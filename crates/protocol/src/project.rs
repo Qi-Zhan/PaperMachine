@@ -227,6 +227,10 @@ pub struct ActionInvocation {
     pub action_name: String,
     pub objective: String,
     pub arguments: Value,
+    /// Direct HumanRequest whose answered string became this Action Turn's
+    /// user message. `None` means the Turn was dispatched as workflow work.
+    #[serde(default)]
+    pub source_human_request_id: Option<HumanRequestId>,
     pub status: ActionStatus,
     pub output: Option<Value>,
     pub error: Option<String>,

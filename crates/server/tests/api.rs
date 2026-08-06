@@ -43,13 +43,19 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 fn prepare_root(root: &Path) {
-    let builtin = root.join("workflows/builtin/parallel-discovery");
-    std::fs::create_dir_all(&builtin).expect("builtin directory should be created");
+    let builtins = ["interactive-agent", "parallel-discovery"];
+    for slug in builtins {
+        let builtin = root.join("workflows/builtin").join(slug);
+        std::fs::create_dir_all(&builtin).expect("builtin directory should be created");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../workflows/builtin")
+            .join(slug)
+            .join("workflow.py");
+        std::fs::copy(source, builtin.join("workflow.py"))
+            .expect("builtin workflow should be copied");
+    }
     std::fs::create_dir_all(root.join("workflows/user"))
         .expect("user workflow directory should be created");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../workflows/builtin/parallel-discovery/workflow.py");
-    std::fs::copy(source, builtin.join("workflow.py")).expect("builtin workflow should be copied");
 }
 
 async fn test_app(directory: &TempDir) -> Router {
@@ -98,19 +104,60 @@ async fn create_project_and_session(app: &Router, base: &Path, name: &str) -> (P
     let project: Project =
         serde_json::from_value(response_json(response).await).expect("project should deserialize");
 
+    let session = start_interactive_session(app, project.id, "Origin Session", "research").await;
+    (project, session)
+}
+
+async fn start_interactive_session(
+    app: &Router,
+    project_id: papermachine_protocol::ProjectId,
+    title: &str,
+    access: &str,
+) -> Session {
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/projects/{}/sessions", project.id),
-            json!({"title": "Origin Session"}),
+            &format!("/api/projects/{project_id}/workflows"),
+            json!({
+                "program_slug": "interactive-agent",
+                "objective": format!("Persistent interactive Session: {title}"),
+                "input": {
+                    "session_title": title,
+                    "agent_system_prompt": "",
+                    "agent_access": access,
+                },
+                "access": access,
+            }),
         ))
         .await
-        .expect("Session request should complete");
+        .expect("interactive Workflow request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
-    let session: Session =
-        serde_json::from_value(response_json(response).await).expect("Session should deserialize");
-    (project, session)
+    let workflow = response_json(response).await;
+    let workflow_id = workflow["id"]
+        .as_str()
+        .expect("interactive Workflow id should exist");
+    for _ in 0..400 {
+        let view = get_workflow_view(app, workflow_id).await;
+        if let Some(session) = view["sessions"]
+            .as_array()
+            .and_then(|sessions| sessions.first())
+        {
+            return serde_json::from_value(session.clone())
+                .expect("interactive Session should deserialize");
+        }
+        if matches!(
+            view["workflow"]["status"].as_str(),
+            Some("failed" | "cancelled")
+        ) {
+            panic!(
+                "interactive Workflow terminated unexpectedly: {}",
+                view["workflow"]
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("interactive Workflow did not create its Session")
 }
 
 #[tokio::test]
@@ -120,18 +167,7 @@ async fn api_creates_and_updates_session_access_profiles() {
     let (project, origin) = create_project_and_session(&app, directory.path(), "Access API").await;
     assert_eq!(origin.access.as_str(), "research");
 
-    let created = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/sessions", project.id),
-            json!({"title": "No tools", "access": "model_only"}),
-        ))
-        .await
-        .expect("profiled Session request should complete");
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let created: Session = serde_json::from_value(response_json(created).await)
-        .expect("profiled Session should deserialize");
+    let created = start_interactive_session(&app, project.id, "No tools", "model_only").await;
     assert_eq!(created.access.as_str(), "model_only");
 
     let updated = app
@@ -217,7 +253,7 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         .iter()
         .map(|layer| layer["kind"].as_str().expect("kind should be a string"))
         .collect::<Vec<_>>();
-    assert_eq!(kinds, vec!["runtime", "project", "session"]);
+    assert_eq!(kinds, vec!["runtime", "project", "agent"]);
 
     let overview = app
         .oneshot(empty_request(
@@ -262,6 +298,109 @@ async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &st
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("Workflow did not reach {expected}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn interactive_session_turns_preserve_exact_human_message_provenance() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (project, session) =
+        create_project_and_session(&app, directory.path(), "Interactive project").await;
+
+    let session_view = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{}", session.id),
+        ))
+        .await
+        .expect("Session view should complete");
+    let session_view = response_json(session_view).await;
+    let workflow_id = session_view["workflows"][0]["id"]
+        .as_str()
+        .expect("interactive Workflow should own the Session")
+        .to_string();
+
+    let (request_id, final_view) = {
+        let mut request_id = None;
+        let mut final_view = None;
+        for _ in 0..400 {
+            let view = get_workflow_view(&app, &workflow_id).await;
+            if request_id.is_none() {
+                request_id = view["human_requests"]
+                    .as_array()
+                    .and_then(|requests| {
+                        requests.iter().find(|request| request["status"] == "open")
+                    })
+                    .and_then(|request| request["id"].as_str())
+                    .map(str::to_string);
+                if let Some(request_id) = request_id.as_ref() {
+                    let answer = app
+                        .clone()
+                        .oneshot(json_request(
+                            "POST",
+                            &format!("/api/human-requests/{request_id}/answer"),
+                            json!({"answer": "Inspect the prompt cache behavior."}),
+                        ))
+                        .await
+                        .expect("human answer request should complete");
+                    assert_eq!(answer.status(), StatusCode::OK);
+                }
+            } else if view["actions"]
+                .as_array()
+                .is_some_and(|actions| actions.len() == 1 && actions[0]["status"] == "completed")
+                && view["human_requests"]
+                    .as_array()
+                    .is_some_and(|requests| requests.len() == 2)
+            {
+                final_view = Some(view);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (
+            request_id.expect("interactive Workflow should ask for a message"),
+            final_view.expect("interactive Workflow should complete one Turn and wait again"),
+        )
+    };
+
+    assert_eq!(
+        final_view["actions"][0]["source_human_request_id"],
+        request_id
+    );
+    let session_view = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{}", session.id),
+        ))
+        .await
+        .expect("updated Session view should complete");
+    let session_view = response_json(session_view).await;
+    assert_eq!(session_view["turns"].as_array().map(Vec::len), Some(1));
+    assert_eq!(session_view["turns"][0]["origin"], "user");
+    assert_eq!(
+        session_view["turns"][0]["input"],
+        "Inspect the prompt cache behavior."
+    );
+    assert!(
+        session_view["turns"][0]["prompt"]["layers"]
+            .as_array()
+            .is_some_and(|layers| layers
+                .iter()
+                .any(|layer| layer["name"] == "Action contract"))
+    );
+
+    let removed_endpoint = app
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/sessions", project.id),
+            json!({"title": "Legacy standalone Session"}),
+        ))
+        .await
+        .expect("removed endpoint should return a response");
+    assert_eq!(removed_endpoint.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[cfg(target_os = "macos")]
@@ -360,7 +499,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     assert_eq!(overview["sessions"].as_array().map(Vec::len), Some(4));
     assert_eq!(
         overview["workflow_participants"].as_array().map(Vec::len),
-        Some(3)
+        Some(4)
     );
 
     let participant_session_id = view["participants"][0]["session_id"]

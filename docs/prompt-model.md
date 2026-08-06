@@ -48,15 +48,19 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 
 ## Message origin / 消息来源
 
-`Turn.origin` is `user` for text submitted through the Session composer and
-`workflow` for an Action dispatched by a Workflow. Both use the same Agent
-runtime, history, model, tools, and Step representation. The distinction is a
-display and provenance contract: the UI must never render a Workflow-generated
-task as if the human typed it.
+`Turn.origin` is `user` for text submitted directly through the Session
+composer or for a string HumanRequest answer that Rust has verified and bound
+to a `HumanMessage` action parameter. It is `workflow` for an Action dispatched
+from program-generated data. Both use the same Agent runtime, history, model,
+tools, and Step representation. The distinction is a display and provenance
+contract: the UI must never render a Workflow-generated task as if the human
+typed it.
 
-`Turn.origin=user` 表示文字来自 Session 输入框；`Turn.origin=workflow` 表示它是
-Workflow 派发的 Action。二者共享同一 Agent runtime、history、model、tools 与
-Step 结构，但 UI 必须明确显示来源，不能把 Workflow 生成的任务伪装成人类消息。
+`Turn.origin=user` 表示文字来自 Session 输入框，或来自 Rust 已核验并绑定到
+`HumanMessage` action 参数的字符串 HumanRequest 回答；`Turn.origin=workflow`
+表示 Action 使用的是程序生成的数据。二者共享同一 Agent runtime、history、
+model、tools 与 Step 结构，但 UI 必须明确显示来源，不能把 Workflow 生成的任务
+伪装成人类消息。
 
 ## Cache behavior / 缓存行为
 

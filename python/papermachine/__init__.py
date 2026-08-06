@@ -25,6 +25,17 @@ ACCESS_PROFILES = {
 }
 
 
+class HumanMessage(str):
+    """A string answer whose durable HumanRequest provenance is preserved."""
+
+    request_id: str
+
+    def __new__(cls, content: str, request_id: str) -> HumanMessage:
+        value = str.__new__(cls, content)
+        value.request_id = request_id
+        return value
+
+
 @dataclass
 class _EffectCursor:
     path: tuple[str, ...]
@@ -126,6 +137,7 @@ class _ActionDescriptor:
         self.name = function.__name__
         self.prompt = (prompt or inspect.getdoc(function) or self.name).strip()
         self.signature = inspect.signature(function)
+        self.human_message_parameter = _human_message_parameter(function)
         self.return_kind = _json_return_kind(function)
         self.response_format = _response_format(self.name, self.return_kind)
         self.max_steps = max_steps
@@ -143,6 +155,26 @@ class _ActionDescriptor:
             arguments = {
                 key: value for key, value in bound.arguments.items() if key != "self"
             }
+            human_message: HumanMessage | None = None
+            if self.human_message_parameter is not None:
+                candidate = arguments.get(self.human_message_parameter)
+                if not isinstance(candidate, HumanMessage):
+                    raise TypeError(
+                        f"action {self.name} parameter {self.human_message_parameter!r} "
+                        "must receive a HumanMessage returned by ask_human()"
+                    )
+                human_message = candidate
+                arguments[self.human_message_parameter] = str(candidate)
+            unexpected = [
+                key
+                for key, value in arguments.items()
+                if isinstance(value, HumanMessage)
+            ]
+            if unexpected:
+                raise TypeError(
+                    "HumanMessage arguments must use a parameter annotated as HumanMessage: "
+                    + ", ".join(unexpected)
+                )
             prompt = self.prompt
             if self.return_kind is not None:
                 prompt = (
@@ -161,6 +193,8 @@ class _ActionDescriptor:
                 self.search_context_size,
                 self.reasoning_effort,
                 self.max_output_tokens,
+                self.human_message_parameter,
+                human_message.request_id if human_message is not None else None,
             )
 
         return call
@@ -199,6 +233,19 @@ def action(
         )
 
     return decorate
+
+
+def _human_message_parameter(function: Callable[..., Any]) -> str | None:
+    try:
+        annotations = inspect.get_annotations(function, eval_str=True)
+    except (NameError, TypeError):
+        annotations = function.__annotations__
+    parameters = [
+        name for name, annotation in annotations.items() if annotation is HumanMessage
+    ]
+    if len(parameters) > 1:
+        raise TypeError("an action may declare at most one HumanMessage parameter")
+    return parameters[0] if parameters else None
 
 
 class Agent:
@@ -314,6 +361,8 @@ class _ActionCall(Awaitable[Any]):
         search_context_size: str | None,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
+        human_message_parameter: str | None,
+        human_request_id: str | None,
     ) -> None:
         self.agent = agent
         self.name = name
@@ -326,13 +375,15 @@ class _ActionCall(Awaitable[Any]):
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.max_output_tokens = max_output_tokens
+        self.human_message_parameter = human_message_parameter
+        self.human_request_id = human_request_id
 
     def __await__(self):  # type: ignore[no-untyped-def]
         return self._run().__await__()
 
     async def _run(self) -> Any:
         remote = await self.agent._ensure_remote()
-        result = await self._invoke(remote)
+        result = await self._invoke(remote, use_human_message=True)
         output = str(result.get("output", ""))
         if self.return_kind is None:
             return output
@@ -364,6 +415,7 @@ class _ActionCall(Awaitable[Any]):
                 search_context_size=None,
                 reasoning_effort="low",
                 max_output_tokens=max(self.max_output_tokens or 0, 32_768),
+                use_human_message=False,
             )
             output = str(result.get("output", ""))
 
@@ -383,6 +435,7 @@ class _ActionCall(Awaitable[Any]):
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
+        use_human_message: bool = False,
     ) -> Any:
         return await _effect(
             "invoke_action",
@@ -414,6 +467,12 @@ class _ActionCall(Awaitable[Any]):
                     else max_output_tokens
                 ),
                 "task_scope_id": _current_scope_id(),
+                "human_request_id": (
+                    self.human_request_id if use_human_message else None
+                ),
+                "human_message_argument": (
+                    self.human_message_parameter if use_human_message else None
+                ),
             },
         )
 
@@ -653,7 +712,10 @@ async def ask_human(
             "agent_instance_id": agent_id,
         },
     )
-    return result["answer"]
+    answer = result["answer"]
+    if isinstance(answer, str):
+        return HumanMessage(answer, str(result["human_request_id"]))
+    return answer
 
 
 class BackgroundTask(Generic[T]):
@@ -786,6 +848,7 @@ __all__ = [
     "Agent",
     "BackgroundTask",
     "Channel",
+    "HumanMessage",
     "Team",
     "TimerHandle",
     "WorkflowContext",

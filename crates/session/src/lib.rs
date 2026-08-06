@@ -195,6 +195,7 @@ impl SessionRuntime {
     pub async fn execute_workflow_action(
         &self,
         session_id: SessionId,
+        origin: TurnOrigin,
         input: impl Into<String>,
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
@@ -210,7 +211,7 @@ impl SessionRuntime {
         let turn = self
             .prepare_turn(
                 session_id,
-                TurnOrigin::Workflow,
+                origin,
                 input,
                 model_override,
                 prompt_layers,

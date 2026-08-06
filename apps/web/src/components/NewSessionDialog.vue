@@ -12,6 +12,8 @@
           </button>
         </header>
 
+        <p class="access-profile-description">{{ t('dialog.newSessionWorkflowHint') }}</p>
+
         <label class="field-label" for="session-title">{{ t('common.title') }}</label>
         <input
           id="session-title"

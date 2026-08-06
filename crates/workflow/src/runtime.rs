@@ -492,7 +492,25 @@ impl RunEffectContext {
             .transpose()
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let participant = self.store.get_participant(agent_id)?;
+        let human_source = resolve_human_turn_source(
+            &self.store,
+            self.workflow_id,
+            participant.session_id,
+            &payload,
+        )?;
+        let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
+        let turn_origin = if human_source.is_some() {
+            TurnOrigin::User
+        } else {
+            TurnOrigin::Workflow
+        };
         let objective = format_action_objective(&payload.prompt, &payload.arguments);
+        let turn_input = human_source
+            .as_ref()
+            .map_or_else(|| objective.clone(), |source| source.input.clone());
+        let human_action_contract = human_source.as_ref().map(|source| {
+            format_human_action_contract(&payload.prompt, &payload.arguments, &source.argument_name)
+        });
         let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
@@ -509,13 +527,18 @@ impl RunEffectContext {
                     payload.action_name.clone(),
                     objective.clone(),
                     payload.arguments.clone(),
+                    source_human_request_id,
                 )?
             }
             Err(error) => return Err(error.into()),
         };
-        if invocation.workflow_id != self.workflow_id || invocation.agent_instance_id != agent_id {
+        if invocation.workflow_id != self.workflow_id
+            || invocation.agent_instance_id != agent_id
+            || invocation.source_human_request_id != source_human_request_id
+        {
             return Err(WorkflowRuntimeError::Protocol(
-                "replayed ActionInvocation belongs to a different Workflow or Agent".to_string(),
+                "replayed ActionInvocation has different Workflow, Agent, or human-message provenance"
+                    .to_string(),
             ));
         }
         match invocation.status {
@@ -636,6 +659,17 @@ impl RunEffectContext {
                         relationship_context.clone(),
                     ));
                 }
+                if let Some(contract) = human_action_contract.as_ref() {
+                    prompt_layers.push(PromptLayerInput::new(
+                        PromptLayerKind::Workflow,
+                        "Action contract",
+                        format!(
+                            "workflow:{}:action-contract:{}",
+                            run.id, payload.action_name
+                        ),
+                        contract,
+                    ));
+                }
                 if let Some(value) = guidance.as_ref() {
                     prompt_layers.push(PromptLayerInput::new(
                         PromptLayerKind::Control,
@@ -647,7 +681,8 @@ impl RunEffectContext {
                 self.sessions
                     .execute_workflow_action(
                         participant.session_id,
-                        objective.clone(),
+                        turn_origin,
+                        turn_input.clone(),
                         if participant.model.trim().is_empty() {
                             None
                         } else {
@@ -1023,7 +1058,7 @@ impl RunEffectContext {
             Err(error) => return Err(error.into()),
         };
         let answer = wait_for_human(&self.store, request.id, &self.cancellation).await?;
-        Ok(json!({"answer": answer}))
+        Ok(json!({"human_request_id": request.id, "answer": answer}))
     }
 
     async fn complete(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
@@ -1312,6 +1347,73 @@ fn format_action_objective(prompt: &str, arguments: &Value) -> String {
     }
 }
 
+fn format_human_action_contract(prompt: &str, arguments: &Value, human_argument: &str) -> String {
+    let mut remaining = arguments.clone();
+    if let Some(values) = remaining.as_object_mut() {
+        values.remove(human_argument);
+    }
+    format_action_objective(prompt, &remaining)
+}
+
+struct HumanTurnSource {
+    request_id: HumanRequestId,
+    argument_name: String,
+    input: String,
+}
+
+fn resolve_human_turn_source(
+    store: &Store,
+    workflow_id: WorkflowId,
+    session_id: SessionId,
+    payload: &InvokeActionEffect,
+) -> Result<Option<HumanTurnSource>, WorkflowRuntimeError> {
+    let (Some(request_id), Some(argument_name)) = (
+        payload.human_request_id.as_deref(),
+        payload.human_message_argument.as_deref(),
+    ) else {
+        if payload.human_request_id.is_some() || payload.human_message_argument.is_some() {
+            return Err(WorkflowRuntimeError::Protocol(
+                "human_request_id and human_message_argument must be supplied together".to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    let request_id = HumanRequestId::from_str(request_id)
+        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+    let request = store.get_human_request(request_id)?;
+    if request.workflow_id != workflow_id
+        || request.session_id != session_id
+        || request.action_invocation_id.is_some()
+        || request.turn_id.is_some()
+        || request.status != HumanRequestStatus::Answered
+    {
+        return Err(WorkflowRuntimeError::Protocol(
+            "human-message Action must reference an answered direct HumanRequest for this Workflow and Agent Session"
+                .to_string(),
+        ));
+    }
+    let input = request
+        .answer
+        .as_ref()
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            WorkflowRuntimeError::Protocol(
+                "human-message Action requires a string HumanRequest answer".to_string(),
+            )
+        })?;
+    if payload.arguments.get(argument_name).and_then(Value::as_str) != Some(input) {
+        return Err(WorkflowRuntimeError::Protocol(
+            "human-message Action argument does not match its durable HumanRequest answer"
+                .to_string(),
+        ));
+    }
+    Ok(Some(HumanTurnSource {
+        request_id,
+        argument_name: argument_name.to_string(),
+        input: input.to_string(),
+    }))
+}
+
 fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, WorkflowRuntimeError> {
     let output = invocation.output.as_ref().ok_or_else(|| {
         WorkflowRuntimeError::Protocol(format!(
@@ -1421,6 +1523,10 @@ struct InvokeActionEffect {
     #[serde(default)]
     max_output_tokens: Option<u32>,
     task_scope_id: Option<String>,
+    #[serde(default)]
+    human_request_id: Option<String>,
+    #[serde(default)]
+    human_message_argument: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

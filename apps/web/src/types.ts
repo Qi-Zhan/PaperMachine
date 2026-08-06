@@ -231,6 +231,7 @@ export interface ActionInvocation {
   action_name: string
   objective: string
   arguments: unknown
+  source_human_request_id: Id | null
   status: ActionStatus
   output: unknown | null
   error: string | null

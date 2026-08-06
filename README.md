@@ -11,6 +11,11 @@ instances, and every Agent instance is backed by an ordinary Project-owned
 Session. The workflow combines those Sessions; it does not create a separate
 Session hierarchy.
 
+The ordinary **New Session** command starts the reviewed `interactive-agent`
+Workflow. That program creates one persistent Agent Session, waits for a human
+message before every Turn, and can be inspected, cancelled, or continued like
+any other Workflow. There is no separate standalone-Session creation path.
+
 ```text
 Project
   Sessions
@@ -77,6 +82,9 @@ one Project.
   built-in tools, path resolution, and command sandboxing; upgrades requested
   by workflows require a typed human grant.
 - Define Agents and actions in Python; use ordinary `if`, `for`, and `while`.
+- Preserve exact human-message provenance in interactive actions: a string
+  HumanRequest answer becomes the visible/model-facing user Turn, while its
+  action contract remains an inspectable prompt layer.
 - Compose explicit concurrency with `together(...)` and serialize each Agent's
   own Session Turns.
 - Add Agents dynamically; define Teams, directed relations, task scopes,

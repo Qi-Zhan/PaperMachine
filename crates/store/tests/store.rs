@@ -1,3 +1,4 @@
+use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::ArtifactKind;
 use papermachine_protocol::Budget;
@@ -684,6 +685,117 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             .expect("standalone Turns should load")
             .iter()
             .all(|candidate| candidate.id != turn.id)
+    );
+}
+
+#[test]
+fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let project = project(&store, &directory, "Human Turn", "");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let workflow = workflow_for_session(&store, &origin, "Interactive conversation");
+    store
+        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .expect("Workflow should be running");
+    let participant = store
+        .create_participant(
+            workflow.id,
+            "InteractiveAgent",
+            "Assistant",
+            "interactive",
+            "",
+            "test-model",
+            Vec::new(),
+            AgentAccessProfile::Research,
+        )
+        .expect("participant should be created");
+    let request = store
+        .create_human_request(
+            workflow.id,
+            None,
+            None,
+            participant.session_id,
+            None,
+            "Next message",
+            json!({"type": "string"}),
+        )
+        .expect("human request should open");
+    store
+        .answer_human_request(request.id, json!("Inspect the cache."))
+        .expect("human request should be answered");
+
+    let invocation = store
+        .create_action_invocation_with_id(
+            ActionInvocationId::new(),
+            workflow.id,
+            None,
+            participant.id,
+            "respond",
+            "Respond to the human",
+            json!({"message": "Inspect the cache."}),
+            Some(request.id),
+        )
+        .expect("human action should be created");
+    let attempt = store
+        .start_action_attempt(invocation.id)
+        .expect("Attempt should start");
+    let turn = store
+        .create_turn_for_attempt(
+            attempt.id,
+            participant.session_id,
+            papermachine_protocol::TurnOrigin::User,
+            "Inspect the cache.",
+            "test-model",
+            papermachine_protocol::PromptSnapshot::default(),
+            None,
+            4,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("exact human answer should become a user Turn");
+    assert_eq!(turn.origin, papermachine_protocol::TurnOrigin::User);
+    assert_eq!(invocation.source_human_request_id, Some(request.id));
+
+    let forged = store
+        .create_action_invocation_with_id(
+            ActionInvocationId::new(),
+            workflow.id,
+            None,
+            participant.id,
+            "respond",
+            "Respond to the human",
+            json!({"message": "A different message"}),
+            Some(request.id),
+        )
+        .expect("second invocation should be recorded before Turn validation");
+    let forged_attempt = store
+        .start_action_attempt(forged.id)
+        .expect("forged Attempt should start");
+    assert!(
+        store
+            .create_turn_for_attempt(
+                forged_attempt.id,
+                participant.session_id,
+                papermachine_protocol::TurnOrigin::User,
+                "A different message",
+                "test-model",
+                papermachine_protocol::PromptSnapshot::default(),
+                None,
+                4,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .is_err(),
+        "a Workflow must not forge human provenance with different text"
     );
 }
 

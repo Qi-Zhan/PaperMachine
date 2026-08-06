@@ -426,7 +426,9 @@ function hasActiveWork(view: SessionView): boolean {
   return (
     view.turns.some((turn) => turn.status === 'queued' || turn.status === 'running') ||
     view.workflows.some((workflow) =>
-      ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(workflow.status),
+      workflow.status === 'created' ||
+      (workflow.status === 'running' && !workflow.attention_required) ||
+      ['waiting_for_timer', 'waiting_for_signal'].includes(workflow.status),
     )
   )
 }
@@ -545,7 +547,21 @@ async function createSession(input: CreateSessionInput) {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const session = await api.createSession(project.id, input)
+    const title = input.title.trim() || t('dialog.newSessionPlaceholder')
+    const workflow = await api.createWorkflow(project.id, {
+      program_slug: 'interactive-agent',
+      objective: 'Maintain a persistent interactive project conversation.',
+      system_prompt: '',
+      input: {
+        session_title: title,
+        agent_system_prompt: input.system_prompt.trim(),
+        agent_access: input.access,
+      },
+      model: input.model,
+      access: input.access,
+      enabled_skills: input.enabled_skills,
+    })
+    const session = await waitForWorkflowSession(workflow.id)
     sessionsByProject[project.id] = [session, ...(sessionsByProject[project.id] ?? [])]
     sessionDialogOpen.value = false
     await selectSession(session.id)
@@ -556,10 +572,47 @@ async function createSession(input: CreateSessionInput) {
   }
 }
 
+async function waitForWorkflowSession(workflowId: string): Promise<Session> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const view = await api.getWorkflow(workflowId)
+    const participant = view.participants[0]
+    const session = participant
+      ? view.sessions.find((candidate) => candidate.id === participant.session_id)
+      : undefined
+    if (session) return session
+    if (['failed', 'cancelled'].includes(view.workflow.status)) {
+      throw new Error(t('app.sessionWorkflowFailed', { error: view.workflow.error ?? view.workflow.status }))
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+  }
+  throw new Error(t('app.sessionWorkflowTimeout'))
+}
+
 async function createTurn(input: string) {
   const view = sessionView.value
   if (!view) return
   try {
+    const humanRequest = view.human_requests.find(
+      (request) =>
+        request.status === 'open' &&
+        request.session_id === view.session.id &&
+        (!request.response_schema.type || request.response_schema.type === 'string'),
+    )
+    if (humanRequest) {
+      const answered = await api.answerHumanRequest(humanRequest.id, input)
+      if (sessionView.value?.session.id === view.session.id) {
+        sessionView.value = {
+          ...sessionView.value,
+          human_requests: sessionView.value.human_requests.map((request) =>
+            request.id === answered.id ? answered : request,
+          ),
+        }
+      }
+      await inspectWorkflow(humanRequest.workflow_id, true)
+      scheduleSessionRefresh(view.session.id)
+      syncPoll()
+      return
+    }
     const turn = await api.createTurn(view.session.id, input)
     if (sessionView.value?.session.id === view.session.id) {
       sessionView.value = { ...sessionView.value, turns: [...sessionView.value.turns, turn] }

@@ -16,7 +16,7 @@
 | `WorkflowEffect` | `(WorkflowId, logical path)` | 对一次精确 Python effect 请求及其可 replay 的结果或错误所做的持久 journal 记录。 |
 | starting Session | `started_from_session_id?` | 可选的发起 Session。它表示来源，不表示所有权。 |
 | `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Project-owned Session 承载。 |
-| `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录。 |
+| `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录；可选记录作为已核验 user Turn 来源的 HumanRequest。 |
 | `ActionAttempt` | `ActionAttemptId` | invocation 的一次执行尝试；被 interrupt 后可以产生新的 attempt。 |
 | `Team` | `TeamId` | 一组可动态修改的具名 Agent instance。 |
 | `AgentRelation` | `RelationId` | 会作为 action 上下文注入的有向、带类型关系。 |
@@ -139,11 +139,18 @@ ActionInvocation
   Attempt 2 -> Turn 2 -> model/tool Steps   # 只在 interrupt/retry 后出现
 ```
 
-runtime 把 action docstring/decorator prompt 与绑定后的参数格式化成 Turn
-objective。每个 Turn 都会快照实际使用且顺序固定的 prompt layers：runtime、
-Project、Workflow、Agent/Session、Skills、runtime control。与该 Agent 有关的
-有向关系属于 Workflow layer，interrupt/retry guidance 属于 control layer。
-详见 [prompt 模型](prompt-model.md)。
+普通 action 会把 docstring/decorator prompt 与绑定参数格式化成来源为 workflow
+的 Turn objective。`ask_human` 返回的字符串则是 `HumanMessage`；当它传给标注为
+`HumanMessage` 的 action 参数时，Python 会同时提交 request ID 与参数名。只有该
+direct HumanRequest 已回答、属于当前 Workflow 与 Agent Session、answer 为字符串，
+并且与绑定参数完全一致时，Rust 才允许创建来源为 user 的 Turn。人类原文成为
+Turn input；action prompt 与其余参数进入可检查的 Workflow prompt layer；
+ActionInvocation 会保留来源 HumanRequest ID。
+
+每个 Turn 都会快照实际使用且顺序固定的 prompt layers：runtime、Project、
+Workflow、Agent/Session、Skills、runtime control。与该 Agent 有关的有向关系属于
+Workflow layer，interrupt/retry guidance 属于 control layer。详见
+[prompt 模型](prompt-model.md)。
 
 | Invocation/Attempt 状态 | 含义 |
 |---|---|
@@ -212,6 +219,10 @@ relation 不会自动发消息，也不会自动调用 target。
 |---|---|---|
 | DSL `await ask_human(...)` | workflow coroutine | request 属于指定 Agent Session 或 origin Session；不要求存在 Turn。 |
 | 模型工具 `ask_human` | action Turn 内的 tool call | Turn 和 Session 变为 `waiting_for_human`；回答作为 tool output 返回。 |
+
+DSL 的字符串回答会以 `HumanMessage` 携带持久 HumanRequest ID。只有把该值传给
+对应类型标注的 action，workflow 才能创建显示为人类消息的 `user` Turn；其他
+schema value 仍是普通 Python 值，相关 action 仍按 workflow 派发。
 
 response schema 会与 request 一起保存。HTTP API 在 resolve 前校验答案。
 只要仍有 open request，`Workflow.attention_required` 就为 true。

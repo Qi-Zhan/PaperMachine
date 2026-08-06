@@ -4,7 +4,15 @@ import asyncio
 import unittest
 from typing import Any
 
-from papermachine import Agent, _Runtime, _set_runtime, action, together
+from papermachine import (
+    Agent,
+    HumanMessage,
+    _Runtime,
+    _set_runtime,
+    action,
+    ask_human,
+    together,
+)
 
 
 class Writer(Agent):
@@ -33,7 +41,51 @@ class RouteResearcher(Agent):
         """Investigate one route."""
 
 
+class ConversationalAgent(Agent):
+    @action(max_steps=8)
+    async def respond(self, message: HumanMessage) -> str:
+        """Respond to the human message."""
+
+
 class ActionOptionsTest(unittest.TestCase):
+    def test_string_human_answer_preserves_provenance_for_a_user_turn(self) -> None:
+        effects: list[tuple[str, dict[str, Any]]] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            effects.append((kind, payload))
+            if kind == "create_agent":
+                return {
+                    "agent_instance_id": "agent",
+                    "session_id": "session",
+                    "access": payload["access"],
+                }
+            if kind == "ask_human":
+                return {
+                    "human_request_id": "request-1",
+                    "answer": "Please inspect the cache behavior.",
+                }
+            if kind == "invoke_action":
+                return {"output": "I will inspect it.", "turn_id": "turn-1"}
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> str:
+            _set_runtime(_Runtime(send))
+            agent = ConversationalAgent("Interactive")
+            message = await ask_human("Next message", agent=agent)
+            self.assertIsInstance(message, HumanMessage)
+            self.assertEqual(message.request_id, "request-1")
+            return await agent.respond(message)
+
+        self.assertEqual(asyncio.run(invoke()), "I will inspect it.")
+        action_payload = effects[-1][1]
+        self.assertEqual(action_payload["arguments"]["message"], "Please inspect the cache behavior.")
+        self.assertEqual(action_payload["human_request_id"], "request-1")
+        self.assertEqual(action_payload["human_message_argument"], "message")
+
+    def test_human_message_parameter_rejects_unattributed_strings(self) -> None:
+        with self.assertRaisesRegex(TypeError, "returned by ask_human"):
+            ConversationalAgent().respond("not a durable human answer")
+
     def test_effect_ids_are_stable_when_parallel_completion_order_changes(self) -> None:
         async def run(delays: dict[str, float]) -> dict[tuple[str, str], str]:
             observed: dict[tuple[str, str], str] = {}

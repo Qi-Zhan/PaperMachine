@@ -267,10 +267,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/projects/{project_id}/skills/{slug}",
             get(get_project_skill),
         )
-        .route(
-            "/projects/{project_id}/sessions",
-            get(list_sessions).post(create_session),
-        )
+        .route("/projects/{project_id}/sessions", get(list_sessions))
         .route("/sessions/{session_id}", get(get_session_view))
         .route("/sessions/{session_id}/turns", post(create_turn))
         .route("/sessions/{session_id}/skills", put(update_session_skills))
@@ -508,67 +505,6 @@ async fn create_project_skill(
         request.instructions.trim(),
     )?;
     Ok((StatusCode::CREATED, Json(skill)))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateSessionRequest {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    system_prompt: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    enabled_skills: Vec<String>,
-    #[serde(default)]
-    access: AgentAccessProfile,
-}
-
-async fn create_session(
-    State(state): State<AppState>,
-    Path(project_id): Path<String>,
-    Json(request): Json<CreateSessionRequest>,
-) -> ApiResult<(StatusCode, Json<Session>)> {
-    let project_id = parse_id(&project_id, "Project")?;
-    state
-        .skills
-        .validate_enabled(project_id, &request.enabled_skills)?;
-    let title = if request.title.trim().is_empty() {
-        "New project Session"
-    } else {
-        request.title.trim()
-    };
-    let model = if request.model.trim().is_empty() {
-        &state.default_model
-    } else {
-        request.model.trim()
-    };
-    if !state.model_profiles.is_empty()
-        && !state
-            .model_profiles
-            .iter()
-            .any(|profile| profile.id == model)
-    {
-        return Err(ApiError::bad_request(format!(
-            "unknown model profile {model:?}; choose one of: {}",
-            state
-                .model_profiles
-                .iter()
-                .map(|profile| profile.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-    let session = state.store.create_session_with_access(
-        project_id,
-        title,
-        request.system_prompt.trim(),
-        model,
-        request.enabled_skills,
-        request.access,
-    )?;
-    Ok((StatusCode::CREATED, Json(session)))
 }
 
 #[derive(Serialize)]

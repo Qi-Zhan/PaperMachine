@@ -3,7 +3,6 @@ import type {
   Artifact,
   ControlMessage,
   ControlMessageKind,
-  CreateSessionInput,
   CreateWorkflowInput,
   GeneratedWorkflow,
   Health,
@@ -58,8 +57,6 @@ export const api = {
     projectId: string,
     input: { slug: string; name: string; description: string; instructions: string },
   ) => request<ProjectSkill>(`/projects/${projectId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
-  createSession: (projectId: string, input: CreateSessionInput) =>
-    request<Session>(`/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify(input) }),
   getSession: (sessionId: string) => request<SessionView>(`/sessions/${sessionId}`),
   createTurn: (sessionId: string, input: string) =>
     request<Turn>(`/sessions/${sessionId}/turns`, { method: 'POST', body: JSON.stringify({ input }) }),

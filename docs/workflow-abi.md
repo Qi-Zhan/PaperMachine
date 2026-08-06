@@ -109,7 +109,8 @@ The runtime provides `ctx.objective`, `ctx.input`, and `ctx.workflow_id`.
 | `await relate(a, b, kind=..., instructions=...)` | Records a directed relation and injects relevant context into actions. |
 | `async with scope(name, objective)` | Opens/closes a durable task scope; scopes may nest. |
 | `Channel(name, schema=...)` | Creates a durable channel; publish emits ordered Signals, receive waits for the next one. |
-| `await ask_human(...)` | Suspends until a schema-validated answer is supplied. |
+| `await ask_human(...)` | Suspends until a schema-validated answer is supplied. A string answer is a `HumanMessage` carrying its durable request ID. |
+| `action(message: HumanMessage)` | Creates a true user-origin Turn only after Rust verifies that the text exactly matches the referenced answered HumanRequest; the action prompt becomes a Workflow prompt layer. |
 | `background(awaitable)` | Starts concurrent workflow work and returns a joinable handle. |
 | `@every(seconds=..., policy=...)` | Starts a periodic callback backed by a durable timer record. |
 
@@ -128,6 +129,11 @@ a downgrade does not. A Turn keeps the profile snapshot captured at creation.
 Agent classes may declare `system_prompt`; a constructor override takes
 precedence. Project, Workflow, Agent/Session, skill, and control layers are
 snapshotted on every Turn. See [prompt model](prompt-model.md).
+
+The built-in `interactive-agent` is the reference conversational program. It
+uses an ordinary `while` loop: `ask_human(..., agent=agent)`, then
+`await agent.respond(message)`. The New Session UI starts this Workflow through
+the same Project Workflow API used for every other program.
 
 ## Effect protocol
 

@@ -16,7 +16,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | `WorkflowEffect` | `(WorkflowId, logical path)` | Durable journal entry for one exact Python effect request and its replayable result or error. |
 | starting Session | `started_from_session_id?` | Optional Session from which a Workflow was started. It is provenance, not ownership. |
 | `Agent instance` | `AgentInstanceId` | One workflow actor backed by exactly one Project-owned Session. |
-| `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent. |
+| `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent; it optionally records the HumanRequest that sourced a verified user Turn. |
 | `ActionAttempt` | `ActionAttemptId` | One execution attempt for an invocation; it may be replaced after interruption. |
 | `Team` | `TeamId` | Named mutable set of Agent instances. |
 | `AgentRelation` | `RelationId` | Directed typed relation used as action context. |
@@ -150,11 +150,20 @@ ActionInvocation
   Attempt 2 -> Turn 2 -> model/tool Steps   # only after interruption/retry
 ```
 
-The runtime formats the action docstring/decorator prompt and bound arguments
-as the Turn objective. Every Turn snapshots the exact ordered prompt layers:
-runtime, Project, Workflow, Agent/Session, Skills, and runtime control. Relevant
-directed relations belong to the Workflow layer; interruption/retry guidance
-belongs to the control layer. See [prompt model](prompt-model.md).
+For an ordinary action, the runtime formats the action docstring/decorator
+prompt and bound arguments as a workflow-origin Turn objective. A string answer
+returned by `ask_human` is instead a `HumanMessage`. When it is passed to an
+action parameter annotated as `HumanMessage`, Python sends the request ID and
+parameter name. Rust accepts a user-origin Turn only if that direct
+HumanRequest is answered, belongs to this Workflow and Agent Session, has a
+string answer, and exactly matches the bound argument. The human text becomes
+the Turn input; the action prompt and remaining arguments become an inspectable
+Workflow prompt layer. The ActionInvocation retains the source HumanRequest ID.
+
+Every Turn snapshots the exact ordered prompt layers: runtime, Project,
+Workflow, Agent/Session, Skills, and runtime control. Relevant directed
+relations belong to the Workflow layer; interruption/retry guidance belongs to
+the control layer. See [prompt model](prompt-model.md).
 
 | Invocation/attempt status | Meaning |
 |---|---|
@@ -227,6 +236,11 @@ There are two request paths:
 |---|---|---|
 | DSL `await ask_human(...)` | Workflow coroutine | Request belongs to the specified Agent Session or origin Session; no Turn is required. |
 | model tool `ask_human` | Tool call inside an action Turn | Turn and Session become `waiting_for_human`; answer is the tool output. |
+
+A string DSL answer carries its durable HumanRequest ID as `HumanMessage`.
+Passing that value into a correspondingly annotated action is the only workflow
+path that may create a human-looking `user` Turn. Other values remain ordinary
+schema-validated Python values and workflow-dispatched actions.
 
 The response schema is stored with the request. The HTTP API validates an
 answer before resolution. While at least one request is open,

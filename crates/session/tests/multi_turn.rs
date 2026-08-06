@@ -408,6 +408,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
     let error = runtime
         .execute_workflow_action(
             participant.session_id,
+            papermachine_protocol::TurnOrigin::Workflow,
             "Research",
             None,
             Vec::new(),

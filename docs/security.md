@@ -27,6 +27,12 @@ The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, budgets, and Session serialization before applying them.
 
+Python also cannot label arbitrary action text as a human message. A
+user-origin workflow Action must name an answered direct HumanRequest and its
+annotated `HumanMessage` argument. Rust verifies Workflow/Session ownership,
+request status, response type, and exact text before the Store accepts the
+Turn; the ActionInvocation retains the source HumanRequest ID for inspection.
+
 Saving the same Project-local slug replaces the editable program source. Every
 Workflow stores an immutable snapshot of the exact source and SHA-256 it started
 with, so later edits cannot change execution history.

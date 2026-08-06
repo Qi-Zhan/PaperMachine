@@ -6,8 +6,8 @@
    Project skill, artifact, and human request in that research effort.
 2. **There is no separate Research entity.** Project is the only ownership
    concept and there is no compatibility alias.
-3. **Session is the main workbench.** It is a durable multi-turn conversation,
-   whether it was created by a person or by a workflow.
+3. **Session is the main workbench.** It is a durable multi-turn conversation;
+   its Turns may be verified human messages or workflow-dispatched work.
 4. **Turn is the model-execution boundary.** Model samples and tool calls are
    Steps folded under the Turn in the UI.
 5. **Workflow belongs to Project.** `started_from_session_id` optionally records
@@ -27,6 +27,9 @@
 11. **Prompt context is a Turn snapshot.** Runtime, Project, Workflow,
     Agent/Session, skill, and control layers retain content, source, and hashes;
     later edits affect only later Turns.
+12. **New Session is a built-in Workflow.** The UI starts
+    `interactive-agent`; its persistent Agent Session waits for a verified human
+    message before each Turn. No privileged standalone creation route exists.
 
 ## Ownership graph
 
@@ -49,6 +52,12 @@ Project
 Sessions do not have parent IDs. The Project overview groups participant
 Sessions by Workflow for navigation, but that grouping is a view over
 WorkflowParticipant records, not a storage hierarchy.
+
+For an interactive action, Rust resolves the referenced answered HumanRequest,
+checks Workflow and Session ownership, verifies the bound string byte-for-byte,
+and only then creates a `user` Turn. The action prompt and non-message arguments
+become a Workflow prompt layer. Ordinary workflow-dispatched actions retain a
+`workflow` Turn and show their generated objective explicitly.
 
 ## Runtime layers
 
@@ -84,7 +93,8 @@ to stderr and captured with a size limit.
 A user Turn or workflow action follows the same core path:
 
 1. Persist the Turn with immutable access, Project-skill, and ordered prompt
-   snapshots. `Turn.origin` records whether input came from the user or a Workflow.
+   snapshots. `Turn.origin` records whether input is a direct/verified human
+   message or program-generated Workflow work.
 2. Rebuild history from completed prior Turns in that Session.
 3. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
    prompt layers into the exact provider instructions.

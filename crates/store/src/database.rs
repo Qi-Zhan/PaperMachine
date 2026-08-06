@@ -438,6 +438,7 @@ impl Store {
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
+        let input = input.into();
         let session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
@@ -449,7 +450,20 @@ impl Store {
             .transpose()?;
         if let Some(attempt) = attempt.as_ref() {
             let invocation = self.get_action_invocation(attempt.invocation_id)?;
-            if origin != TurnOrigin::Workflow
+            let valid_origin = match (origin, invocation.source_human_request_id) {
+                (TurnOrigin::Workflow, None) => true,
+                (TurnOrigin::User, Some(request_id)) => {
+                    let request = self.get_human_request(request_id)?;
+                    request.workflow_id == invocation.workflow_id
+                        && request.session_id == session_id
+                        && request.action_invocation_id.is_none()
+                        && request.turn_id.is_none()
+                        && request.status == HumanRequestStatus::Answered
+                        && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
+                }
+                _ => false,
+            };
+            if !valid_origin
                 || attempt.status.is_terminal()
                 || attempt.turn_id.is_some()
                 || invocation.session_id != session_id
@@ -476,7 +490,7 @@ impl Store {
             session_id,
             status: TurnStatus::Queued,
             origin,
-            input: input.into(),
+            input,
             output: None,
             model: model.into(),
             reasoning_effort,
@@ -1543,6 +1557,7 @@ impl Store {
             action_name,
             objective,
             arguments,
+            None,
         )
     }
 
@@ -1556,6 +1571,7 @@ impl Store {
         action_name: impl Into<String>,
         objective: impl Into<String>,
         arguments: Value,
+        source_human_request_id: Option<HumanRequestId>,
     ) -> Result<ActionInvocation, StoreError> {
         let participant = self.get_participant(agent_id)?;
         if participant.workflow_id != workflow_id || participant.status != ParticipantStatus::Active
@@ -1575,6 +1591,7 @@ impl Store {
             action_name: action_name.into(),
             objective: objective.into(),
             arguments,
+            source_human_request_id,
             status: ActionStatus::Scheduled,
             output: None,
             error: None,

@@ -174,8 +174,8 @@
               ref="composer"
               v-model="draft"
               rows="1"
-              :disabled="Boolean(activeTurn)"
-              :placeholder="activeTurn ? t('session.running') : t('session.message')"
+              :disabled="composerDisabled"
+              :placeholder="composerPlaceholder"
               :aria-label="t('session.message')"
               @input="resizeComposer"
               @keydown.enter="onComposerEnter"
@@ -188,7 +188,7 @@
                 </span>
               </div>
               <button
-                v-if="activeTurn"
+                v-if="activeTurn && !composerHumanRequest"
                 class="composer-action composer-action--stop"
                 type="button"
                 :title="t('session.stopTurn')"
@@ -203,7 +203,7 @@
                 type="submit"
                 :title="t('common.send')"
                 :aria-label="t('common.send')"
-                :disabled="!draft.trim()"
+                :disabled="composerDisabled || !draft.trim()"
               >
                 <ArrowUp :size="17" />
               </button>
@@ -619,6 +619,35 @@ const accessProfiles = computed(() => [
 const activeTurn = computed(() =>
   props.view.turns.find((turn) => ['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status)),
 )
+const composerHumanRequest = computed(() =>
+  props.view.human_requests.find(
+    (request) =>
+      request.status === 'open' &&
+      request.session_id === props.view.session.id &&
+      (!request.response_schema.type || request.response_schema.type === 'string'),
+  ),
+)
+const interactiveWorkflow = computed(() => {
+  const memberships = new Set(props.view.workflow_memberships.map((membership) => membership.workflow_id))
+  return props.view.workflows.find(
+    (workflow) => memberships.has(workflow.id) && workflow.program.manifest.slug === 'interactive-agent',
+  )
+})
+const interactiveComposerLocked = computed(
+  () => Boolean(interactiveWorkflow.value) && !composerHumanRequest.value,
+)
+const composerDisabled = computed(
+  () => Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
+)
+const composerPlaceholder = computed(() => {
+  if (composerHumanRequest.value) return composerHumanRequest.value.question
+  if (interactiveComposerLocked.value) {
+    return interactiveWorkflow.value?.status === 'running'
+      ? t('session.preparingNextTurn')
+      : t('session.interactiveEnded')
+  }
+  return activeTurn.value ? t('session.running') : t('session.message')
+})
 const workflowIsActive = computed(() =>
   ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(
     props.workflowView?.workflow.status ?? '',
@@ -766,7 +795,7 @@ function accessDescription(access: AgentAccessProfile): string {
 }
 function send() {
   const value = draft.value.trim()
-  if (!value || activeTurn.value) return
+  if (!value || composerDisabled.value) return
   emit('send', value)
   draft.value = ''
   nextTick(resizeComposer)
