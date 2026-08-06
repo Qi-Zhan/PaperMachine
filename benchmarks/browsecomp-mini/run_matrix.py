@@ -223,7 +223,7 @@ def create_session(
         f"/projects/{project_id}/sessions",
         {
             "title": title,
-            "instructions": "",
+            "system_prompt": "",
             "model": model,
             "access": access,
             "enabled_skills": [],

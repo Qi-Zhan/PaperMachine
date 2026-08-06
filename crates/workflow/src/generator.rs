@@ -40,7 +40,7 @@ impl WorkflowGenerator {
         let instructions = r#"You design PaperMachine Python workflow DSL programs. Return only executable workflow.py source, without Markdown fences or explanation.
 
 Available API:
-- Agent base class; class attributes: role, instructions, model, skills.
+- Agent base class; class attributes: role, system_prompt, model, skills, access.
 - @action, @action("prompt"), or @action(max_steps=N, max_search_calls=M, search_context_size="low", reasoning_effort="high", max_output_tokens=K) on async Agent methods. The method body is declarative; its docstring/prompt and arguments become a Codex-like Session Turn. Use max_steps=1 for evaluators and synthesizers that must reason only over supplied evidence without calling tools. Give every research action a finite max_search_calls allowance and normally use low search context for bounded parallel routes. Assign lower reasoning effort and a bounded output ceiling to planning/routing actions, and reserve higher effort for evidence judgment and final synthesis.
 - Annotate an action with -> dict, -> list, -> bool, -> int, or -> float when workflow control flow needs parsed JSON rather than raw text.
 - @workflow(slug=..., name=..., description=..., input_schema={...}, output_schema={...}, budget={...}) on exactly one async main(ctx).

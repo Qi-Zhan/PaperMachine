@@ -63,6 +63,9 @@ pub struct Workflow {
     pub started_from_session_id: Option<SessionId>,
     pub program: WorkflowProgramSnapshot,
     pub objective: String,
+    /// Optional Workflow-wide system prompt supplied when this durable
+    /// execution is created.
+    pub system_prompt: String,
     pub default_model: String,
     #[serde(default)]
     pub access: crate::AgentAccessProfile,
@@ -141,7 +144,7 @@ pub struct WorkflowParticipant {
     pub class_name: String,
     pub name: String,
     pub role: String,
-    pub instructions: String,
+    pub system_prompt: String,
     pub model: String,
     #[serde(default)]
     pub skills: Vec<String>,

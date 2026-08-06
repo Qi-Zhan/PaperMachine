@@ -4,7 +4,7 @@ from papermachine import Agent, action, workflow
 class Grader(Agent):
     access = "model_only"
     role = "independent post-write research report grader"
-    instructions = """You are a strict, blinded evaluator. Grade only the supplied final report against every supplied criterion. You did not participate in the research and must not infer credit from hidden work. Do not browse, repair the report, or use a workflow's internal evaluator result. Unsupported, stale, contradictory, or uncited claims must not receive full credit. Apply the same 0-10 scale consistently across reports."""
+    system_prompt = """You are a strict, blinded evaluator. Grade only the supplied final report against every supplied criterion. You did not participate in the research and must not infer credit from hidden work. Do not browse, repair the report, or use a workflow's internal evaluator result. Unsupported, stale, contradictory, or uncited claims must not receive full credit. Apply the same 0-10 scale consistently across reports."""
 
     @action(max_steps=1, reasoning_effort="medium", max_output_tokens=32_768)
     async def grade(

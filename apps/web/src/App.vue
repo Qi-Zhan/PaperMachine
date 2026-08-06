@@ -70,6 +70,7 @@
         :stream-connected="streamConnected"
         :skills-busy="skillsBusy"
         :access-busy="accessBusy"
+        :prompt-busy="promptBusy"
         @open-sidebar="mobileSidebarOpen = true"
         @select-project="selectProject"
         @select-session="selectSession"
@@ -84,6 +85,7 @@
         @answer-human="answerHumanRequest"
         @update-skills="updateSessionSkills"
         @update-access="updateSessionAccess"
+        @update-system-prompt="updateSessionSystemPrompt"
         @open-artifact="selectedArtifact = $event"
         @open-workflow-output="selectedWorkflowOutput = $event"
       />
@@ -92,11 +94,13 @@
         v-else-if="projectOverview"
         :overview="projectOverview"
         :skills="projectSkills"
+        :prompt-busy="promptBusy"
         @open-sidebar="mobileSidebarOpen = true"
         @new-session="openSessionDialog(projectOverview.project.id)"
         @new-skill="skillDialogOpen = true"
         @select-session="selectSession"
         @open-artifact="selectedArtifact = $event"
+        @update-system-prompt="updateProjectSystemPrompt"
       />
 
       <div v-else class="full-loading"><LoaderCircle class="spin" :size="18" /></div>
@@ -210,6 +214,7 @@ const dialogError = ref('')
 const dialogBusy = ref(false)
 const skillsBusy = ref(false)
 const accessBusy = ref(false)
+const promptBusy = ref(false)
 const projectDialogOpen = ref(false)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
@@ -609,6 +614,36 @@ async function updateSessionAccess(access: AgentAccessProfile) {
   }
 }
 
+async function updateSessionSystemPrompt(systemPrompt: string) {
+  const view = sessionView.value
+  if (!view || promptBusy.value) return
+  promptBusy.value = true
+  try {
+    const session = await api.updateSessionSystemPrompt(view.session.id, systemPrompt)
+    if (sessionView.value?.session.id === session.id) sessionView.value.session = session
+  } catch (error) {
+    globalError.value = messageOf(error)
+  } finally {
+    promptBusy.value = false
+  }
+}
+
+async function updateProjectSystemPrompt(systemPrompt: string) {
+  const overview = projectOverview.value
+  if (!overview || promptBusy.value) return
+  promptBusy.value = true
+  try {
+    const prompt = await api.updateProjectSystemPrompt(overview.project.id, systemPrompt)
+    if (projectOverview.value?.project.id === overview.project.id) {
+      projectOverview.value = { ...projectOverview.value, system_prompt: prompt }
+    }
+  } catch (error) {
+    globalError.value = messageOf(error)
+  } finally {
+    promptBusy.value = false
+  }
+}
+
 async function createSkill(input: { slug: string; name: string; description: string; instructions: string }) {
   const projectId = selectedProjectId.value
   if (!projectId) return
@@ -630,6 +665,7 @@ async function createSkill(input: { slug: string; name: string; description: str
 async function createWorkflow(input: {
   workflow: WorkflowProgram
   objective: string
+  systemPrompt: string
   input: Record<string, unknown>
 }) {
   const view = sessionView.value
@@ -640,6 +676,7 @@ async function createWorkflow(input: {
     const workflow = await api.createWorkflow(view.session.project_id, {
       program_slug: input.workflow.manifest.slug,
       objective: input.objective,
+      system_prompt: input.systemPrompt,
       input: input.input,
       started_from_session_id: view.session.id,
       model: view.session.model,

@@ -4,7 +4,7 @@ from papermachine import Agent, action, workflow
 class LiveDRJudge(Agent):
     access = "model_only"
     role = "blind LiveDRBench claim-equivalence judge"
-    instructions = """Judge only equivalence between the supplied encrypted-benchmark reference values and the submitted prediction. Do not research, repair, or reward the prediction using outside knowledge.
+    system_prompt = """Judge only equivalence between the supplied encrypted-benchmark reference values and the submitted prediction. Do not research, repair, or reward the prediction using outside knowledge.
 
 This rubric is adapted from the upstream Microsoft LiveDRBench evaluators:
 - Strings are equivalent when they preserve the same meaning, including common acronyms, shortened names, partial titles, harmless casing/spacing differences, or one being a semantic subset of the other. For people, allow missing middle names and switched first/last order.

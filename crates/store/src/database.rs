@@ -12,6 +12,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -20,6 +22,8 @@ use std::sync::Mutex;
 use tokio::sync::broadcast;
 
 const SCHEMA_VERSION: u32 = 1;
+const PROJECT_SYSTEM_PROMPT_PATH: &str = ".papermachine/prompts/system.md";
+const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct Store {
@@ -122,18 +126,48 @@ impl Store {
         self.query_document_by_id("projects", id.to_string(), "project")
     }
 
+    pub fn get_project_system_prompt(
+        &self,
+        id: ProjectId,
+    ) -> Result<ProjectSystemPrompt, StoreError> {
+        let project = self.get_project(id)?;
+        let path = PathBuf::from(&project.root_path).join(PROJECT_SYSTEM_PROMPT_PATH);
+        reject_prompt_symlink(&path)?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|error| StoreError::Io(error.to_string()))?;
+        Ok(ProjectSystemPrompt {
+            relative_path: PROJECT_SYSTEM_PROMPT_PATH.to_string(),
+            sha256: hash_text(&content),
+            content,
+        })
+    }
+
+    pub fn set_project_system_prompt(
+        &self,
+        id: ProjectId,
+        content: impl Into<String>,
+    ) -> Result<ProjectSystemPrompt, StoreError> {
+        let project = self.get_project(id)?;
+        let content = content.into();
+        validate_system_prompt(&content)?;
+        let path = PathBuf::from(&project.root_path).join(PROJECT_SYSTEM_PROMPT_PATH);
+        reject_prompt_symlink(&path)?;
+        write_atomic(&path, content.as_bytes())?;
+        self.get_project_system_prompt(id)
+    }
+
     pub fn create_session(
         &self,
         project_id: ProjectId,
         title: impl Into<String>,
-        instructions: impl Into<String>,
+        system_prompt: impl Into<String>,
         model: impl Into<String>,
         enabled_skills: Vec<String>,
     ) -> Result<Session, StoreError> {
         self.create_session_with_access(
             project_id,
             title,
-            instructions,
+            system_prompt,
             model,
             enabled_skills,
             AgentAccessProfile::Research,
@@ -144,18 +178,20 @@ impl Store {
         &self,
         project_id: ProjectId,
         title: impl Into<String>,
-        instructions: impl Into<String>,
+        system_prompt: impl Into<String>,
         model: impl Into<String>,
         enabled_skills: Vec<String>,
         access: AgentAccessProfile,
     ) -> Result<Session, StoreError> {
         self.ensure_project(project_id)?;
+        let system_prompt = system_prompt.into();
+        validate_system_prompt(&system_prompt)?;
         self.insert_session(Session {
             id: SessionId::new(),
             project_id,
             origin: SessionOrigin::User,
             title: title.into(),
-            instructions: instructions.into(),
+            system_prompt,
             model: model.into(),
             access,
             status: SessionStatus::Ready,
@@ -244,15 +280,36 @@ impl Store {
         enabled_skills: Vec<String>,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
-        if matches!(
-            session.status,
-            SessionStatus::Running | SessionStatus::WaitingForHuman | SessionStatus::Paused
-        ) {
+        if self.session_has_active_turn(session_id)? {
             return Err(StoreError::Invariant(
                 "cannot change skills while a Session has an active Turn".to_string(),
             ));
         }
         session.enabled_skills = enabled_skills;
+        session.updated_at = Utc::now();
+        self.update_document(
+            "sessions",
+            &session.id.to_string(),
+            session.updated_at,
+            &session,
+        )?;
+        Ok(session)
+    }
+
+    pub fn set_session_system_prompt(
+        &self,
+        session_id: SessionId,
+        system_prompt: impl Into<String>,
+    ) -> Result<Session, StoreError> {
+        let mut session = self.get_session(session_id)?;
+        if self.session_has_active_turn(session_id)? {
+            return Err(StoreError::Invariant(
+                "cannot change the system prompt while a Session has an active Turn".to_string(),
+            ));
+        }
+        let system_prompt = system_prompt.into();
+        validate_system_prompt(&system_prompt)?;
+        session.system_prompt = system_prompt;
         session.updated_at = Utc::now();
         self.update_document(
             "sessions",
@@ -269,13 +326,7 @@ impl Store {
         access: AgentAccessProfile,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
-        let active = self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
-             AND status IN ('queued', 'running', 'waiting_for_human', 'paused'))",
-            [session_id.to_string()],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if active {
+        if self.session_has_active_turn(session_id)? {
             return Err(StoreError::Invariant(
                 "cannot change access while a Session has an active Turn".to_string(),
             ));
@@ -291,13 +342,23 @@ impl Store {
         Ok(session)
     }
 
+    fn session_has_active_turn(&self, session_id: SessionId) -> Result<bool, StoreError> {
+        Ok(self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
+             AND status IN ('queued', 'running', 'waiting_for_human', 'paused'))",
+            [session_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_turn(
         &self,
         session_id: SessionId,
+        origin: TurnOrigin,
         input: impl Into<String>,
         model: impl Into<String>,
-        instructions: impl Into<String>,
+        prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
         max_steps: u32,
         max_search_calls: Option<u32>,
@@ -328,11 +389,12 @@ impl Store {
             id: TurnId::new(),
             session_id,
             status: TurnStatus::Queued,
+            origin,
             input: input.into(),
             output: None,
             model: model.into(),
             reasoning_effort,
-            instructions: instructions.into(),
+            prompt,
             access: session.access,
             max_steps: max_steps.max(1),
             max_search_calls,
@@ -365,6 +427,7 @@ impl Store {
             Some(turn.id),
             None,
             SessionEventPayload::TurnCreated {
+                origin: turn.origin,
                 input: turn.input.clone(),
                 model: turn.model.clone(),
             },
@@ -656,6 +719,7 @@ impl Store {
         started_from_session_id: Option<SessionId>,
         program: WorkflowProgramSnapshot,
         objective: impl Into<String>,
+        system_prompt: impl Into<String>,
         input: Value,
         budget: Option<Budget>,
         default_model: impl Into<String>,
@@ -703,6 +767,8 @@ impl Store {
         } else {
             enabled_skills
         };
+        let system_prompt = system_prompt.into();
+        validate_system_prompt(&system_prompt)?;
         let now = Utc::now();
         let workflow = Workflow {
             id: WorkflowId::new(),
@@ -711,6 +777,7 @@ impl Store {
             budget: budget.unwrap_or_else(|| program.manifest.default_budget.clone()),
             program,
             objective: objective.into(),
+            system_prompt,
             default_model,
             access,
             enabled_skills,
@@ -1133,7 +1200,7 @@ impl Store {
         class_name: impl Into<String>,
         name: impl Into<String>,
         role: impl Into<String>,
-        instructions: impl Into<String>,
+        system_prompt: impl Into<String>,
         model: impl Into<String>,
         skills: Vec<String>,
         access: AgentAccessProfile,
@@ -1150,6 +1217,8 @@ impl Store {
                 run.usage.agents_created, run.budget.max_agents
             )));
         }
+        let system_prompt = system_prompt.into();
+        validate_system_prompt(&system_prompt)?;
         let now = Utc::now();
         let name = name.into();
         let role = role.into();
@@ -1166,7 +1235,7 @@ impl Store {
             project_id: run.project_id,
             origin: SessionOrigin::WorkflowAgent,
             title: name.clone(),
-            instructions: instructions.into(),
+            system_prompt,
             model,
             access: std::cmp::min(access, run.access),
             status: SessionStatus::Ready,
@@ -1185,7 +1254,7 @@ impl Store {
             class_name: class_name.into(),
             name,
             role,
-            instructions: session.instructions.clone(),
+            system_prompt: session.system_prompt.clone(),
             model: session.model.clone(),
             skills: session.enabled_skills.clone(),
             status: ParticipantStatus::Active,
@@ -2560,6 +2629,7 @@ fn initialize_project_directory(project: &Project) -> Result<(), StoreError> {
         std::fs::create_dir_all(metadata_root.join(directory))
             .map_err(|error| StoreError::Io(error.to_string()))?;
     }
+    write_atomic(&metadata_root.join("prompts/system.md"), b"")?;
     let document = toml::to_string_pretty(&ProjectConfig {
         id: project.id.to_string(),
         name: &project.name,
@@ -2570,6 +2640,56 @@ fn initialize_project_directory(project: &Project) -> Result<(), StoreError> {
     std::fs::write(&temporary, document).map_err(|error| StoreError::Io(error.to_string()))?;
     std::fs::rename(&temporary, &config_path).map_err(|error| StoreError::Io(error.to_string()))?;
     Ok(())
+}
+
+fn validate_system_prompt(content: &str) -> Result<(), StoreError> {
+    if content.len() > MAX_SYSTEM_PROMPT_BYTES {
+        return Err(StoreError::Invariant(format!(
+            "system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_prompt_symlink(path: &Path) -> Result<(), StoreError> {
+    if std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(StoreError::Invariant(format!(
+            "Project system prompt may not be a symlink: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, content: &[u8]) -> Result<(), StoreError> {
+    let parent = path.parent().ok_or_else(|| {
+        StoreError::Invariant(format!("path has no parent directory: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("prompt"),
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::write(&temporary, content).map_err(|error| StoreError::Io(error.to_string()))?;
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(StoreError::Io(error.to_string()))
+        }
+    }
+}
+
+fn hash_text(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn initialize(connection: &Connection) -> Result<(), StoreError> {

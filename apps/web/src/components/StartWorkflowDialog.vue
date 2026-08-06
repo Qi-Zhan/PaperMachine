@@ -29,6 +29,14 @@
           required
         />
 
+        <label class="field-label" for="workflow-system-prompt">{{ t('dialog.workflowSystemPrompt') }}</label>
+        <textarea
+          id="workflow-system-prompt"
+          v-model="systemPrompt"
+          class="text-area text-area--small"
+          :placeholder="t('dialog.workflowSystemPromptPlaceholder')"
+        />
+
         <div class="schema-fields">
           <template v-for="field in visibleFields" :key="field.key">
             <label v-if="field.type === 'boolean'" class="check-row schema-check-row">
@@ -124,7 +132,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   close: []
-  submit: [input: { workflow: WorkflowProgram; objective: string; input: Record<string, unknown> }]
+  submit: [input: { workflow: WorkflowProgram; objective: string; systemPrompt: string; input: Record<string, unknown> }]
 }>()
 
 type FormValue = string | number | boolean
@@ -155,6 +163,7 @@ interface SchemaField {
 const workflowKey = ref('')
 const { t } = useAppI18n()
 const objective = ref('')
+const systemPrompt = ref('')
 const formValues = ref<Record<string, FormValue>>({})
 const advancedVisible = ref(false)
 const localError = ref('')
@@ -195,6 +204,7 @@ watch(
     if (!open) return
     workflowKey.value = props.workflows[0] ? keyOf(props.workflows[0]) : ''
     objective.value = ''
+    systemPrompt.value = ''
     advancedVisible.value = false
     localError.value = ''
     initializeValues()
@@ -239,7 +249,12 @@ function submit() {
     } else input[field.key] = value
   }
   localError.value = ''
-  emit('submit', { workflow: selectedWorkflow.value, objective: objective.value.trim(), input })
+  emit('submit', {
+    workflow: selectedWorkflow.value,
+    objective: objective.value.trim(),
+    systemPrompt: systemPrompt.value.trim(),
+    input,
+  })
 }
 
 function decrement(field: SchemaField) {

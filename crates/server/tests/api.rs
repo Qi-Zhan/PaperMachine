@@ -159,6 +159,81 @@ async fn api_creates_and_updates_session_access_profiles() {
     assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+#[tokio::test]
+async fn api_layers_project_and_session_system_prompts_into_user_turns() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (project, session) = create_project_and_session(&app, directory.path(), "Prompt API").await;
+
+    let project_prompt = app
+        .clone()
+        .oneshot(json_request(
+            "PUT",
+            &format!("/api/projects/{}/system-prompt", project.id),
+            json!({"system_prompt": "Use only primary evidence."}),
+        ))
+        .await
+        .expect("Project prompt request should complete");
+    assert_eq!(project_prompt.status(), StatusCode::OK);
+    let project_prompt = response_json(project_prompt).await;
+    assert_eq!(project_prompt["content"], "Use only primary evidence.");
+    assert_eq!(
+        project_prompt["relative_path"],
+        ".papermachine/prompts/system.md"
+    );
+
+    let session_prompt = app
+        .clone()
+        .oneshot(json_request(
+            "PUT",
+            &format!("/api/sessions/{}/system-prompt", session.id),
+            json!({"system_prompt": "Answer in a compact evidence table."}),
+        ))
+        .await
+        .expect("Session prompt request should complete");
+    assert_eq!(session_prompt.status(), StatusCode::OK);
+    let session_prompt: Session = serde_json::from_value(response_json(session_prompt).await)
+        .expect("Session should deserialize");
+    assert_eq!(
+        session_prompt.system_prompt,
+        "Answer in a compact evidence table."
+    );
+
+    let turn = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/sessions/{}/turns", session.id),
+            json!({"input": "Compare the sources."}),
+        ))
+        .await
+        .expect("Turn request should complete");
+    assert_eq!(turn.status(), StatusCode::CREATED);
+    let turn = response_json(turn).await;
+    assert_eq!(turn["origin"], "user");
+    let kinds = turn["prompt"]["layers"]
+        .as_array()
+        .expect("prompt layers should be an array")
+        .iter()
+        .map(|layer| layer["kind"].as_str().expect("kind should be a string"))
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, vec!["runtime", "project", "session"]);
+
+    let overview = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project overview should complete");
+    assert_eq!(overview.status(), StatusCode::OK);
+    let overview = response_json(overview).await;
+    assert_eq!(
+        overview["system_prompt"]["content"],
+        "Use only primary evidence."
+    );
+}
+
 async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
     let response = app
         .clone()
@@ -226,6 +301,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
             json!({
                 "program_slug": "parallel-discovery",
                 "objective": "Compare two implementation approaches.",
+                "system_prompt": "Prefer directly comparable implementation evidence.",
                 "input": {"perspectives": ["primary evidence", "failure modes"]},
                 "started_from_session_id": origin.id
             }),
@@ -237,6 +313,10 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     let workflow_id = run["id"].as_str().expect("run id should be present");
 
     let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    assert_eq!(
+        view["workflow"]["system_prompt"],
+        "Prefer directly comparable implementation evidence."
+    );
     assert_eq!(view["participants"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["sessions"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["actions"].as_array().map(Vec::len), Some(3));
@@ -297,6 +377,16 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     let participant_view = response_json(participant_view).await;
     assert_eq!(participant_view["session"]["origin"], "workflow_agent");
     assert_eq!(participant_view["turns"].as_array().map(Vec::len), Some(1));
+    assert_eq!(participant_view["turns"][0]["origin"], "workflow");
+    let prompt_kinds = participant_view["turns"][0]["prompt"]["layers"]
+        .as_array()
+        .expect("Workflow Turn prompt layers should exist")
+        .iter()
+        .filter_map(|layer| layer["kind"].as_str())
+        .collect::<Vec<_>>();
+    assert!(prompt_kinds.contains(&"runtime"));
+    assert!(prompt_kinds.contains(&"workflow"));
+    assert!(prompt_kinds.contains(&"agent"));
     assert_eq!(
         participant_view["workflow_memberships"]
             .as_array()

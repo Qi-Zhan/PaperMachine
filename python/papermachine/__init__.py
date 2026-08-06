@@ -145,7 +145,7 @@ def action(
 
 
 class Agent:
-    instructions = ""
+    system_prompt = ""
     role = "research agent"
     model = ""
     skills: list[str] = []
@@ -156,14 +156,16 @@ class Agent:
         name: str | None = None,
         *,
         role: str | None = None,
-        instructions: str | None = None,
+        system_prompt: str | None = None,
         model: str | None = None,
         skills: list[str] | None = None,
         access: str | None = None,
     ) -> None:
         self.name = name or type(self).__name__
         self.role = role if role is not None else type(self).role
-        self.instructions = instructions if instructions is not None else type(self).instructions
+        self.system_prompt = (
+            system_prompt if system_prompt is not None else type(self).system_prompt
+        )
         self.model = model if model is not None else type(self).model
         self.skills = list(skills if skills is not None else type(self).skills)
         self.access = _normalize_access(access if access is not None else type(self).access)
@@ -179,7 +181,7 @@ class Agent:
                     "class_name": type(self).__name__,
                     "name": self.name,
                     "role": self.role,
-                    "instructions": self.instructions,
+                    "system_prompt": self.system_prompt,
                     "model": self.model,
                     "skills": self.skills,
                     "access": self.access,

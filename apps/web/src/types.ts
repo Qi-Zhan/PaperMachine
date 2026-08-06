@@ -4,6 +4,8 @@ export const AGENT_ACCESS_PROFILES = ['model_only', 'read_only', 'workspace', 'r
 export type AgentAccessProfile = (typeof AGENT_ACCESS_PROFILES)[number]
 export type SessionStatus = 'ready' | 'running' | 'waiting_for_human' | 'paused' | 'failed' | 'archived'
 export type SessionOrigin = 'user' | 'workflow_agent'
+export type TurnOrigin = 'user' | 'workflow'
+export type PromptLayerKind = 'runtime' | 'project' | 'workflow' | 'agent' | 'session' | 'skills' | 'control'
 export type TurnStatus =
   | 'queued'
   | 'running'
@@ -44,7 +46,7 @@ export interface Session {
   project_id: Id
   origin: SessionOrigin
   title: string
-  instructions: string
+  system_prompt: string
   model: string
   access: AgentAccessProfile
   status: SessionStatus
@@ -54,6 +56,15 @@ export interface Session {
 }
 
 export interface SkillSnapshot { slug: string; sha256: string; relative_path: string }
+export interface PromptLayer {
+  kind: PromptLayerKind
+  name: string
+  source: string
+  content: string
+  sha256: string
+}
+export interface PromptSnapshot { layers: PromptLayer[]; rendered: string; sha256: string }
+export interface ProjectSystemPrompt { relative_path: string; content: string; sha256: string }
 export interface TokenUsage {
   input_tokens: number
   output_tokens: number
@@ -65,11 +76,12 @@ export interface Turn {
   id: Id
   session_id: Id
   status: TurnStatus
+  origin: TurnOrigin
   input: string
   output: string | null
   model: string
   reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
-  instructions: string
+  prompt: PromptSnapshot
   access: AgentAccessProfile
   max_steps: number
   max_search_calls: number | null
@@ -152,6 +164,7 @@ export interface Workflow {
   started_from_session_id: Id | null
   program: WorkflowProgramSnapshot
   objective: string
+  system_prompt: string
   default_model: string
   access: AgentAccessProfile
   enabled_skills: string[]
@@ -173,7 +186,7 @@ export interface WorkflowParticipant {
   class_name: string
   name: string
   role: string
-  instructions: string
+  system_prompt: string
   model: string
   skills: string[]
   status: ParticipantStatus
@@ -311,6 +324,7 @@ export interface ProjectSkill {
 
 export interface ProjectOverview {
   project: Project
+  system_prompt: ProjectSystemPrompt
   sessions: Session[]
   workflows: Workflow[]
   workflow_participants: WorkflowParticipant[]
@@ -408,7 +422,7 @@ export interface GeneratedWorkflow { source: string; validation: WorkflowValidat
 export interface WorkflowGenerationInput { description: string; name?: string; slug?: string; model?: string }
 export interface CreateSessionInput {
   title: string
-  instructions: string
+  system_prompt: string
   model: string
   enabled_skills: string[]
   access: AgentAccessProfile
@@ -416,6 +430,7 @@ export interface CreateSessionInput {
 export interface CreateWorkflowInput {
   program_slug: string
   objective: string
+  system_prompt: string
   input: Record<string, unknown>
   started_from_session_id?: Id
   model: string

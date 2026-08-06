@@ -138,8 +138,10 @@ ActionInvocation
 ```
 
 runtime 把 action docstring/decorator prompt 与绑定后的参数格式化成 Turn
-objective，并把 Workflow objective、与该 Agent 有关的有向关系、以及
-interrupt guidance 加到 Session instructions 中。
+objective。每个 Turn 都会快照实际使用且顺序固定的 prompt layers：runtime、
+Project、Workflow、Agent/Session、Skills、runtime control。与该 Agent 有关的
+有向关系属于 Workflow layer，interrupt/retry guidance 属于 control layer。
+详见 [prompt 模型](prompt-model.md)。
 
 | Invocation/Attempt 状态 | 含义 |
 |---|---|

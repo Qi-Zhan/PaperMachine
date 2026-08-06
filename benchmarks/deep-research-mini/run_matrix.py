@@ -309,7 +309,7 @@ def create_origin_session(
         f"/projects/{project_id}/sessions",
         {
             "title": title,
-            "instructions": "",
+            "system_prompt": "",
             "model": model,
             "enabled_skills": [],
         },

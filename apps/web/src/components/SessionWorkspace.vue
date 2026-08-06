@@ -60,13 +60,16 @@
           </div>
 
           <article v-for="turn in view.turns" :key="turn.id" class="turn-block">
-            <div class="user-message">
+            <div :class="turn.origin === 'user' ? 'user-message' : 'workflow-message'">
+              <span v-if="turn.origin === 'workflow'" class="message-origin">
+                <GitBranch :size="12" /> {{ t('session.workflowTask') }}
+              </span>
               <p>{{ turn.input }}</p>
               <time>{{ formatDateTime(turn.created_at) }}</time>
             </div>
 
             <details
-              v-if="stepsFor(turn.id).length || turn.status !== 'completed'"
+              v-if="turn.prompt.layers.length || stepsFor(turn.id).length || turn.status !== 'completed'"
               class="execution-details"
               :open="['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status)"
             >
@@ -94,6 +97,25 @@
                 <ChevronDown :size="14" />
               </summary>
               <div class="step-list">
+                <details v-if="turn.prompt.layers.length" class="prompt-snapshot-row">
+                  <summary>
+                    <span class="step-kind-icon" data-kind="system"><Info :size="13" /></span>
+                    <span class="step-name">{{ t('prompt.snapshot') }}</span>
+                    <span class="step-meta">
+                      {{ turn.prompt.layers.length }} {{ t('prompt.layers') }} · {{ turn.prompt.sha256.slice(0, 10) }}
+                    </span>
+                    <ChevronRight :size="13" />
+                  </summary>
+                  <div class="prompt-layer-list">
+                    <details v-for="layer in turn.prompt.layers" :key="`${layer.kind}:${layer.source}:${layer.sha256}`">
+                      <summary>
+                        <strong>{{ layer.name }}</strong>
+                        <span>{{ layer.kind }} · {{ layer.source }}</span>
+                      </summary>
+                      <pre>{{ layer.content }}</pre>
+                    </details>
+                  </div>
+                </details>
                 <details v-for="step in stepsFor(turn.id)" :key="step.id" class="step-row">
                   <summary>
                     <span class="step-kind-icon" :data-kind="step.kind">
@@ -233,7 +255,30 @@
             <div><dt>Session</dt><dd>{{ shortId(view.session.id) }}</dd></div>
             <div><dt>{{ t('common.updated') }}</dt><dd>{{ formatDateTime(view.session.updated_at) }}</dd></div>
           </dl>
-          <p v-if="view.session.instructions">{{ view.session.instructions }}</p>
+        </section>
+
+        <section class="inspector-section session-prompt-control">
+          <div class="inspector-title-row">
+            <h3>{{ view.session.origin === 'workflow_agent' ? t('prompt.agentSystemPrompt') : t('prompt.sessionSystemPrompt') }}</h3>
+            <button
+              class="icon-button"
+              type="button"
+              :title="t('common.save')"
+              :aria-label="t('common.save')"
+              :disabled="Boolean(activeTurn) || promptBusy || !sessionPromptChanged"
+              @click="saveSystemPrompt"
+            >
+              <LoaderCircle v-if="promptBusy" class="spin" :size="14" />
+              <Save v-else :size="14" />
+            </button>
+          </div>
+          <textarea
+            v-model="systemPromptDraft"
+            class="text-area session-system-prompt-input"
+            :placeholder="t('prompt.sessionPlaceholder')"
+            :disabled="Boolean(activeTurn) || promptBusy"
+          />
+          <p>{{ t('prompt.futureTurns') }}</p>
         </section>
 
         <section class="inspector-section">
@@ -475,6 +520,7 @@ import {
   Play,
   Plus,
   Radio,
+  Save,
   ScanSearch,
   SendHorizontal,
   Sparkles,
@@ -513,6 +559,7 @@ const props = defineProps<{
   streamConnected: boolean
   skillsBusy: boolean
   accessBusy: boolean
+  promptBusy: boolean
 }>()
 const emit = defineEmits<{
   'open-sidebar': []
@@ -529,6 +576,7 @@ const emit = defineEmits<{
   'answer-human': [input: { requestId: string; answer: unknown; workflowId: string }]
   'update-skills': [slugs: string[]]
   'update-access': [access: AgentAccessProfile]
+  'update-system-prompt': [systemPrompt: string]
   'open-artifact': [artifact: Artifact]
   'open-workflow-output': [workflow: Workflow]
 }>()
@@ -539,6 +587,7 @@ const timeline = ref<HTMLElement | null>(null)
 const inspectorOpen = ref(false)
 const enabledSkills = ref<string[]>([...props.view.session.enabled_skills])
 const controlDraft = ref('')
+const systemPromptDraft = ref(props.view.session.system_prompt)
 const humanAnswers = reactive<Record<string, string>>({})
 const humanAnswerError = ref('')
 const { t } = useAppI18n()
@@ -569,6 +618,9 @@ const currentAction = computed(() =>
 const openHumanRequests = computed(() =>
   props.workflowView?.human_requests.filter((request) => request.status === 'open') ?? [],
 )
+const sessionPromptChanged = computed(
+  () => systemPromptDraft.value !== props.view.session.system_prompt,
+)
 
 watch(
   () => props.view.session.id,
@@ -577,6 +629,7 @@ watch(
     enabledSkills.value = [...props.view.session.enabled_skills]
     inspectorOpen.value = false
     controlDraft.value = ''
+    systemPromptDraft.value = props.view.session.system_prompt
     humanAnswerError.value = ''
     nextTick(scrollToBottom)
   },
@@ -587,6 +640,12 @@ watch(
     enabledSkills.value = [...value]
   },
   { deep: true },
+)
+watch(
+  () => props.view.session.system_prompt,
+  (value) => {
+    systemPromptDraft.value = value
+  },
 )
 watch(
   () => props.events.length + props.view.turns.length + props.view.steps.length,
@@ -712,5 +771,9 @@ function scrollToBottom() {
 }
 function saveSkills() {
   emit('update-skills', [...enabledSkills.value])
+}
+function saveSystemPrompt() {
+  if (!sessionPromptChanged.value || activeTurn.value || props.promptBusy) return
+  emit('update-system-prompt', systemPromptDraft.value)
 }
 </script>

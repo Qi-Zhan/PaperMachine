@@ -149,8 +149,10 @@ ActionInvocation
 ```
 
 The runtime formats the action docstring/decorator prompt and bound arguments
-as the Turn objective. It adds the Workflow objective, relevant directed
-relations, and interruption guidance to the Session instructions.
+as the Turn objective. Every Turn snapshots the exact ordered prompt layers:
+runtime, Project, Workflow, Agent/Session, Skills, and runtime control. Relevant
+directed relations belong to the Workflow layer; interruption/retry guidance
+belongs to the control layer. See [prompt model](prompt-model.md).
 
 | Invocation/attempt status | Meaning |
 |---|---|

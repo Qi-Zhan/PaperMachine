@@ -4,7 +4,7 @@ from papermachine import Agent, Team, action, relate, scope, together, workflow
 class Researcher(Agent):
     access = "research"
     role = "independent research route"
-    instructions = "Gather concrete evidence, preserve provenance, and state uncertainty."
+    system_prompt = "Gather concrete evidence, preserve provenance, and state uncertainty."
 
     @action(
         max_search_calls=16,
@@ -18,7 +18,7 @@ class Researcher(Agent):
 class Synthesizer(Agent):
     access = "model_only"
     role = "research synthesis"
-    instructions = "Compare independent findings and keep conclusions bounded by the evidence."
+    system_prompt = "Compare independent findings and keep conclusions bounded by the evidence."
 
     @action(max_steps=1, reasoning_effort="high", max_output_tokens=16_384)
     async def synthesize(self, question: str, findings: list[str]):

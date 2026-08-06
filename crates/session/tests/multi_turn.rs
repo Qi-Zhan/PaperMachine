@@ -9,9 +9,11 @@ use papermachine_protocol::Budget;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
+use papermachine_protocol::PromptLayerKind;
 use papermachine_protocol::SessionStatus;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
@@ -225,6 +227,109 @@ async fn later_turns_reuse_the_completed_session_history() {
 }
 
 #[tokio::test]
+async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
+    );
+    let project = store
+        .create_project("Prompt snapshots", "", directory.path().join("project"))
+        .expect("Project should be created");
+    store
+        .set_project_system_prompt(project.id, "Project prompt one.")
+        .expect("Project prompt should update");
+    let session = store
+        .create_session(
+            project.id,
+            "Session",
+            "Session prompt one.",
+            "test-model",
+            Vec::new(),
+        )
+        .expect("Session should be created");
+    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let model = ScriptedModelClient::new([response("First."), response("Second.")]);
+    let runtime = SessionRuntime::new(
+        Arc::clone(&store),
+        Arc::new(model.clone()),
+        ToolRegistry::default(),
+        skills,
+        SessionRuntimeConfig {
+            default_model: "test-model".to_string(),
+            model_context_window: 128_000,
+            max_concurrent_turns: 1,
+        },
+    );
+
+    let first = runtime
+        .submit(session.id, "First question")
+        .await
+        .expect("first Turn should submit");
+    wait_for_completion(&store, first.id).await;
+    let first = store.get_turn(first.id).expect("first Turn should load");
+    assert_eq!(first.origin, TurnOrigin::User);
+    assert_eq!(
+        first
+            .prompt
+            .layers
+            .iter()
+            .map(|layer| layer.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            PromptLayerKind::Runtime,
+            PromptLayerKind::Project,
+            PromptLayerKind::Session,
+        ]
+    );
+    assert!(
+        first
+            .prompt
+            .layers
+            .iter()
+            .any(|layer| layer.content == "Project prompt one.")
+    );
+
+    store
+        .set_project_system_prompt(project.id, "Project prompt two.")
+        .expect("Project prompt should update");
+    store
+        .set_session_system_prompt(session.id, "Session prompt two.")
+        .expect("Session prompt should update");
+    let second = runtime
+        .submit(session.id, "Second question")
+        .await
+        .expect("second Turn should submit");
+    wait_for_completion(&store, second.id).await;
+    let second = store.get_turn(second.id).expect("second Turn should load");
+
+    assert_ne!(first.prompt.sha256, second.prompt.sha256);
+    assert!(
+        second
+            .prompt
+            .layers
+            .iter()
+            .any(|layer| layer.content == "Project prompt two.")
+    );
+    assert!(
+        second
+            .prompt
+            .layers
+            .iter()
+            .any(|layer| layer.content == "Session prompt two.")
+    );
+    assert!(
+        first
+            .prompt
+            .layers
+            .iter()
+            .any(|layer| layer.content == "Project prompt one.")
+    );
+    let requests = model.requests().expect("model requests should be captured");
+    assert_eq!(requests[0].instructions, first.prompt.rendered);
+    assert_eq!(requests[1].instructions, second.prompt.rendered);
+}
+
+#[tokio::test]
 async fn workflow_token_budget_is_charged_at_each_model_step() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
@@ -246,6 +351,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             Some(origin.id),
             workflow_snapshot(budget),
             "Stay within budget",
+            "",
             serde_json::json!({}),
             None,
             "test-model",
@@ -304,7 +410,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             participant.session_id,
             "Research",
             None,
-            "",
+            Vec::new(),
             None,
             1,
             None,

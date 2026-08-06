@@ -24,6 +24,9 @@
    SHA-256 are copied into the Workflow. Later files cannot change history.
 10. **Access is a Turn snapshot.** A Session chooses one of five profiles; a
     Turn captures it at creation, and model/tool/execution layers all enforce it.
+11. **Prompt context is a Turn snapshot.** Runtime, Project, Workflow,
+    Agent/Session, skill, and control layers retain content, source, and hashes;
+    later edits affect only later Turns.
 
 ## Ownership graph
 
@@ -80,10 +83,11 @@ to stderr and captured with a size limit.
 
 A user Turn or workflow action follows the same core path:
 
-1. Persist the Turn with immutable access and Project-skill snapshots.
+1. Persist the Turn with immutable access, Project-skill, and ordered prompt
+   snapshots. `Turn.origin` records whether input came from the user or a Workflow.
 2. Rebuild history from completed prior Turns in that Session.
-3. Inject Session instructions, enabled skills, workflow relationship context,
-   and any pending human guidance.
+3. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
+   prompt layers into the exact provider instructions.
 4. Stream a Responses API sample and persist model-step events. Each Session
    retains one sequential WebSocket continuation chain; unsupported providers
    fall back to HTTP SSE.
@@ -176,7 +180,7 @@ tools, and model streams.
 `guide` is consumed at the next Agent checkpoint and appended as a user-history
 item for the running action. `interrupt` terminates the current ActionAttempt;
 the workflow runtime starts a new attempt for the same ActionInvocation with the
-interruption text as additional instructions.
+interruption text in an inspectable `control` prompt layer.
 
 Both workflow code and the model-visible `ask_human` tool can create a typed
 HumanRequest. The request marks the run as requiring attention; an action-level
@@ -217,6 +221,12 @@ Project-local skills live at:
 <project-root>/.papermachine/skills/<slug>/SKILL.md
 ```
 
+The user-editable Project system prompt lives at:
+
+```text
+<project-root>/.papermachine/prompts/system.md
+```
+
 Workflow source lives at:
 
 ```text
@@ -226,6 +236,9 @@ workflows/builtin/<slug>/workflow.py
 
 Built-in and user workflows use the same validator and runtime. The directory
 split expresses ownership and review status, not extra privileges.
+
+See [prompt model](prompt-model.md) for exact layering, editing, provenance,
+message-origin, and cache semantics.
 
 ## Explicit non-goals
 

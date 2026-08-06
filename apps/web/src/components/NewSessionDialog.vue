@@ -22,12 +22,12 @@
           :placeholder="t('dialog.newSessionPlaceholder')"
         />
 
-        <label class="field-label" for="session-instructions">{{ t('dialog.sessionInstructions') }}</label>
+        <label class="field-label" for="session-system-prompt">{{ t('dialog.sessionSystemPrompt') }}</label>
         <textarea
-          id="session-instructions"
-          v-model="instructions"
+          id="session-system-prompt"
+          v-model="systemPrompt"
           class="text-area text-area--small"
-          :placeholder="t('dialog.sessionInstructionsPlaceholder')"
+          :placeholder="t('dialog.sessionSystemPromptPlaceholder')"
         />
 
         <label class="field-label" for="session-model">{{ t('common.model') }}</label>
@@ -104,7 +104,7 @@ const emit = defineEmits<{ close: []; submit: [input: CreateSessionInput] }>()
 
 const title = ref('')
 const { t } = useAppI18n()
-const instructions = ref('')
+const systemPrompt = ref('')
 const model = ref('')
 const access = ref<AgentAccessProfile>('research')
 const enabledSkills = ref<string[]>([])
@@ -123,7 +123,7 @@ watch(
   async (open) => {
     if (!open) return
     title.value = ''
-    instructions.value = ''
+    systemPrompt.value = ''
     model.value = ''
     access.value = 'research'
     enabledSkills.value = []
@@ -137,7 +137,7 @@ function submit() {
   if (access.value === 'full_access' && !window.confirm(t('session.fullAccessConfirm'))) return
   emit('submit', {
     title: title.value.trim(),
-    instructions: instructions.value.trim(),
+    system_prompt: systemPrompt.value.trim(),
     model: model.value.trim(),
     enabled_skills: [...enabledSkills.value],
     access: access.value,

@@ -259,6 +259,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{project_id}", get(get_project_overview))
         .route(
+            "/projects/{project_id}/system-prompt",
+            get(get_project_system_prompt).put(update_project_system_prompt),
+        )
+        .route(
             "/projects/{project_id}/skills",
             get(list_project_skills).post(create_project_skill),
         )
@@ -273,6 +277,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/sessions/{session_id}", get(get_session_view))
         .route("/sessions/{session_id}/turns", post(create_turn))
         .route("/sessions/{session_id}/skills", put(update_session_skills))
+        .route(
+            "/sessions/{session_id}/system-prompt",
+            put(update_session_system_prompt),
+        )
         .route("/sessions/{session_id}/access", put(update_session_access))
         .route(
             "/sessions/{session_id}/workflows",
@@ -393,6 +401,7 @@ async fn create_project(
 #[derive(Serialize)]
 struct ProjectOverview {
     project: Project,
+    system_prompt: ProjectSystemPrompt,
     sessions: Vec<Session>,
     workflows: Vec<Workflow>,
     workflow_participants: Vec<WorkflowParticipant>,
@@ -414,12 +423,41 @@ async fn get_project_overview(
     }
     Ok(Json(ProjectOverview {
         project: state.store.get_project(project_id)?,
+        system_prompt: state.store.get_project_system_prompt(project_id)?,
         sessions: state.store.list_sessions(project_id)?,
         workflows,
         workflow_participants: participants,
         human_requests: requests,
         artifacts: state.store.list_project_artifacts(project_id)?,
     }))
+}
+
+async fn get_project_system_prompt(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Json<ProjectSystemPrompt>> {
+    Ok(Json(state.store.get_project_system_prompt(parse_id(
+        &project_id,
+        "Project",
+    )?)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SystemPromptRequest {
+    #[serde(default)]
+    system_prompt: String,
+}
+
+async fn update_project_system_prompt(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<SystemPromptRequest>,
+) -> ApiResult<Json<ProjectSystemPrompt>> {
+    Ok(Json(state.store.set_project_system_prompt(
+        parse_id(&project_id, "Project")?,
+        request.system_prompt,
+    )?))
 }
 
 async fn list_sessions(
@@ -481,7 +519,7 @@ struct CreateSessionRequest {
     #[serde(default)]
     title: String,
     #[serde(default)]
-    instructions: String,
+    system_prompt: String,
     #[serde(default)]
     model: String,
     #[serde(default)]
@@ -528,7 +566,7 @@ async fn create_session(
     let session = state.store.create_session_with_access(
         project_id,
         title,
-        request.instructions.trim(),
+        request.system_prompt.trim(),
         model,
         request.enabled_skills,
         request.access,
@@ -628,6 +666,17 @@ async fn update_session_skills(
             .store
             .set_session_enabled_skills(id, request.enabled_skills)?,
     ))
+}
+
+async fn update_session_system_prompt(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SystemPromptRequest>,
+) -> ApiResult<Json<Session>> {
+    Ok(Json(state.store.set_session_system_prompt(
+        parse_id(&session_id, "Session")?,
+        request.system_prompt,
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -770,6 +819,8 @@ async fn list_project_workflows(
 struct CreateWorkflowRequest {
     program_slug: String,
     objective: String,
+    #[serde(default)]
+    system_prompt: String,
     #[serde(default = "empty_object")]
     input: Value,
     #[serde(default)]
@@ -843,6 +894,7 @@ async fn create_workflow(
         request.started_from_session_id,
         snapshot,
         request.objective.trim(),
+        request.system_prompt.trim(),
         request.input,
         None,
         model,

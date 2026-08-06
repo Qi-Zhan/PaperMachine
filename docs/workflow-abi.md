@@ -13,6 +13,7 @@ from papermachine import Agent, action, scope, together, workflow
 class Researcher(Agent):
     access = "research"
     role = "independent evidence route"
+    system_prompt = "Prefer primary evidence and preserve uncertainty."
 
     @action(
         max_search_calls=16,
@@ -97,6 +98,7 @@ The runtime provides `ctx.objective`, `ctx.input`, and `ctx.workflow_id`.
 | Primitive | Effect |
 |---|---|
 | `Agent(...)` | Local declaration; first use creates an Agent instance and Session. |
+| `Agent(system_prompt=...)` | Overrides the class system prompt for this persistent Agent Session. |
 | `Agent(access=...)` | Overrides the class access profile for this instance. |
 | `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
 | `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, `reasoning_effort`, and `max_output_tokens` give each role its own sample, search, retrieval-context, compute, and output policy. |
@@ -122,6 +124,10 @@ origin Session's profile is the initial ceiling: creating an Agent above it
 opens a boolean HumanRequest before the first action. Creating one at or below
 the ceiling does not. A later `set_access` upgrade always opens a HumanRequest;
 a downgrade does not. A Turn keeps the profile snapshot captured at creation.
+
+Agent classes may declare `system_prompt`; a constructor override takes
+precedence. Project, Workflow, Agent/Session, skill, and control layers are
+snapshotted on every Turn. See [prompt model](prompt-model.md).
 
 ## Effect protocol
 

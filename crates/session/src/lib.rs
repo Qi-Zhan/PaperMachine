@@ -17,7 +17,11 @@ use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelResponseFormat;
+use papermachine_protocol::PromptLayer;
+use papermachine_protocol::PromptLayerKind;
+use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::ReasoningEffort;
+use papermachine_protocol::Session;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::StepId;
@@ -26,17 +30,21 @@ use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::Turn;
 use papermachine_protocol::TurnId;
+use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkflowStatus;
 use papermachine_skills::ProjectSkillCatalog;
+use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_tools::ToolRegistry;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,6 +52,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+
+const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions and budgets are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history.";
 
 #[derive(Clone)]
 pub struct SessionRuntime {
@@ -75,6 +85,30 @@ pub struct WorkflowTurnContext {
     pub action_attempt_id: ActionAttemptId,
 }
 
+#[derive(Clone, Debug)]
+pub struct PromptLayerInput {
+    pub kind: PromptLayerKind,
+    pub name: String,
+    pub source: String,
+    pub content: String,
+}
+
+impl PromptLayerInput {
+    pub fn new(
+        kind: PromptLayerKind,
+        name: impl Into<String>,
+        source: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            source: source.into(),
+            content: content.into(),
+        }
+    }
+}
+
 impl SessionRuntime {
     pub fn new(
         store: Arc<Store>,
@@ -104,7 +138,17 @@ impl SessionRuntime {
     ) -> Result<Turn, SessionRuntimeError> {
         let turn = self
             .prepare_turn(
-                session_id, input, None, "", None, 32, None, None, None, None,
+                session_id,
+                TurnOrigin::User,
+                input,
+                None,
+                Vec::new(),
+                None,
+                32,
+                None,
+                None,
+                None,
+                None,
             )
             .await?;
         self.schedule(turn.id).await?;
@@ -123,9 +167,15 @@ impl SessionRuntime {
         let turn = self
             .prepare_turn(
                 session_id,
+                TurnOrigin::Workflow,
                 input,
                 model_override,
-                additional_instructions,
+                prompt_layer_from_text(
+                    PromptLayerKind::Control,
+                    "Runtime instructions",
+                    "runtime:execute",
+                    additional_instructions,
+                ),
                 None,
                 max_steps,
                 None,
@@ -144,7 +194,7 @@ impl SessionRuntime {
         session_id: SessionId,
         input: impl Into<String>,
         model_override: Option<&str>,
-        additional_instructions: &str,
+        prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
         max_steps: u32,
         max_search_calls: Option<u32>,
@@ -157,9 +207,10 @@ impl SessionRuntime {
         let turn = self
             .prepare_turn(
                 session_id,
+                TurnOrigin::Workflow,
                 input,
                 model_override,
-                additional_instructions,
+                prompt_layers,
                 reasoning_effort,
                 max_steps,
                 max_search_calls,
@@ -185,9 +236,10 @@ impl SessionRuntime {
     async fn prepare_turn(
         &self,
         session_id: SessionId,
+        origin: TurnOrigin,
         input: impl Into<String>,
         model_override: Option<&str>,
-        additional_instructions: &str,
+        prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
         max_steps: u32,
         max_search_calls: Option<u32>,
@@ -208,17 +260,17 @@ impl SessionRuntime {
             self.inner
                 .skills
                 .resolve(session.project_id, &session.enabled_skills, &workspace)?;
-        let session_instructions = [session.instructions.trim(), additional_instructions.trim()]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let instructions = build_instructions(&session_instructions, &resolved.instructions);
+        let project_prompt = self
+            .inner
+            .store
+            .get_project_system_prompt(session.project_id)?;
+        let prompt = build_prompt_snapshot(&session, project_prompt, prompt_layers, &resolved);
         let turn = self.inner.store.create_turn(
             session_id,
+            origin,
             input,
             model,
-            instructions,
+            prompt,
             reasoning_effort,
             max_steps,
             max_search_calls,
@@ -308,6 +360,7 @@ async fn run_scheduled_turn(
         _ = cancellation.cancelled() => return Err(SessionRuntimeError::Cancelled),
     };
     let turn = inner.store.start_turn(turn_id)?;
+    verify_prompt_snapshot(&turn.prompt)?;
     let session = inner.store.get_session(turn.session_id)?;
     let history = previous_history(&inner.store, &turn)?;
     let workspace = session_workspace(&inner, &session)?;
@@ -330,7 +383,7 @@ async fn run_scheduled_turn(
         turn.id,
         workspace,
         turn.model.clone(),
-        turn.instructions.clone(),
+        turn.prompt.rendered.clone(),
         turn.input.clone(),
     );
     if let Some(context) = workflow_context {
@@ -529,13 +582,159 @@ fn previous_history(store: &Store, current: &Turn) -> Result<Vec<ModelInputItem>
         .unwrap_or_default())
 }
 
-fn build_instructions(session_instructions: &str, skill_instructions: &str) -> String {
-    let base = "You are a research agent working in a persistent PaperMachine session. Use tools to gather and verify evidence. Distinguish observations, inferences, limitations, and open questions.";
-    [base, session_instructions.trim(), skill_instructions.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
+fn prompt_layer_from_text(
+    kind: PromptLayerKind,
+    name: &str,
+    source: &str,
+    content: &str,
+) -> Vec<PromptLayerInput> {
+    if content.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![PromptLayerInput::new(kind, name, source, content)]
+    }
+}
+
+fn build_prompt_snapshot(
+    session: &Session,
+    project_prompt: papermachine_protocol::ProjectSystemPrompt,
+    additional: Vec<PromptLayerInput>,
+    skills: &ResolvedSkills,
+) -> PromptSnapshot {
+    let mut layers = vec![make_prompt_layer(
+        PromptLayerKind::Runtime,
+        "PaperMachine runtime",
+        "builtin:runtime",
+        RUNTIME_SYSTEM_PROMPT,
+    )];
+    if !project_prompt.content.trim().is_empty() {
+        layers.push(PromptLayer {
+            kind: PromptLayerKind::Project,
+            name: "Project system prompt".to_string(),
+            source: project_prompt.relative_path,
+            content: project_prompt.content,
+            sha256: project_prompt.sha256,
+        });
+    }
+    layers.extend(additional.iter().filter_map(prompt_layer_from_input));
+    if !session.system_prompt.trim().is_empty() {
+        let (kind, name) = match session.origin {
+            papermachine_protocol::SessionOrigin::User => {
+                (PromptLayerKind::Session, "Session system prompt")
+            }
+            papermachine_protocol::SessionOrigin::WorkflowAgent => {
+                (PromptLayerKind::Agent, "Agent system prompt")
+            }
+        };
+        layers.push(make_prompt_layer(
+            kind,
+            name,
+            format!("session:{}", session.id),
+            &session.system_prompt,
+        ));
+    }
+    if !skills.instructions.trim().is_empty() {
+        let source = skills
+            .snapshots
+            .iter()
+            .map(|snapshot| format!("{}@{}", snapshot.slug, snapshot.sha256))
+            .collect::<Vec<_>>()
+            .join(",");
+        layers.push(make_prompt_layer(
+            PromptLayerKind::Skills,
+            "Enabled Project skills",
+            format!("skills:{source}"),
+            &skills.instructions,
+        ));
+    }
+    // Stable sorting makes the layer contract hold even when future runtimes
+    // contribute Agent/Session or Control layers through `additional`.
+    layers.sort_by_key(|layer| prompt_layer_rank(layer.kind));
+    let rendered = render_prompt_layers(&layers);
+    PromptSnapshot {
+        sha256: hash_text(&rendered),
+        layers,
+        rendered,
+    }
+}
+
+const fn prompt_layer_rank(kind: PromptLayerKind) -> u8 {
+    match kind {
+        PromptLayerKind::Runtime => 0,
+        PromptLayerKind::Project => 1,
+        PromptLayerKind::Workflow => 2,
+        PromptLayerKind::Agent | PromptLayerKind::Session => 3,
+        PromptLayerKind::Skills => 4,
+        PromptLayerKind::Control => 5,
+    }
+}
+
+fn prompt_layer_from_input(input: &PromptLayerInput) -> Option<PromptLayer> {
+    if input.content.trim().is_empty() {
+        None
+    } else {
+        Some(make_prompt_layer(
+            input.kind,
+            &input.name,
+            &input.source,
+            &input.content,
+        ))
+    }
+}
+
+fn make_prompt_layer(
+    kind: PromptLayerKind,
+    name: impl Into<String>,
+    source: impl Into<String>,
+    content: impl Into<String>,
+) -> PromptLayer {
+    let content = content.into();
+    PromptLayer {
+        kind,
+        name: name.into(),
+        source: source.into(),
+        sha256: hash_text(&content),
+        content,
+    }
+}
+
+fn render_prompt_layers(layers: &[PromptLayer]) -> String {
+    layers
+        .iter()
+        .map(|layer| {
+            format!(
+                "## {} [{}]\n{}",
+                layer.name,
+                layer.kind.as_str(),
+                layer.content.trim()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn verify_prompt_snapshot(snapshot: &PromptSnapshot) -> Result<(), SessionRuntimeError> {
+    for layer in &snapshot.layers {
+        if hash_text(&layer.content) != layer.sha256 {
+            return Err(SessionRuntimeError::InvalidPromptSnapshot(format!(
+                "layer {:?} from {} has changed",
+                layer.kind, layer.source
+            )));
+        }
+    }
+    let rendered = render_prompt_layers(&snapshot.layers);
+    if rendered != snapshot.rendered || hash_text(&rendered) != snapshot.sha256 {
+        return Err(SessionRuntimeError::InvalidPromptSnapshot(
+            "rendered prompt does not match its layers".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn hash_text(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 struct SessionAgentEventSink {
@@ -998,6 +1197,8 @@ pub enum SessionRuntimeError {
     TerminalTurn(TurnId),
     #[error("turn scheduling failed: {0}")]
     Scheduling(String),
+    #[error("invalid Turn prompt snapshot: {0}")]
+    InvalidPromptSnapshot(String),
     #[error("turn was cancelled")]
     Cancelled,
     #[error("turn was interrupted: {0}")]

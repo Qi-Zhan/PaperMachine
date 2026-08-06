@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use papermachine_protocol::*;
+use papermachine_session::PromptLayerInput;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeError;
 use papermachine_session::WorkflowTurnContext;
@@ -294,7 +295,7 @@ impl RunEffectContext {
             payload.class_name,
             payload.name,
             payload.role,
-            payload.instructions,
+            payload.system_prompt,
             payload.model,
             payload.skills,
             initial_access,
@@ -418,18 +419,36 @@ impl RunEffectContext {
             self.checkpoint().await?;
             let attempt = self.store.start_action_attempt(invocation.id)?;
             let guidance = interruption_guidance.take();
-            let additional_instructions = [
-                format!("Workflow objective:\n{}", run.objective),
-                relationship_context.clone(),
-                guidance
-                    .as_ref()
-                    .map(|value| format!("A human interrupted the previous attempt. Start a new attempt and follow this direction:\n{value}"))
-                    .unwrap_or_default(),
-            ]
-            .into_iter()
-            .filter(|value| !value.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+            let mut prompt_layers = vec![PromptLayerInput::new(
+                PromptLayerKind::Workflow,
+                "Workflow objective",
+                format!("workflow:{}:objective", run.id),
+                &run.objective,
+            )];
+            if !run.system_prompt.trim().is_empty() {
+                prompt_layers.push(PromptLayerInput::new(
+                    PromptLayerKind::Workflow,
+                    "Workflow system prompt",
+                    format!("workflow:{}:system-prompt", run.id),
+                    &run.system_prompt,
+                ));
+            }
+            if !relationship_context.trim().is_empty() {
+                prompt_layers.push(PromptLayerInput::new(
+                    PromptLayerKind::Workflow,
+                    "Agent collaboration context",
+                    format!("workflow:{}:relations", run.id),
+                    relationship_context.clone(),
+                ));
+            }
+            if let Some(value) = guidance.as_ref() {
+                prompt_layers.push(PromptLayerInput::new(
+                    PromptLayerKind::Control,
+                    "Human interruption guidance",
+                    format!("action-attempt:{}:guidance", attempt.id),
+                    value,
+                ));
+            }
             let max_steps = payload
                 .max_steps
                 .unwrap_or(run.budget.max_action_steps)
@@ -449,7 +468,7 @@ impl RunEffectContext {
                     } else {
                         Some(participant.model.as_str())
                     },
-                    &additional_instructions,
+                    prompt_layers,
                     payload.reasoning_effort,
                     max_steps,
                     payload.max_search_calls,
@@ -1050,7 +1069,7 @@ struct CreateAgentEffect {
     class_name: String,
     name: String,
     role: String,
-    instructions: String,
+    system_prompt: String,
     model: String,
     #[serde(default)]
     skills: Vec<String>,

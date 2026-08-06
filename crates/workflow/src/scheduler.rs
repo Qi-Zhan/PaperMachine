@@ -350,6 +350,7 @@ mod tests {
                 Some(session.id),
                 workflow(),
                 objective,
+                "",
                 json!({}),
                 None,
                 "test-model",
@@ -438,9 +439,10 @@ mod tests {
         let turn = store
             .create_turn(
                 participant.session_id,
+                papermachine_protocol::TurnOrigin::Workflow,
                 "Investigate",
                 "test-model",
-                "",
+                papermachine_protocol::PromptSnapshot::default(),
                 None,
                 8,
                 None,

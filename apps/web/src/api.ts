@@ -10,6 +10,7 @@ import type {
   HumanRequest,
   Project,
   ProjectOverview,
+  ProjectSystemPrompt,
   ProjectSkill,
   Session,
   SessionEvent,
@@ -47,6 +48,11 @@ export const api = {
   createProject: (name: string, description: string, rootPath: string) =>
     request<Project>('/projects', { method: 'POST', body: JSON.stringify({ name, description, root_path: rootPath }) }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
+  updateProjectSystemPrompt: (projectId: string, systemPrompt: string) =>
+    request<ProjectSystemPrompt>(`/projects/${projectId}/system-prompt`, {
+      method: 'PUT',
+      body: JSON.stringify({ system_prompt: systemPrompt }),
+    }),
   listProjectSkills: (projectId: string) => request<ProjectSkill[]>(`/projects/${projectId}/skills`),
   createProjectSkill: (
     projectId: string,
@@ -62,6 +68,11 @@ export const api = {
     request<Session>(`/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
   updateSessionAccess: (sessionId: string, access: AgentAccessProfile) =>
     request<Session>(`/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
+  updateSessionSystemPrompt: (sessionId: string, systemPrompt: string) =>
+    request<Session>(`/sessions/${sessionId}/system-prompt`, {
+      method: 'PUT',
+      body: JSON.stringify({ system_prompt: systemPrompt }),
+    }),
   listSessionEvents: (sessionId: string, after = 0) =>
     request<SessionEvent[]>(`/sessions/${sessionId}/events?after=${after}`),
   createWorkflow: (projectId: string, input: CreateWorkflowInput) =>

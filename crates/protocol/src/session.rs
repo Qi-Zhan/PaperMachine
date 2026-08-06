@@ -1,6 +1,7 @@
 use crate::ModelInputItem;
 use crate::ModelResponseFormat;
 use crate::ProjectId;
+use crate::PromptSnapshot;
 use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::StepId;
@@ -30,6 +31,13 @@ pub enum SessionStatus {
 pub enum SessionOrigin {
     User,
     WorkflowAgent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    User,
+    Workflow,
 }
 
 /// User-facing access profiles. The runtime expands these presets into
@@ -92,7 +100,9 @@ pub struct Session {
     pub project_id: ProjectId,
     pub origin: SessionOrigin,
     pub title: String,
-    pub instructions: String,
+    /// User-configurable system prompt. Project, Workflow, Agent, skill, and
+    /// runtime layers are snapshotted separately for each Turn.
+    pub system_prompt: String,
     pub model: String,
     #[serde(default)]
     pub access: AgentAccessProfile,
@@ -137,6 +147,7 @@ pub struct Turn {
     pub id: TurnId,
     pub session_id: SessionId,
     pub status: TurnStatus,
+    pub origin: TurnOrigin,
     pub input: String,
     pub output: Option<String>,
     pub model: String,
@@ -144,7 +155,7 @@ pub struct Turn {
     /// default.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub instructions: String,
+    pub prompt: PromptSnapshot,
     /// Access snapshot captured when this Turn is created.
     #[serde(default)]
     pub access: AgentAccessProfile,

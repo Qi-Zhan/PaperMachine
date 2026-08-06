@@ -42,6 +42,16 @@ fn project_creation_initializes_owned_directory_and_rejects_reuse() {
     for child in ["prompts", "workflows", "skills", "state"] {
         assert!(metadata.join(child).is_dir(), "missing {child} directory");
     }
+    let prompt = store
+        .get_project_system_prompt(project.id)
+        .expect("Project system prompt should load");
+    assert!(prompt.content.is_empty());
+    assert_eq!(prompt.relative_path, ".papermachine/prompts/system.md");
+    let prompt = store
+        .set_project_system_prompt(project.id, "Prefer primary evidence.")
+        .expect("Project system prompt should update");
+    assert_eq!(prompt.content, "Prefer primary evidence.");
+    assert_eq!(prompt.sha256.len(), 64);
     let config = std::fs::read_to_string(metadata.join("project.toml"))
         .expect("project config should be readable");
     assert!(config.contains(&project.id.to_string()));
@@ -87,6 +97,7 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
             None,
             original,
             "Summarize the Project",
+            "",
             json!({}),
             None,
             "test-model",
@@ -166,6 +177,7 @@ fn workflow_for_session(
             Some(session.id),
             workflow(),
             objective,
+            "",
             json!({}),
             None,
             "test-model",
@@ -193,9 +205,10 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     let first = store
         .create_turn(
             session.id,
+            papermachine_protocol::TurnOrigin::User,
             "First",
             "test-model",
-            "",
+            papermachine_protocol::PromptSnapshot::default(),
             None,
             4,
             None,
@@ -228,9 +241,10 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     let second = store
         .create_turn(
             session.id,
+            papermachine_protocol::TurnOrigin::User,
             "Second",
             "test-model",
-            "",
+            papermachine_protocol::PromptSnapshot::default(),
             None,
             4,
             None,
@@ -241,6 +255,58 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
         )
         .expect("second turn should be created");
     assert_eq!(second.access, AgentAccessProfile::Research);
+}
+
+#[test]
+fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let project = project(&store, &directory, "Prompt locking", "");
+    let session = store
+        .create_session(
+            project.id,
+            "Prompted session",
+            "Original prompt",
+            "test-model",
+            Vec::new(),
+        )
+        .expect("session should be created");
+    let turn = store
+        .create_turn(
+            session.id,
+            papermachine_protocol::TurnOrigin::User,
+            "Question",
+            "test-model",
+            papermachine_protocol::PromptSnapshot::default(),
+            None,
+            4,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Turn should be queued");
+
+    assert!(
+        store
+            .set_session_system_prompt(session.id, "Changed too early")
+            .is_err(),
+        "a queued Turn must lock the Session prompt"
+    );
+    assert_eq!(
+        store
+            .get_session(session.id)
+            .expect("Session should load")
+            .system_prompt,
+        "Original prompt"
+    );
+
+    store.cancel_turn(turn.id).expect("Turn should end");
+    let updated = store
+        .set_session_system_prompt(session.id, "Changed between Turns")
+        .expect("prompt should change after the Turn ends");
+    assert_eq!(updated.system_prompt, "Changed between Turns");
 }
 
 #[test]

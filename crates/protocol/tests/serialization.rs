@@ -5,6 +5,7 @@ use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowEventPayload;
 use papermachine_protocol::WorkflowId;
@@ -68,4 +69,25 @@ fn failed_model_step_exposes_charged_usage() {
     let value = serde_json::to_value(event).expect("event should serialize");
     assert_eq!(value["type"], "model_step_failed");
     assert_eq!(value["usage"]["output_tokens"], 100);
+}
+
+#[test]
+fn turn_created_event_preserves_message_origin() {
+    let event = SessionEvent {
+        id: EventId::new(),
+        sequence: 5,
+        session_id: SessionId::new(),
+        turn_id: None,
+        step_id: None,
+        occurred_at: Utc::now(),
+        payload: SessionEventPayload::TurnCreated {
+            origin: TurnOrigin::Workflow,
+            input: "Investigate route A".to_string(),
+            model: "test-model".to_string(),
+        },
+    };
+
+    let value = serde_json::to_value(event).expect("event should serialize");
+    assert_eq!(value["type"], "turn_created");
+    assert_eq!(value["origin"], "workflow");
 }

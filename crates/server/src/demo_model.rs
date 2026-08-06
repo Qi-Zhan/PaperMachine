@@ -76,7 +76,7 @@ fn generated_workflow(prompt: &str) -> String {
 class EvidenceResearcher(Agent):
     access = "research"
     role = "evidence collection"
-    instructions = "Find concrete support and preserve uncertainty."
+    system_prompt = "Find concrete support and preserve uncertainty."
 
     @action
     async def investigate(self, question: str, perspective: str):

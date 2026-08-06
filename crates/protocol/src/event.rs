@@ -19,6 +19,7 @@ use crate::TeamId;
 use crate::TimerId;
 use crate::TokenUsage;
 use crate::TurnId;
+use crate::TurnOrigin;
 use crate::TurnStatus;
 use crate::WorkflowId;
 use crate::WorkflowStatus;
@@ -146,6 +147,7 @@ pub enum SessionEventPayload {
         reason: Option<String>,
     },
     TurnCreated {
+        origin: TurnOrigin,
         input: String,
         model: String,
     },

@@ -160,6 +160,32 @@
         </section>
       </div>
 
+      <section class="overview-section project-prompt-editor">
+        <div class="section-heading">
+          <div>
+            <h2>{{ t('prompt.projectSystemPrompt') }}</h2>
+            <small>{{ overview.system_prompt.relative_path }}</small>
+          </div>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="promptBusy || !projectPromptChanged"
+            @click="$emit('update-system-prompt', projectPromptDraft)"
+          >
+            <LoaderCircle v-if="promptBusy" class="spin" :size="14" />
+            <Save v-else :size="14" />
+            {{ t('common.save') }}
+          </button>
+        </div>
+        <textarea
+          v-model="projectPromptDraft"
+          class="text-area project-system-prompt-input"
+          :placeholder="t('prompt.projectPlaceholder')"
+          :disabled="promptBusy"
+        />
+        <p class="field-note">{{ t('prompt.futureTurns') }}</p>
+      </section>
+
       <section class="overview-section artifact-index">
         <div class="section-heading">
           <h2>{{ t('project.artifacts') }}</h2>
@@ -203,17 +229,19 @@ import {
   GitBranch,
   MessageSquare,
   MessageSquarePlus,
+  LoaderCircle,
   PanelLeft,
   Plus,
+  Save,
   Sparkles,
 } from '@lucide/vue'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { formatDate, formatDateTime } from '../format'
 import { useAppI18n } from '../i18n'
 import type { Artifact, ProjectOverview, ProjectSkill, Workflow } from '../types'
 import StatusBadge from './StatusBadge.vue'
 
-const props = defineProps<{ overview: ProjectOverview; skills: ProjectSkill[] }>()
+const props = defineProps<{ overview: ProjectOverview; skills: ProjectSkill[]; promptBusy: boolean }>()
 const { t } = useAppI18n()
 const emit = defineEmits<{
   'open-sidebar': []
@@ -221,7 +249,20 @@ const emit = defineEmits<{
   'new-skill': []
   'select-session': [sessionId: string]
   'open-artifact': [artifact: Artifact]
+  'update-system-prompt': [systemPrompt: string]
 }>()
+
+const projectPromptDraft = ref(props.overview.system_prompt.content)
+const projectPromptChanged = computed(
+  () => projectPromptDraft.value !== props.overview.system_prompt.content,
+)
+
+watch(
+  () => [props.overview.project.id, props.overview.system_prompt.content] as const,
+  () => {
+    projectPromptDraft.value = props.overview.system_prompt.content
+  },
+)
 
 const activeSessions = computed(
   () => props.overview.sessions.filter((session) =>

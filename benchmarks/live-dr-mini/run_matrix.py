@@ -604,7 +604,7 @@ def launch_run(
         f"/projects/{project_id}/sessions",
         {
             "title": f"LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
-            "instructions": "",
+            "system_prompt": "",
             "model": model,
             "access": "research",
             "enabled_skills": [],
@@ -646,7 +646,7 @@ def launch_grader_run(
         f"/projects/{project_id}/sessions",
         {
             "title": f"Grade LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
-            "instructions": "",
+            "system_prompt": "",
             "model": grader_model,
             "access": "model_only",
             "enabled_skills": [],
