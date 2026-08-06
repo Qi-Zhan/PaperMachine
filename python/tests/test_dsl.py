@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from typing import Any
 
-from papermachine import Agent, _Runtime, _set_runtime, action
+from papermachine import Agent, _Runtime, _set_runtime, action, together
 
 
 class Writer(Agent):
@@ -27,13 +27,63 @@ class StructuredResearcher(Agent):
         """Return structured evidence."""
 
 
+class RouteResearcher(Agent):
+    @action(max_steps=1)
+    async def investigate(self, route: str) -> str:
+        """Investigate one route."""
+
+
 class ActionOptionsTest(unittest.TestCase):
+    def test_effect_ids_are_stable_when_parallel_completion_order_changes(self) -> None:
+        async def run(delays: dict[str, float]) -> dict[tuple[str, str], str]:
+            observed: dict[tuple[str, str], str] = {}
+
+            async def send(
+                effect_id: str,
+                kind: str,
+                payload: dict[str, Any],
+            ) -> Any:
+                identity = str(
+                    payload.get("name") or payload.get("arguments", {}).get("route")
+                )
+                observed[(kind, identity)] = effect_id
+                await asyncio.sleep(delays.get(identity, 0))
+                if kind == "create_agent":
+                    return {
+                        "agent_instance_id": f"agent-{payload['name']}",
+                        "session_id": f"session-{payload['name']}",
+                    }
+                if kind == "invoke_action":
+                    return {"output": identity, "turn_id": f"turn-{identity}"}
+                raise AssertionError(f"unexpected effect: {kind}")
+
+            _set_runtime(_Runtime(send))
+            left = RouteResearcher("left")
+            right = RouteResearcher("right")
+            await together(left.investigate("left"), right.investigate("right"))
+            return observed
+
+        left_first = asyncio.run(run({"right": 0.01}))
+        right_first = asyncio.run(run({"left": 0.01}))
+        self.assertEqual(left_first, right_first)
+        self.assertEqual(len(set(left_first.values())), 4)
+        self.assertTrue(
+            left_first[("invoke_action", "left")].startswith(
+                "root/together:2/branch:0/"
+            )
+        )
+        self.assertTrue(
+            left_first[("invoke_action", "right")].startswith(
+                "root/together:2/branch:1/"
+            )
+        )
+
     def test_typed_action_accepts_one_fenced_json_payload(self) -> None:
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
-                return {"output": "```json\n{\"answer\": 42}\n```"}
+                return {"output": '```json\n{"answer": 42}\n```'}
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -43,11 +93,11 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(asyncio.run(invoke()), {"answer": 42})
 
     def test_typed_action_extracts_object_after_provider_commentary(self) -> None:
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
-                return {"output": "Result follows:\n{\"answer\": 42}\nDone."}
+                return {"output": 'Result follows:\n{"answer": 42}\nDone.'}
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -59,13 +109,16 @@ class ActionOptionsTest(unittest.TestCase):
     def test_typed_action_repairs_malformed_provider_json_in_same_session(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
 
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action" and payload["action_name"] == "research":
                 return {"output": '{"answer": "unterminated}'}
-            if kind == "invoke_action" and payload["action_name"] == "research_json_repair":
+            if (
+                kind == "invoke_action"
+                and payload["action_name"] == "research_json_repair"
+            ):
                 return {"output": '{"answer": 42}'}
             raise AssertionError(f"unexpected effect: {kind}")
 
@@ -83,7 +136,7 @@ class ActionOptionsTest(unittest.TestCase):
     def test_typed_action_stops_after_two_failed_repairs(self) -> None:
         calls = 0
 
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             nonlocal calls
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
@@ -103,10 +156,14 @@ class ActionOptionsTest(unittest.TestCase):
     def test_max_steps_is_sent_with_the_action_effect(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
 
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session", "access": payload["access"]}
+                return {
+                    "agent_instance_id": "agent",
+                    "session_id": "session",
+                    "access": payload["access"],
+                }
             if kind == "invoke_action":
                 return {"output": "done", "turn_id": "turn"}
             raise AssertionError(f"unexpected effect: {kind}")
@@ -127,10 +184,14 @@ class ActionOptionsTest(unittest.TestCase):
     def test_constructor_override_and_dynamic_access_change_emit_profiles(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
 
-        async def send(kind: str, payload: dict[str, Any]) -> Any:
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session", "access": payload["access"]}
+                return {
+                    "agent_instance_id": "agent",
+                    "session_id": "session",
+                    "access": payload["access"],
+                }
             if kind == "set_agent_access":
                 return {"access": payload["access"]}
             raise AssertionError(f"unexpected effect: {kind}")
@@ -143,7 +204,9 @@ class ActionOptionsTest(unittest.TestCase):
             await writer.set_access("research")
 
         asyncio.run(invoke())
-        self.assertEqual([kind for kind, _ in effects], ["create_agent", "set_agent_access"])
+        self.assertEqual(
+            [kind for kind, _ in effects], ["create_agent", "set_agent_access"]
+        )
         self.assertEqual(effects[0][1]["access"], "workspace")
         self.assertEqual(effects[1][1]["access"], "research")
 
@@ -184,7 +247,9 @@ class ActionOptionsTest(unittest.TestCase):
                     """Invalid action."""
 
     def test_max_output_tokens_must_be_positive(self) -> None:
-        with self.assertRaisesRegex(ValueError, "max_output_tokens must be a positive integer"):
+        with self.assertRaisesRegex(
+            ValueError, "max_output_tokens must be a positive integer"
+        ):
 
             class Invalid(Agent):
                 @action(max_output_tokens=0)

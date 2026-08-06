@@ -464,6 +464,23 @@
               </div>
             </div>
 
+            <details v-if="workflowView.effects.length" class="workflow-effect-journal">
+              <summary>
+                <span>{{ t('workflow.effectJournal') }}</span>
+                <span>{{ workflowView.effects.length }}</span>
+              </summary>
+              <div class="workflow-action-list">
+                <div v-for="effect in workflowView.effects.slice(-12).reverse()" :key="effect.key">
+                  <Activity :size="13" />
+                  <span :title="effect.key">
+                    <strong>{{ effect.kind }}</strong>
+                    <small>{{ effect.key }}</small>
+                  </span>
+                  <span class="status-pin" :data-status="effect.status" />
+                </div>
+              </div>
+            </details>
+
             <div v-if="workflowView.timers.length" class="workflow-action-list">
               <div v-for="timer in workflowView.timers" :key="timer.id">
                 <AlarmClock :size="13" />

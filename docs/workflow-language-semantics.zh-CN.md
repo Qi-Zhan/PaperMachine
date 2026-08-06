@@ -13,6 +13,7 @@
 | `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | 通过校验的 Python 源码及字面量 manifest；无 Project 表示 built-in。 |
 | `Workflow` | `WorkflowId` | Project 内对某个不可变 workflow 快照的一次执行。 |
+| `WorkflowEffect` | `(WorkflowId, logical path)` | 对一次精确 Python effect 请求及其可 replay 的结果或错误所做的持久 journal 记录。 |
 | starting Session | `started_from_session_id?` | 可选的发起 Session。它表示来源，不表示所有权。 |
 | `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Project-owned Session 承载。 |
 | `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录。 |
@@ -39,6 +40,7 @@
 | I8 | run 创建之后，其 workflow 源码快照与 SHA-256 不可变。 |
 | I9 | 每个 Project 的每个 slug 最多有一个可编辑 WorkflowProgram；覆盖保存不会改变已创建 Workflow 的快照。 |
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
+| I11 | 在同一个 Workflow 内，一个逻辑 effect path 永久绑定到一种精确的 kind 与 payload。 |
 
 UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
 建立 Session 的父子关系。
@@ -299,20 +301,29 @@ protocol error。
 
 ## 13. 持久化与 Replay 边界
 
-所有权威 entity 与有序 event 都会持久化，workflow 源码也会被快照。独立的
-Session Turn 支持重启恢复。仍处于 `created` 的 Workflow 可以在重启后启动，
-因为它还没有执行任何 Python effect。
+所有权威 entity、effect 结果与有序 event 都会持久化，workflow 源码也会被
+快照。独立 Session Turn 和所有非终态 Workflow 都会在 server 重启时进入恢复
+调度。
 
-当前无法安全续跑 `running` 或 `paused` Workflow。server 重启时，这类 run
-会带着明确的 restart-interruption 原因进入 `failed`；未完成的
-ActionInvocation/ActionAttempt 进入 `interrupted`，关联 Turn 进入
-`interrupted`，运行中的 Step 进入 `cancelled`。这一步发生在独立 Session
-恢复之前，从而避免 action Turn 丢失 WorkflowTurnContext 与 run budget 记账。
+runtime 不序列化 Python instruction pointer，而是从 entrypoint 重新执行源码。
+每个 DSL 操作都有确定性的逻辑 effect path；Store 会持久化该 path、kind、精确
+payload hash、`started/completed/failed` 状态、result、error 与时间戳。再次到达
+已经 completed 的 path 时，只返回原结果，不重复领域变更。若进程消失时某个
+effect 仍是 started，runtime 会用 `(WorkflowId, effect path, resource kind)` 派生
+的确定性 ID 重新派发，使 entity 创建、signal 发布、timer 触发和 HumanRequest
+收敛到原有对象。同一路径若出现不同请求会 fail closed。
 
-当前 effect request ID 只用于并发 request/response 关联，并不是确定性的持久
-idempotency key。真正的 active-run continuation 需要持久 effect-result journal，
-并让 Python 从头执行时只重放 journal 中的结果。在实现它之前，应把中断执行
-作为新的 Workflow 重试，而不是重放已经 commit 的 effect。
+未完成的 Action 会复用原 ActionInvocation、最新的非终态 Attempt 与关联 Turn。
+Turn checkpoint 保存 model history、累计 usage、已完成 model-step 与 hosted-search
+游标，以及可能已经得到的终态候选消息。每个本地 Tool Step 还会保存 provider
+call ID；恢复会复用 completed Tool Step 的真实输出，而进程消失时仍是 running 的
+Step 会得到明确的 execution-unknown restart 结果。runtime 还会取消已经失去
+waiter 的 open human-tool request，然后从下一次 model sample 继续。workflow 级
+`ask_human` 本身是 journaled effect，因此会继续等待同一个确定性 HumanRequest。
+
+两个 effect 之间的纯 Python 计算可能再次执行。对于同一源码快照和输入，作者
+必须保持 effect 序列确定；时间、随机数或其他非确定性不能让已经占用的逻辑路径
+产生不同请求。
 
 ## 14. 代表性执行轨迹
 

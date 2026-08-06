@@ -26,13 +26,21 @@ class RunnerProtocolTest(unittest.TestCase):
             environment = os.environ.copy()
             environment["PYTHONPATH"] = str(PYTHON_ROOT)
             process = subprocess.Popen(
-                [sys.executable, "-B", "-m", "papermachine._runner", str(workflow), "main"],
+                [
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "papermachine._runner",
+                    str(workflow),
+                    "main",
+                ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 env=environment,
             )
+
             def cleanup() -> None:
                 if process.poll() is None:
                     process.kill()
@@ -45,16 +53,21 @@ class RunnerProtocolTest(unittest.TestCase):
             assert process.stdin is not None
             assert process.stdout is not None
             process.stdin.write(
-                json.dumps({"workflow_id": "test-workflow", "objective": "test", "input": {}})
+                json.dumps(
+                    {"workflow_id": "test-workflow", "objective": "test", "input": {}}
+                )
                 + "\n"
             )
             process.stdin.flush()
 
             request = json.loads(process.stdout.readline())
+            self.assertEqual(request["id"], "root/effect:0/complete")
             self.assertEqual(request["kind"], "complete")
             self.assertEqual(request["payload"]["output"], {"ok": True})
             process.stdin.write(
-                json.dumps({"id": request["id"], "ok": True, "result": None, "error": None})
+                json.dumps(
+                    {"id": request["id"], "ok": True, "result": None, "error": None}
+                )
                 + "\n"
             )
             process.stdin.flush()

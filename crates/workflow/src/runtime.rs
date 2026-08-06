@@ -116,6 +116,7 @@ impl PythonWorkflowRuntime {
                 run.budget.max_concurrent_actions.max(1) as usize
             )),
             agent_gates: Mutex::new(HashMap::new()),
+            effect_gates: Mutex::new(HashMap::new()),
             completion: Mutex::new(None),
         });
         let (responses_tx, mut responses_rx) = mpsc::unbounded_channel::<EffectResponse>();
@@ -232,29 +233,83 @@ struct RunEffectContext {
     cancellation: CancellationToken,
     action_permits: Arc<Semaphore>,
     agent_gates: Mutex<HashMap<AgentInstanceId, Arc<Mutex<()>>>>,
+    effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     completion: Mutex<Option<Value>>,
 }
 
 impl RunEffectContext {
     async fn handle(&self, request: EffectRequest) -> Result<Value, WorkflowRuntimeError> {
-        self.checkpoint().await?;
-        match request.kind.as_str() {
-            "create_agent" => self.create_agent(request.payload).await,
-            "set_agent_access" => self.set_agent_access(request.payload).await,
-            "retire_agent" => self.retire_agent(request.payload),
-            "invoke_action" => self.invoke_action(request.payload).await,
-            "create_team" => self.create_team(request.payload),
-            "set_team_members" => self.set_team_members(request.payload),
-            "set_relation" => self.set_relation(request.payload),
-            "open_scope" => self.open_scope(request.payload),
-            "close_scope" => self.close_scope(request.payload),
-            "register_timer" => self.register_timer(request.payload),
-            "wait_timer" => self.wait_timer(request.payload).await,
-            "create_channel" => self.create_channel(request.payload),
-            "publish_signal" => self.publish_signal(request.payload),
-            "wait_signal" => self.wait_signal(request.payload).await,
-            "ask_human" => self.ask_human(request.payload).await,
-            "complete" => self.complete(request.payload).await,
+        validate_effect_key(&request.id)?;
+        let gate = {
+            let mut gates = self.effect_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry(request.id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _guard = gate.lock().await;
+        let effect = self.store.begin_workflow_effect(
+            self.workflow_id,
+            &request.id,
+            &request.kind,
+            request.payload.clone(),
+        )?;
+        match effect.status {
+            WorkflowEffectStatus::Completed => {
+                if request.kind == "complete" {
+                    self.remember_completion(&request.payload).await?;
+                }
+                return Ok(effect.result.unwrap_or(Value::Null));
+            }
+            WorkflowEffectStatus::Failed => {
+                return Err(WorkflowRuntimeError::ReplayedEffect {
+                    key: request.id,
+                    error: effect.error.unwrap_or_else(|| "effect failed".to_string()),
+                });
+            }
+            WorkflowEffectStatus::Started => {}
+        }
+        let key = request.id;
+        let result = async {
+            self.checkpoint().await?;
+            self.dispatch(&key, &request.kind, request.payload).await
+        }
+        .await;
+        self.store.finish_workflow_effect(
+            self.workflow_id,
+            &key,
+            result
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(ToString::to_string),
+        )?;
+        result
+    }
+
+    async fn dispatch(
+        &self,
+        effect_key: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
+        match kind {
+            "create_agent" => self.create_agent(effect_key, payload).await,
+            "set_agent_access" => self.set_agent_access(effect_key, payload).await,
+            "retire_agent" => self.retire_agent(payload),
+            "invoke_action" => self.invoke_action(effect_key, payload).await,
+            "create_team" => self.create_team(effect_key, payload),
+            "set_team_members" => self.set_team_members(payload),
+            "set_relation" => self.set_relation(effect_key, payload),
+            "open_scope" => self.open_scope(effect_key, payload),
+            "close_scope" => self.close_scope(payload),
+            "register_timer" => self.register_timer(effect_key, payload),
+            "wait_timer" => self.wait_timer(effect_key, payload).await,
+            "create_channel" => self.create_channel(effect_key, payload),
+            "publish_signal" => self.publish_signal(effect_key, payload),
+            "wait_signal" => self.wait_signal(payload).await,
+            "ask_human" => self.ask_human(effect_key, payload).await,
+            "complete" => self.complete(payload).await,
             other => Err(WorkflowRuntimeError::Protocol(format!(
                 "unknown effect kind: {other}"
             ))),
@@ -286,36 +341,69 @@ impl RunEffectContext {
         }
     }
 
-    async fn create_agent(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn create_agent(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: CreateAgentEffect = serde_json::from_value(payload)?;
         let workflow = self.store.get_workflow(self.workflow_id)?;
         let initial_access = std::cmp::min(payload.access, workflow.access);
-        let participant = self.store.create_participant(
+        let participant_id = AgentInstanceId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            payload.class_name,
-            payload.name,
-            payload.role,
-            payload.system_prompt,
-            payload.model,
-            payload.skills,
-            initial_access,
-        )?;
-        if initial_access < payload.access
+            effect_key,
+            "participant",
+        ));
+        let session_id = SessionId::from_uuid(effect_resource_uuid(
+            self.workflow_id,
+            effect_key,
+            "session",
+        ));
+        let participant = match self.store.get_participant(participant_id) {
+            Ok(participant) => participant,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_participant_with_ids(
+                    self.workflow_id,
+                    participant_id,
+                    session_id,
+                    payload.class_name,
+                    payload.name,
+                    payload.role,
+                    payload.system_prompt,
+                    payload.model,
+                    payload.skills,
+                    initial_access,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if participant.workflow_id != self.workflow_id {
+            return Err(WorkflowRuntimeError::Protocol(
+                "replayed Agent belongs to another Workflow".to_string(),
+            ));
+        }
+        let current_access = self.store.get_session(participant.session_id)?.access;
+        if current_access < payload.access
             && let Err(error) = self
-                .request_access_grant(&participant, initial_access, payload.access)
+                .request_access_grant(effect_key, &participant, current_access, payload.access)
                 .await
         {
             let _ = self.store.retire_participant(participant.id);
             return Err(error);
         }
+        let access = self.store.get_session(participant.session_id)?.access;
         Ok(json!({
             "agent_instance_id": participant.id,
             "session_id": participant.session_id,
-            "access": payload.access,
+            "access": access,
         }))
     }
 
-    async fn set_agent_access(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn set_agent_access(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: SetAgentAccessEffect = serde_json::from_value(payload)?;
         let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
@@ -327,7 +415,7 @@ impl RunEffectContext {
         }
         let current = self.store.get_session(participant.session_id)?.access;
         if payload.access > current {
-            self.request_access_grant(&participant, current, payload.access)
+            self.request_access_grant(effect_key, &participant, current, payload.access)
                 .await?;
         } else if payload.access < current {
             self.store
@@ -338,26 +426,39 @@ impl RunEffectContext {
 
     async fn request_access_grant(
         &self,
+        effect_key: &str,
         participant: &WorkflowParticipant,
         current: AgentAccessProfile,
         requested: AgentAccessProfile,
     ) -> Result<(), WorkflowRuntimeError> {
-        let request = self.store.create_human_request(
+        let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            None,
-            None,
-            participant.session_id,
-            None,
-            format!(
-                "Workflow Agent {} requests an access change from {current} to {requested}. Grant this access?",
-                participant.name
-            ),
-            json!({
-                "type": "boolean",
-                "title": "Grant Agent access",
-                "requested_access": requested,
-            }),
-        )?;
+            effect_key,
+            "access-grant",
+        ));
+        let request = match self.store.get_human_request(request_id) {
+            Ok(request) => request,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_human_request_with_id(
+                    request_id,
+                    self.workflow_id,
+                    None,
+                    None,
+                    participant.session_id,
+                    None,
+                    format!(
+                        "Workflow Agent {} requests an access change from {current} to {requested}. Grant this access?",
+                        participant.name
+                    ),
+                    json!({
+                        "type": "boolean",
+                        "title": "Grant Agent access",
+                        "requested_access": requested,
+                    }),
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         let answer = wait_for_human(&self.store, request.id, &self.cancellation).await?;
         if answer.as_bool() != Some(true) {
             return Err(WorkflowRuntimeError::Protocol(format!(
@@ -376,7 +477,11 @@ impl RunEffectContext {
         Ok(Value::Null)
     }
 
-    async fn invoke_action(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn invoke_action(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: InvokeActionEffect = serde_json::from_value(payload)?;
         let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
@@ -388,14 +493,45 @@ impl RunEffectContext {
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let participant = self.store.get_participant(agent_id)?;
         let objective = format_action_objective(&payload.prompt, &payload.arguments);
-        let invocation = self.store.create_action_invocation(
+        let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            scope_id,
-            agent_id,
-            payload.action_name,
-            objective.clone(),
-            payload.arguments,
-        )?;
+            effect_key,
+            "action-invocation",
+        ));
+        let invocation = match self.store.get_action_invocation(invocation_id) {
+            Ok(invocation) => invocation,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_action_invocation_with_id(
+                    invocation_id,
+                    self.workflow_id,
+                    scope_id,
+                    agent_id,
+                    payload.action_name.clone(),
+                    objective.clone(),
+                    payload.arguments.clone(),
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if invocation.workflow_id != self.workflow_id || invocation.agent_instance_id != agent_id {
+            return Err(WorkflowRuntimeError::Protocol(
+                "replayed ActionInvocation belongs to a different Workflow or Agent".to_string(),
+            ));
+        }
+        match invocation.status {
+            ActionStatus::Completed => return completed_action_result(&invocation),
+            ActionStatus::Failed | ActionStatus::Cancelled => {
+                return Err(WorkflowRuntimeError::Action(
+                    invocation
+                        .error
+                        .unwrap_or_else(|| "previous Action attempt failed".to_string()),
+                ));
+            }
+            ActionStatus::Scheduled
+            | ActionStatus::Running
+            | ActionStatus::WaitingForHuman
+            | ActionStatus::Interrupted => {}
+        }
         let _permit = tokio::select! {
             permit = Arc::clone(&self.action_permits).acquire_owned() => {
                 permit.map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
@@ -415,40 +551,19 @@ impl RunEffectContext {
         let relationship_context =
             relationship_instructions(&self.store, self.workflow_id, agent_id)?;
         let mut interruption_guidance = None;
+        let mut recovered_attempt = self
+            .store
+            .list_action_attempts(invocation.id)?
+            .into_iter()
+            .rev()
+            .find(|attempt| !attempt.status.is_terminal());
         loop {
             self.checkpoint().await?;
-            let attempt = self.store.start_action_attempt(invocation.id)?;
+            let attempt = match recovered_attempt.take() {
+                Some(attempt) => attempt,
+                None => self.store.start_action_attempt(invocation.id)?,
+            };
             let guidance = interruption_guidance.take();
-            let mut prompt_layers = vec![PromptLayerInput::new(
-                PromptLayerKind::Workflow,
-                "Workflow objective",
-                format!("workflow:{}:objective", run.id),
-                &run.objective,
-            )];
-            if !run.system_prompt.trim().is_empty() {
-                prompt_layers.push(PromptLayerInput::new(
-                    PromptLayerKind::Workflow,
-                    "Workflow system prompt",
-                    format!("workflow:{}:system-prompt", run.id),
-                    &run.system_prompt,
-                ));
-            }
-            if !relationship_context.trim().is_empty() {
-                prompt_layers.push(PromptLayerInput::new(
-                    PromptLayerKind::Workflow,
-                    "Agent collaboration context",
-                    format!("workflow:{}:relations", run.id),
-                    relationship_context.clone(),
-                ));
-            }
-            if let Some(value) = guidance.as_ref() {
-                prompt_layers.push(PromptLayerInput::new(
-                    PromptLayerKind::Control,
-                    "Human interruption guidance",
-                    format!("action-attempt:{}:guidance", attempt.id),
-                    value,
-                ));
-            }
             let max_steps = payload
                 .max_steps
                 .unwrap_or(run.budget.max_action_steps)
@@ -458,31 +573,98 @@ impl RunEffectContext {
                     "action max_steps must be positive".to_string(),
                 ));
             }
-            let result = self
-                .sessions
-                .execute_workflow_action(
-                    participant.session_id,
-                    objective.clone(),
-                    if participant.model.trim().is_empty() {
-                        None
-                    } else {
-                        Some(participant.model.as_str())
-                    },
-                    prompt_layers,
-                    payload.reasoning_effort,
-                    max_steps,
-                    payload.max_search_calls,
-                    payload.web_search_context_size,
-                    payload.max_output_tokens,
-                    payload.response_format.clone(),
-                    WorkflowTurnContext {
-                        workflow_id: self.workflow_id,
-                        action_invocation_id: invocation.id,
-                        action_attempt_id: attempt.id,
-                    },
-                    self.cancellation.child_token(),
-                )
-                .await;
+            let context = WorkflowTurnContext {
+                workflow_id: self.workflow_id,
+                action_invocation_id: invocation.id,
+                action_attempt_id: attempt.id,
+            };
+            let result = if let Some(turn_id) = attempt.turn_id {
+                let turn = self.store.get_turn(turn_id)?;
+                match turn.status {
+                    TurnStatus::Completed => Ok(turn),
+                    TurnStatus::Queued
+                    | TurnStatus::Running
+                    | TurnStatus::WaitingForHuman
+                    | TurnStatus::Paused => {
+                        self.sessions
+                            .resume_workflow_action(
+                                turn.id,
+                                context,
+                                self.cancellation.child_token(),
+                            )
+                            .await
+                    }
+                    TurnStatus::Interrupted => Err(SessionRuntimeError::Interrupted(
+                        turn.error
+                            .unwrap_or_else(|| "Action Turn was interrupted".to_string()),
+                    )),
+                    TurnStatus::Cancelled => Err(SessionRuntimeError::Cancelled),
+                    TurnStatus::Failed => {
+                        let error = turn
+                            .error
+                            .unwrap_or_else(|| "Action Turn failed before restart".to_string());
+                        self.store.finish_action(
+                            invocation.id,
+                            attempt.id,
+                            ActionStatus::Failed,
+                            None,
+                            Some(error.clone()),
+                        )?;
+                        return Err(WorkflowRuntimeError::Action(error));
+                    }
+                }
+            } else {
+                let mut prompt_layers = vec![PromptLayerInput::new(
+                    PromptLayerKind::Workflow,
+                    "Workflow objective",
+                    format!("workflow:{}:objective", run.id),
+                    &run.objective,
+                )];
+                if !run.system_prompt.trim().is_empty() {
+                    prompt_layers.push(PromptLayerInput::new(
+                        PromptLayerKind::Workflow,
+                        "Workflow system prompt",
+                        format!("workflow:{}:system-prompt", run.id),
+                        &run.system_prompt,
+                    ));
+                }
+                if !relationship_context.trim().is_empty() {
+                    prompt_layers.push(PromptLayerInput::new(
+                        PromptLayerKind::Workflow,
+                        "Agent collaboration context",
+                        format!("workflow:{}:relations", run.id),
+                        relationship_context.clone(),
+                    ));
+                }
+                if let Some(value) = guidance.as_ref() {
+                    prompt_layers.push(PromptLayerInput::new(
+                        PromptLayerKind::Control,
+                        "Human interruption guidance",
+                        format!("action-attempt:{}:guidance", attempt.id),
+                        value,
+                    ));
+                }
+                self.sessions
+                    .execute_workflow_action(
+                        participant.session_id,
+                        objective.clone(),
+                        if participant.model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(participant.model.as_str())
+                        },
+                        prompt_layers,
+                        payload.reasoning_effort,
+                        max_steps,
+                        payload.max_search_calls,
+                        payload.web_search_context_size,
+                        payload.max_output_tokens,
+                        payload.response_format.clone(),
+                        context,
+                        self.cancellation.child_token(),
+                    )
+                    .await
+            };
             match result {
                 Ok(turn) => {
                     self.store.finish_action(
@@ -530,12 +712,17 @@ impl RunEffectContext {
         }
     }
 
-    fn create_team(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn create_team(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: TeamEffect = serde_json::from_value(payload)?;
         let members = parse_ids(&payload.member_ids)?;
-        let team = self
-            .store
-            .create_team(self.workflow_id, payload.name, members)?;
+        let team_id = TeamId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "team"));
+        let team = match self.store.get_team(team_id) {
+            Ok(team) => team,
+            Err(papermachine_store::StoreError::NotFound { .. }) => self
+                .store
+                .create_team_with_id(team_id, self.workflow_id, payload.name, members)?,
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"team_id": team.id}))
     }
 
@@ -548,23 +735,39 @@ impl RunEffectContext {
         Ok(Value::Null)
     }
 
-    fn set_relation(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn set_relation(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: RelationEffect = serde_json::from_value(payload)?;
         let source = AgentInstanceId::from_str(&payload.source_agent_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let target = AgentInstanceId::from_str(&payload.target_agent_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let relation = self.store.set_relation(
+        let relation_id = RelationId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            source,
-            target,
-            payload.kind,
-            payload.instructions,
-        )?;
+            effect_key,
+            "relation",
+        ));
+        let relation = match self.store.get_relation(relation_id) {
+            Ok(relation) => relation,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.set_relation_with_id(
+                    relation_id,
+                    self.workflow_id,
+                    source,
+                    target,
+                    payload.kind,
+                    payload.instructions,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"relation_id": relation.id}))
     }
 
-    fn open_scope(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn open_scope(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: OpenScopeEffect = serde_json::from_value(payload)?;
         let parent = payload
             .parent_id
@@ -572,12 +775,24 @@ impl RunEffectContext {
             .map(TaskScopeId::from_str)
             .transpose()
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let scope = self.store.create_task_scope(
+        let scope_id = TaskScopeId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            parent,
-            payload.name,
-            payload.objective,
-        )?;
+            effect_key,
+            "task-scope",
+        ));
+        let scope = match self.store.get_task_scope(scope_id) {
+            Ok(scope) => scope,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_task_scope_with_id(
+                    scope_id,
+                    self.workflow_id,
+                    parent,
+                    payload.name,
+                    payload.objective,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"task_scope_id": scope.id}))
     }
 
@@ -598,7 +813,11 @@ impl RunEffectContext {
         Ok(Value::Null)
     }
 
-    fn register_timer(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn register_timer(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: TimerEffect = serde_json::from_value(payload)?;
         if let Some(timer) = self
             .store
@@ -621,13 +840,29 @@ impl RunEffectContext {
                 )));
             }
         };
-        let timer =
-            self.store
-                .create_timer(self.workflow_id, payload.name, payload.interval_ms, policy)?;
+        let timer_id =
+            TimerId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "timer"));
+        let timer = match self.store.get_timer(timer_id) {
+            Ok(timer) => timer,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_timer_with_id(
+                    timer_id,
+                    self.workflow_id,
+                    payload.name,
+                    payload.interval_ms,
+                    policy,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"timer_id": timer.id}))
     }
 
-    async fn wait_timer(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn wait_timer(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let timer_id = id_field::<TimerId>(&payload, "timer_id")?;
         loop {
             self.checkpoint().await?;
@@ -641,7 +876,7 @@ impl RunEffectContext {
                 .to_std()
                 .unwrap_or_default();
             if wait.is_zero() {
-                let fired = self.store.fire_timer(timer_id)?;
+                let fired = self.store.fire_timer_for_effect(timer_id, effect_key)?;
                 return Ok(
                     json!({"fire_count": fired.fire_count, "fired_at": fired.last_fired_at}),
                 );
@@ -655,7 +890,11 @@ impl RunEffectContext {
         }
     }
 
-    fn create_channel(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn create_channel(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: ChannelEffect = serde_json::from_value(payload)?;
         if let Some(channel) = self
             .store
@@ -665,13 +904,31 @@ impl RunEffectContext {
         {
             return Ok(json!({"channel_id": channel.id}));
         }
-        let channel = self
-            .store
-            .create_channel(self.workflow_id, payload.name, payload.schema)?;
+        let channel_id = ChannelId::from_uuid(effect_resource_uuid(
+            self.workflow_id,
+            effect_key,
+            "channel",
+        ));
+        let channel = match self.store.get_channel(channel_id) {
+            Ok(channel) => channel,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_channel_with_id(
+                    channel_id,
+                    self.workflow_id,
+                    payload.name,
+                    payload.schema,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"channel_id": channel.id}))
     }
 
-    fn publish_signal(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    fn publish_signal(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: PublishSignalEffect = serde_json::from_value(payload)?;
         let channel_id = ChannelId::from_str(&payload.channel_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
@@ -681,9 +938,15 @@ impl RunEffectContext {
             .map(AgentInstanceId::from_str)
             .transpose()
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let signal = self
-            .store
-            .publish_signal(channel_id, sender, payload.value)?;
+        let signal_id =
+            SignalId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "signal"));
+        let signal = match self.store.get_signal(signal_id) {
+            Ok(signal) => signal,
+            Err(papermachine_store::StoreError::NotFound { .. }) => self
+                .store
+                .publish_signal_with_id(signal_id, channel_id, sender, payload.value)?,
+            Err(error) => return Err(error.into()),
+        };
         Ok(json!({"signal_id": signal.id, "sequence": signal.sequence}))
     }
 
@@ -711,7 +974,11 @@ impl RunEffectContext {
         }
     }
 
-    async fn ask_human(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn ask_human(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: AskHumanEffect = serde_json::from_value(payload)?;
         let run = self.store.get_workflow(self.workflow_id)?;
         let session_id = if let Some(agent_id) = payload.agent_instance_id {
@@ -734,29 +1001,49 @@ impl RunEffectContext {
                     )
                 })?
         };
-        let request = self.store.create_human_request(
+        let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            None,
-            None,
-            session_id,
-            None,
-            payload.question,
-            payload.response_schema,
-        )?;
+            effect_key,
+            "human-request",
+        ));
+        let request = match self.store.get_human_request(request_id) {
+            Ok(request) => request,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_human_request_with_id(
+                    request_id,
+                    self.workflow_id,
+                    None,
+                    None,
+                    session_id,
+                    None,
+                    payload.question,
+                    payload.response_schema,
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
         let answer = wait_for_human(&self.store, request.id, &self.cancellation).await?;
         Ok(json!({"answer": answer}))
     }
 
     async fn complete(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+        self.remember_completion(&payload).await?;
+        Ok(Value::Null)
+    }
+
+    async fn remember_completion(&self, payload: &Value) -> Result<(), WorkflowRuntimeError> {
         let output = payload.get("output").cloned().unwrap_or(Value::Null);
         let mut completion = self.completion.lock().await;
-        if completion.is_some() {
+        if completion
+            .as_ref()
+            .is_some_and(|existing| existing != &output)
+        {
             return Err(WorkflowRuntimeError::Protocol(
-                "workflow submitted completion more than once".to_string(),
+                "workflow submitted conflicting completion outputs".to_string(),
             ));
         }
         *completion = Some(output);
-        Ok(Value::Null)
+        Ok(())
     }
 }
 
@@ -1025,6 +1312,26 @@ fn format_action_objective(prompt: &str, arguments: &Value) -> String {
     }
 }
 
+fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, WorkflowRuntimeError> {
+    let output = invocation.output.as_ref().ok_or_else(|| {
+        WorkflowRuntimeError::Protocol(format!(
+            "completed ActionInvocation {} has no output",
+            invocation.id
+        ))
+    })?;
+    Ok(json!({
+        "output": output.get("message").and_then(Value::as_str).unwrap_or_default(),
+        "turn_id": output.get("turn_id").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn effect_resource_uuid(workflow_id: WorkflowId, effect_key: &str, resource: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        workflow_id.as_uuid(),
+        format!("{effect_key}:{resource}").as_bytes(),
+    )
+}
+
 fn id_field<T: FromStr>(value: &Value, field: &str) -> Result<T, WorkflowRuntimeError>
 where
     T::Err: std::fmt::Display,
@@ -1035,6 +1342,21 @@ where
         .ok_or_else(|| WorkflowRuntimeError::Protocol(format!("missing string field {field}")))?
         .parse()
         .map_err(|error: T::Err| WorkflowRuntimeError::Protocol(error.to_string()))
+}
+
+fn validate_effect_key(key: &str) -> Result<(), WorkflowRuntimeError> {
+    if key.is_empty()
+        || key.len() > 512
+        || !key.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+        })
+    {
+        return Err(WorkflowRuntimeError::Protocol(
+            "effect id must be a non-empty logical path of at most 512 ASCII characters"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_ids(values: &[String]) -> Result<Vec<AgentInstanceId>, WorkflowRuntimeError> {
@@ -1064,8 +1386,6 @@ struct EffectResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateAgentEffect {
-    #[allow(dead_code)]
-    local_key: String,
     class_name: String,
     name: String,
     role: String,
@@ -1193,6 +1513,8 @@ pub enum WorkflowRuntimeError {
     MissingPipe(&'static str),
     #[error("workflow effect protocol failed: {0}")]
     Protocol(String),
+    #[error("replayed Workflow effect {key} failed previously: {error}")]
+    ReplayedEffect { key: String, error: String },
     #[error("workflow Python process exited with {code:?}: {stderr}{suffix}", suffix = if *.truncated { " [truncated]" } else { "" })]
     Python {
         code: Option<i32>,

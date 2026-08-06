@@ -89,24 +89,12 @@ impl WorkflowScheduler {
         Ok(true)
     }
 
-    /// Marks runs that lost their in-memory Python control state as failed.
-    /// This must happen before SessionRuntime recovers standalone Turns.
-    pub fn reconcile_process_restart(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
-        const REASON: &str = "Workflow interrupted by server restart; durable Python effect replay is not available. Start a new run to retry safely.";
-        let mut failed = Vec::new();
-        for run in self.inner.store.list_interrupted_workflows()? {
-            self.inner.store.fail_interrupted_workflow(run.id, REASON)?;
-            failed.push(run.id);
-        }
-        Ok(failed)
-    }
-
-    /// Starts runs that were durably created but had not begun executing when
-    /// the previous process stopped. Running/paused Python programs cannot be
-    /// restarted safely until workflow effects have deterministic replay keys.
+    /// Restarts every non-terminal Workflow. The Python program executes from
+    /// its snapshotted source while deterministic effects replay from the
+    /// durable journal; an unfinished Action resumes its checkpointed Turn.
     pub async fn recover(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
         let mut started = Vec::new();
-        for run in self.inner.store.list_created_workflows()? {
+        for run in self.inner.store.list_recoverable_workflows()? {
             if self.start(run.id).await? {
                 started.push(run.id);
             }
@@ -292,14 +280,9 @@ pub enum WorkflowSchedulerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use papermachine_protocol::ActionStatus;
     use papermachine_protocol::AgentAccessProfile;
     use papermachine_protocol::Budget;
     use papermachine_protocol::Session;
-    use papermachine_protocol::SessionStatus;
-    use papermachine_protocol::StepKind;
-    use papermachine_protocol::StepStatus;
-    use papermachine_protocol::TurnStatus;
     use papermachine_protocol::Workflow;
     use papermachine_protocol::WorkflowProgramId;
     use papermachine_protocol::WorkflowProgramManifest;
@@ -397,7 +380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_restart_fails_inflight_workflow_but_starts_created_run() {
+    async fn process_restart_recovers_running_and_created_workflows() {
         let directory = tempdir().expect("temporary directory should be created");
         let store =
             Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
@@ -407,68 +390,10 @@ mod tests {
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
             .expect("session should be created");
-        let interrupted_run = create_test_workflow(&store, &session, "Interrupted");
+        let running_run = create_test_workflow(&store, &session, "Running");
         store
-            .set_workflow_status(interrupted_run.id, WorkflowStatus::Running, None)
+            .set_workflow_status(running_run.id, WorkflowStatus::Running, None)
             .expect("run should be running");
-        let participant = store
-            .create_participant(
-                interrupted_run.id,
-                "Researcher",
-                "Researcher",
-                "evidence",
-                "",
-                "test-model",
-                Vec::new(),
-                AgentAccessProfile::Research,
-            )
-            .expect("participant should be created");
-        let active_invocation = store
-            .create_action_invocation(
-                interrupted_run.id,
-                None,
-                participant.id,
-                "investigate",
-                "Investigate",
-                json!({}),
-            )
-            .expect("active invocation should be created");
-        let active_attempt = store
-            .start_action_attempt(active_invocation.id)
-            .expect("attempt should start");
-        let turn = store
-            .create_turn(
-                participant.session_id,
-                papermachine_protocol::TurnOrigin::Workflow,
-                "Investigate",
-                "test-model",
-                papermachine_protocol::PromptSnapshot::default(),
-                None,
-                8,
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-            )
-            .expect("workflow Turn should be created");
-        store
-            .attach_turn_to_attempt(active_attempt.id, turn.id)
-            .expect("Turn should be attached");
-        store.start_turn(turn.id).expect("Turn should be running");
-        let step = store
-            .create_step(turn.id, StepKind::Model, "sample", json!({}))
-            .expect("step should be running");
-        let scheduled_invocation = store
-            .create_action_invocation(
-                interrupted_run.id,
-                None,
-                participant.id,
-                "follow_up",
-                "Follow up",
-                json!({}),
-            )
-            .expect("scheduled invocation should be created");
         let created_run = create_test_workflow(&store, &session, "Created");
 
         let scheduler = WorkflowScheduler::new(
@@ -478,74 +403,26 @@ mod tests {
             }),
             1,
         );
-        let failed = scheduler
-            .reconcile_process_restart()
-            .expect("restart reconciliation should succeed");
-        assert_eq!(failed, vec![interrupted_run.id]);
-
-        let failed_run = store
-            .get_workflow(interrupted_run.id)
-            .expect("failed run should load");
-        assert_eq!(failed_run.status, WorkflowStatus::Failed);
-        assert!(
-            failed_run
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("durable Python effect replay"))
-        );
-        assert_eq!(
-            store
-                .get_action_invocation(active_invocation.id)
-                .expect("active invocation should load")
-                .status,
-            ActionStatus::Interrupted
-        );
-        assert_eq!(
-            store
-                .get_action_attempt(active_attempt.id)
-                .expect("active attempt should load")
-                .status,
-            ActionStatus::Interrupted
-        );
-        assert_eq!(
-            store
-                .get_action_invocation(scheduled_invocation.id)
-                .expect("scheduled invocation should load")
-                .status,
-            ActionStatus::Interrupted
-        );
-        assert_eq!(
-            store.get_turn(turn.id).expect("Turn should load").status,
-            TurnStatus::Interrupted
-        );
-        assert_eq!(
-            store.get_step(step.id).expect("step should load").status,
-            StepStatus::Cancelled
-        );
-        assert_eq!(
-            store
-                .get_session(participant.session_id)
-                .expect("participant Session should load")
-                .status,
-            SessionStatus::Ready
-        );
-
         let recovered = scheduler
             .recover()
             .await
-            .expect("created run should be recovered");
-        assert_eq!(recovered, vec![created_run.id]);
-        scheduler
-            .wait(created_run.id)
-            .await
-            .expect("created run should remain scheduled")
-            .expect("created run should complete");
-        assert_eq!(
-            store
-                .get_workflow(created_run.id)
-                .expect("created run should load")
-                .status,
-            WorkflowStatus::Completed
-        );
+            .expect("non-terminal runs should be recovered");
+        assert_eq!(recovered.len(), 2);
+        assert!(recovered.contains(&running_run.id));
+        assert!(recovered.contains(&created_run.id));
+        for workflow_id in [running_run.id, created_run.id] {
+            scheduler
+                .wait(workflow_id)
+                .await
+                .expect("recovered run should remain scheduled")
+                .expect("recovered run should complete");
+            assert_eq!(
+                store
+                    .get_workflow(workflow_id)
+                    .expect("recovered run should load")
+                    .status,
+                WorkflowStatus::Completed
+            );
+        }
     }
 }

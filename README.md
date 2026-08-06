@@ -83,6 +83,9 @@ one Project.
   channels/signals, background tasks, and durable timer records.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
   interrupt an attempt; or let workflow/model code request typed human input.
+- Recover every non-terminal Workflow after a server restart by replaying its
+  immutable Python source against deterministic effect IDs and a durable result
+  journal; unfinished Agent actions resume the same checkpointed Turn.
 - Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every

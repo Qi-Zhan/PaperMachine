@@ -200,18 +200,23 @@ append-only Session and Workflow event streams. Artifacts are stored on disk
 under content-hashed metadata records. The web client uses SSE for live deltas
 and refreshes durable views for lifecycle changes.
 
-Unfinished standalone Session Turns are recovered at startup. A Workflow
-that was durably `created` but had not started is also safe to start. A
-`running` or `paused` Workflow is instead failed explicitly on process
-restart, and its unfinished ActionInvocations, ActionAttempts, attached Turns,
-and Steps are marked interrupted/cancelled before Session recovery begins.
+Unfinished standalone Session Turns and every non-terminal Workflow are
+recovered at startup. A recovered Workflow reruns its immutable Python source
+from the entrypoint. DSL operations use deterministic logical effect paths;
+SQLite journals each path with the exact request hash, status, result, and
+error. A completed effect returns its stored result, while an effect that was
+started when the process disappeared is safely redispatched against
+deterministic resource IDs.
 
-This boundary is deliberate. The Python instruction pointer and effect results
-are not checkpointed, and the effect request ID is not a deterministic durable
-idempotency key. Restarting arbitrary workflow source at line one would replay
-committed Agent/action effects and corrupt budgets. Durable continuation of
-active Workflows requires a general effect journal plus deterministic replay;
-until that exists, callers should retry an interrupted Workflow as a new Workflow.
+Action Turns checkpoint model history, usage, completed-model-step and hosted
+search cursors, and a terminal candidate message. Recovery keeps the same
+ActionInvocation, ActionAttempt, and Turn, cancels only orphaned in-flight
+Steps/human-tool waiters, reconstructs a completed local-tool result from the
+Step's durable call ID, gives an execution-unknown tool an explicit restart
+result, and resumes at the next model sample. This avoids repeating a
+checkpointed completed sample or charging the Action-start budget twice. The
+effect journal is returned in Workflow views and is visible in the Session
+inspector.
 
 ## Skills and workflow roots
 

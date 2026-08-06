@@ -179,6 +179,17 @@ pub struct Turn {
     pub history: Vec<ModelInputItem>,
     #[serde(default)]
     pub usage: TokenUsage,
+    /// Durable Agent loop cursor used to continue an interrupted Turn without
+    /// replaying completed model samples.
+    #[serde(default)]
+    pub completed_model_steps: u32,
+    #[serde(default)]
+    pub hosted_search_calls_used: u32,
+    /// Last terminal assistant message checkpointed before the Turn status was
+    /// committed. This closes the small crash window between model completion
+    /// and `complete_turn`.
+    #[serde(default)]
+    pub checkpoint_message: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -209,6 +220,10 @@ pub struct AgentStep {
     pub sequence: u32,
     pub kind: StepKind,
     pub name: String,
+    /// Provider/tool-loop call ID for local tool Steps. Model and system Steps
+    /// leave this empty.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     pub status: StepStatus,
     pub input: Value,
     pub output: Option<Value>,

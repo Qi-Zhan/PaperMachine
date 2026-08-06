@@ -226,9 +226,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
     ));
     let scheduler =
         WorkflowScheduler::new(Arc::clone(&store), executor, config.max_concurrent_runs);
-    scheduler
-        .reconcile_process_restart()
-        .context("failed to reconcile Workflows interrupted by process restart")?;
     sessions
         .recover()
         .await
@@ -236,7 +233,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
     scheduler
         .recover()
         .await
-        .context("failed to start Workflows created before process restart")?;
+        .context("failed to recover unfinished Workflows")?;
 
     Ok(AppState {
         store,
@@ -908,6 +905,7 @@ async fn create_workflow(
 #[derive(Serialize)]
 struct WorkflowView {
     workflow: Workflow,
+    effects: Vec<WorkflowEffect>,
     participants: Vec<WorkflowParticipant>,
     sessions: Vec<Session>,
     actions: Vec<ActionInvocation>,
@@ -946,6 +944,7 @@ async fn get_workflow_view(
     }
     Ok(Json(WorkflowView {
         workflow: run,
+        effects: state.store.list_workflow_effects(workflow_id)?,
         participants,
         sessions,
         actions,

@@ -87,10 +87,16 @@ not silently rewrite the endpoint.
   readable to sandboxed commands unless denied by the profile.
 - The AST policy is intentionally small and should not be treated as a proof
   that Python code is harmless; OS isolation remains mandatory.
-- Active Workflows fail explicitly after a server restart because Python
-  control state and effect results do not yet have a durable replay journal.
-  Retry creates a new Workflow; transparent active-run continuation remains
-  unavailable until effects have deterministic replay keys.
+- Workflow recovery relies on deterministic effect paths. Replaying the same
+  path with a different kind or payload fails closed instead of guessing which
+  side effect the author intended. Workflow source should therefore keep the
+  sequence and shape of effects deterministic for the same snapshotted input;
+  arbitrary external I/O remains outside the Python sandbox and effect model.
+- A local tool Step completed before a crash is replayed from its durable output.
+  If the process died while an arbitrary command/tool was running, PaperMachine
+  can only report execution as unknown: it cannot prove whether an external side
+  effect happened before the process disappeared. Workflow authors should make
+  destructive or non-idempotent tool operations require an explicit checkpoint.
 - Raw, uncached-token, and run-wide hosted-search budgets are checked at
   effect/model boundaries. One in-flight response can exceed a remaining token,
   search, or wall-time allowance before usage is reported. Per-action

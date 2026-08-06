@@ -7,9 +7,9 @@ research state is emitted as an effect and executed by the Rust runtime.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, get_origin
@@ -23,6 +23,51 @@ ACCESS_PROFILES = {
     "research",
     "full_access",
 }
+
+
+@dataclass
+class _EffectCursor:
+    path: tuple[str, ...]
+    next_slot: int = 0
+
+    def reserve(self, label: str) -> tuple[str, ...]:
+        slot = self.next_slot
+        self.next_slot += 1
+        return (*self.path, f"{label}:{slot}")
+
+
+_effect_cursor: contextvars.ContextVar[_EffectCursor | None] = contextvars.ContextVar(
+    "papermachine_effect_cursor",
+    default=None,
+)
+_scope_stack: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "papermachine_scope_stack",
+    default=(),
+)
+
+
+def _current_effect_cursor() -> _EffectCursor:
+    cursor = _effect_cursor.get()
+    if cursor is None:
+        cursor = _EffectCursor(("root",))
+        _effect_cursor.set(cursor)
+    return cursor
+
+
+def _reserve_effect_path(label: str) -> tuple[str, ...]:
+    return _current_effect_cursor().reserve(label)
+
+
+def _effect_id(path: tuple[str, ...], kind: str) -> str:
+    return "/".join((*path, kind))
+
+
+async def _run_in_effect_branch(awaitable: Awaitable[T], path: tuple[str, ...]) -> T:
+    token = _effect_cursor.set(_EffectCursor(path))
+    try:
+        return await awaitable
+    finally:
+        _effect_cursor.reset(token)
 
 
 def _normalize_access(value: str) -> str:
@@ -58,8 +103,18 @@ class _ActionDescriptor:
         ):
             raise ValueError("action max_search_calls must be a non-negative integer")
         if search_context_size not in {None, "low", "medium", "high"}:
-            raise ValueError("action search_context_size must be one of: low, medium, high")
-        if reasoning_effort not in {None, "none", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError(
+                "action search_context_size must be one of: low, medium, high"
+            )
+        if reasoning_effort not in {
+            None,
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
             raise ValueError(
                 "action reasoning_effort must be one of: none, low, medium, high, xhigh, max"
             )
@@ -85,7 +140,9 @@ class _ActionDescriptor:
 
         def call(*args: Any, **kwargs: Any) -> _ActionCall:
             bound = self.signature.bind(instance, *args, **kwargs)
-            arguments = {key: value for key, value in bound.arguments.items() if key != "self"}
+            arguments = {
+                key: value for key, value in bound.arguments.items() if key != "self"
+            }
             prompt = self.prompt
             if self.return_kind is not None:
                 prompt = (
@@ -168,26 +225,30 @@ class Agent:
         )
         self.model = model if model is not None else type(self).model
         self.skills = list(skills if skills is not None else type(self).skills)
-        self.access = _normalize_access(access if access is not None else type(self).access)
-        self._local_key = str(uuid.uuid4())
+        self.access = _normalize_access(
+            access if access is not None else type(self).access
+        )
+        self._effect_path = _reserve_effect_path("agent")
+        self._remote_lock = asyncio.Lock()
         self._remote: dict[str, Any] | None = None
 
     async def _ensure_remote(self) -> dict[str, Any]:
-        if self._remote is None:
-            self._remote = await _effect(
-                "create_agent",
-                {
-                    "local_key": self._local_key,
-                    "class_name": type(self).__name__,
-                    "name": self.name,
-                    "role": self.role,
-                    "system_prompt": self.system_prompt,
-                    "model": self.model,
-                    "skills": self.skills,
-                    "access": self.access,
-                },
-            )
-            self.access = self._remote.get("access", self.access)
+        async with self._remote_lock:
+            if self._remote is None:
+                self._remote = await _effect(
+                    "create_agent",
+                    {
+                        "class_name": type(self).__name__,
+                        "name": self.name,
+                        "role": self.role,
+                        "system_prompt": self.system_prompt,
+                        "model": self.model,
+                        "skills": self.skills,
+                        "access": self.access,
+                    },
+                    effect_id=_effect_id(self._effect_path, "create_agent"),
+                )
+                self.access = self._remote.get("access", self.access)
         return self._remote
 
     async def set_access(self, access: str) -> None:
@@ -206,7 +267,9 @@ class Agent:
 
     async def retire(self) -> None:
         remote = await self._ensure_remote()
-        await _effect("retire_agent", {"agent_instance_id": remote["agent_instance_id"]})
+        await _effect(
+            "retire_agent", {"agent_instance_id": remote["agent_instance_id"]}
+        )
 
 
 def _json_return_kind(function: Callable[..., Any]) -> str | None:
@@ -304,7 +367,9 @@ class _ActionCall(Awaitable[Any]):
             )
             output = str(result.get("output", ""))
 
-        raise ValueError(f"action {self.name} returned invalid JSON: {error}") from error
+        raise ValueError(
+            f"action {self.name} returned invalid JSON: {error}"
+        ) from error
 
     async def _invoke(
         self,
@@ -329,7 +394,9 @@ class _ActionCall(Awaitable[Any]):
                 "response_format": self.response_format,
                 "max_steps": self.max_steps if max_steps is None else max_steps,
                 "max_search_calls": (
-                    self.max_search_calls if max_search_calls is None else max_search_calls
+                    self.max_search_calls
+                    if max_search_calls is None
+                    else max_search_calls
                 ),
                 "web_search_context_size": (
                     self.search_context_size
@@ -337,10 +404,14 @@ class _ActionCall(Awaitable[Any]):
                     else search_context_size
                 ),
                 "reasoning_effort": (
-                    self.reasoning_effort if reasoning_effort is None else reasoning_effort
+                    self.reasoning_effort
+                    if reasoning_effort is None
+                    else reasoning_effort
                 ),
                 "max_output_tokens": (
-                    self.max_output_tokens if max_output_tokens is None else max_output_tokens
+                    self.max_output_tokens
+                    if max_output_tokens is None
+                    else max_output_tokens
                 ),
                 "task_scope_id": _current_scope_id(),
             },
@@ -403,29 +474,40 @@ def _parse_action_json(output: str, return_kind: str) -> Any:
 
 async def together(*actions: Awaitable[T]) -> tuple[T, ...]:
     explicit = [item for item in actions if isinstance(item, _ActionCall)]
-    keys = [item.agent._local_key for item in explicit]
+    keys = [id(item.agent) for item in explicit]
     if len(keys) != len(set(keys)):
         raise ValueError("together() cannot run two actions on the same Agent Session")
-    return tuple(await asyncio.gather(*actions))
+    fork_path = _reserve_effect_path("together")
+    branches = [
+        _run_in_effect_branch(action, (*fork_path, f"branch:{index}"))
+        for index, action in enumerate(actions)
+    ]
+    return tuple(await asyncio.gather(*branches))
 
 
 class Team:
     def __init__(self, name: str, *members: Agent) -> None:
         self.name = name
         self.members = list(members)
+        self._effect_path = _reserve_effect_path("team")
+        self._remote_lock = asyncio.Lock()
         self._remote_id: str | None = None
 
     async def _ensure_remote(self) -> str:
-        if self._remote_id is None:
-            remotes = [await member._ensure_remote() for member in self.members]
-            result = await _effect(
-                "create_team",
-                {
-                    "name": self.name,
-                    "member_ids": [remote["agent_instance_id"] for remote in remotes],
-                },
-            )
-            self._remote_id = str(result["team_id"])
+        async with self._remote_lock:
+            if self._remote_id is None:
+                remotes = [await member._ensure_remote() for member in self.members]
+                result = await _effect(
+                    "create_team",
+                    {
+                        "name": self.name,
+                        "member_ids": [
+                            remote["agent_instance_id"] for remote in remotes
+                        ],
+                    },
+                    effect_id=_effect_id(self._effect_path, "create_team"),
+                )
+                self._remote_id = str(result["team_id"])
         return self._remote_id
 
     async def activate(self) -> Team:
@@ -438,7 +520,9 @@ class Team:
         await self._sync()
 
     async def remove(self, member: Agent) -> None:
-        self.members = [candidate for candidate in self.members if candidate is not member]
+        self.members = [
+            candidate for candidate in self.members if candidate is not member
+        ]
         await self._sync()
 
     async def _sync(self) -> None:
@@ -460,7 +544,9 @@ async def relate(
     kind: str,
     instructions: str = "",
 ) -> None:
-    source_remote, target_remote = await together(source._ensure_remote(), target._ensure_remote())
+    source_remote, target_remote = await together(
+        source._ensure_remote(), target._ensure_remote()
+    )
     await _effect(
         "set_relation",
         {
@@ -470,9 +556,6 @@ async def relate(
             "instructions": instructions,
         },
     )
-
-
-_scope_stack: list[str] = []
 
 
 class scope:
@@ -491,34 +574,46 @@ class scope:
             },
         )
         self.id = str(result["task_scope_id"])
-        _scope_stack.append(self.id)
+        self._scope_token = _scope_stack.set((*_scope_stack.get(), self.id))
         return self
 
     async def __aexit__(self, error_type: Any, error: Any, traceback: Any) -> None:
         if self.id is not None:
-            if _scope_stack and _scope_stack[-1] == self.id:
-                _scope_stack.pop()
+            token = getattr(self, "_scope_token", None)
+            if token is not None:
+                _scope_stack.reset(token)
             await _effect(
                 "close_scope",
-                {"task_scope_id": self.id, "status": "cancelled" if error else "completed"},
+                {
+                    "task_scope_id": self.id,
+                    "status": "cancelled" if error else "completed",
+                },
             )
 
 
 def _current_scope_id() -> str | None:
-    return _scope_stack[-1] if _scope_stack else None
+    stack = _scope_stack.get()
+    return stack[-1] if stack else None
 
 
 class Channel(Generic[T]):
     def __init__(self, name: str, *, schema: dict[str, Any] | None = None) -> None:
         self.name = name
         self.schema = schema or {}
+        self._effect_path = _reserve_effect_path("channel")
+        self._remote_lock = asyncio.Lock()
         self._remote_id: str | None = None
         self._last_sequence = 0
 
     async def _ensure_remote(self) -> str:
-        if self._remote_id is None:
-            result = await _effect("create_channel", {"name": self.name, "schema": self.schema})
-            self._remote_id = str(result["channel_id"])
+        async with self._remote_lock:
+            if self._remote_id is None:
+                result = await _effect(
+                    "create_channel",
+                    {"name": self.name, "schema": self.schema},
+                    effect_id=_effect_id(self._effect_path, "create_channel"),
+                )
+                self._remote_id = str(result["channel_id"])
         return self._remote_id
 
     async def publish(self, value: T, *, sender: Agent | None = None) -> None:
@@ -574,7 +669,8 @@ class BackgroundTask(Generic[T]):
 
 def background(awaitable: Awaitable[T]) -> BackgroundTask[T]:
     runtime = _require_runtime()
-    task = asyncio.create_task(awaitable)
+    path = _reserve_effect_path("background")
+    task = asyncio.create_task(_run_in_effect_branch(awaitable, path))
     runtime.tasks.add(task)
     task.add_done_callback(runtime.tasks.discard)
     return BackgroundTask(task)
@@ -593,7 +689,8 @@ class TimerHandle:
         self.seconds = seconds
         self.policy = policy
         self.name = name
-        self._task = asyncio.create_task(self._run())
+        path = _reserve_effect_path("timer")
+        self._task = asyncio.create_task(_run_in_effect_branch(self._run(), path))
         runtime = _require_runtime()
         runtime.tasks.add(self._task)
         self._task.add_done_callback(runtime.tasks.discard)
@@ -652,7 +749,10 @@ class WorkflowContext:
 
 
 class _Runtime:
-    def __init__(self, send: Callable[[str, dict[str, Any]], Awaitable[Any]]) -> None:
+    def __init__(
+        self,
+        send: Callable[[str, str, dict[str, Any]], Awaitable[Any]],
+    ) -> None:
         self.send = send
         self.tasks: set[asyncio.Task[Any]] = set()
 
@@ -660,6 +760,8 @@ class _Runtime:
 def _set_runtime(runtime: _Runtime) -> None:
     global _runtime
     _runtime = runtime
+    _effect_cursor.set(_EffectCursor(("root",)))
+    _scope_stack.set(())
 
 
 def _require_runtime() -> _Runtime:
@@ -668,9 +770,16 @@ def _require_runtime() -> _Runtime:
     return _runtime
 
 
-async def _effect(kind: str, payload: dict[str, Any]) -> Any:
+async def _effect(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    effect_id: str | None = None,
+) -> Any:
     json.dumps(payload)
-    return await _require_runtime().send(kind, payload)
+    if effect_id is None:
+        effect_id = _effect_id(_reserve_effect_path("effect"), kind)
+    return await _require_runtime().send(effect_id, kind, payload)
 
 
 __all__ = [

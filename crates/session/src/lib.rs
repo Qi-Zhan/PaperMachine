@@ -12,6 +12,7 @@ use papermachine_agent::AgentTurnRequest;
 use papermachine_model::ModelClient;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::AgentStep;
 use papermachine_protocol::Budget;
 use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ControlMessageKind;
@@ -149,6 +150,7 @@ impl SessionRuntime {
                 None,
                 None,
                 None,
+                None,
             )
             .await?;
         self.schedule(turn.id).await?;
@@ -178,6 +180,7 @@ impl SessionRuntime {
                 ),
                 None,
                 max_steps,
+                None,
                 None,
                 None,
                 None,
@@ -217,11 +220,9 @@ impl SessionRuntime {
                 web_search_context_size,
                 max_output_tokens,
                 response_format,
+                Some(context.action_attempt_id),
             )
             .await?;
-        self.inner
-            .store
-            .attach_turn_to_attempt(context.action_attempt_id, turn.id)?;
         run_scheduled_turn(
             Arc::clone(&self.inner),
             turn.id,
@@ -230,6 +231,38 @@ impl SessionRuntime {
         )
         .await?;
         Ok(self.inner.store.get_turn(turn.id)?)
+    }
+
+    pub async fn resume_workflow_action(
+        &self,
+        turn_id: TurnId,
+        context: WorkflowTurnContext,
+        cancellation: CancellationToken,
+    ) -> Result<Turn, SessionRuntimeError> {
+        self.inner
+            .store
+            .cancel_open_human_requests_for_recovery(turn_id)?;
+        let cancelled_steps = self.inner.store.cancel_running_steps_for_recovery(
+            turn_id,
+            "server process restarted while this Step was running",
+        )?;
+        if cancelled_steps > 0 {
+            let turn = self.inner.store.get_turn(turn_id)?;
+            self.inner.store.append_session_event(
+                turn.session_id,
+                Some(turn_id),
+                None,
+                SessionEventPayload::AssistantMessageReset,
+            )?;
+        }
+        run_scheduled_turn(
+            Arc::clone(&self.inner),
+            turn_id,
+            Some(context),
+            cancellation,
+        )
+        .await?;
+        Ok(self.inner.store.get_turn(turn_id)?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -246,6 +279,7 @@ impl SessionRuntime {
         web_search_context_size: Option<WebSearchContextSize>,
         max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
+        action_attempt_id: Option<ActionAttemptId>,
     ) -> Result<Turn, SessionRuntimeError> {
         let session = self.inner.store.get_session(session_id)?;
         let model = if model_override.is_some_and(|model| !model.trim().is_empty()) {
@@ -265,25 +299,43 @@ impl SessionRuntime {
             .store
             .get_project_system_prompt(session.project_id)?;
         let prompt = build_prompt_snapshot(&session, project_prompt, prompt_layers, &resolved);
-        let turn = self.inner.store.create_turn(
-            session_id,
-            origin,
-            input,
-            model,
-            prompt,
-            reasoning_effort,
-            max_steps,
-            max_search_calls,
-            web_search_context_size,
-            max_output_tokens,
-            response_format,
-            resolved.snapshots,
-        )?;
+        let turn = if let Some(attempt_id) = action_attempt_id {
+            self.inner.store.create_turn_for_attempt(
+                attempt_id,
+                session_id,
+                origin,
+                input,
+                model,
+                prompt,
+                reasoning_effort,
+                max_steps,
+                max_search_calls,
+                web_search_context_size,
+                max_output_tokens,
+                response_format,
+                resolved.snapshots,
+            )?
+        } else {
+            self.inner.store.create_turn(
+                session_id,
+                origin,
+                input,
+                model,
+                prompt,
+                reasoning_effort,
+                max_steps,
+                max_search_calls,
+                web_search_context_size,
+                max_output_tokens,
+                response_format,
+                resolved.snapshots,
+            )?
+        };
         Ok(turn)
     }
 
     pub async fn recover(&self) -> Result<Vec<TurnId>, SessionRuntimeError> {
-        let turns = self.inner.store.list_resumable_turns()?;
+        let turns = self.inner.store.list_resumable_standalone_turns()?;
         let mut recovered = Vec::with_capacity(turns.len());
         for turn in turns {
             let session = self.inner.store.get_session(turn.session_id)?;
@@ -291,6 +343,18 @@ impl SessionRuntime {
             self.inner
                 .skills
                 .resolve_snapshots(&workspace, &turn.skill_snapshots)?;
+            let cancelled_steps = self.inner.store.cancel_running_steps_for_recovery(
+                turn.id,
+                "server process restarted while this Step was running",
+            )?;
+            if cancelled_steps > 0 {
+                self.inner.store.append_session_event(
+                    turn.session_id,
+                    Some(turn.id),
+                    None,
+                    SessionEventPayload::AssistantMessageReset,
+                )?;
+            }
             if self.schedule(turn.id).await? {
                 recovered.push(turn.id);
             }
@@ -362,7 +426,14 @@ async fn run_scheduled_turn(
     let turn = inner.store.start_turn(turn_id)?;
     verify_prompt_snapshot(&turn.prompt)?;
     let session = inner.store.get_session(turn.session_id)?;
-    let history = previous_history(&inner.store, &turn)?;
+    let resume_current_turn = !turn.history.is_empty()
+        || turn.completed_model_steps > 0
+        || turn.checkpoint_message.is_some();
+    let history = if resume_current_turn {
+        repair_interrupted_tool_calls(turn.history.clone(), &inner.store.list_steps(turn.id)?)
+    } else {
+        previous_history(&inner.store, &turn)?
+    };
     let workspace = session_workspace(&inner, &session)?;
     let workflow_id = workflow_context.as_ref().map(|context| context.workflow_id);
     let event_sink = Arc::new(SessionAgentEventSink::new(
@@ -400,6 +471,11 @@ async fn run_scheduled_turn(
         }
     }
     request.initial_history = history;
+    request.initial_usage = turn.usage;
+    request.completed_model_steps = turn.completed_model_steps;
+    request.hosted_search_calls_used = turn.hosted_search_calls_used;
+    request.resume_current_turn = resume_current_turn;
+    request.checkpoint_message = turn.checkpoint_message.clone();
     request.access = turn.access;
     request.reasoning_effort = turn.reasoning_effort;
     request.max_steps = turn.max_steps;
@@ -580,6 +656,53 @@ fn previous_history(store: &Store, current: &Turn) -> Result<Vec<ModelInputItem>
         .find(|turn| turn.id != current.id && turn.status == TurnStatus::Completed)
         .map(|turn| turn.history)
         .unwrap_or_default())
+}
+
+fn repair_interrupted_tool_calls(
+    mut history: Vec<ModelInputItem>,
+    steps: &[AgentStep],
+) -> Vec<ModelInputItem> {
+    let mut calls = Vec::new();
+    let mut outputs = std::collections::HashSet::new();
+    let recovered_outputs = steps
+        .iter()
+        .filter_map(|step| {
+            step.tool_call_id
+                .as_ref()
+                .zip(step.output.as_ref())
+                .map(|(call_id, output)| (call_id.clone(), output.clone()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for item in &history {
+        match item {
+            ModelInputItem::FunctionCall { call_id, .. } => calls.push(call_id.clone()),
+            ModelInputItem::FunctionCallOutput { call_id, .. } => {
+                outputs.insert(call_id.clone());
+            }
+            ModelInputItem::ResponseItem { item }
+                if item.get("type").and_then(Value::as_str) == Some("function_call") =>
+            {
+                if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+                    calls.push(call_id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    for call_id in calls {
+        if outputs.insert(call_id.clone()) {
+            history.push(ModelInputItem::FunctionCallOutput {
+                output: recovered_outputs.get(&call_id).cloned().unwrap_or_else(|| {
+                    json!({
+                        "error": "tool execution was interrupted by a server restart; inspect durable state before retrying",
+                        "recovered": true,
+                    })
+                }),
+                call_id,
+            });
+        }
+    }
+    history
 }
 
 fn prompt_layer_from_text(
@@ -889,7 +1012,7 @@ impl AgentEventSink for SessionAgentEventSink {
                     .unwrap_or_else(|_| Value::String(call.arguments.clone()));
                 let step = self
                     .store
-                    .create_step(self.turn_id, StepKind::Tool, call.name.clone(), input)
+                    .create_tool_step(self.turn_id, call.call_id.clone(), call.name.clone(), input)
                     .map_err(|error| error.to_string())?;
                 self.tool_steps
                     .lock()
@@ -1047,6 +1170,24 @@ impl AgentEventSink for SessionAgentEventSink {
             AgentEvent::SamplingRetry { attempt, error } => {
                 self.append(None, SessionEventPayload::SamplingRetry { attempt, error })
             }
+            AgentEvent::HistoryCheckpoint {
+                history,
+                usage,
+                completed_model_steps,
+                hosted_search_calls_used,
+                message,
+            } => self
+                .store
+                .checkpoint_turn_history(
+                    self.turn_id,
+                    history,
+                    usage,
+                    completed_model_steps,
+                    hosted_search_calls_used,
+                    message,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
         }
     }
 }
@@ -1208,6 +1349,7 @@ pub enum SessionRuntimeError {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn prompt_cache_reads_do_not_consume_uncached_budget() {
@@ -1292,5 +1434,64 @@ mod budget_tests {
                 "Workflow action-step budget exceeded: used 4 of 3 persisted model, tool, and compaction steps"
             )
         );
+    }
+
+    #[test]
+    fn recovery_reuses_a_completed_tool_step_output() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store = Store::open_in_memory(directory.path()).expect("Store should open");
+        let project = store
+            .create_project("Tool recovery", "", directory.path().join("project"))
+            .expect("Project should be created");
+        let session = store
+            .create_session(project.id, "Session", "", "test-model", Vec::new())
+            .expect("Session should be created");
+        let turn = store
+            .create_turn(
+                session.id,
+                TurnOrigin::User,
+                "Read evidence",
+                "test-model",
+                PromptSnapshot::default(),
+                None,
+                2,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .expect("Turn should be created");
+        let step = store
+            .create_tool_step(
+                turn.id,
+                "call-read",
+                "read_file",
+                json!({"path": "evidence.md"}),
+            )
+            .expect("Tool Step should be created");
+        let output = json!({"content": "durable evidence"});
+        let step = store
+            .finish_step(
+                step.id,
+                StepStatus::Completed,
+                Some(output.clone()),
+                TokenUsage::default(),
+                Some(3),
+            )
+            .expect("Tool Step should complete");
+        let repaired = repair_interrupted_tool_calls(
+            vec![ModelInputItem::FunctionCall {
+                call_id: "call-read".to_string(),
+                name: "read_file".to_string(),
+                arguments: "{\"path\":\"evidence.md\"}".to_string(),
+            }],
+            &[step],
+        );
+
+        assert!(repaired.iter().any(|item| {
+            matches!(item, ModelInputItem::FunctionCallOutput { call_id, output: value }
+                if call_id == "call-read" && value == &output)
+        }));
     }
 }

@@ -134,12 +134,17 @@ snapshotted on every Turn. See [prompt model](prompt-model.md).
 The isolated runner reserves stdout for newline-delimited JSON:
 
 ```json
-{"id":"request-id","kind":"invoke_action","payload":{"agent_instance_id":"..."}}
-{"id":"request-id","ok":true,"result":{"output":"...","turn_id":"..."}}
+{"id":"root/together:2/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_instance_id":"..."}}
+{"id":"root/together:2/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
 ```
 
-The request ID correlates concurrent responses. It is not currently a durable
-idempotency key. Supported effect kinds are:
+The request ID is both the concurrent response correlation ID and a durable
+logical idempotency key. Sequential operations reserve monotonically numbered
+paths; `together(...)` and `background(...)` give each child a stable branch
+path, so completion order does not change identity. Rust journals the exact
+kind and payload hash before dispatch and records the terminal result or error.
+Reusing one path with a changed request is a hard protocol error. Supported
+effect kinds are:
 
 ```text
 create_agent      set_agent_access   retire_agent       invoke_action
@@ -149,7 +154,12 @@ wait_timer        create_channel      publish_signal
 wait_signal       ask_human           complete
 ```
 
-Rust rejects unknown effects and malformed or cross-run IDs.
+Rust rejects unknown effects and malformed or cross-run IDs. On process
+restart, the snapshotted Python program starts at its entrypoint: completed
+effects replay their stored results, while a journal entry left `started` is
+redispatched to deterministic domain-resource IDs. Unfinished Agent actions
+resume the same checkpointed Turn rather than sampling their first model step
+again.
 
 ## Concurrency and timers
 

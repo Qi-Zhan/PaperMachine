@@ -13,6 +13,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | `AgentStep` | `StepId` | Inspectable model, tool, workflow, or system step under a Turn. |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | Validated Python source plus literal manifest. A missing Project denotes a built-in. |
 | `Workflow` | `WorkflowId` | One execution of an immutable workflow snapshot inside a Project. |
+| `WorkflowEffect` | `(WorkflowId, logical path)` | Durable journal entry for one exact Python effect request and its replayable result or error. |
 | starting Session | `started_from_session_id?` | Optional Session from which a Workflow was started. It is provenance, not ownership. |
 | `Agent instance` | `AgentInstanceId` | One workflow actor backed by exactly one Project-owned Session. |
 | `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent. |
@@ -39,6 +40,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | I8 | A workflow source snapshot and SHA-256 are immutable after run creation. |
 | I9 | A Project has at most one editable WorkflowProgram per slug. Saving that slug replaces the program, never existing Workflow snapshots. |
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
+| I11 | Within one Workflow, a logical effect path is permanently bound to one exact kind and payload. |
 
 The UI may visually group Agent Sessions beneath a Workflow. This does not
 create a Session parent/child relation.
@@ -324,22 +326,34 @@ protocol error.
 
 ## 13. Persistence and replay boundary
 
-All authoritative entities and ordered events are durable. Workflow source is
-snapshotted. Standalone Session Turns have restart recovery. A Workflow still
-in `created` state is started after restart because no Python effect has run.
+All authoritative entities, effect outcomes, and ordered events are durable.
+Workflow source is snapshotted. Standalone Session Turns and every non-terminal
+Workflow are scheduled for restart recovery.
 
-A `running` or `paused` Workflow cannot be continued safely today. On server
-restart it is failed with an explicit restart-interruption reason; unfinished
-ActionInvocations and ActionAttempts become `interrupted`, attached Turns become
-`interrupted`, and their running Steps become `cancelled`. This reconciliation
-happens before standalone Session recovery, preventing an action Turn from
-losing its WorkflowTurnContext and run-budget accounting.
+The Python program restarts at its entrypoint rather than serializing a Python
+instruction pointer. Each DSL operation has a deterministic logical effect path.
+The Store journals that path, kind, exact payload hash, `started/completed/failed`
+status, result, error, and timestamps. Reaching a completed path returns its
+stored result without repeating the domain mutation. A path left `started` is
+redispatched using resource IDs derived from `(WorkflowId, effect path,
+resource kind)`, so creation, signal publication, timer firing, and human
+requests converge on the original durable object. Reaching one path with a
+different request fails closed.
 
-The current effect request ID is only a concurrent request/response correlation
-ID, not a deterministic durable idempotency key. True active-run continuation
-requires a durable effect-result journal and replay of Python from the beginning
-against that journal. Until then, retry an interrupted execution as a new
-Workflow rather than replaying committed effects.
+An unfinished Action reuses its ActionInvocation, latest non-terminal Attempt,
+and attached Turn. The Turn checkpoint stores model history, cumulative usage,
+completed-model-step and hosted-search cursors, plus any terminal candidate
+message. Each local Tool Step also stores its provider call ID. Recovery reuses
+the exact output of a completed Tool Step; a Step still running when the process
+disappeared becomes an explicit execution-unknown restart output. It also
+cancels a stale open human-tool request and resumes at the next sample. A direct
+workflow-level `ask_human` effect is itself journaled and continues waiting on
+its deterministic HumanRequest.
+
+Pure Python computation between effects may execute again. Authors must keep
+the effect sequence deterministic for the same source snapshot and input; wall
+clock, randomness, or other non-determinism must not change the request at an
+already reserved path.
 
 ## 14. Representative trace
 

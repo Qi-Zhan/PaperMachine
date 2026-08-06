@@ -5,11 +5,10 @@ import importlib.util
 import json
 import sys
 import traceback
-import uuid
 from pathlib import Path
 from typing import Any
 
-from papermachine import WorkflowContext, _Runtime, _set_runtime
+from papermachine import WorkflowContext, _Runtime, _effect, _set_runtime
 
 _protocol_stdout = sys.stdout
 sys.stdout = sys.stderr
@@ -21,13 +20,17 @@ class EffectClient:
         self.pending: dict[str, asyncio.Future[Any]] = {}
         self.write_lock = asyncio.Lock()
 
-    async def send(self, kind: str, payload: dict[str, Any]) -> Any:
-        effect_id = str(uuid.uuid4())
+    async def send(self, effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        if effect_id in self.pending:
+            raise RuntimeError(f"effect is already pending: {effect_id}")
         self.pending[effect_id] = future
         async with self.write_lock:
             _protocol_stdout.write(
-                json.dumps({"id": effect_id, "kind": kind, "payload": payload}, separators=(",", ":"))
+                json.dumps(
+                    {"id": effect_id, "kind": kind, "payload": payload},
+                    separators=(",", ":"),
+                )
                 + "\n"
             )
             _protocol_stdout.flush()
@@ -45,11 +48,15 @@ class EffectClient:
             if response.get("ok"):
                 future.set_result(response.get("result"))
             else:
-                future.set_exception(RuntimeError(str(response.get("error", "effect failed"))))
+                future.set_exception(
+                    RuntimeError(str(response.get("error", "effect failed")))
+                )
 
 
 def load_workflow(source_path: Path, entrypoint: str):
-    spec = importlib.util.spec_from_file_location("papermachine_user_workflow", source_path)
+    spec = importlib.util.spec_from_file_location(
+        "papermachine_user_workflow", source_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load workflow source: {source_path}")
     module = importlib.util.module_from_spec(spec)
@@ -85,7 +92,7 @@ async def run() -> None:
             workflow_id=str(initialization["workflow_id"]),
         )
         result = await function(context)
-        await client.send("complete", {"output": result})
+        await _effect("complete", {"output": result})
     finally:
         for task in tuple(runtime.tasks):
             task.cancel()

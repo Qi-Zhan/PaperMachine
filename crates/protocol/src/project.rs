@@ -84,6 +84,29 @@ pub struct Workflow {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowEffectStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct WorkflowEffect {
+    pub workflow_id: WorkflowId,
+    /// Deterministic logical path assigned by the Python DSL runtime.
+    pub key: String,
+    pub kind: String,
+    pub request_sha256: String,
+    pub payload: Value,
+    pub status: WorkflowEffectStatus,
+    pub result: Option<Value>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Budget {
     pub max_agents: u32,
@@ -274,6 +297,9 @@ pub struct WorkflowTimer {
     pub fire_count: u32,
     pub next_fire_at: DateTime<Utc>,
     pub last_fired_at: Option<DateTime<Utc>>,
+    /// Lets an interrupted `wait_timer` effect observe the same durable fire
+    /// instead of incrementing the timer twice during replay.
+    pub last_fire_effect_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

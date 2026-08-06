@@ -10,6 +10,7 @@ use papermachine_protocol::Session;
 use papermachine_protocol::TaskScopeStatus;
 use papermachine_protocol::TimerPolicy;
 use papermachine_protocol::TimerStatus;
+use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowEventPayload;
 use papermachine_protocol::WorkflowProgram;
 use papermachine_protocol::WorkflowProgramId;
@@ -551,6 +552,193 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
                 "Too late",
             )
             .is_err()
+    );
+}
+
+#[test]
+fn recovery_cancels_orphaned_turn_human_requests_idempotently() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let project = project(&store, &directory, "Human recovery", "");
+    let session = store
+        .create_session(project.id, "Agent", "", "test-model", Vec::new())
+        .expect("Session should be created");
+    let workflow = workflow_for_session(&store, &session, "Recover the Agent");
+    store
+        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .expect("Workflow should be running");
+    let turn = store
+        .create_turn(
+            session.id,
+            papermachine_protocol::TurnOrigin::Workflow,
+            "Ask before proceeding",
+            "test-model",
+            papermachine_protocol::PromptSnapshot::default(),
+            None,
+            4,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Turn should be created");
+    store.start_turn(turn.id).expect("Turn should start");
+    let request = store
+        .create_human_request(
+            workflow.id,
+            None,
+            None,
+            session.id,
+            Some(turn.id),
+            "Continue?",
+            json!({"type": "boolean"}),
+        )
+        .expect("human request should open");
+
+    let cancelled = store
+        .cancel_open_human_requests_for_recovery(turn.id)
+        .expect("orphaned request should be cancelled");
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(cancelled[0].id, request.id);
+    assert_eq!(cancelled[0].status, HumanRequestStatus::Cancelled);
+    assert!(
+        !store
+            .get_workflow(workflow.id)
+            .expect("Workflow should load")
+            .attention_required
+    );
+    assert!(
+        store
+            .cancel_open_human_requests_for_recovery(turn.id)
+            .expect("recovery cancellation should replay")
+            .is_empty()
+    );
+}
+
+#[test]
+fn workflow_turn_and_action_attempt_are_attached_atomically() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let project = project(&store, &directory, "Atomic Turn", "");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let workflow = workflow_for_session(&store, &origin, "Attach one Turn");
+    store
+        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .expect("Workflow should be running");
+    let participant = store
+        .create_participant(
+            workflow.id,
+            "Researcher",
+            "Researcher",
+            "research",
+            "",
+            "test-model",
+            Vec::new(),
+            AgentAccessProfile::Research,
+        )
+        .expect("participant should be created");
+    let invocation = store
+        .create_action_invocation(
+            workflow.id,
+            None,
+            participant.id,
+            "research",
+            "Research",
+            json!({}),
+        )
+        .expect("Action should be created");
+    let attempt = store
+        .start_action_attempt(invocation.id)
+        .expect("Attempt should start");
+    let turn = store
+        .create_turn_for_attempt(
+            attempt.id,
+            participant.session_id,
+            papermachine_protocol::TurnOrigin::Workflow,
+            "Research",
+            "test-model",
+            papermachine_protocol::PromptSnapshot::default(),
+            None,
+            4,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Turn and Attempt should attach");
+
+    assert_eq!(
+        store
+            .get_action_attempt(attempt.id)
+            .expect("Attempt should load")
+            .turn_id,
+        Some(turn.id)
+    );
+    assert!(
+        store
+            .list_resumable_standalone_turns()
+            .expect("standalone Turns should load")
+            .iter()
+            .all(|candidate| candidate.id != turn.id)
+    );
+}
+
+#[test]
+fn workflow_effect_journal_replays_only_an_identical_request() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let project = project(&store, &directory, "Effect journal", "");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("Session should be created");
+    let workflow = workflow_for_session(&store, &origin, "Replay safely");
+    let payload = json!({"name": "Researcher", "access": "research"});
+
+    let started = store
+        .begin_workflow_effect(
+            workflow.id,
+            "root/agent:0/create_agent",
+            "create_agent",
+            payload.clone(),
+        )
+        .expect("effect should begin");
+    assert_eq!(started.status, WorkflowEffectStatus::Started);
+    assert_eq!(started.request_sha256.len(), 64);
+
+    let completed = store
+        .finish_workflow_effect(
+            workflow.id,
+            &started.key,
+            Ok(json!({"agent_instance_id": "stable-agent"})),
+        )
+        .expect("effect should complete");
+    assert_eq!(completed.status, WorkflowEffectStatus::Completed);
+
+    let replay = store
+        .begin_workflow_effect(workflow.id, &started.key, "create_agent", payload)
+        .expect("identical request should replay");
+    assert_eq!(replay, completed);
+    assert_eq!(
+        store
+            .list_workflow_effects(workflow.id)
+            .expect("journal should load")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .begin_workflow_effect(
+                workflow.id,
+                &started.key,
+                "create_agent",
+                json!({"name": "Different"}),
+            )
+            .is_err(),
+        "one logical effect path must never accept a changed request"
     );
 }
 

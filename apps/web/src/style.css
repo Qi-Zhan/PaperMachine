@@ -1934,6 +1934,29 @@ pre {
   font-size: 8px;
 }
 
+.workflow-effect-journal {
+  margin-top: 11px;
+}
+
+.workflow-effect-journal > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 620;
+  list-style: none;
+}
+
+.workflow-effect-journal > summary::-webkit-details-marker {
+  display: none;
+}
+
+.workflow-effect-journal .workflow-action-list {
+  margin-top: 7px;
+}
+
 .inspector-artifact-list {
   margin-top: 11px;
 }

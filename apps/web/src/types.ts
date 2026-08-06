@@ -91,6 +91,9 @@ export interface Turn {
   skill_snapshots: SkillSnapshot[]
   history: unknown[]
   usage: TokenUsage
+  completed_model_steps: number
+  hosted_search_calls_used: number
+  checkpoint_message: string | null
   error: string | null
   created_at: string
   updated_at: string
@@ -102,6 +105,7 @@ export interface AgentStep {
   sequence: number
   kind: StepKind
   name: string
+  tool_call_id: string | null
   status: StepStatus
   input: unknown
   output: unknown | null
@@ -177,6 +181,19 @@ export interface Workflow {
   usage: BudgetUsage
   created_at: string
   updated_at: string
+}
+
+export interface WorkflowEffect {
+  workflow_id: Id
+  key: string
+  kind: string
+  request_sha256: string
+  payload: unknown
+  status: 'started' | 'completed' | 'failed'
+  result: unknown | null
+  error: string | null
+  started_at: string
+  completed_at: string | null
 }
 
 export interface WorkflowParticipant {
@@ -343,6 +360,7 @@ export interface SessionView {
 
 export interface WorkflowView {
   workflow: Workflow
+  effects: WorkflowEffect[]
   participants: WorkflowParticipant[]
   sessions: Session[]
   actions: ActionInvocation[]

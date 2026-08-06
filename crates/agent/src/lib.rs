@@ -71,6 +71,11 @@ pub struct AgentTurnRequest {
     pub objective: String,
     pub access: AgentAccessProfile,
     pub initial_history: Vec<ModelInputItem>,
+    pub initial_usage: TokenUsage,
+    pub completed_model_steps: u32,
+    pub hosted_search_calls_used: u32,
+    pub resume_current_turn: bool,
+    pub checkpoint_message: Option<String>,
     pub hosted_tools: Vec<HostedTool>,
     pub web_search_context_size: Option<WebSearchContextSize>,
     pub max_steps: u32,
@@ -107,6 +112,11 @@ impl AgentTurnRequest {
             objective: objective.into(),
             access: AgentAccessProfile::Research,
             initial_history: Vec::new(),
+            initial_usage: TokenUsage::default(),
+            completed_model_steps: 0,
+            hosted_search_calls_used: 0,
+            resume_current_turn: false,
+            checkpoint_message: None,
             hosted_tools: vec![HostedTool::WebSearch],
             web_search_context_size: None,
             max_steps: 16,
@@ -187,6 +197,13 @@ pub enum AgentEvent {
     SamplingRetry {
         attempt: u32,
         error: String,
+    },
+    HistoryCheckpoint {
+        history: Vec<ModelInputItem>,
+        usage: TokenUsage,
+        completed_model_steps: u32,
+        hosted_search_calls_used: u32,
+        message: Option<String>,
     },
 }
 
@@ -324,12 +341,14 @@ impl AgentRuntime {
             .map_err(AgentError::EventSink)?;
 
         let mut history = request.initial_history.clone();
-        history.push(ModelInputItem::Message {
-            role: MessageRole::User,
-            content: request.objective.clone(),
-        });
+        if !request.resume_current_turn {
+            history.push(ModelInputItem::Message {
+                role: MessageRole::User,
+                content: request.objective.clone(),
+            });
+        }
         let execution_gate = Arc::new(RwLock::new(()));
-        let mut total_usage = TokenUsage::default();
+        let mut total_usage = request.initial_usage;
         let tool_definitions = if request.max_steps > 1 {
             self.tools.definitions_for(request.access)
         } else {
@@ -359,9 +378,21 @@ impl AgentRuntime {
         let history_budget = history_token_budget(&request, &tool_definitions)?;
         let compact_trigger = history_budget.saturating_mul(AUTO_COMPACT_PERCENT) / 100;
         let mut control_forced_final = false;
-        let mut hosted_search_calls_used = 0_u32;
+        let mut hosted_search_calls_used = request.hosted_search_calls_used;
 
-        for step in 1..=request.max_steps {
+        if request.completed_model_steps >= request.max_steps {
+            if let Some(message) = request.checkpoint_message.clone() {
+                return Ok(AgentTurnResult {
+                    final_message: message,
+                    history,
+                    steps: request.completed_model_steps,
+                    usage: total_usage,
+                });
+            }
+            return Err(AgentError::StepLimit(request.max_steps));
+        }
+
+        for step in request.completed_model_steps.saturating_add(1)..=request.max_steps {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
@@ -435,7 +466,12 @@ impl AgentRuntime {
                 !hosted_tools.is_empty() && remaining_search_calls == Some(0);
             let final_sample =
                 control_forced_final || search_limit_forced_final || step == request.max_steps;
-            if final_sample {
+            let already_has_final_prompt = matches!(
+                history.last(),
+                Some(ModelInputItem::Message { role: MessageRole::User, content })
+                    if content == FINAL_SAMPLE_PROMPT
+            );
+            if final_sample && !already_has_final_prompt {
                 history.push(ModelInputItem::Message {
                     role: MessageRole::User,
                     content: FINAL_SAMPLE_PROMPT.to_string(),
@@ -455,6 +491,17 @@ impl AgentRuntime {
                     budget: history_budget,
                 });
             }
+
+            self.events
+                .emit(AgentEvent::HistoryCheckpoint {
+                    history: history.clone(),
+                    usage: total_usage,
+                    completed_model_steps: step.saturating_sub(1),
+                    hosted_search_calls_used,
+                    message: None,
+                })
+                .await
+                .map_err(AgentError::EventSink)?;
 
             // Keep the declared hosted-tool set stable for prompt caching and
             // previous_response_id continuation. Once the Turn limit is
@@ -685,18 +732,6 @@ impl AgentRuntime {
                     .map_err(AgentError::EventSink)?;
             }
 
-            if calls.is_empty() {
-                if message.is_empty() {
-                    return Err(AgentError::EmptyModelResponse);
-                }
-                return Ok(AgentTurnResult {
-                    final_message: message,
-                    history,
-                    steps: step,
-                    usage: total_usage,
-                });
-            }
-
             for call in &calls {
                 if !replayed_call_ids.contains(&call.call_id) {
                     history.push(ModelInputItem::FunctionCall {
@@ -709,6 +744,29 @@ impl AgentRuntime {
                     .emit(AgentEvent::ToolCallStarted { call: call.clone() })
                     .await
                     .map_err(AgentError::EventSink)?;
+            }
+
+            self.events
+                .emit(AgentEvent::HistoryCheckpoint {
+                    history: history.clone(),
+                    usage: total_usage,
+                    completed_model_steps: step,
+                    hosted_search_calls_used,
+                    message: calls.is_empty().then_some(message.clone()),
+                })
+                .await
+                .map_err(AgentError::EventSink)?;
+
+            if calls.is_empty() {
+                if message.is_empty() {
+                    return Err(AgentError::EmptyModelResponse);
+                }
+                return Ok(AgentTurnResult {
+                    final_message: message,
+                    history,
+                    steps: step,
+                    usage: total_usage,
+                });
             }
 
             let futures = calls.into_iter().map(|call| {
@@ -728,6 +786,16 @@ impl AgentRuntime {
                     call_id: outcome.call_id,
                     output: outcome.output,
                 });
+                self.events
+                    .emit(AgentEvent::HistoryCheckpoint {
+                        history: history.clone(),
+                        usage: total_usage,
+                        completed_model_steps: step,
+                        hosted_search_calls_used,
+                        message: None,
+                    })
+                    .await
+                    .map_err(AgentError::EventSink)?;
             }
         }
 
