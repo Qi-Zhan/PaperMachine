@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,33 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class MatrixTests(unittest.TestCase):
+    def test_ensure_project_repairs_missing_reused_root(self) -> None:
+        class FakeApi:
+            def __init__(self, root_path: str) -> None:
+                self.root_path = root_path
+
+            def get(self, path):
+                self.assert_path(path)
+                return [{"id": "existing-project", "root_path": self.root_path}]
+
+            def post(self, path, payload):
+                raise AssertionError(f"unexpected project creation: {path} {payload}")
+
+            @staticmethod
+            def assert_path(path):
+                if path != "/projects":
+                    raise AssertionError(f"unexpected path: {path}")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "missing" / "research"
+            api = FakeApi(str(root.resolve()))
+            self.assertFalse(root.exists())
+            self.assertEqual(
+                run_matrix.ensure_project(api, "Research", "Benchmark", root),
+                "existing-project",
+            )
+            self.assertTrue(root.is_dir())
+
     def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:
         class FakeApi:
             def __init__(self) -> None:

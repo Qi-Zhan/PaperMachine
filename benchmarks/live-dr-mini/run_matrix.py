@@ -562,6 +562,7 @@ def ensure_project(
     description: str,
     root_path: Path,
 ) -> str:
+    root_path.mkdir(parents=True, exist_ok=True)
     canonical_root = str(root_path.resolve())
     for project in api.get("/projects"):
         if project["root_path"] == canonical_root:
