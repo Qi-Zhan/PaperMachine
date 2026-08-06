@@ -34,6 +34,14 @@ provider reasoning and credentials. `publish_artifact(...)` accepts bounded
 text only, derives a deterministic Artifact ID from the Workflow/effect path,
 and verifies optional Agent ownership.
 
+The optional launch-time Project snapshot uses the same bounded builder. It is
+persisted once on the Workflow, exposed read-only as `ctx.context`, and rendered
+inside an explicit untrusted-data delimiter for Agent Turns. Starting from a
+Session only changes focus/provenance; it does not copy that Session's system
+prompt or permissions into prompt text. A live Project read remains an explicit
+`ctx.project.snapshot()` effect, so unrelated Project updates cannot silently
+alter an active run's context.
+
 Python also cannot label arbitrary action text as a human message. A
 user-origin workflow Action must name an answered direct HumanRequest and its
 annotated `HumanMessage` argument. Rust verifies Workflow/Session ownership,
@@ -58,6 +66,15 @@ workspace writes and sandboxed commands; `research` adds hosted web search and
 controlled URL fetching; `full_access` allows host files and unrestricted
 commands/network after explicit human grant. `ask_human` remains available as a
 control primitive in every profile.
+
+Run creation applies access bounds before Python starts. The Workflow profile
+is a hard ceiling; a Session-origin Workflow cannot choose a profile above the
+source Session, and an Agent class override cannot exceed the Workflow. Agent
+class declarations above the run ceiling are clamped. The Python
+`set_access(...)` effect cannot cross that ceiling, and any upgrade within it
+still requires a typed boolean HumanRequest. The Store and Workflow runtime
+both enforce these rules; hiding unavailable choices in the web UI is not the
+security boundary.
 
 The Turn snapshots the Session profile. Tool schemas are filtered before model
 sampling, and registry dispatch plus each built-in implementation rechecks that

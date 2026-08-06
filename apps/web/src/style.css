@@ -501,6 +501,12 @@ pre {
   white-space: nowrap;
 }
 
+.project-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .primary-button,
 .secondary-button,
 .text-button {
@@ -2170,6 +2176,10 @@ pre {
   width: min(480px, 100%);
 }
 
+.workflow-launch-dialog {
+  width: min(760px, 100%);
+}
+
 .dialog-header {
   margin-bottom: 21px;
 }
@@ -2237,6 +2247,179 @@ pre {
 
 .field-note {
   margin: -8px 0 16px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.workflow-prompt-note {
+  margin-top: -9px;
+}
+
+.workflow-launch-section {
+  margin-top: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.workflow-launch-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 15px;
+}
+
+.workflow-launch-section-heading h3 {
+  color: #3f4642;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.workflow-launch-section-heading p {
+  max-width: 72ch;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.schema-control {
+  margin-bottom: 15px;
+}
+
+.workflow-context-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+}
+
+.workflow-context-options > label {
+  display: flex;
+  gap: 9px;
+  min-height: 76px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fafbfa;
+  cursor: pointer;
+}
+
+.workflow-context-options > label:hover {
+  border-color: var(--border-strong);
+  background: #fff;
+}
+
+.workflow-context-options > label[data-active='true'] {
+  border-color: #91aa9f;
+  background: #f3f7f5;
+  box-shadow: inset 0 0 0 1px rgba(71, 105, 93, 0.12);
+}
+
+.workflow-context-options input {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  accent-color: #405e54;
+}
+
+.workflow-context-options span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workflow-context-options strong,
+.workflow-agent-access-row strong,
+.workflow-agent-access-heading strong {
+  color: #3e4541;
+  font-size: 10px;
+  font-weight: 660;
+}
+
+.workflow-context-options small,
+.workflow-agent-access-row small,
+.workflow-agent-access-heading small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.workflow-context-note {
+  margin: 8px 2px 16px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.workflow-launch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.workflow-launch-grid > label > .field-label {
+  margin-bottom: 6px;
+}
+
+.workflow-run-configuration > .access-profile-description {
+  margin-top: 7px;
+}
+
+.workflow-agent-access {
+  margin-top: 17px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.workflow-agent-access-heading,
+.workflow-agent-access-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px 112px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+}
+
+.workflow-agent-access-heading {
+  grid-template-columns: minmax(0, 1fr) auto;
+  background: #f5f6f5;
+}
+
+.workflow-agent-access-heading > div,
+.workflow-agent-access-row > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.workflow-agent-access-heading > span {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.workflow-agent-access-row {
+  border-top: 1px solid var(--border);
+}
+
+.workflow-agent-access-row .select-input {
+  height: 32px;
+}
+
+.workflow-effective-access {
+  color: #52605a;
+  font-size: 9px;
+  text-align: right;
+}
+
+.workflow-run-skills {
+  margin-top: 18px;
+}
+
+.workflow-run-skills > p {
+  margin: -1px 0 8px;
   color: var(--muted);
   font-size: 9px;
   line-height: 1.45;
@@ -3189,11 +3372,16 @@ pre {
     display: none;
   }
 
-  .project-page-header .primary-button {
+  .project-page-header .primary-button,
+  .project-page-header .secondary-button {
     width: 32px;
     padding: 0;
     overflow: hidden;
     font-size: 0;
+  }
+
+  .project-header-actions {
+    gap: 4px;
   }
 
   .session-page-header .status-badge,
@@ -3350,6 +3538,21 @@ pre {
     border-bottom: 0;
     border-left: 0;
     border-radius: 8px 8px 0 0;
+  }
+
+  .workflow-context-options,
+  .workflow-launch-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-agent-access-row {
+    grid-template-columns: minmax(0, 1fr) 150px;
+  }
+
+  .workflow-effective-access {
+    grid-column: 1 / -1;
+    margin-top: -6px;
+    text-align: left;
   }
 
   .artifact-dialog {

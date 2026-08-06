@@ -27,6 +27,7 @@ export type WorkflowStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+export type WorkflowContextMode = 'fresh' | 'project_snapshot'
 export type ParticipantStatus = 'active' | 'waiting_for_human' | 'retired' | 'failed'
 export type ActionStatus = 'scheduled' | 'running' | 'waiting_for_human' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
@@ -162,6 +163,11 @@ export interface WorkflowProgramSnapshot extends WorkflowProgram {
   source_code: string
 }
 
+export interface WorkflowLaunchContext {
+  mode: WorkflowContextMode
+  snapshot: Record<string, unknown> | null
+}
+
 export interface Workflow {
   id: Id
   project_id: Id
@@ -172,6 +178,8 @@ export interface Workflow {
   default_model: string
   access: AgentAccessProfile
   enabled_skills: string[]
+  launch_context: WorkflowLaunchContext
+  agent_access_overrides: Record<string, AgentAccessProfile>
   status: WorkflowStatus
   input: Record<string, unknown>
   output: unknown | null
@@ -416,7 +424,11 @@ export interface ModelProvider {
   prompt_cache_mode: string
 }
 
-export interface WorkflowProgramSource { registration: WorkflowProgram; source: string }
+export interface WorkflowProgramSource {
+  registration: WorkflowProgram
+  source: string
+  validation: WorkflowValidation
+}
 export interface WorkflowAgentDeclaration { class_name: string; actions: string[]; access: AgentAccessProfile }
 export interface WorkflowTimerDeclaration { callback: string; seconds: number | null; policy: string | null }
 export interface WorkflowFeatureSummary {
@@ -457,4 +469,6 @@ export interface CreateWorkflowInput {
   model: string
   access: AgentAccessProfile
   enabled_skills: string[]
+  context_mode?: WorkflowContextMode
+  agent_access_overrides?: Record<string, AgentAccessProfile>
 }

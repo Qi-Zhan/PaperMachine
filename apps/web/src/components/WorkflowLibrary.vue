@@ -279,7 +279,7 @@ async function loadWorkflow(workflow: WorkflowProgram) {
     generation.name = workflow.manifest.name
     generation.slug = workflow.manifest.slug
     generation.description = workflow.manifest.description
-    validation.value = await api.validateWorkflow(loaded.source)
+    validation.value = loaded.validation
   } catch (error) {
     setError(error)
   } finally {

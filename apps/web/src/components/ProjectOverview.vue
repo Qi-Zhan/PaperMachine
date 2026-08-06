@@ -16,10 +16,16 @@
           <h1>{{ overview.project.name }}</h1>
         </div>
       </div>
-      <button class="primary-button" type="button" @click="$emit('new-session')">
-        <MessageSquarePlus :size="16" />
-        {{ t('sidebar.newSession') }}
-      </button>
+      <div class="project-header-actions">
+        <button class="secondary-button" type="button" @click="$emit('run-workflow')">
+          <GitBranch :size="15" />
+          {{ t('project.runWorkflow') }}
+        </button>
+        <button class="primary-button" type="button" @click="$emit('new-session')">
+          <MessageSquarePlus :size="16" />
+          {{ t('sidebar.newSession') }}
+        </button>
+      </div>
     </header>
 
     <main class="project-content">
@@ -340,6 +346,7 @@ const emit = defineEmits<{
   'select-session': [sessionId: string]
   'open-artifact': [artifact: Artifact]
   'update-system-prompt': [systemPrompt: string]
+  'run-workflow': []
   'run-summary': [input: { systemPrompt: string; intervalMinutes: number; replaceWorkflowId?: string }]
   'stop-summary': [workflowId: string]
 }>()

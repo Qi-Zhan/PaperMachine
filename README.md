@@ -11,6 +11,13 @@ instances, and every Agent instance is backed by an ordinary Project-owned
 Session. The workflow combines those Sessions; it does not create a separate
 Session hierarchy.
 
+Both the Project page and a Session header use the same **Run Workflow**
+launcher. A Project-level launch starts new work from the Project as a whole;
+a Session-origin launch records that Session as provenance and can prioritize
+its recent Turns in the captured context. The Workflow's model, skills,
+permission ceiling, per-Agent access overrides, prompt, input, and launch
+context are explicit run configuration rather than hidden global state.
+
 The ordinary **New Session** command starts the reviewed `interactive-agent`
 Workflow. That program creates one persistent Agent Session, waits for a human
 message before every Turn, and can be inspected, cancelled, or continued like
@@ -84,10 +91,13 @@ one Project.
   histories at 90% of the available context budget.
 - Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
 - Enable Project-local skills per Session and snapshot them per Turn.
-- Assign each Session/Workflow Agent one of five access profiles. Profiles are
-  snapshotted per Turn and enforced in model tool exposure, registry dispatch,
-  built-in tools, path resolution, and command sandboxing; upgrades requested
-  by workflows require a typed human grant.
+- Assign each Session/Workflow Agent one of five access profiles. A Workflow
+  launch establishes a hard run ceiling, a Session-origin launch cannot exceed
+  the source Session, and per-Agent class overrides cannot exceed the run.
+  Profiles are snapshotted per Turn and enforced in model tool exposure,
+  registry dispatch, built-in tools, path resolution, and command sandboxing;
+  later in-run upgrades within the established ceiling require a typed human
+  grant.
 - Define Agents and actions in Python; use ordinary `if`, `for`, and `while`.
 - Preserve exact human-message provenance in interactive actions: a string
   HumanRequest answer becomes the visible/model-facing user Turn, while its
@@ -101,6 +111,11 @@ one Project.
   durable Signal, including concurrent background-timer plus human-wait flows.
 - Read bounded Project state from Workflow code with `ctx.project.snapshot()`
   and publish deterministic text/HTML Artifacts with `publish_artifact(...)`.
+- Launch with either a fresh context or one immutable, bounded Project snapshot.
+  The latter is exposed as `ctx.context` and automatically reused in every
+  Agent Turn; a Session-origin snapshot focuses that Session without copying
+  its mutable system prompt. Workflows may still request live state explicitly
+  with `ctx.project.snapshot()`.
 - Generate a Project progress webpage manually or with the built-in scheduled
   `project-summary` Workflow, with an explicit user-editable Workflow prompt.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;

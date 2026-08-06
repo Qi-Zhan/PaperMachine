@@ -41,6 +41,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | I9 | A Project has at most one editable WorkflowProgram per slug. Saving that slug replaces the program, never existing Workflow snapshots. |
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
 | I11 | Within one Workflow, a logical effect path is permanently bound to one exact kind and payload. |
+| I12 | Workflow launch configuration and launch context never mutate after run creation. |
 
 The UI may visually group Agent Sessions beneath a Workflow. This does not
 create a Session parent/child relation.
@@ -57,8 +58,14 @@ consistent created run:
 1. Resolve `slug` in the Project-visible catalog (Project source overrides a built-in of the same slug).
 2. Validate the user input against `input_schema`.
 3. Copy source, manifest, owner, path, and SHA-256 into a WorkflowProgramSnapshot.
-4. Create a Project-owned Workflow with `created` status and an optional starting Session.
-5. Schedule the run; the worker changes it to `running` before interpreting effects.
+4. Validate the selected model, skills, Workflow access ceiling, and Agent class
+   overrides. A starting Session must belong to the Project and is a hard outer
+   access bound.
+5. Store either a `fresh` launch context or one bounded immutable Project
+   snapshot. For context construction, a starting Session supplies focus and
+   provenance rather than a copied Session prompt.
+6. Create a Project-owned Workflow with `created` status and an optional starting Session.
+7. Schedule the run; the worker changes it to `running` before interpreting effects.
 
 The run's output is the value returned by the Python entrypoint. The runner
 sends it through the `complete` effect.
@@ -88,17 +95,19 @@ capabilities:
 | `full_access` | Read/write host filesystem | Unrestricted | Unrestricted | All registered tools and hosted web search. |
 
 The profile is declared with `access = "research"` on an Agent class or with an
-`access=` constructor override. `research` is the default. The origin Session's
-profile is the initial creation ceiling. A requested profile at or below that
-ceiling creates directly; a higher request first creates the Agent at the
-ceiling and opens a boolean HumanRequest. Denial fails that creation. A
-`full_access` origin therefore represents a prior explicit user grant.
+`access=` constructor override. `research` is the default. The launcher's
+Workflow profile is the hard run ceiling; for a Session-origin run that ceiling
+must be at or below the source Session. A per-run override keyed by Python Agent
+class is applied before the class declaration, then the result is clamped to
+the Workflow ceiling. Launch-time choices at or below the ceiling are already
+authorized and create directly.
 
 `await agent.set_access(profile)` changes an existing Agent. Downgrades apply
-without approval; every upgrade opens a HumanRequest. Access may change only
-when the Session has no active Turn. Each Turn captures an immutable access
-snapshot, so a later Session change affects only later Turns. The Session UI
-uses the same rule and requires an explicit confirmation for `full_access`.
+without approval; every upgrade within the run ceiling opens a HumanRequest,
+while an attempt above the ceiling fails. Access may change only when the
+Session has no active Turn. Each Turn captures an immutable access snapshot, so
+a later Session change affects only later Turns. The Session UI uses the same
+rule and requires an explicit confirmation for `full_access`.
 
 Tool definitions are filtered before a model sample, but that is not the trust
 boundary. The registry and each built-in tool recheck the Turn snapshot, paths
@@ -161,9 +170,10 @@ the Turn input; the action prompt and remaining arguments become an inspectable
 Workflow prompt layer. The ActionInvocation retains the source HumanRequest ID.
 
 Every Turn snapshots the exact ordered prompt layers: runtime, Project,
-Workflow, Agent/Session, Skills, and runtime control. Relevant directed
-relations belong to the Workflow layer; interruption/retry guidance belongs to
-the control layer. See [prompt model](prompt-model.md).
+Workflow, Agent/Session, Skills, and runtime control. The Workflow layer
+includes the immutable launch context when configured. Relevant directed
+relations belong to that layer; interruption/retry guidance belongs to the
+control layer. See [prompt model](prompt-model.md).
 
 | Invocation/attempt status | Meaning |
 |---|---|
@@ -256,8 +266,9 @@ and domain mutations replay from their journaled results, so a timer may fire
 while another branch still has an open HumanRequest, and a Signal published by
 a concurrent branch is consumed exactly once after replay.
 
-`ctx.project.snapshot(...)` returns only bounded durable state owned by the
-current Project. `publish_artifact(...)` accepts text, derives its Artifact ID
+`ctx.context` returns the immutable launch snapshot, or `{}` for a fresh run.
+`ctx.project.snapshot(...)` separately reads current bounded durable state owned
+by the Project. `publish_artifact(...)` accepts text, derives its Artifact ID
 from the effect path, and is idempotent under replay. These effects let ordinary
 user Workflows build Project-level views without direct SQLite or host-file
 access.

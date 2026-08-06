@@ -91,10 +91,13 @@ must be Python literals.
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 | `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
 
-The runtime provides `ctx.objective`, `ctx.input`, `ctx.workflow_id`, and
-`ctx.project`. `await ctx.project.snapshot(...)` returns a bounded, structured
-view of the Project's durable Sessions, Turns, Workflow results, and Artifact
-metadata; it excludes summary runs themselves to avoid recursive summaries.
+The runtime provides `ctx.objective`, `ctx.input`, `ctx.workflow_id`,
+`ctx.context`, and `ctx.project`. `ctx.context` is either `{}` for a fresh run or
+the immutable bounded Project snapshot selected at launch. In contrast,
+`await ctx.project.snapshot(...)` performs an explicit durable effect and
+returns a bounded view of current Project Sessions, Turns, Workflow results,
+and Artifact metadata; it excludes summary runs themselves to avoid recursive
+summaries.
 
 ## DSL surface
 
@@ -126,15 +129,26 @@ access, subprocesses, environment access, dynamic code, and reflection are not
 part of the ABI.
 
 Every Agent class should declare `access` as one of `model_only`, `read_only`,
-`workspace`, `research`, or `full_access`. `research` is the default. The
-origin Session's profile is the initial ceiling: creating an Agent above it
-opens a boolean HumanRequest before the first action. Creating one at or below
-the ceiling does not. A later `set_access` upgrade always opens a HumanRequest;
-a downgrade does not. A Turn keeps the profile snapshot captured at creation.
+`workspace`, `research`, or `full_access`. `research` is the default. Run
+creation fixes a Workflow access ceiling. A Session-origin run cannot set that
+ceiling above the source Session, and a launch-time override keyed by Agent
+class cannot exceed the Workflow ceiling. At Agent creation the runtime applies
+the class override when present and clamps the class declaration to the run
+ceiling; these launch-time choices require no additional HumanRequest. A later
+`set_access` upgrade within the ceiling always opens a HumanRequest, an upgrade
+above it fails, and a downgrade applies directly. A Turn keeps the profile
+snapshot captured at creation.
 
 Agent classes may declare `system_prompt`; a constructor override takes
 precedence. Project, Workflow, Agent/Session, skill, and control layers are
 snapshotted on every Turn. See [prompt model](prompt-model.md).
+
+The Project and Session launchers share this run contract. They select the
+Workflow system prompt, model profile, skills, Workflow ceiling, class
+overrides, schema input, and `fresh` or `project_snapshot` context mode. A
+source Session contributes provenance and snapshot focus without copying its
+Session system prompt into new Agent Sessions; independently, its access
+profile is the outer run ceiling.
 
 The built-in `interactive-agent` is the reference conversational program. It
 uses an ordinary `while` loop: `ask_human(..., agent=agent)`, then

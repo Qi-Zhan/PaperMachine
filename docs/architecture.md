@@ -30,6 +30,9 @@
 12. **New Session is a built-in Workflow.** The UI starts
     `interactive-agent`; its persistent Agent Session waits for a verified human
     message before each Turn. No privileged standalone creation route exists.
+13. **A Workflow launch is explicit and immutable.** The run snapshots its
+    objective, Workflow system prompt, input, model, skills, permission ceiling,
+    per-Agent class overrides, and either fresh or bounded Project context.
 
 ## Ownership graph
 
@@ -42,6 +45,8 @@ Project
   |     +-- Turn ...
   +-- Workflow
         +-- started_from_session_id -> Session (optional)
+        +-- launch_context -> immutable Project snapshot (optional)
+        +-- access ceiling / Agent class overrides
         +-- WorkflowParticipant -> Session
         +-- ActionInvocation -> ActionAttempt -> Turn
         +-- Team / AgentRelation / TaskScope
@@ -58,6 +63,35 @@ checks Workflow and Session ownership, verifies the bound string byte-for-byte,
 and only then creates a `user` Turn. The action prompt and non-message arguments
 become a Workflow prompt layer. Ordinary workflow-dispatched actions retain a
 `workflow` Turn and show their generated objective explicitly.
+
+## Workflow launch
+
+The Project page and Session header open the same Run Workflow surface. The
+Project is always the owner. `started_from_session_id` records the optional
+source Session and focuses its recent Turns when a Project snapshot is captured;
+the source profile also bounds the run's access, but does not create a nested
+Workflow or Session hierarchy. A Project launch
+navigates to the first participant Session once one exists. A Session-origin
+launch keeps the current Session in focus so the new run can be inspected from
+the same workbench.
+
+Launch context has two modes:
+
+- `fresh` carries no prior research state. The Project system prompt still
+  applies because it is an instruction layer, not research data.
+- `project_snapshot` captures one bounded Rust-produced view of existing
+  Sessions, Turns, Workflow results, and text Artifacts. It is stored on the
+  Workflow, exposed to Python as `ctx.context`, and automatically rendered as
+  untrusted Workflow context in every Agent Turn. It never changes during the
+  run. Code that intentionally needs current state calls
+  `await ctx.project.snapshot()` as a separate durable effect.
+
+The immutable snapshot is important for both reproducibility and caching: an
+unrelated Project update cannot silently change the instruction prefix of an
+already-running Agent Session. A Session-origin launch prioritizes that
+Session's history in the snapshot, but does not copy its mutable Session system
+prompt into the new Agents. The prompt stack remains Project -> Workflow ->
+Agent/Session -> Skills -> Control.
 
 ## Runtime layers
 
@@ -207,10 +241,15 @@ therefore combine `ask_human`, background timers, and Channels without keeping
 one idle process per long-lived Workflow.
 
 Workflow Agents declare `model_only`, `read_only`, `workspace`, `research`, or
-`full_access`. The origin Session profile is the initial creation ceiling.
-Creation above that ceiling and every later upgrade suspend on a boolean
-HumanRequest; downgrades do not. Direct Session changes are accepted only
-between Turns, and the UI separately confirms `full_access`.
+`full_access`. The user-selected Workflow profile is a hard ceiling for the
+entire run. If launched from a Session it must also be at or below that source
+Session's profile. Per-run Agent class overrides are validated at launch and
+may only narrow the run; a class declaration above the run ceiling is clamped.
+These launch-time choices are already authorized and create no HumanRequest.
+A later `set_access` upgrade within the fixed Workflow ceiling suspends on a
+boolean HumanRequest; an attempt above the ceiling fails. Downgrades do not
+require approval. Direct Session changes are accepted only between Turns, and
+the UI separately confirms `full_access`.
 
 ## Persistence and recovery
 

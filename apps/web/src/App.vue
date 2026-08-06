@@ -76,7 +76,7 @@
         @select-session="selectSession"
         @send="createTurn"
         @cancel-turn="cancelTurn"
-        @open-workflow="workflowDialogOpen = true"
+        @open-workflow="openSessionWorkflowDialog"
         @inspect-workflow="inspectWorkflow"
         @pause-workflow="pauseWorkflow"
         @resume-workflow="resumeWorkflow"
@@ -102,6 +102,7 @@
         @select-session="selectSession"
         @open-artifact="selectedArtifact = $event"
         @update-system-prompt="updateProjectSystemPrompt"
+        @run-workflow="openProjectWorkflowDialog"
         @run-summary="runProjectSummary"
         @stop-summary="stopProjectSummary"
       />
@@ -147,8 +148,12 @@
       :open="workflowDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
-      :session="sessionView?.session ?? null"
+      :project="workflowDialogProject"
+      :session="workflowDialogOriginSession"
       :workflows="workflowPrograms"
+      :skills="workflowDialogSkills"
+      :model-profiles="health?.model_profiles ?? []"
+      :default-model="health?.default_model ?? ''"
       @close="closeDialogs"
       @submit="createWorkflow"
     />
@@ -192,6 +197,7 @@ import type {
   SessionEvent,
   SessionView,
   WorkflowProgram,
+  WorkflowContextMode,
   Workflow,
   WorkflowView,
 } from './types'
@@ -223,6 +229,8 @@ const projectDialogOpen = ref(false)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
 const workflowDialogOpen = ref(false)
+const workflowDialogProjectId = ref<string | null>(null)
+const workflowDialogOriginSession = ref<Session | null>(null)
 const dialogProjectId = ref<string | null>(null)
 const mobileSidebarOpen = ref(false)
 const selectedArtifact = ref<Artifact | null>(null)
@@ -244,6 +252,12 @@ const dialogProject = computed(
 )
 const dialogSkills = computed(() =>
   dialogProjectId.value ? (skillsByProject[dialogProjectId.value] ?? []) : [],
+)
+const workflowDialogProject = computed(
+  () => projects.value.find((project) => project.id === workflowDialogProjectId.value) ?? null,
+)
+const workflowDialogSkills = computed(() =>
+  workflowDialogProjectId.value ? (skillsByProject[workflowDialogProjectId.value] ?? []) : [],
 )
 
 onMounted(async () => {
@@ -560,12 +574,39 @@ function openSessionDialog(projectId: string) {
   })
 }
 
+function openSessionWorkflowDialog() {
+  const session = sessionView.value?.session
+  if (session) void openWorkflowDialog(session.project_id, session)
+}
+
+function openProjectWorkflowDialog() {
+  const projectId = projectOverview.value?.project.id ?? selectedProjectId.value
+  if (projectId) void openWorkflowDialog(projectId, null)
+}
+
+async function openWorkflowDialog(projectId: string, origin: Session | null) {
+  workflowDialogProjectId.value = projectId
+  workflowDialogOriginSession.value = origin
+  dialogError.value = ''
+  workflowDialogOpen.value = true
+  try {
+    await Promise.all([
+      ensureProjectSkills(projectId),
+      loadWorkflowPrograms(projectId),
+    ])
+  } catch (error) {
+    dialogError.value = messageOf(error)
+  }
+}
+
 function closeDialogs() {
   if (dialogBusy.value) return
   projectDialogOpen.value = false
   sessionDialogOpen.value = false
   skillDialogOpen.value = false
   workflowDialogOpen.value = false
+  workflowDialogProjectId.value = null
+  workflowDialogOriginSession.value = null
   dialogError.value = ''
 }
 
@@ -837,36 +878,67 @@ async function createWorkflow(input: {
   objective: string
   systemPrompt: string
   input: Record<string, unknown>
+  contextMode: WorkflowContextMode
+  model: string
+  access: AgentAccessProfile
+  enabledSkills: string[]
+  agentAccessOverrides: Record<string, AgentAccessProfile>
 }) {
-  const view = sessionView.value
-  if (!view) return
+  const project = workflowDialogProject.value
+  const origin = workflowDialogOriginSession.value
+  if (!project) return
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const workflow = await api.createWorkflow(view.session.project_id, {
+    const workflow = await api.createWorkflow(project.id, {
       program_slug: input.workflow.manifest.slug,
       objective: input.objective,
       system_prompt: input.systemPrompt,
       input: input.input,
-      started_from_session_id: view.session.id,
-      model: view.session.model,
-      access: view.session.access,
-      enabled_skills: view.session.enabled_skills,
+      ...(origin ? { started_from_session_id: origin.id } : {}),
+      model: input.model,
+      access: input.access,
+      enabled_skills: input.enabledSkills,
+      context_mode: input.contextMode,
+      agent_access_overrides: input.agentAccessOverrides,
     })
-    if (sessionView.value?.session.id === view.session.id) {
+    workflowDialogOpen.value = false
+    workflowDialogProjectId.value = null
+    workflowDialogOriginSession.value = null
+    if (origin && sessionView.value?.session.id === origin.id) {
       sessionView.value = {
         ...sessionView.value,
         workflows: [workflow, ...sessionView.value.workflows.filter((candidate) => candidate.id !== workflow.id)],
       }
+      await inspectWorkflow(workflow.id)
+      syncPoll()
+    } else {
+      const session = await waitForWorkflowSessionOrTerminal(workflow.id)
+      await refreshProjectIndex(project.id)
+      if (session) await selectSession(session.id)
+      else if (selectedProjectId.value === project.id) await selectProject(project.id)
     }
-    workflowDialogOpen.value = false
-    await inspectWorkflow(workflow.id)
-    syncPoll()
   } catch (error) {
     dialogError.value = messageOf(error)
+    if (!workflowDialogOpen.value) globalError.value = dialogError.value
   } finally {
     dialogBusy.value = false
   }
+}
+
+async function waitForWorkflowSessionOrTerminal(workflowId: string): Promise<Session | null> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const view = await api.getWorkflow(workflowId)
+    const participant = view.participants[0]
+    const session = participant
+      ? view.sessions.find((candidate) => candidate.id === participant.session_id)
+      : undefined
+    if (session) return session
+    if (view.workflow.status === 'failed') throw new Error(view.workflow.error ?? view.workflow.status)
+    if (['completed', 'cancelled'].includes(view.workflow.status) || view.workflow.attention_required) return null
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+  }
+  return null
 }
 
 async function cancelWorkflow(workflowId: string) {

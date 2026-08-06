@@ -41,6 +41,7 @@
 | I9 | 每个 Project 的每个 slug 最多有一个可编辑 WorkflowProgram；覆盖保存不会改变已创建 Workflow 的快照。 |
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
 | I11 | 在同一个 Workflow 内，一个逻辑 effect path 永久绑定到一种精确的 kind 与 payload。 |
+| I12 | Workflow 的启动配置与启动上下文在 run 创建后不可变。 |
 
 UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
 建立 Session 的父子关系。
@@ -56,8 +57,12 @@ UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这�
 1. 按 `slug` 在 Project 可见 catalog 中解析；同 slug 的 Project source 覆盖 built-in。
 2. 按 `input_schema` 校验用户输入。
 3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowProgramSnapshot。
-4. 创建 Project-owned、状态为 `created` 的 Workflow，并可选记录 starting Session。
-5. 调度该 run；worker 在解释 effect 前把它改为 `running`。
+4. 校验 model、skills、Workflow 权限上限与 Agent class override。starting Session
+   必须属于该 Project，并构成不可越过的外层权限上限。
+5. 保存 `fresh` 启动上下文，或截取一份有界且不可变的 Project 快照。在上下文
+   构造中，starting Session 用于确定快照焦点和记录来源，而不是复制 Session prompt。
+6. 创建 Project-owned、状态为 `created` 的 Workflow，并可选记录 starting Session。
+7. 调度该 run；worker 在解释 effect 前把它改为 `running`。
 
 run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` effect
 把它交给 Rust。
@@ -85,13 +90,14 @@ run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` ef
 | `full_access` | 读写宿主机文件系统 | 不受限 | 不受限 | 所有已注册工具与托管 web search。 |
 
 Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
-`access=` 覆盖；默认值是 `research`。origin Session 的档位是 Agent 创建时
-的初始上限。请求不高于上限时直接创建；高于上限时，先按上限创建 Agent，
-再发起 boolean HumanRequest。拒绝会使该次创建失败。因此，origin Session
-本身为 `full_access` 表示用户此前已经明确授权。
+`access=` 覆盖；默认值是 `research`。启动器选择的 Workflow 档位是整个 run
+不可越过的权限上限；若从 Session 启动，该上限还不得高于来源 Session。按 Python
+Agent class 设置的本次运行 override 优先于 class 声明，最终结果再限制到 Workflow
+上限。启动时选择的上限内权限已经得到授权，创建 Agent 不会再次发起 HumanRequest。
 
-`await agent.set_access(profile)` 修改现有 Agent。降级无需批准；任何升级
-都会创建 HumanRequest。只有 Session 没有 active Turn 时才能修改权限。
+`await agent.set_access(profile)` 修改现有 Agent。降级无需批准；上限内的任何升级
+都会创建 HumanRequest，超过 Workflow 上限则直接失败。只有 Session 没有 active Turn
+时才能修改权限。
 每个 Turn 在创建时保存不可变的权限快照，所以之后修改 Session 只影响后续
 Turn。Session UI 遵守同一规则，并在选择 `full_access` 时二次确认。
 
@@ -148,8 +154,9 @@ Turn input；action prompt 与其余参数进入可检查的 Workflow prompt lay
 ActionInvocation 会保留来源 HumanRequest ID。
 
 每个 Turn 都会快照实际使用且顺序固定的 prompt layers：runtime、Project、
-Workflow、Agent/Session、Skills、runtime control。与该 Agent 有关的有向关系属于
-Workflow layer，interrupt/retry guidance 属于 control layer。详见
+Workflow、Agent/Session、Skills、runtime control。配置后，不可变的启动上下文属于
+Workflow layer；与该 Agent 有关的有向关系也属于该层，interrupt/retry guidance
+属于 control layer。详见
 [prompt 模型](prompt-model.md)。
 
 | Invocation/Attempt 状态 | 含义 |
@@ -235,7 +242,8 @@ replay 的挂起点。某个分支先收到“已挂起”的协议确认，而�
 结果。因此一个分支等待 HumanRequest 时，后台 timer 仍可触发；并发分支先发布的
 Signal 也会在 replay 后恰好消费一次。
 
-`ctx.project.snapshot(...)` 只返回属于当前 Project 的、有界的持久状态；
+`ctx.context` 返回不可变的启动快照，`fresh` run 则返回 `{}`；
+`ctx.project.snapshot(...)` 另行读取属于当前 Project 的最新、有界持久状态；
 `publish_artifact(...)` 只接受文本，并由 effect path 派生 Artifact ID，因此 replay
 幂等。用户 Workflow 可以用这两个 effect 构建 Project 级视图，而不需要直接访问
 SQLite 或 host 文件。
