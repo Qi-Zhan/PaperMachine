@@ -30,6 +30,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -396,6 +398,7 @@ pub struct OpenAiResponsesClient {
     websocket_fallback_sessions: Arc<Mutex<HashMap<String, Instant>>>,
     prompt_cache_capabilities: Arc<Mutex<HashMap<String, Arc<OnceCell<PromptCacheCapability>>>>>,
     max_tool_calls_capabilities: Arc<Mutex<HashMap<String, Arc<OnceCell<MaxToolCallsCapability>>>>>,
+    max_tool_calls_violations: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -419,6 +422,17 @@ struct WebsocketSessionState {
     last_response_id: String,
     last_response_items: Vec<Value>,
     last_used: Instant,
+}
+
+struct MaxToolCallsObservationState {
+    stream: ModelStream,
+    model: String,
+    limit: u32,
+    hosted_calls: u32,
+    latest_metadata: Option<ModelRequestMetadata>,
+    pending: VecDeque<Result<ModelEvent, ModelError>>,
+    violations: Arc<Mutex<HashSet<String>>>,
+    reported: bool,
 }
 
 impl OpenAiResponsesClient {
@@ -458,6 +472,7 @@ impl OpenAiResponsesClient {
             websocket_fallback_sessions: Arc::new(Mutex::new(HashMap::new())),
             prompt_cache_capabilities: Arc::new(Mutex::new(HashMap::new())),
             max_tool_calls_capabilities: Arc::new(Mutex::new(HashMap::new())),
+            max_tool_calls_violations: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -585,6 +600,15 @@ impl OpenAiResponsesClient {
         if request.max_tool_calls.is_none() {
             return (request, MaxToolCallsMode::NotRequested);
         }
+        if self
+            .max_tool_calls_violations
+            .lock()
+            .await
+            .contains(&request.model)
+        {
+            request.max_tool_calls = None;
+            return (request, MaxToolCallsMode::RuntimeFallback);
+        }
         let capability = self.max_tool_calls_capability(&request.model).await;
         match capability {
             MaxToolCallsCapability::Supported => (request, MaxToolCallsMode::ProviderEnforced),
@@ -593,6 +617,64 @@ impl OpenAiResponsesClient {
                 (request, MaxToolCallsMode::RuntimeFallback)
             }
         }
+    }
+
+    fn observe_max_tool_calls(
+        &self,
+        stream: ModelStream,
+        model: String,
+        limit: Option<u32>,
+        mode: MaxToolCallsMode,
+    ) -> ModelStream {
+        let Some(limit) = limit.filter(|_| mode == MaxToolCallsMode::ProviderEnforced) else {
+            return stream;
+        };
+        let state = MaxToolCallsObservationState {
+            stream,
+            model,
+            limit,
+            hosted_calls: 0,
+            latest_metadata: None,
+            pending: VecDeque::new(),
+            violations: Arc::clone(&self.max_tool_calls_violations),
+            reported: false,
+        };
+        stream::unfold(state, |mut state| async move {
+            if let Some(event) = state.pending.pop_front() {
+                return Some((event, state));
+            }
+            let event = state.stream.next().await?;
+            match &event {
+                Ok(ModelEvent::RequestMetadata { metadata }) => {
+                    state.latest_metadata = Some(metadata.clone());
+                }
+                Ok(ModelEvent::ResponseItemCompleted { item })
+                    if item.get("type").and_then(Value::as_str) == Some("web_search_call") =>
+                {
+                    state.hosted_calls = state.hosted_calls.saturating_add(1);
+                }
+                Ok(ModelEvent::Completed { .. })
+                    if !state.reported && state.hosted_calls > state.limit =>
+                {
+                    state.reported = true;
+                    state.violations.lock().await.insert(state.model.clone());
+                    tracing::warn!(
+                        model = state.model,
+                        requested = state.limit,
+                        observed = state.hosted_calls,
+                        "provider accepted but violated max_tool_calls; using runtime fallback"
+                    );
+                    if let Some(mut metadata) = state.latest_metadata.clone() {
+                        metadata.max_tool_calls_mode = MaxToolCallsMode::ProviderViolated;
+                        state.pending.push_back(event);
+                        return Some((Ok(ModelEvent::RequestMetadata { metadata }), state));
+                    }
+                }
+                _ => {}
+            }
+            Some((event, state))
+        })
+        .boxed()
     }
 
     async fn max_tool_calls_capability(&self, model: &str) -> MaxToolCallsCapability {
@@ -731,6 +813,7 @@ impl OpenAiResponsesClient {
         websocket_fallback_reason: Option<String>,
     ) -> Result<ModelStream, ModelError> {
         let upstream_model = request.model.clone();
+        let max_tool_calls = request.max_tool_calls;
         let body = request_body(&request, &self.config, prompt_cache_mode);
         let response = self.request(&body).await?;
         let idle_timeout = self.config.stream_idle_timeout;
@@ -761,7 +844,7 @@ impl OpenAiResponsesClient {
             metadata: ModelRequestMetadata {
                 provider: Some(self.config.provider_id.clone()),
                 model_profile: None,
-                upstream_model: Some(upstream_model),
+                upstream_model: Some(upstream_model.clone()),
                 transport: ModelTransport::HttpSse,
                 prompt_cache_mode,
                 prompt_cache_key: request.prompt_cache.map(|cache| cache.key),
@@ -772,9 +855,17 @@ impl OpenAiResponsesClient {
                 websocket_fallback_reason,
             },
         };
-        Ok(stream::once(async move { Ok(metadata) })
+        let stream = stream::once(async move { Ok(metadata) })
             .chain(stream)
-            .boxed())
+            .boxed();
+        Ok(
+            self.observe_max_tool_calls(
+                stream,
+                upstream_model,
+                max_tool_calls,
+                max_tool_calls_mode,
+            ),
+        )
     }
 
     async fn connect_websocket(&self, session_key: &str) -> Result<ResponsesWebSocket, ModelError> {
@@ -834,6 +925,7 @@ impl OpenAiResponsesClient {
         max_tool_calls_mode: MaxToolCallsMode,
     ) -> Result<ModelStream, ModelError> {
         let upstream_model = request.model.clone();
+        let max_tool_calls = request.max_tool_calls;
         let session_key = request
             .transport_session_key
             .as_deref()
@@ -897,7 +989,7 @@ impl OpenAiResponsesClient {
             metadata: ModelRequestMetadata {
                 provider: Some(self.config.provider_id.clone()),
                 model_profile: None,
-                upstream_model: Some(upstream_model),
+                upstream_model: Some(upstream_model.clone()),
                 transport: ModelTransport::ResponsesWebsocket,
                 prompt_cache_mode,
                 prompt_cache_key: request.prompt_cache.map(|cache| cache.key),
@@ -908,9 +1000,17 @@ impl OpenAiResponsesClient {
                 websocket_fallback_reason: None,
             },
         };
-        Ok(stream::once(async move { Ok(metadata) })
+        let stream = stream::once(async move { Ok(metadata) })
             .chain(ReceiverStream::new(receiver))
-            .boxed())
+            .boxed();
+        Ok(
+            self.observe_max_tool_calls(
+                stream,
+                upstream_model,
+                max_tool_calls,
+                max_tool_calls_mode,
+            ),
+        )
     }
 }
 
@@ -2043,6 +2143,26 @@ mod tests {
             .expect("test SSE response should build")
     }
 
+    async fn accept_but_violate_max_tool_calls(
+        State(state): State<CacheProbeServerState>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        state.requests.lock().await.push(body.clone());
+        if body.get("stream").and_then(Value::as_bool) == Some(false) {
+            return Json(json!({"id": "probe-accepted"})).into_response();
+        }
+        let events = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+        );
+        Response::builder()
+            .status(AxumStatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(events))
+            .expect("test SSE response should build")
+    }
+
     #[tokio::test]
     async fn max_tool_calls_falls_back_when_provider_rejects_the_field() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2111,6 +2231,95 @@ mod tests {
         assert!(requests[1].get("max_tool_calls").is_none());
         assert!(requests[2].get("max_tool_calls").is_none());
         assert_eq!(requests[2]["stream"], true);
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn max_tool_calls_falls_back_after_provider_accepts_but_violates_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let state = CacheProbeServerState::default();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/responses", post(accept_but_violate_max_tool_calls))
+                    .with_state(server_state),
+            )
+            .await
+            .expect("test HTTP server should run");
+        });
+
+        let mut config = test_config();
+        config.endpoint = Url::parse(&format!("http://{address}/v1/responses"))
+            .expect("test endpoint should parse");
+        config.responses_websockets = false;
+        let client = OpenAiResponsesClient::new(config).expect("test client should build");
+        let request = ModelRequest {
+            model: "gpt-test".to_string(),
+            reasoning_effort: None,
+            instructions: "research carefully".to_string(),
+            input: vec![ModelInputItem::Message {
+                role: MessageRole::User,
+                content: "question".to_string(),
+            }],
+            prompt_cache: None,
+            transport_session_key: None,
+            tools: Vec::new(),
+            hosted_tools: vec![papermachine_protocol::HostedTool::WebSearch],
+            web_search_context_size: None,
+            parallel_tool_calls: true,
+            tool_choice: ModelToolChoice::Auto,
+            max_tool_calls: Some(1),
+            max_output_tokens: None,
+            response_format: None,
+        };
+        let first = client
+            .stream(request.clone())
+            .await
+            .expect("first stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("first stream should complete");
+        assert!(first.iter().any(|event| matches!(
+            event,
+            ModelEvent::RequestMetadata {
+                metadata: ModelRequestMetadata {
+                    max_tool_calls_mode: MaxToolCallsMode::ProviderViolated,
+                    ..
+                }
+            }
+        )));
+
+        let second = client
+            .stream(request)
+            .await
+            .expect("fallback stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("fallback stream should complete");
+        assert!(second.iter().any(|event| matches!(
+            event,
+            ModelEvent::RequestMetadata {
+                metadata: ModelRequestMetadata {
+                    max_tool_calls_mode: MaxToolCallsMode::RuntimeFallback,
+                    ..
+                }
+            }
+        )));
+
+        let requests = state.requests.lock().await.clone();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["max_tool_calls"], 1);
+        assert_eq!(requests[1]["max_tool_calls"], 1);
+        assert!(requests[2].get("max_tool_calls").is_none());
 
         server.abort();
         let _ = server.await;

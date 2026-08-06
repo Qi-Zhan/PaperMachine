@@ -122,12 +122,14 @@ Model sample 前会过滤 tool definitions，但这不是唯一安全边界。re
 `@action(max_steps=N)` 可缩小单个 action 的模型采样次数，Workflow 的
 `max_action_steps` 仍是硬上限；`max_steps=1` 会让第一次采样直接成为禁用工具的
 最终回答。`@action(max_search_calls=N)` 限制整个 Turn 内的 hosted web search
-次数，设为 `0` 会禁用 hosted search，但不会改变 Agent 的其他权限。若 endpoint
-支持 Responses API 的 `max_tool_calls`，该限制由 provider 硬执行；若代理拒绝此
-字段，PaperMachine 会在 model step 中记录 `runtime_fallback`，并在相邻采样之间
-停止继续搜索，因此单个 provider response 仍可能超出目标次数。每个 response
-最多从剩余额度中获得 4 次调用，并收到内容稳定的对应控制指令；支持其中任一机制的
-endpoint 都不会让单个 response 吞掉整个 Turn，且 continuation identity 不会变化。
+次数，设为 `0` 会禁用 hosted search，但不会改变 Agent 的其他权限。PaperMachine
+先探测 endpoint 是否接受 Responses API 的 `max_tool_calls`，再核对响应中实际产生的
+hosted-call 数。拒绝字段时记录 `runtime_fallback`；接受字段却超过目标时，本次记录
+`provider_violated`，同一模型的后续响应切换到 runtime fallback。fallback 会在相邻
+采样之间停止继续搜索，因此暴露不兼容行为的那个 provider response 仍可能已经超限。
+每个 response 最多从剩余额度中获得 4 次调用，并收到内容稳定的对应控制指令；真正
+执行其中任一机制的 endpoint 不会让单个 response 吞掉整个 Turn，且 continuation
+identity 不会变化。
 `reasoning_effort`（`none`、`low`、`medium`、`high`、`xhigh` 或 `max`）可覆盖
 该 action 的服务端默认推理强度，`max_output_tokens` 则设置每次模型响应的输出
 上限；两者都会固化到 Turn，并出现在 model step 的输入元数据里。
@@ -321,10 +323,11 @@ hosted tool 与 compaction Step 的总上限；Step 创建时立即计费，即�
 search、open-page 与 find-in-page 的总次数；每个研究 action 还应声明
 `max_search_calls`，避免一次 provider 响应吃完整个 run 的额度。
 Agent、action、step、timer、hosted-search、token 与 wall-time usage 都会持久化。
-部分限制只在 effect/model 边界检查，并发中的响应可能让 run 级搜索总数小幅超限，
-endpoint 支持 `max_tool_calls` 时 action 级限制由 provider 硬执行；代理不支持时，
-runtime 只能在 model sample 之间执行限制，单个 response 仍可能超过 4 次的软
-批量上限。cost enforcement 需要 provider 提供 cost estimate。
+部分限制只在 effect/model 边界检查，并发中的响应可能让 run 级搜索总数小幅超限。
+endpoint 真正执行 `max_tool_calls` 时 action 级限制由 provider 硬执行；只接受但不
+执行也会在首次违规响应后被识别并降级。fallback 下 runtime 只能在 model sample
+之间执行限制，单个 response 仍可能超过 4 次的软批量上限。cost enforcement 需要
+provider 提供 cost estimate。
 
 未捕获的 Python exception 会让 runner 退出，并以有长度限制的 stderr 使 run
 失败。action failure 会作为 effect exception 返回 Python；workflow 若不捕获，

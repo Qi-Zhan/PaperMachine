@@ -137,14 +137,17 @@ not silently rewrite the endpoint.
   effect/model boundaries. One in-flight response can exceed a remaining token,
   search, or wall-time allowance before usage is reported. Per-action
   `max_search_calls` is forwarded as the Responses API `max_tool_calls` hard
-  response limit when the endpoint supports it. PaperMachine probes this
-  capability once per model. If a proxy rejects the field, it is omitted and
-  the runtime stops further hosted search between model samples; one provider
-  response can then overshoot the requested search allowance. Model-step
-  metadata records `provider_enforced` or `runtime_fallback` explicitly.
-  PaperMachine also batches the remaining allowance at four hosted calls per
-  response and adds a stable matching instruction; unsupported proxies can
-  still exceed this soft batch size before the runtime regains control.
+  response limit when the endpoint supports it. PaperMachine probes field
+  acceptance once per model and also counts the actual hosted calls in every
+  response. If a proxy rejects the field, it is omitted. If a proxy accepts but
+  exceeds the requested limit, that response is recorded as
+  `provider_violated` and all later requests for the model use
+  `runtime_fallback`. In either fallback case the runtime stops further hosted
+  search between model samples, but the response that reveals a violation can
+  already have overshot its allowance. PaperMachine also batches the remaining
+  allowance at four hosted calls per response and adds a stable matching
+  instruction; non-enforcing proxies can still exceed this soft batch size
+  before the runtime regains control.
 - An explicit `max_output_tokens` ceiling selects HTTP SSE because compatible
   Responses WebSocket beta endpoints do not consistently accept that property.
   Multi-step research actions should omit the ceiling to retain incremental

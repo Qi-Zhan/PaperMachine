@@ -133,11 +133,14 @@ per-action model-sample limit; the Workflow's `max_action_steps` remains the
 hard ceiling. Setting `max_steps=1` also disables tools for that action because
 the first sample must be the final response. `@action(max_search_calls=N)` sets
 a hosted web-search allowance across the Turn; zero disables hosted search
-without changing the Agent's other access permissions. On endpoints that accept
-the Responses API `max_tool_calls` field the allowance is provider-enforced. If
-a proxy rejects that field, PaperMachine records `runtime_fallback` in each
-model step and enforces the remaining allowance between samples, so one response
-may overshoot it. Each response receives at most four calls from the remaining
+without changing the Agent's other access permissions. PaperMachine first
+probes whether an endpoint accepts the Responses API `max_tool_calls` field and
+then verifies the actual hosted-call count. A rejecting endpoint records
+`runtime_fallback`; an endpoint that accepts but exceeds the requested limit
+records `provider_violated`, and later responses for that model switch to
+runtime fallback. Runtime fallback enforces the remaining allowance between
+samples, so the response that reveals unsupported behavior may already
+overshoot it. Each response receives at most four calls from the remaining
 allowance and a stable matching control instruction; this keeps one response
 from consuming an entire Turn on endpoints that honor either mechanism without
 changing continuation identity. `reasoning_effort` (`none`, `low`, `medium`,
@@ -350,8 +353,10 @@ open-page, and find-in-page actions. Each action should also declare
 `max_search_calls` so a single provider response cannot consume the whole run
 budget. Agent, action, step, timer, hosted-search, token, and wall-time usage are
 persisted. Some limits are checked only at effect/model boundaries; concurrent
-in-flight responses can overshoot the run-wide search limit, while each action's
-provider-side limit remains hard when the endpoint supports `max_tool_calls`.
+in-flight responses can overshoot the run-wide search limit. An action's
+provider-side limit is hard only when the endpoint actually honors
+`max_tool_calls`; acceptance without enforcement is detected after the first
+violating response and downgraded to runtime fallback.
 With a proxy that rejects that request property, the action limit is enforced
 between model samples and one response can still overshoot the four-call soft
 batch size. Cost enforcement

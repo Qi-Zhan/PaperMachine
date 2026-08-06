@@ -142,6 +142,7 @@ pub enum ModelTransport {
 pub enum MaxToolCallsMode {
     NotRequested,
     ProviderEnforced,
+    ProviderViolated,
     RuntimeFallback,
 }
 
@@ -161,9 +162,12 @@ pub struct ModelRequestMetadata {
     pub prompt_cache_mode: PromptCacheMode,
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_breakpoint: bool,
-    /// Whether the provider accepted the Responses API `max_tool_calls`
-    /// request property. RuntimeFallback means PaperMachine must stop hosted
-    /// search between model samples because the endpoint rejected the field.
+    /// Whether the provider accepted and honored the Responses API
+    /// `max_tool_calls` request property. ProviderViolated means the endpoint
+    /// accepted the field but emitted more hosted calls than requested;
+    /// subsequent requests fall back to runtime accounting. RuntimeFallback
+    /// means PaperMachine omitted the field because the endpoint rejected or
+    /// previously violated it.
     pub max_tool_calls_mode: MaxToolCallsMode,
     pub used_previous_response_id: bool,
     pub continuation_miss_reason: Option<String>,
