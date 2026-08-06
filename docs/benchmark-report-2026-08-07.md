@@ -8,20 +8,25 @@ DeepSeek Responses-compatible provider 上完成检索、并行研究、Evaluato
 Agent 会创建多个相互隔离的 Session，每条路线都要建立自己的前缀，因此总体 cache read
 比例自然低于单 Agent。
 
-本轮最可信的 DeepResearch Bench mini 矩阵有 5 道题、3 个条件、每个条件每题 2 次，
-共 30 个研究结果和 30 个独立评分，全部完成。`evidence_r1` 的平均分最高，但它的优势
-几乎全部来自避免了一次 single-agent 没有产出最终报告的灾难性失败。去掉这一个失败
-样本做敏感性分析，single-agent 的均分从 75.91 变为 84.22，和 `evidence_r1` 的
-85.58 只差 1.36 分；后者却使用 4.38 倍 uncached input、6.38 倍 output 和 3.53 倍
-端到端时间。`evidence_r2` 比 `evidence_r1` 多消耗约 64k uncached input，平均分反而
-低 0.57 分。因此当前证据不支持“默认增加 Agent 或 evaluator 轮数就会更好”。
+本报告包含两轮可区分的 DeepResearch Bench mini 实验。第一轮 5 题 × 3 条件 × 2 次，
+共 30 个研究结果和 30 个独立评分，发现 single-agent 偶尔把搜索过程播报误当最终交付物。
+我们据此加入通用无工具 finalization 和显式 completion policy。随后使用当前 runtime 在
+4 道困难题上运行 `single_agent`、`evidence_r3`、`evidence_r4`，每题每条件 2 次，共
+24/24 research 和 24/24 grade 全部完成，且没有整条 Workflow 重跑。
+
+当前 runtime 的复验结果更直接：single-agent 平均 **85.88**，高于 r3 的 82.07 和 r4
+的 82.88，并在 4 道题的逐题均分和 4 个 rubric dimension 上全部领先。r3 相对 single
+使用 3.13 倍 uncached input、5.24 倍 output 和 2.23 倍时间；r4 分别为 3.64、6.22 和
+2.47 倍。r3 只有 1/8 真正进入后续 evaluator round，r4 只有 2/8；固定创建 3 或 4 条
+研究路线，而不是 follow-up 本身，是大部分增量成本的来源。因此现有证据明确反对把
+“更多 Agent / 更多 max_rounds”当作默认质量旋钮。
 
 更合理的产品方向是：默认给强单 Agent 一个明确的完成契约；当问题的覆盖风险、证据
 冲突或用户指定的 Workflow 需要时，再自适应地增加路线、Evaluator 和追查轮次。框架
 的核心价值应是让用户舒服地表达这种协作结构，并提供持久化、权限、并发、定时、人类
 介入、预算、缓存可观测性和可恢复执行，而不是内置一个永远正确的多 Agent 拓扑。
 
-## 本轮实验到底测了什么
+## 两轮实验到底测了什么
 
 ### 题目
 
@@ -55,7 +60,7 @@ Agent 会创建多个相互隔离的 Session，每条路线都要建立自己的
 `deepseek-v4-flash`。同模型家族 grader 仍可能有 judge bias，但评分 Session 与研究
 Session 是隔离的。
 
-## 完整结果
+## 第一轮完整基线结果（completion 修复前）
 
 | 条件 | Runs | 分数均值 | SD | Operational uncached input | Operational output | Cache read | 端到端时间 | 报告字符数 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -105,12 +110,75 @@ r1 的正常质量优势只剩约 1.36 分。
 的数值被上述 Task 68 失败主导；除去它，其他 single-agent 的重复差距并不异常。
 小样本只够发现 failure mode，不能据此声称多 Agent 普遍降低方差。
 
+## 当前 runtime 的高难高轮次复验
+
+### 条件与可靠性
+
+复验选择 Task 19、66、68、69，继续使用相同的上游完整 rubric、隔离的 post-write
+grader 和 DeepSeek 模型。`single_agent` 的搜索 Action 在实际使用搜索工具后，会在同一
+持久 Session 中自动追加一个无工具 `research_finalize` Turn；这既保留该 Session 的
+研究上下文，又防止工具循环最后一条 progress message 成为最终报告。
+
+`evidence_r3` 固定 3 条初始路线，最多 3 次 assessment、每轮最多 3 个 follow-up；
+`evidence_r4` 对应 4/4/4。两者均使用 `deliver_with_warning` completion policy：最终
+evidence evaluation 或 draft audit 未通过时可以交付，但必须返回机器可见的 warning
+及原因。三组各 8 次，24/24 research、24/24 grade 完成；没有 terminal failure，也没有
+整条 Workflow retry。
+
+### 结果
+
+| 条件 | Runs | 分数 | SD | Uncached input | Output | Cache read | 时间 | 报告字符 | 直接 URL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| single-agent | 8 | **85.88** | **4.24** | **143,700** | **24,992** | **79.6%** | **353s** | 20,978 | **30.6** |
+| evidence-r3 | 8 | 82.07 | 8.29 | 449,976 | 131,051 | 63.7% | 788s | 21,770 | 23.9 |
+| evidence-r4 | 8 | 82.88 | 5.90 | 523,297 | 155,520 | 60.8% | 871s | 21,140 | 27.1 |
+
+| Task | single-agent | evidence-r3 | evidence-r4 |
+|---:|---:|---:|---:|
+| 19 Prometheus | **89.23** | 86.13 | 86.73 |
+| 66 Obsidian | **84.62** | 84.52 | 83.44 |
+| 68 Kubernetes | **80.30** | 69.29 | 74.55 |
+| 69 A2A / MCP | **89.37** | 88.33 | 86.78 |
+
+rubric dimension 同样没有出现“总体分掩盖局部提升”的情况：single-agent 的
+comprehensiveness / insight / instruction following / readability 分别为
+83.56 / 82.25 / 93.88 / 87.44；r3 为 79.94 / 77.69 / 91.69 / 82.06；r4 为
+81.94 / 79.44 / 89.19 / 83.50。r3 相对 single 的成对差为 -3.81 分，只赢 2/8；
+r4 相对 r3 为 +0.81 分、赢 4/8，但仍比 single 低 3.00 分。
+
+### Workflow 实际做了什么
+
+| 条件 | Completion | 实际 round | 初始 research Action | 初始语义修复 | Follow-up research | Draft 修订 | 最终 audit fail |
+|---|---|---|---:|---:|---:|---:|---:|
+| single-agent | 未单独声明；finalization 全部完成 | n/a | 8 | 0 | 0 | 0 | 0 |
+| evidence-r3 | passed 3 / warning 5 | round 1: 7；round 3: 1 | 25（预期 24） | 1，另有 1 次 JSON repair | 6 | 5 | 2 |
+| evidence-r4 | passed 6 / warning 2 | round 1: 6；round 2: 1；round 3: 1 | 36（预期 32） | 4 | 5 | 6 | 1 |
+
+这里必须区分三种“重试”：整条 Workflow 重跑为 0；同一个 `ActionInvocation` 的
+`ActionAttempt` retry 为 0；Python Workflow 发现 evidence packet 违反语义契约后重新
+调用同一 Researcher 的修复 Action，r3 有 1 次、r4 有 4 次。旧报告只统计第一类，会把
+后两类遗漏；runner 现在从 durable Action journal 回填并分别报告这些指标。
+
+r3/r4 的最终报告长度与 single 相近，但直接 URL 更少，外部评分也更低。这支持一个尚需
+更多实验验证的工程假设：当前主要瓶颈是 evidence ledger 到 Writer 的信息压缩与来源
+保真，而不是搜索路线不足。盲目增加路线会扩大 handoff 面积，并不自动扩大最终答案的
+有效覆盖。
+
+### completion 修复是否解决了原 failure mode
+
+用相同 4 道题比较修复前基线中的 single-agent 样本与当前复验，均分从 74.32 变为
+85.88，SD 从 29.97 降到 4.24，平均重复差从 23.05 降到 2.45；当前 8 个结果全部是完整
+报告，最低分 78.89，没有再次出现 615 字符的 progress-only 输出。这是很强的工程回归
+信号，但不是只改变一个变量的随机对照实验，因此不能把全部 11.56 分提升都因果归于
+finalization。
+
 ## 缓存 deep-dive 结论
 
-缓存是有效的：single-agent 的 aggregate cache read 为 89.3%，provider probe 也出现
-90.3% 和 94.6%。DeepSeek 当前走 HTTP SSE 和 implicit prompt caching，不支持本项目
-所用的 Responses WebSocket continuation，因此 continuation hit 为 0；这和 provider
-返回的 cached input 是两个不同机制。
+缓存是有效的：第一轮 single-agent aggregate cache read 为 89.3%，provider probe 也
+出现 90.3% 和 94.6%；当前复验的 single / r3 / r4 分别为 79.6% / 63.7% / 60.8%。
+DeepSeek 当前走 HTTP SSE 和 implicit prompt caching，不支持本项目所用的 Responses
+WebSocket continuation，因此 continuation hit 为 0；这和 provider 返回的 cached input
+是两个不同机制。
 
 多 Agent 的 cache read 较低并不表示 key 每轮变化。PaperMachine 的 routing key 在
 同一 Session 内稳定，并且每个 Turn 保存准确 prompt snapshot。多路线 Workflow 会创建
@@ -129,7 +197,9 @@ Session，能复用该路线历史，而不是重建新 Agent。
    tool-call limit 是否真的生效。
 
 当前单 Agent、r1、r2 的 uncached input 比为 1 : 4.38 : 5.44；output 比为
-1 : 6.38 : 7.24。即使缓存有效，多 Agent 的真实增量成本仍然很大。
+1 : 6.38 : 7.24。当前复验 single、r3、r4 的 uncached input 比为
+1 : 3.13 : 3.64，output 比为 1 : 5.24 : 6.22。即使缓存有效，多 Agent 的真实增量
+成本仍然很大。
 
 ## 这轮实践发现并修复的框架问题
 
@@ -148,12 +218,19 @@ Session，能复用该路线历史，而不是重建新 Agent。
    `2158d02`。
 5. **结构化 action 失败会重跑整个 Workflow。** Task 69 的一个 r1 job 因
    `findings must be an array` 完整重试两次，浪费约 260k operational uncached input。
-   下一步应把 checkpoint/retry 粒度降到失败的 ActionAttempt，并在 provider 支持时使用
-   schema-constrained output；Workflow replay 只应作为 crash recovery，不应是普通 JSON
-   修复机制。
+   evidence-loop 现在先在原 Researcher Session 内执行局部语义 repair，当前复验没有整条
+   Workflow retry；但原生 checkpoint/retry 粒度最终仍应降到 ActionAttempt，并在 provider
+   支持时使用 schema-constrained output。Workflow replay 只应作为 crash recovery。
 6. **Draft audit 失败后没有统一的完成政策。** r1 有 2 次、r2 有 4 次最终 audit 仍为
-   false。内置 Workflow 需要明确选择 `deliver_with_warning`、`wait_for_human` 或
-   `fail_run`，且结果和 Project 页面都要显示该状态。
+   false。现在 Workflow 必须明确选择 `deliver_with_warning`、`wait_for_human` 或
+   `fail_run`；等待人类时支持 `/deliver`、`/fail` 或把自由文本作为带来源的 Writer
+   revision Turn，提交 `f311284`。
+7. **工具循环可能把 progress narration 当最终报告。** 通用 Action DSL 新增
+   `finalize="after_search"`，若首个 Action 使用过 hosted search，就在同一 Agent Session
+   上追加无工具 finalization Turn；当前 8/8 single-agent 报告均正常，提交 `f311284`。
+8. **只统计整条 Workflow retry 会漏掉内部修复。** runner 现在同时统计 Action 名称、
+   research phase、初始 contract repair、follow-up、同一 Action 的 attempt retry 与
+   completion status，并可从 durable journal 回填旧 state，提交 `adf7f15`。
 
 ## 其他 benchmark 的证据边界
 
@@ -206,23 +283,40 @@ Project 管理多个正在运行或已完成的 Workflow；Workflow 管理参与
 Workflow、Agent 分层机制。这样普通交互、定时总结和复杂研究共享同一个 runtime，用户
 又不需要理解额外的 “instance” 概念。
 
-## 下一阶段实验门槛
+## 下一阶段：优化构建 Workflow 的能力，而不是继续堆默认 Agent
 
-直接把 `max_rounds` 放到 3 或 4 只会验证“更多计算更贵”。下一阶段先加入以下两个
-通用机制，再在 Task 19、66、68、69 上对 `evidence_r3`、`evidence_r4` 各重复两次：
+高轮次实验已经完成，并否定了把 r3/r4 设为推荐默认值。下一阶段应围绕用户可写 DSL 和
+runtime primitive 做以下工作：
 
-1. 最终 deliverable completion contract，防止 progress narration 被当作成功；
-2. audit completion policy，明确失败时交付、等待人类还是终止。
+1. **自适应 escalation。** built-in research 从一个强 Researcher 开始；Evaluator 只在
+   能指出可搜索、可路由、预期收益足够高的具体 gap 时请求额外路线。DSL 需要支持运行中
+   `spawn`/激活 Agent、给既有 Session 派发 follow-up，以及预算化的 stop policy。
+2. **一等 completion contract。** `finalize="after_search"` 已解决最明显 failure mode；
+   下一步把交付物验证器、repair 次数、失败/等待人类策略做成所有 Action 都可组合的
+   primitive，而不是每个 Workflow 手写。
+3. **保真 evidence handoff。** evidence packet 应成为带来源、claim、coverage ID 和稳定
+   artifact 引用的结构，而不是把大量搜索结果再次塞进 Writer prompt；grader 应测 citation
+   coverage/正确性，不能只计算 URL 数。
+4. **Action 级 checkpoint 与预算。** 原生保存每次结构校验、repair 原因和 token；失败从
+   最近 Action 恢复。预算同时约束 uncached input、output、search call、wall time 和动态
+   Agent 数，并让 evaluator 看见剩余预算。
+5. **可校准的人类介入。** `ask_human` 已能暂停并保留来源；还需要让 Evaluator 生成一个
+   具体问题、解释为什么不能自动解决，并在 UI 中把 warning、等待和用户修订展示为普通
+   Workflow/Session 事件。
+6. **继续做对照实验。** 下一组比较应是“强 single”对“single + 条件式 evaluator”以及
+   “条件式 evaluator + 动态新增路线”，而不是固定 r5/r6。至少扩到更多任务、增加重复，
+   并用不同模型家族的 grader 或上游 RACE/FACT 降低同模型 judge bias。
 
-高轮次实验必须报告：实际创建的 route 数、实际 evaluator round、follow-up 次数、
-每个 Session 的 cache、action retry、uncached/output tokens、端到端时间、最终质量和
-audit 状态。只有在困难题上带来稳定且超过成本阈值的改善，r3/r4 才适合成为推荐模板；
-否则它们只作为用户显式选择的 Workflow 参数。
+这些能力都应服务于用户自己的 Workflow。`evidence-loop`、`interactive-agent` 和
+`project-summary` 是 built-in 程序和可学习示例，不是特殊内核；用户可以在一个 Project
+里先运行任意研究 Workflow，再从已有 Session、artifact 或 Project snapshot 启动另一个
+Workflow 继续工作。
 
 ## 可复核材料
 
-- 当前主报告：`benchmarks/deep-research-mini/runs/deepseek-clean-f2123eb-5x3x2-2026-08-07/report.md`
-- 当前完整 state：`benchmarks/deep-research-mini/runs/deepseek-clean-f2123eb-5x3x2-2026-08-07/state.json`
+- 当前 runtime 高难报告：`benchmarks/deep-research-mini/runs/deepseek-hard-f311284-4x3x2-2026-08-07/report.md`
+- 当前 runtime 完整 state：`benchmarks/deep-research-mini/runs/deepseek-hard-f311284-4x3x2-2026-08-07/state.json`
+- 第一轮基线报告：`benchmarks/deep-research-mini/runs/deepseek-clean-f2123eb-5x3x2-2026-08-07/report.md`
 - DeepResearch runner：`benchmarks/deep-research-mini/run_matrix.py`
 - LiveDR runner：`benchmarks/live-dr-mini/run_matrix.py`
 - BrowseComp runner：`benchmarks/browsecomp-mini/run_matrix.py`
