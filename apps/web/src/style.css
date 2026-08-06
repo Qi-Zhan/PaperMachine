@@ -252,7 +252,7 @@ pre {
   background: rgba(255, 255, 255, 0.78);
 }
 
-.research-tree {
+.project-tree {
   flex: 1 1 auto;
   min-height: 0;
   padding: 8px;
@@ -278,11 +278,11 @@ pre {
   font-size: 11px;
 }
 
-.research-group {
+.project-group {
   margin-bottom: 4px;
 }
 
-.research-row {
+.project-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 26px;
   align-items: center;
@@ -290,12 +290,12 @@ pre {
   border-radius: 6px;
 }
 
-.research-row:hover,
-.research-row[data-active="true"] {
+.project-row:hover,
+.project-row[data-active="true"] {
   background: rgba(255, 255, 255, 0.76);
 }
 
-.research-select {
+.project-select {
   display: grid;
   grid-template-columns: 14px 16px minmax(0, 1fr);
   gap: 6px;
@@ -309,7 +309,7 @@ pre {
   text-align: left;
 }
 
-.research-select span {
+.project-select span {
   overflow: hidden;
   font-size: 11px;
   font-weight: 630;
@@ -602,7 +602,7 @@ pre {
   flex-basis: 6px;
 }
 
-.research-overview,
+.project-overview,
 .session-workspace,
 .zero-state,
 .workflow-library {
@@ -612,21 +612,21 @@ pre {
   min-height: 0;
 }
 
-.research-content {
+.project-content {
   flex: 1;
   min-height: 0;
   padding: 34px clamp(22px, 5vw, 72px) 122px;
   overflow-y: auto;
 }
 
-.research-summary,
+.project-summary,
 .overview-section,
 .overview-columns {
   width: min(1080px, 100%);
   margin: 0 auto;
 }
 
-.research-summary {
+.project-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 42px;
@@ -635,7 +635,7 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 
-.research-description {
+.project-description {
   max-width: 66ch;
   color: #515754;
   font-size: 13px;
@@ -2913,7 +2913,7 @@ pre {
     display: none;
   }
 
-  .research-page-header .primary-button {
+  .project-page-header .primary-button {
     width: 32px;
     padding: 0;
     overflow: hidden;
@@ -2925,11 +2925,11 @@ pre {
     display: none;
   }
 
-  .research-content {
+  .project-content {
     padding: 24px 15px 112px;
   }
 
-  .research-summary {
+  .project-summary {
     grid-template-columns: 1fr;
     gap: 20px;
   }

@@ -397,7 +397,6 @@ async def _research_with_contract(
 @workflow(
     slug="evidence-loop",
     name="Evidence loop",
-    version="0.6.0",
     description="Freeze a question-specific coverage contract, run bounded independent parallel evidence routes, and reuse one continuation-stable action in each persistent route Session for evaluator-directed follow-up.",
     input_schema={
         "type": "object",

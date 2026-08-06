@@ -232,7 +232,6 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
 @workflow(
     slug="live-dr-grader",
     name="LiveDRBench grader",
-    version="0.2.0",
     description="Blindly apply the upstream LiveDRBench semantic claim-matching rubric, then compute precision, recall, and F1 deterministically.",
     input_schema={
         "type": "object",

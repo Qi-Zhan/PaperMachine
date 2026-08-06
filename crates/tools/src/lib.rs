@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::AgentAccessProfile;
-use papermachine_protocol::ResearchId;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowRunId;
+use papermachine_protocol::WorkflowId;
 use serde_json::Value;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -33,10 +33,10 @@ pub use registry::ToolRegistryBuilder;
 
 #[derive(Clone, Debug)]
 pub struct ToolContext {
-    pub research_id: ResearchId,
+    pub project_id: ProjectId,
     pub session_id: SessionId,
     pub turn_id: TurnId,
-    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub workspace_root: PathBuf,

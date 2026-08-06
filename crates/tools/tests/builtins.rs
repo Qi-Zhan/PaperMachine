@@ -1,8 +1,8 @@
 use papermachine_protocol::AgentAccessProfile;
-use papermachine_protocol::ResearchId;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowRunId;
+use papermachine_protocol::WorkflowId;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
@@ -21,10 +21,10 @@ fn context(root: &std::path::Path) -> ToolContext {
 
 fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> ToolContext {
     ToolContext {
-        research_id: ResearchId::new(),
+        project_id: ProjectId::new(),
         session_id: SessionId::new(),
         turn_id: TurnId::new(),
-        workflow_run_id: Some(WorkflowRunId::new()),
+        workflow_id: Some(WorkflowId::new()),
         action_invocation_id: None,
         action_attempt_id: None,
         workspace_root: root.to_path_buf(),

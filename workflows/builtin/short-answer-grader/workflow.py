@@ -19,7 +19,6 @@ class Grader(Agent):
 @workflow(
     slug="short-answer-grader",
     name="Short-answer grader",
-    version="0.3.0",
     description="Blindly judge one final short answer against a supplied reference answer in a separate no-tool Session.",
     input_schema={
         "type": "object",

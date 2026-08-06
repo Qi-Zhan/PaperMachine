@@ -33,7 +33,7 @@
           <component :is="workflow.source === 'builtin' ? Boxes : UserRound" :size="15" />
           <span>
             <strong>{{ workflow.manifest.name }}</strong>
-            <small>{{ workflow.manifest.version }} · {{ sourceLabel(workflow.source) }}</small>
+            <small>{{ workflow.manifest.slug }} · {{ sourceLabel(workflow.source) }}</small>
           </span>
           <ChevronRight :size="14" />
         </button>
@@ -59,9 +59,9 @@
           <div class="workflow-generator-actions">
             <span v-if="selectedRegistration" class="workflow-source-line">
               <component :is="selectedRegistration.source === 'builtin' ? Boxes : UserRound" :size="13" />
-              {{ sourceLabel(selectedRegistration.source) }} · {{ selectedRegistration.manifest.slug }}@{{ selectedRegistration.manifest.version }}
+              {{ sourceLabel(selectedRegistration.source) }} · {{ selectedRegistration.manifest.slug }}
             </span>
-            <span v-else class="workflow-source-line">{{ t('workflow.sourceVersioned') }}</span>
+            <span v-else class="workflow-source-line">{{ t('workflow.sourceHint') }}</span>
             <button class="secondary-button" type="button" :disabled="Boolean(busyAction) || !generation.description.trim()" @click="generate">
               <LoaderCircle v-if="busyAction === 'generate'" class="spin" :size="14" />
               <WandSparkles v-else :size="14" />
@@ -97,7 +97,6 @@
               <section v-if="manifest" class="workflow-protocol-intro">
                 <p>{{ manifest.description }}</p>
                 <dl>
-                  <div><dt>{{ t('workflow.version') }}</dt><dd>{{ manifest.version }}</dd></div>
                   <div><dt>{{ t('workflow.entrypoint') }}</dt><dd>{{ manifest.entrypoint }}</dd></div>
                   <div><dt>{{ t('workflow.inputs') }}</dt><dd>{{ schemaKeys(manifest.input_schema) }}</dd></div>
                   <div><dt>{{ t('workflow.agentLimit') }}</dt><dd>{{ manifest.default_budget.max_agents }}</dd></div>
@@ -174,7 +173,7 @@
               <button class="primary-button" type="button" :disabled="Boolean(busyAction) || !canSave" @click="save">
                 <LoaderCircle v-if="busyAction === 'save'" class="spin" :size="14" />
                 <Save v-else :size="14" />
-                {{ t('workflow.publishVersion') }}
+                {{ t('workflow.save') }}
               </button>
             </div>
           </footer>
@@ -209,13 +208,13 @@ import { useAppI18n } from '../i18n'
 import type {
   AgentAccessProfile,
   WorkflowGenerationInput,
-  WorkflowManifest,
-  WorkflowRegistration,
+  WorkflowProgramManifest,
+  WorkflowProgram,
   WorkflowValidation,
 } from '../types'
 
-const props = defineProps<{ workflows: WorkflowRegistration[] }>()
-const emit = defineEmits<{ 'open-sidebar': []; saved: [workflow: WorkflowRegistration] }>()
+const props = defineProps<{ projectId: string; workflows: WorkflowProgram[] }>()
+const emit = defineEmits<{ 'open-sidebar': []; saved: [workflow: WorkflowProgram] }>()
 
 const selectedKey = ref<string | null>(null)
 const sourceText = ref('')
@@ -228,7 +227,7 @@ const { t } = useAppI18n()
 const selectedRegistration = computed(
   () => props.workflows.find((workflow) => keyOf(workflow) === selectedKey.value) ?? null,
 )
-const manifest = computed<WorkflowManifest | null>(
+const manifest = computed<WorkflowProgramManifest | null>(
   () => validation.value?.manifest ?? selectedRegistration.value?.manifest ?? null,
 )
 const canSave = computed(() => Boolean(validation.value?.valid && validation.value.manifest))
@@ -254,8 +253,8 @@ function accessLabel(access: AgentAccessProfile): string {
   return t('access.fullAccess')
 }
 
-function keyOf(workflow: WorkflowRegistration) {
-  return `${workflow.manifest.slug}@${workflow.manifest.version}`
+function keyOf(workflow: WorkflowProgram) {
+  return workflow.manifest.slug
 }
 
 function newDraft() {
@@ -268,12 +267,12 @@ function newDraft() {
   clearStatus()
 }
 
-async function loadWorkflow(workflow: WorkflowRegistration) {
+async function loadWorkflow(workflow: WorkflowProgram) {
   selectedKey.value = keyOf(workflow)
   busyAction.value = 'load'
   clearStatus()
   try {
-    const loaded = await api.getWorkflow(workflow.manifest.slug, workflow.manifest.version)
+    const loaded = await api.getWorkflowProgram(props.projectId, workflow.manifest.slug)
     sourceText.value = loaded.source
     generation.name = workflow.manifest.name
     generation.slug = workflow.manifest.slug
@@ -337,10 +336,10 @@ async function save() {
       setValidationStatus(result, '')
       return
     }
-    const registration = await api.saveWorkflow(sourceText.value)
+    const registration = await api.saveWorkflowProgram(props.projectId, sourceText.value)
     selectedKey.value = keyOf(registration)
     status.kind = 'success'
-    status.message = t('workflow.versionPublished')
+    status.message = t('workflow.saved')
     emit('saved', registration)
   } catch (error) {
     setError(error)

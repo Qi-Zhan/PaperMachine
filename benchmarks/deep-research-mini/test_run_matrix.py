@@ -12,7 +12,7 @@ SPEC.loader.exec_module(run_matrix)
 
 class MatrixTests(unittest.TestCase):
     def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
-        attempts = [{"run_id": "failed-run"}]
+        attempts = [{"workflow_id": "failed-run"}]
         state = {
             "jobs": [
                 {
@@ -39,7 +39,10 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 16)
         self.assertEqual(
-            {condition: sum(job["condition"] == condition for job in first) for condition in conditions},
+            {
+                condition: sum(job["condition"] == condition for job in first)
+                for condition in conditions
+            },
             {condition: 8 for condition in conditions},
         )
 
@@ -47,7 +50,12 @@ class MatrixTests(unittest.TestCase):
         rubric = {
             "criterions": {
                 dimension: [
-                    {"criterion": "A", "explanation": "B", "weight": 1.0, "comment": "hidden"}
+                    {
+                        "criterion": "A",
+                        "explanation": "B",
+                        "weight": 1.0,
+                        "comment": "hidden",
+                    }
                 ]
                 for dimension in run_matrix.DIMENSIONS
             }
@@ -90,16 +98,20 @@ class MatrixTests(unittest.TestCase):
 
     def test_weighted_score_rejects_missing_criterion(self) -> None:
         rubric = {
-            "dimension_weight": {dimension: 0.25 for dimension in run_matrix.DIMENSIONS},
+            "dimension_weight": {
+                dimension: 0.25 for dimension in run_matrix.DIMENSIONS
+            },
             "criterions": {
                 dimension: [{"criterion": "A", "explanation": "", "weight": 1.0}]
                 for dimension in run_matrix.DIMENSIONS
             },
         }
         grading = {
-            dimension: [] if dimension == "insight" else [
-                {"criterion_index": 0, "score": 5, "analysis": ""}
-            ]
+            dimension: (
+                []
+                if dimension == "insight"
+                else [{"criterion_index": 0, "score": 5, "analysis": ""}]
+            )
             for dimension in run_matrix.DIMENSIONS
         }
         with self.assertRaisesRegex(ValueError, "insight expected 1 ratings"):
@@ -114,7 +126,11 @@ class MatrixTests(unittest.TestCase):
                     "report_characters": 1000,
                     "unique_direct_urls": 3,
                     "usage": run_matrix.token_usage(
-                        {"input_tokens": 100, "output_tokens": 20, "cached_input_tokens": 40}
+                        {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "cached_input_tokens": 40,
+                        }
                     ),
                 }
             },
@@ -135,7 +151,9 @@ class MatrixTests(unittest.TestCase):
             "research": complete["research"],
             "grade": {"attempts": []},
         }
-        aggregate = run_matrix.aggregate_condition([complete, incomplete], "single_agent")
+        aggregate = run_matrix.aggregate_condition(
+            [complete, incomplete], "single_agent"
+        )
         self.assertEqual(aggregate["runs"], 1)
         self.assertEqual(aggregate["score_mean"], 75)
         self.assertEqual(aggregate["uncached_input_mean"], 60)
@@ -146,7 +164,11 @@ class MatrixTests(unittest.TestCase):
             "research": {
                 "result": {
                     "usage": run_matrix.token_usage(
-                        {"input_tokens": 100, "output_tokens": 20, "cached_input_tokens": 40}
+                        {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "cached_input_tokens": 40,
+                        }
                     ),
                     "wall_time_seconds": 10,
                 },
@@ -155,7 +177,11 @@ class MatrixTests(unittest.TestCase):
                         "status": "failed",
                         "error": "stream_read_error",
                         "usage": run_matrix.token_usage(
-                            {"input_tokens": 25, "output_tokens": 5, "cached_input_tokens": 8}
+                            {
+                                "input_tokens": 25,
+                                "output_tokens": 5,
+                                "cached_input_tokens": 8,
+                            }
                         ),
                         "wall_time_seconds": 3,
                     },
@@ -175,7 +201,9 @@ class MatrixTests(unittest.TestCase):
                 "Workflow token budget exceeded: used 515213 of 500000 tokens"
             )
         )
-        self.assertTrue(run_matrix.is_retryable_error("model provider error: stream_read_error"))
+        self.assertTrue(
+            run_matrix.is_retryable_error("model provider error: stream_read_error")
+        )
         self.assertTrue(run_matrix.is_retryable_error("Broken pipe (os error 32)"))
 
 

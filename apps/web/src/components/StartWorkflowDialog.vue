@@ -15,7 +15,7 @@
         <label class="field-label" for="workflow-select">Workflow</label>
         <select id="workflow-select" v-model="workflowKey" class="select-input">
           <option v-for="workflow in workflows" :key="keyOf(workflow)" :value="keyOf(workflow)">
-            {{ workflow.manifest.name }} · {{ workflow.manifest.version }}
+            {{ workflow.manifest.name }} · {{ workflow.manifest.slug }}
           </option>
         </select>
         <p v-if="selectedWorkflow" class="field-note">{{ selectedWorkflow.manifest.description }}</p>
@@ -113,18 +113,18 @@
 import { ChevronDown, LoaderCircle, Minus, Play, Plus, SlidersHorizontal, X } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAppI18n } from '../i18n'
-import type { Session, WorkflowRegistration } from '../types'
+import type { Session, WorkflowProgram } from '../types'
 
 const props = defineProps<{
   open: boolean
   busy: boolean
   error?: string
   session: Session | null
-  workflows: WorkflowRegistration[]
+  workflows: WorkflowProgram[]
 }>()
 const emit = defineEmits<{
   close: []
-  submit: [input: { workflow: WorkflowRegistration; objective: string; input: Record<string, unknown> }]
+  submit: [input: { workflow: WorkflowProgram; objective: string; input: Record<string, unknown> }]
 }>()
 
 type FormValue = string | number | boolean
@@ -160,7 +160,7 @@ const advancedVisible = ref(false)
 const localError = ref('')
 const objectiveInput = ref<HTMLTextAreaElement | null>(null)
 
-const keyOf = (workflow: WorkflowRegistration) => `${workflow.manifest.slug}@${workflow.manifest.version}`
+const keyOf = (workflow: WorkflowProgram) => workflow.manifest.slug
 const selectedWorkflow = computed(() => props.workflows.find((workflow) => keyOf(workflow) === workflowKey.value))
 const schemaFields = computed<SchemaField[]>(() => {
   const properties = (selectedWorkflow.value?.manifest.input_schema as { properties?: unknown } | undefined)?.properties

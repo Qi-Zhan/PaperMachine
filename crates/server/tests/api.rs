@@ -3,9 +3,9 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
-use papermachine_protocol::Research;
+use papermachine_protocol::Project;
 use papermachine_protocol::Session;
-use papermachine_protocol::WorkflowRunEvent;
+use papermachine_protocol::WorkflowEvent;
 use papermachine_server::ServerConfig;
 use papermachine_server::initialize;
 use papermachine_server::router;
@@ -69,25 +69,40 @@ async fn test_app(directory: &TempDir) -> Router {
     router(state, directory.path().join("dist"))
 }
 
-async fn create_research_and_session(app: &Router, name: &str) -> (Research, Session) {
+async fn create_project_and_session(app: &Router, base: &Path, name: &str) -> (Project, Session) {
+    let directory_name = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let root_path = base.join("projects").join(directory_name);
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/researches",
-            json!({"name": name, "description": "API test"}),
+            "/api/projects",
+            json!({
+                "name": name,
+                "description": "API test",
+                "root_path": root_path.to_string_lossy()
+            }),
         ))
         .await
-        .expect("research request should complete");
+        .expect("project request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
-    let research: Research =
-        serde_json::from_value(response_json(response).await).expect("research should deserialize");
+    let project: Project =
+        serde_json::from_value(response_json(response).await).expect("project should deserialize");
 
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/researches/{}/sessions", research.id),
+            &format!("/api/projects/{}/sessions", project.id),
             json!({"title": "Origin Session"}),
         ))
         .await
@@ -95,21 +110,21 @@ async fn create_research_and_session(app: &Router, name: &str) -> (Research, Ses
     assert_eq!(response.status(), StatusCode::CREATED);
     let session: Session =
         serde_json::from_value(response_json(response).await).expect("Session should deserialize");
-    (research, session)
+    (project, session)
 }
 
 #[tokio::test]
 async fn api_creates_and_updates_session_access_profiles() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
-    let (research, origin) = create_research_and_session(&app, "Access API").await;
+    let (project, origin) = create_project_and_session(&app, directory.path(), "Access API").await;
     assert_eq!(origin.access.as_str(), "research");
 
     let created = app
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/researches/{}/sessions", research.id),
+            &format!("/api/projects/{}/sessions", project.id),
             json!({"title": "No tools", "access": "model_only"}),
         ))
         .await
@@ -144,12 +159,12 @@ async fn api_creates_and_updates_session_access_profiles() {
     assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
-async fn get_run_view(app: &Router, run_id: &str) -> Value {
+async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
     let response = app
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/workflow-runs/{run_id}"),
+            &format!("/api/workflows/{workflow_id}"),
         ))
         .await
         .expect("run view request should complete");
@@ -157,29 +172,26 @@ async fn get_run_view(app: &Router, run_id: &str) -> Value {
     response_json(response).await
 }
 
-async fn wait_for_run_status(app: &Router, run_id: &str, expected: &str) -> Value {
+async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &str) -> Value {
     for _ in 0..400 {
-        let view = get_run_view(app, run_id).await;
-        if view["workflow_run"]["status"] == expected {
+        let view = get_workflow_view(app, workflow_id).await;
+        if view["workflow"]["status"] == expected {
             return view;
         }
         if matches!(
-            view["workflow_run"]["status"].as_str(),
+            view["workflow"]["status"].as_str(),
             Some("failed" | "cancelled")
         ) {
-            panic!(
-                "WorkflowRun terminated unexpectedly: {}",
-                view["workflow_run"]
-            );
+            panic!("Workflow terminated unexpectedly: {}", view["workflow"]);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("WorkflowRun did not reach {expected}");
+    panic!("Workflow did not reach {expected}");
 }
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn api_runs_python_workflow_as_research_owned_sessions() {
+async fn api_runs_python_workflow_as_project_owned_sessions() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
 
@@ -191,9 +203,10 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
     assert_eq!(health.status(), StatusCode::OK);
     let health = response_json(health).await;
     assert_eq!(health["model_mode"], "demo");
-    assert_eq!(health["workflow_runtime"], "python_effect_dsl_v1");
+    assert_eq!(health["workflow_runtime"], "python_effect_dsl");
 
-    let (research, origin) = create_research_and_session(&app, "Parallel research").await;
+    let (project, origin) =
+        create_project_and_session(&app, directory.path(), "Parallel project").await;
     let turn = app
         .clone()
         .oneshot(json_request(
@@ -209,21 +222,21 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/sessions/{}/workflow-runs", origin.id),
+            &format!("/api/projects/{}/workflows", project.id),
             json!({
-                "workflow_slug": "parallel-discovery",
-                "workflow_version": "0.3.0",
+                "program_slug": "parallel-discovery",
                 "objective": "Compare two implementation approaches.",
-                "input": {"perspectives": ["primary evidence", "failure modes"]}
+                "input": {"perspectives": ["primary evidence", "failure modes"]},
+                "started_from_session_id": origin.id
             }),
         ))
         .await
         .expect("run request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
     let run = response_json(response).await;
-    let run_id = run["id"].as_str().expect("run id should be present");
+    let workflow_id = run["id"].as_str().expect("run id should be present");
 
-    let view = wait_for_run_status(&app, run_id, "completed").await;
+    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
     assert_eq!(view["participants"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["sessions"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["actions"].as_array().map(Vec::len), Some(3));
@@ -232,7 +245,7 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
     assert_eq!(view["relations"].as_array().map(Vec::len), Some(2));
     assert_eq!(view["task_scopes"].as_array().map(Vec::len), Some(1));
     assert!(
-        view["workflow_run"]["output"]["summary"]
+        view["workflow"]["output"]["summary"]
             .as_str()
             .is_some_and(|value| value.contains("Demo result"))
     );
@@ -241,11 +254,11 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/workflow-runs/{run_id}/events"),
+            &format!("/api/workflows/{workflow_id}/events"),
         ))
         .await
         .expect("events request should complete");
-    let events: Vec<WorkflowRunEvent> =
+    let events: Vec<WorkflowEvent> =
         serde_json::from_value(response_json(response).await).expect("events should deserialize");
     assert!(events.len() > 12);
     assert_eq!(events.first().map(|event| event.sequence), Some(1));
@@ -259,10 +272,10 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/researches/{}", research.id),
+            &format!("/api/projects/{}", project.id),
         ))
         .await
-        .expect("Research overview should load");
+        .expect("Project overview should load");
     let overview = response_json(overview).await;
     assert_eq!(overview["sessions"].as_array().map(Vec::len), Some(4));
     assert_eq!(
@@ -295,7 +308,7 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
         .oneshot(empty_request(
             "GET",
             &format!(
-                "/api/workflow-runs/{run_id}/events/stream?after={}",
+                "/api/workflows/{workflow_id}/events/stream?after={}",
                 events.len()
             ),
         ))
@@ -315,11 +328,13 @@ async fn api_runs_python_workflow_as_research_owned_sessions() {
 async fn api_generates_validates_and_publishes_python_workflows() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
+    let (project, _origin) =
+        create_project_and_session(&app, directory.path(), "Workflow authoring").await;
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows/generate",
+            "/api/workflow-programs/generate",
             json!({
                 "name": "Claim challenge",
                 "slug": "claim-challenge",
@@ -351,7 +366,7 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows/validate",
+            "/api/workflow-programs/validate",
             json!({"source": invalid_access}),
         ))
         .await
@@ -375,7 +390,7 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows/validate",
+            "/api/workflow-programs/validate",
             json!({"source": source}),
         ))
         .await
@@ -387,22 +402,27 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows",
+            &format!("/api/projects/{}/workflow-programs", project.id),
             json!({"source": source}),
         ))
         .await
         .expect("publish request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
     assert!(
-        directory
-            .path()
-            .join("workflows/user/claim-challenge/0.1.0/workflow.py")
+        Path::new(&project.root_path)
+            .join(".papermachine/workflows/claim-challenge/workflow.py")
             .is_file()
     );
 
     let response = app
         .clone()
-        .oneshot(empty_request("GET", "/api/workflows/claim-challenge/0.1.0"))
+        .oneshot(empty_request(
+            "GET",
+            &format!(
+                "/api/projects/{}/workflow-programs/claim-challenge",
+                project.id
+            ),
+        ))
         .await
         .expect("published workflow should load");
     assert_eq!(response.status(), StatusCode::OK);
@@ -412,15 +432,28 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         "Run two independent evidence routes",
         "Run independent evidence routes",
     );
-    let conflict = app
+    let replaced = app
+        .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows",
+            &format!("/api/projects/{}/workflow-programs", project.id),
             json!({"source": changed}),
         ))
         .await
-        .expect("immutable version request should complete");
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        .expect("replacement request should complete");
+    assert_eq!(replaced.status(), StatusCode::CREATED);
+    let loaded = app
+        .oneshot(empty_request(
+            "GET",
+            &format!(
+                "/api/projects/{}/workflow-programs/claim-challenge",
+                project.id
+            ),
+        ))
+        .await
+        .expect("replaced workflow should load");
+    assert_eq!(loaded.status(), StatusCode::OK);
+    assert_eq!(response_json(loaded).await["source"], changed);
 }
 
 #[cfg(target_os = "macos")]
@@ -428,20 +461,21 @@ async fn api_generates_validates_and_publishes_python_workflows() {
 async fn workflow_can_pause_request_human_input_and_resume() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
+    let (project, origin) =
+        create_project_and_session(&app, directory.path(), "Human-guided project").await;
     let source = r#"from papermachine import ask_human, workflow
 
 
 @workflow(
     slug="human-decision",
     name="Human decision",
-    version="0.1.0",
     description="Wait for a human decision before completing.",
     input_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"decision": {"type": "string"}}},
 )
 async def main(ctx):
     answer = await ask_human(
-        "Which direction should the research take?",
+        "Which direction should the project take?",
         response_schema={"type": "string"},
     )
     return {"decision": answer}
@@ -450,34 +484,33 @@ async def main(ctx):
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows",
+            &format!("/api/projects/{}/workflow-programs", project.id),
             json!({"source": source}),
         ))
         .await
         .expect("workflow should publish");
     assert_eq!(publish.status(), StatusCode::CREATED);
-    let (_research, origin) = create_research_and_session(&app, "Human-guided research").await;
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/sessions/{}/workflow-runs", origin.id),
+            &format!("/api/projects/{}/workflows", project.id),
             json!({
-                "workflow_slug": "human-decision",
-                "workflow_version": "0.1.0",
-                "objective": "Choose a research direction.",
-                "input": {}
+                "program_slug": "human-decision",
+                "objective": "Choose a project direction.",
+                "input": {},
+                "started_from_session_id": origin.id
             }),
         ))
         .await
         .expect("run should start");
     assert_eq!(response.status(), StatusCode::CREATED);
     let run = response_json(response).await;
-    let run_id = run["id"].as_str().expect("run id should exist");
+    let workflow_id = run["id"].as_str().expect("run id should exist");
 
     let mut request_id = None;
     for _ in 0..200 {
-        let view = get_run_view(&app, run_id).await;
+        let view = get_workflow_view(&app, workflow_id).await;
         request_id = view["human_requests"].as_array().and_then(|items| {
             items
                 .iter()
@@ -486,7 +519,7 @@ async def main(ctx):
                 .map(str::to_string)
         });
         if request_id.is_some() {
-            assert_eq!(view["workflow_run"]["attention_required"], true);
+            assert_eq!(view["workflow"]["attention_required"], true);
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -497,17 +530,17 @@ async def main(ctx):
         .clone()
         .oneshot(empty_request(
             "POST",
-            &format!("/api/workflow-runs/{run_id}/pause"),
+            &format!("/api/workflows/{workflow_id}/pause"),
         ))
         .await
         .expect("pause should complete");
     assert_eq!(pause.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(&app, run_id, "paused").await;
+    wait_for_workflow_status(&app, workflow_id, "paused").await;
     let resume = app
         .clone()
         .oneshot(empty_request(
             "POST",
-            &format!("/api/workflow-runs/{run_id}/resume"),
+            &format!("/api/workflows/{workflow_id}/resume"),
         ))
         .await
         .expect("resume should complete");
@@ -536,12 +569,12 @@ async def main(ctx):
     let answer_body = response_json(answer).await;
     assert_eq!(answer_status, StatusCode::OK, "{answer_body}");
 
-    let completed = wait_for_run_status(&app, run_id, "completed").await;
+    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
     assert_eq!(
-        completed["workflow_run"]["output"]["decision"],
+        completed["workflow"]["output"]["decision"],
         "Prioritize primary evidence."
     );
-    assert_eq!(completed["workflow_run"]["attention_required"], false);
+    assert_eq!(completed["workflow"]["attention_required"], false);
 }
 
 #[cfg(target_os = "macos")]
@@ -549,6 +582,7 @@ async def main(ctx):
 async fn workflow_access_escalation_requires_a_human_grant() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
+    let (project, origin) = create_project_and_session(&app, directory.path(), "Escalation").await;
     let source = r#"from papermachine import Agent, action, workflow
 
 
@@ -564,7 +598,6 @@ class HostInspector(Agent):
 @workflow(
     slug="access-grant",
     name="Access grant",
-    version="0.1.0",
     description="Require a human grant before creating a full-access Agent Session.",
     input_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
@@ -578,35 +611,34 @@ async def main(ctx):
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflows",
+            &format!("/api/projects/{}/workflow-programs", project.id),
             json!({"source": source}),
         ))
         .await
         .expect("workflow should publish");
     assert_eq!(publish.status(), StatusCode::CREATED);
-    let (_research, origin) = create_research_and_session(&app, "Escalation").await;
     let response = app
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/sessions/{}/workflow-runs", origin.id),
+            &format!("/api/projects/{}/workflows", project.id),
             json!({
-                "workflow_slug": "access-grant",
-                "workflow_version": "0.1.0",
+                "program_slug": "access-grant",
                 "objective": "Inspect the configured environment.",
-                "input": {}
+                "input": {},
+                "started_from_session_id": origin.id
             }),
         ))
         .await
         .expect("run should start");
     assert_eq!(response.status(), StatusCode::CREATED);
     let run = response_json(response).await;
-    let run_id = run["id"].as_str().expect("run id should exist");
+    let workflow_id = run["id"].as_str().expect("run id should exist");
 
     let mut open_request = None;
     let mut participant_session_id = None;
     for _ in 0..200 {
-        let view = get_run_view(&app, run_id).await;
+        let view = get_workflow_view(&app, workflow_id).await;
         participant_session_id = view["sessions"]
             .as_array()
             .and_then(|items| items.first())
@@ -645,7 +677,7 @@ async def main(ctx):
         .await
         .expect("grant should complete");
     assert_eq!(answer.status(), StatusCode::OK);
-    let completed = wait_for_run_status(&app, run_id, "completed").await;
+    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
     assert_eq!(completed["sessions"][0]["access"], "full_access");
 
     let participant = app

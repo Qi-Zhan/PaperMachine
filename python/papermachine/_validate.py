@@ -42,7 +42,6 @@ FORBIDDEN_ROOTS = {
     "threading",
 }
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 ACCESS_PROFILES = {
     "model_only",
     "read_only",
@@ -264,12 +263,10 @@ def validate(source: str) -> dict[str, Any]:
         return {"valid": False, "manifest": None, "agents": validator.agents, "features": validator.features, "diagnostics": diagnostics}
 
     slug = str(metadata.get("slug", ""))
-    version = str(metadata.get("version", ""))
     name = str(metadata.get("name", ""))
     description = str(metadata.get("description", ""))
     for condition, message in [
         (not SLUG.fullmatch(slug), "workflow slug must use lowercase kebab-case"),
-        (not VERSION.fullmatch(version), "workflow version must be semantic x.y.z"),
         (not name.strip(), "workflow name is required"),
         (not description.strip(), "workflow description is required"),
         (not isinstance(metadata.get("input_schema", {}), dict), "input_schema must be a literal dict"),
@@ -303,7 +300,6 @@ def validate(source: str) -> dict[str, Any]:
         "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"papermachine:workflow:{slug}")),
         "slug": slug,
         "name": name,
-        "version": version,
         "description": description,
         "entrypoint": entrypoint,
         "input_schema": metadata.get("input_schema", {"type": "object"}),

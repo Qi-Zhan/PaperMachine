@@ -22,13 +22,11 @@ from typing import Any, Callable
 
 CONDITIONS = {
     "single_agent": {
-        "workflow_slug": "single-agent-research",
-        "workflow_version": "0.5.0",
+        "program_slug": "single-agent-research",
         "input": {},
     },
     "coverage_r1": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 2,
             "max_rounds": 1,
@@ -36,8 +34,7 @@ CONDITIONS = {
         },
     },
     "coverage_r2": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 2,
             "max_rounds": 2,
@@ -45,8 +42,7 @@ CONDITIONS = {
         },
     },
     "coverage_r3": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 3,
             "minimum_route_count": 3,
@@ -55,8 +51,7 @@ CONDITIONS = {
         },
     },
     "coverage_r4": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 4,
             "minimum_route_count": 4,
@@ -72,9 +67,9 @@ RUNTIME_FILES = (
     "crates/model/src/providers.rs",
     "crates/protocol/src/event.rs",
     "crates/protocol/src/model.rs",
-    "crates/protocol/src/research.rs",
-    "crates/research/src/runtime.rs",
-    "crates/research/src/scheduler.rs",
+    "crates/protocol/src/project.rs",
+    "crates/workflow/src/runtime.rs",
+    "crates/workflow/src/scheduler.rs",
     "crates/server/src/lib.rs",
     "crates/session/src/lib.rs",
     "crates/store/src/database.rs",
@@ -114,7 +109,9 @@ class PaperMachineApi:
                 data = response.read()
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise ApiError(f"{method} {path} returned HTTP {error.code}: {detail}") from error
+            raise ApiError(
+                f"{method} {path} returned HTTP {error.code}: {detail}"
+            ) from error
         except urllib.error.URLError as error:
             raise ApiError(f"{method} {path} failed: {error}") from error
         return None if not data else json.loads(data)
@@ -164,7 +161,9 @@ def decrypt(ciphertext_b64: str, password: str) -> str:
 
 def task_content(task: dict[str, Any]) -> tuple[str, str]:
     password = str(task["canary"])
-    return decrypt(str(task["problem"]), password), decrypt(str(task["answer"]), password)
+    return decrypt(str(task["problem"]), password), decrypt(
+        str(task["answer"]), password
+    )
 
 
 def research_prompt(question: str) -> str:
@@ -177,11 +176,22 @@ def research_prompt(question: str) -> str:
     )
 
 
-def ensure_research(api: PaperMachineApi, name: str, description: str) -> str:
-    for research in api.get("/researches"):
-        if research["name"] == name:
-            return str(research["id"])
-    return str(api.post("/researches", {"name": name, "description": description})["id"])
+def ensure_project(
+    api: PaperMachineApi,
+    name: str,
+    description: str,
+    root_path: Path,
+) -> str:
+    canonical_root = str(root_path.resolve())
+    for project in api.get("/projects"):
+        if project["root_path"] == canonical_root:
+            return str(project["id"])
+    return str(
+        api.post(
+            "/projects",
+            {"name": name, "description": description, "root_path": canonical_root},
+        )["id"]
+    )
 
 
 def build_jobs(
@@ -204,13 +214,13 @@ def build_jobs(
 
 def create_session(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     title: str,
     model: str,
     access: str,
 ) -> str:
     session = api.post(
-        f"/researches/{research_id}/sessions",
+        f"/projects/{project_id}/sessions",
         {
             "title": title,
             "instructions": "",
@@ -224,7 +234,7 @@ def create_session(
 
 def launch_research_run(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     job: dict[str, Any],
     task: dict[str, Any],
     model: str,
@@ -233,30 +243,33 @@ def launch_research_run(
     question, _ = task_content(task)
     session_id = create_session(
         api,
-        research_id,
+        project_id,
         f"BrowseComp {job['task_key']} {job['condition']} repeat {job['repeat']}",
         model,
         "research",
     )
     run = api.post(
-        f"/sessions/{session_id}/workflow-runs",
+        f"/projects/{project_id}/workflows",
         {
-            "workflow_slug": condition["workflow_slug"],
-            "workflow_version": condition["workflow_version"],
+            "program_slug": condition["program_slug"],
             "objective": research_prompt(question),
             "input": condition["input"],
+            "started_from_session_id": session_id,
+            "model": model,
+            "access": "research",
+            "enabled_skills": [],
         },
     )
     return {
         "session_id": session_id,
-        "run_id": str(run["id"]),
+        "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
 
 
 def launch_grader_run(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     job: dict[str, Any],
     task: dict[str, Any],
     response: str,
@@ -265,16 +278,15 @@ def launch_grader_run(
     question, correct_answer = task_content(task)
     session_id = create_session(
         api,
-        research_id,
+        project_id,
         f"Grade BrowseComp {job['task_key']} {job['condition']} repeat {job['repeat']}",
         model,
         "model_only",
     )
     run = api.post(
-        f"/sessions/{session_id}/workflow-runs",
+        f"/projects/{project_id}/workflows",
         {
-            "workflow_slug": "short-answer-grader",
-            "workflow_version": "0.3.0",
+            "program_slug": "short-answer-grader",
             "objective": "Blindly judge the submitted response against the supplied reference answer.",
             "input": {
                 "question": question,
@@ -282,11 +294,15 @@ def launch_grader_run(
                 "response": response,
                 "grader_model": model,
             },
+            "started_from_session_id": session_id,
+            "model": model,
+            "access": "model_only",
+            "enabled_skills": [],
         },
     )
     return {
         "session_id": session_id,
-        "run_id": str(run["id"]),
+        "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
 
@@ -336,7 +352,7 @@ def session_metrics(view: dict[str, Any]) -> dict[str, Any]:
     for step in steps:
         if step.get("kind") != "model":
             continue
-        metadata = ((step.get("output") or {}).get("request") or {})
+        metadata = (step.get("output") or {}).get("request") or {}
         if metadata.get("transport"):
             transports[str(metadata["transport"])] += 1
         if metadata.get("prompt_cache_mode"):
@@ -382,7 +398,7 @@ def capture_research_result(
     view: dict[str, Any],
     article_path: Path,
 ) -> dict[str, Any]:
-    run = view["workflow_run"]
+    run = view["workflow"]
     output = run.get("output") or {}
     report = output.get("report")
     if not isinstance(report, str) or not report.strip():
@@ -395,7 +411,7 @@ def capture_research_result(
     usage = run.get("usage") or {}
     result = {
         "status": run["status"],
-        "workflow_sha256": run["workflow"]["sha256"],
+        "workflow_sha256": run["program"]["sha256"],
         "created_at": run["created_at"],
         "completed_at": run["updated_at"],
         "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
@@ -450,7 +466,7 @@ def capture_research_result(
 
 
 def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, Any]:
-    run = view["workflow_run"]
+    run = view["workflow"]
     grading = (run.get("output") or {}).get("grading")
     if not isinstance(grading, dict):
         raise ValueError("grader output is missing grading object")
@@ -472,7 +488,7 @@ def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, A
         "extracted_final_answer": extracted,
         "confidence": float(confidence),
         "reasoning": str(grading.get("reasoning", "")),
-        "workflow_sha256": run["workflow"]["sha256"],
+        "workflow_sha256": run["program"]["sha256"],
         "usage": token_usage(usage.get("tokens") or {}),
         "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
         "grade_path": str(grade_path),
@@ -529,11 +545,14 @@ def drive_phase(
             phase_state = job[phase]
             if "result" in phase_state or job.get(failure_key):
                 continue
-            if not phase_state["attempts"] or phase_state.get("status") == "pending_retry":
+            if (
+                not phase_state["attempts"]
+                or phase_state.get("status") == "pending_retry"
+            ):
                 continue
             attempt = phase_state["attempts"][-1]
-            view = api.get(f"/workflow-runs/{attempt['run_id']}")
-            run = view["workflow_run"]
+            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            run = view["workflow"]
             status = str(run["status"])
             phase_state["status"] = status
             attempt["status"] = status
@@ -591,11 +610,15 @@ def drive_phase(
             for job in state["jobs"]
         )
         counts = Counter(
-            "skipped"
-            if phase == "grade" and job.get("research_failed")
-            else "failed"
-            if job.get(failure_key)
-            else job.get(phase, {}).get("status", "pending")
+            (
+                "skipped"
+                if phase == "grade" and job.get("research_failed")
+                else (
+                    "failed"
+                    if job.get(failure_key)
+                    else job.get(phase, {}).get("status", "pending")
+                )
+            )
             for job in state["jobs"]
         )
         print(f"{phase}: {dict(counts)}", flush=True)
@@ -633,7 +656,7 @@ def cancel_inflight(api: PaperMachineApi, state: dict[str, Any]) -> int:
                 continue
             attempt = attempts[-1]
             try:
-                api.post_empty(f"/workflow-runs/{attempt['run_id']}/cancel")
+                api.post_empty(f"/workflows/{attempt['workflow_id']}/cancel")
             except ApiError as error:
                 attempt["cancel_error"] = str(error)
             else:
@@ -695,9 +718,7 @@ def mean(values: list[float]) -> float:
 def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
     selected = [job for job in jobs if job["condition"] == condition]
     graded = [job for job in selected if "result" in job.get("grade", {})]
-    research_results = [
-        job.get("research", {}).get("result") or {} for job in selected
-    ]
+    research_results = [job.get("research", {}).get("result") or {} for job in selected]
     draft_audits = [
         result["draft_audit"]
         for result in research_results
@@ -709,14 +730,22 @@ def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
     total_cached = sum(usage["cached_input_tokens"] for usage in research_usage)
     transports = sum(
         (
-            Counter((job.get("research", {}).get("result") or {}).get("model_transports", {}))
+            Counter(
+                (job.get("research", {}).get("result") or {}).get(
+                    "model_transports", {}
+                )
+            )
             for job in selected
         ),
         Counter(),
     )
     cache_modes = sum(
         (
-            Counter((job.get("research", {}).get("result") or {}).get("prompt_cache_modes", {}))
+            Counter(
+                (job.get("research", {}).get("result") or {}).get(
+                    "prompt_cache_modes", {}
+                )
+            )
             for job in selected
         ),
         Counter(),
@@ -724,18 +753,25 @@ def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
     return {
         "runs": len(selected),
         "graded": len(graded),
-        "accuracy": sum(job["grade"]["result"]["correct"] for job in graded)
-        / len(selected)
-        if selected
-        else 0.0,
+        "accuracy": (
+            sum(job["grade"]["result"]["correct"] for job in graded) / len(selected)
+            if selected
+            else 0.0
+        ),
         "raw_input_mean": mean([usage["input_tokens"] for usage in research_usage]),
         "effective_mean": mean([usage["effective_tokens"] for usage in research_usage]),
         "output_mean": mean([usage["output_tokens"] for usage in research_usage]),
         "cache_read_ratio": total_cached / total_input if total_input else 0.0,
-        "grader_effective_mean": mean([usage["effective_tokens"] for usage in grader_usage]),
+        "grader_effective_mean": mean(
+            [usage["effective_tokens"] for usage in grader_usage]
+        ),
         "search_calls_mean": mean(
             [
-                float((job.get("research", {}).get("result") or {}).get("hosted_search_calls", 0))
+                float(
+                    (job.get("research", {}).get("result") or {}).get(
+                        "hosted_search_calls", 0
+                    )
+                )
                 for job in selected
             ]
         ),
@@ -744,24 +780,40 @@ def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
         "draft_revisions": sum(
             audit.get("revision_performed") is True for audit in draft_audits
         ),
-        "final_audit_failures": sum(audit.get("pass") is not True for audit in draft_audits),
+        "final_audit_failures": sum(
+            audit.get("pass") is not True for audit in draft_audits
+        ),
         "model_transports": dict(transports),
         "prompt_cache_modes": dict(cache_modes),
-        "websocket_ratio": transports["responses_websocket"] / sum(transports.values())
-        if transports
-        else 0.0,
+        "websocket_ratio": (
+            transports["responses_websocket"] / sum(transports.values())
+            if transports
+            else 0.0
+        ),
         "continuation_hits": sum(
-            int((job.get("research", {}).get("result") or {}).get("continuation_hits", 0))
+            int(
+                (job.get("research", {}).get("result") or {}).get(
+                    "continuation_hits", 0
+                )
+            )
             for job in selected
         ),
         "fallback_steps": sum(
             sum(
-                ((job.get("research", {}).get("result") or {}).get("websocket_fallback_reasons", {})).values()
+                (
+                    (job.get("research", {}).get("result") or {}).get(
+                        "websocket_fallback_reasons", {}
+                    )
+                ).values()
             )
             for job in selected
         ),
         "explicit_cache_breakpoints": sum(
-            int((job.get("research", {}).get("result") or {}).get("explicit_cache_breakpoints", 0))
+            int(
+                (job.get("research", {}).get("result") or {}).get(
+                    "explicit_cache_breakpoints", 0
+                )
+            )
             for job in selected
         ),
     }
@@ -769,7 +821,9 @@ def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
 
 def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> str:
     conditions = list(state["experiment"]["conditions"])
-    aggregates = {condition: aggregate(state["jobs"], condition) for condition in conditions}
+    aggregates = {
+        condition: aggregate(state["jobs"], condition) for condition in conditions
+    }
     lines = [
         "# PaperMachine BrowseComp mini report",
         "",
@@ -837,7 +891,8 @@ def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> st
         ]
     )
     for job in sorted(
-        state["jobs"], key=lambda item: (int(item["task_key"]), item["condition"], item["repeat"])
+        state["jobs"],
+        key=lambda item: (int(item["task_key"]), item["condition"], item["repeat"]),
     ):
         research = job.get("research", {}).get("result") or {}
         grade = job.get("grade", {}).get("result") or {}
@@ -877,22 +932,20 @@ def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
-def validate_workflows(api: PaperMachineApi, conditions: list[str]) -> None:
+def validate_workflows(
+    api: PaperMachineApi,
+    project_id: str,
+    required: set[str],
+) -> None:
     available = {
-        (item["manifest"]["slug"], item["manifest"]["version"])
-        for item in api.get("/workflows")
+        item["manifest"]["slug"]
+        for item in api.get(f"/projects/{project_id}/workflow-programs")
     }
-    required = {
-        (
-            CONDITIONS[condition]["workflow_slug"],
-            CONDITIONS[condition]["workflow_version"],
-        )
-        for condition in conditions
-    }
-    required.add(("short-answer-grader", "0.3.0"))
     missing = sorted(required - available)
     if missing:
-        raise RuntimeError(f"server is missing workflows {missing}; restart PaperMachine")
+        raise RuntimeError(
+            f"server is missing workflows {missing}; restart PaperMachine"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -916,16 +969,22 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.repeats < 1 or args.max_attempts < 1 or args.max_parallel_runs < 1:
-        raise ValueError("repeats, max-attempts, and max-parallel-runs must be positive")
+        raise ValueError(
+            "repeats, max-attempts, and max-parallel-runs must be positive"
+        )
     root = Path(__file__).resolve().parents[2]
     snapshot = load_json(Path(__file__).with_name("tasks.json"))
     available_tasks = {str(task["key"]): task for task in snapshot["tasks"]}
     task_keys = [value.strip() for value in args.task_keys.split(",") if value.strip()]
-    conditions = [value.strip() for value in args.conditions.split(",") if value.strip()]
+    conditions = [
+        value.strip() for value in args.conditions.split(",") if value.strip()
+    ]
     unknown_tasks = sorted(set(task_keys) - available_tasks.keys())
     unknown_conditions = sorted(set(conditions) - CONDITIONS.keys())
     if unknown_tasks or unknown_conditions:
-        raise ValueError(f"unknown tasks={unknown_tasks}, conditions={unknown_conditions}")
+        raise ValueError(
+            f"unknown tasks={unknown_tasks}, conditions={unknown_conditions}"
+        )
     tasks = {key: available_tasks[key] for key in task_keys}
     jobs = build_jobs(task_keys, conditions, args.repeats, args.seed)
     run_dir = Path(__file__).with_name("runs") / args.run_name
@@ -946,7 +1005,9 @@ def main() -> int:
         }
         for key, value in current.items():
             if expected[key] != value:
-                raise ValueError(f"existing run differs for {key}: {expected[key]!r} != {value!r}")
+                raise ValueError(
+                    f"existing run differs for {key}: {expected[key]!r} != {value!r}"
+                )
     else:
         state = {
             "schema_version": 1,
@@ -976,7 +1037,7 @@ def main() -> int:
                 )
             },
             "runtime_source_sha256": runtime_fingerprint(root),
-            "researches": {},
+            "projects": {},
             "jobs": jobs,
         }
         save_state(state_path, state)
@@ -997,20 +1058,27 @@ def main() -> int:
     health = api.get("/health")
     if health.get("model_mode") == "demo":
         raise RuntimeError("benchmark requires a substantive model provider")
-    validate_workflows(api, conditions)
     state["server_health"] = health
-    if "research" not in state["researches"]:
-        state["researches"]["research"] = ensure_research(
+    if "research" not in state["projects"]:
+        state["projects"]["research"] = ensure_project(
             api,
             f"BrowseComp research - {args.run_name}",
             "Pinned hard short-answer browsing tasks; reference answers are withheld.",
+            run_dir / "projects" / "research",
         )
-    if "grader" not in state["researches"]:
-        state["researches"]["grader"] = ensure_research(
+    if "grader" not in state["projects"]:
+        state["projects"]["grader"] = ensure_project(
             api,
             f"BrowseComp graders - {args.run_name}",
             "Independent no-tool answer-equivalence grading Sessions.",
+            run_dir / "projects" / "grader",
         )
+    validate_workflows(
+        api,
+        state["projects"]["research"],
+        {CONDITIONS[condition]["program_slug"] for condition in conditions},
+    )
+    validate_workflows(api, state["projects"]["grader"], {"short-answer-grader"})
     save_state(state_path, state)
 
     try:
@@ -1021,7 +1089,7 @@ def main() -> int:
             tasks,
             "research",
             lambda job, task: launch_research_run(
-                api, state["researches"]["research"], job, task, args.model
+                api, state["projects"]["research"], job, task, args.model
             ),
             lambda job, view: capture_research_result(
                 api, view, run_dir / "articles" / f"{job['key']}.txt"
@@ -1038,10 +1106,12 @@ def main() -> int:
             "grade",
             lambda job, task: launch_grader_run(
                 api,
-                state["researches"]["grader"],
+                state["projects"]["grader"],
                 job,
                 task,
-                Path(job["research"]["result"]["article_path"]).read_text(encoding="utf-8"),
+                Path(job["research"]["result"]["article_path"]).read_text(
+                    encoding="utf-8"
+                ),
                 args.grader_model,
             ),
             lambda job, view: capture_grader_result(
@@ -1054,7 +1124,7 @@ def main() -> int:
     except KeyboardInterrupt:
         cancelled = cancel_inflight(api, state)
         save_state(state_path, state)
-        print(f"cancelled {cancelled} in-flight WorkflowRuns", flush=True)
+        print(f"cancelled {cancelled} in-flight Workflows", flush=True)
         return 130
 
     atomic_write_text(report_path, render_report(state, tasks))

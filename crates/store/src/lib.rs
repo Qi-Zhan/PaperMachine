@@ -1,10 +1,10 @@
-//! Durable metadata, append-only run events, and content-addressed artifacts.
+//! Durable metadata, append-only Workflow events, and content-addressed artifacts.
 
 mod artifact;
 mod database;
 
 use papermachine_protocol::SessionEvent;
-use papermachine_protocol::WorkflowRunEvent;
+use papermachine_protocol::WorkflowEvent;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ impl From<serde_json::Error> for StoreError {
 #[derive(Clone)]
 struct StoreShared {
     artifact_root: Arc<PathBuf>,
-    run_events: broadcast::Sender<WorkflowRunEvent>,
+    workflow_events: broadcast::Sender<WorkflowEvent>,
     session_events: broadcast::Sender<SessionEvent>,
 }
 
@@ -47,17 +47,17 @@ impl StoreShared {
         let artifact_root = artifact_root.as_ref().to_path_buf();
         std::fs::create_dir_all(&artifact_root)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let (run_events, _) = broadcast::channel(4096);
+        let (workflow_events, _) = broadcast::channel(4096);
         let (session_events, _) = broadcast::channel(4096);
         Ok(Self {
             artifact_root: Arc::new(artifact_root),
-            run_events,
+            workflow_events,
             session_events,
         })
     }
 
-    fn publish_run(&self, event: WorkflowRunEvent) {
-        let _ = self.run_events.send(event);
+    fn publish_workflow(&self, event: WorkflowEvent) {
+        let _ = self.workflow_events.send(event);
     }
 
     fn publish_session(&self, event: SessionEvent) {

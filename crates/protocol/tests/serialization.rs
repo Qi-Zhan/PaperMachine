@@ -1,23 +1,23 @@
 use chrono::Utc;
 use papermachine_protocol::EventId;
-use papermachine_protocol::ResearchId;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
-use papermachine_protocol::WorkflowRunEvent;
-use papermachine_protocol::WorkflowRunEventPayload;
-use papermachine_protocol::WorkflowRunId;
+use papermachine_protocol::WorkflowEvent;
+use papermachine_protocol::WorkflowEventPayload;
+use papermachine_protocol::WorkflowId;
 
 #[test]
 fn run_event_uses_a_flat_stable_tag() {
-    let event = WorkflowRunEvent {
+    let event = WorkflowEvent {
         id: EventId::new(),
         sequence: 7,
-        research_id: ResearchId::new(),
-        workflow_run_id: WorkflowRunId::new(),
+        project_id: ProjectId::new(),
+        workflow_id: WorkflowId::new(),
         occurred_at: Utc::now(),
-        payload: WorkflowRunEventPayload::Warning {
+        payload: WorkflowEventPayload::Warning {
             message: "check evidence".to_string(),
         },
     };

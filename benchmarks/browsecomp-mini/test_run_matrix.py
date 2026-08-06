@@ -13,7 +13,7 @@ SPEC.loader.exec_module(run_matrix)
 
 class BrowseCompMatrixTests(unittest.TestCase):
     def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
-        attempts = [{"run_id": "failed-run"}]
+        attempts = [{"workflow_id": "failed-run"}]
         state = {
             "jobs": [
                 {
@@ -67,7 +67,7 @@ class BrowseCompMatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "boolean"):
             run_matrix.capture_grader_result(
                 {
-                    "workflow_run": {
+                    "workflow": {
                         "output": {"grading": {"correct": "yes"}},
                         "workflow": {"sha256": "test"},
                         "usage": {},
@@ -90,11 +90,11 @@ class BrowseCompMatrixTests(unittest.TestCase):
                 {
                     "research": {
                         "status": "running",
-                        "attempts": [{"run_id": "research-run"}],
+                        "attempts": [{"workflow_id": "research-run"}],
                     },
                     "grade": {
                         "status": "created",
-                        "attempts": [{"run_id": "grade-run"}],
+                        "attempts": [{"workflow_id": "grade-run"}],
                     },
                 }
             ]
@@ -103,8 +103,8 @@ class BrowseCompMatrixTests(unittest.TestCase):
         self.assertEqual(
             api.paths,
             [
-                "/workflow-runs/research-run/cancel",
-                "/workflow-runs/grade-run/cancel",
+                "/workflows/research-run/cancel",
+                "/workflows/grade-run/cancel",
             ],
         )
 

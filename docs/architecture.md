@@ -2,16 +2,16 @@
 
 ## Product invariants
 
-1. **Research is the ownership root.** It owns every Session, WorkflowRun,
-   Research skill, artifact, and human request in that research effort.
-2. **Project and Research are the same concept.** There is no second Project
-   entity or compatibility alias.
+1. **Project is the ownership root.** It owns every Session, Workflow,
+   Project skill, artifact, and human request in that research effort.
+2. **There is no separate Research entity.** Project is the only ownership
+   concept and there is no compatibility alias.
 3. **Session is the main workbench.** It is a durable multi-turn conversation,
    whether it was created by a person or by a workflow.
 4. **Turn is the model-execution boundary.** Model samples and tool calls are
    Steps folded under the Turn in the UI.
-5. **WorkflowRun belongs to Research.** `origin_session_id` records where it was
-   launched; it does not make the run or its participants children of that Session.
+5. **Workflow belongs to Project.** `started_from_session_id` optionally records
+   where it was launched; Project-level/background Workflows need no starting Session.
 6. **Agent instance maps to one Session.** An action invocation executes as one
    or more attempts, and every attempt uses a Turn in that Session.
 7. **One Agent Session is serial.** Different Agent Sessions may execute actions
@@ -21,21 +21,21 @@
    to do next, but only Rust creates Sessions, calls models/tools, persists
    state, applies controls, and enforces budgets.
 9. **A run snapshots its program.** Source, manifest, path, source owner, and
-   SHA-256 are copied into the WorkflowRun. Later files cannot change history.
+   SHA-256 are copied into the Workflow. Later files cannot change history.
 10. **Access is a Turn snapshot.** A Session chooses one of five profiles; a
     Turn captures it at creation, and model/tool/execution layers all enforce it.
 
 ## Ownership graph
 
 ```text
-Research
+Project
   +-- Session [origin=user]
   |     +-- Turn
   |           +-- AgentStep [model | tool | workflow | system]
   +-- Session [origin=workflow_agent]
   |     +-- Turn ...
-  +-- WorkflowRun
-        +-- origin_session_id -> Session
+  +-- Workflow
+        +-- started_from_session_id -> Session (optional)
         +-- WorkflowParticipant -> Session
         +-- ActionInvocation -> ActionAttempt -> Turn
         +-- Team / AgentRelation / TaskScope
@@ -43,22 +43,22 @@ Research
         +-- HumanRequest / ControlMessage / Artifact
 ```
 
-Sessions do not have parent IDs. The Research overview groups participant
-Sessions by WorkflowRun for navigation, but that grouping is a view over
+Sessions do not have parent IDs. The Project overview groups participant
+Sessions by Workflow for navigation, but that grouping is a view over
 WorkflowParticipant records, not a storage hierarchy.
 
 ## Runtime layers
 
 ```text
 Vue client
-  Research overview | Session thread + inspector | Workflow page
+  Project overview | Session thread + inspector | Workflow page
                                |
                           HTTP + SSE
                                |
 PaperMachine server ------------+
   | ModelRouter -> profile -> provider client
-  | SessionRuntime                       | WorkflowRunScheduler
-  |                                      | PythonWorkflowExecutor
+  | SessionRuntime                       | WorkflowScheduler
+  |                                      | PythonWorkflowRuntime
   +-> AgentRuntime                       +-> sandboxed Python runner
        | Responses WebSocket                  | JSONL effect requests
        | (HTTP SSE fallback)
@@ -67,7 +67,7 @@ PaperMachine server ------------+
                  |                         |
                  +-> execution sandbox     +-> SessionRuntime actions
                                |
-                 SQLite v3 store + events + artifacts + workspaces
+                 SQLite store + events + artifacts + Project directories
 ```
 
 The Python runner loads the snapshotted `workflow.py`, executes its async
@@ -80,7 +80,7 @@ to stderr and captured with a size limit.
 
 A user Turn or workflow action follows the same core path:
 
-1. Persist the Turn with immutable access and Research-skill snapshots.
+1. Persist the Turn with immutable access and Project-skill snapshots.
 2. Rebuild history from completed prior Turns in that Session.
 3. Inject Session instructions, enabled skills, workflow relationship context,
    and any pending human guidance.
@@ -105,7 +105,7 @@ ID to one provider's concrete model ID and context window. Sessions and workflow
 Agents store the profile ID; `ModelRouter` resolves it immediately before the
 request and records profile, provider, and upstream model in Step metadata.
 
-This keeps workflow source portable: an Agent can inherit the WorkflowRun's
+This keeps workflow source portable: an Agent can inherit the Workflow's
 profile or explicitly select another configured profile, while the same server
 can route planner, researcher, evaluator, and grader Sessions to different
 providers. The current provider client implements the OpenAI Responses wire
@@ -168,7 +168,7 @@ billed prompt-cache read/write counters.
 
 ## Human control
 
-Pause is a WorkflowRun state. Runtime and Agent checkpoints wait while paused;
+Pause is a Workflow state. Runtime and Agent checkpoints wait while paused;
 an in-flight provider request is not forcibly rewound. Resume releases the next
 checkpoint. Cancel propagates a cancellation token to the workflow, actions,
 tools, and model streams.
@@ -192,13 +192,13 @@ between Turns, and the UI separately confirms `full_access`.
 ## Persistence and recovery
 
 SQLite stores JSON documents plus indexed ownership/status columns and ordered
-append-only Session and WorkflowRun event streams. Artifacts are stored on disk
+append-only Session and Workflow event streams. Artifacts are stored on disk
 under content-hashed metadata records. The web client uses SSE for live deltas
 and refreshes durable views for lifecycle changes.
 
-Unfinished standalone Session Turns are recovered at startup. A WorkflowRun
+Unfinished standalone Session Turns are recovered at startup. A Workflow
 that was durably `created` but had not started is also safe to start. A
-`running` or `paused` WorkflowRun is instead failed explicitly on process
+`running` or `paused` Workflow is instead failed explicitly on process
 restart, and its unfinished ActionInvocations, ActionAttempts, attached Turns,
 and Steps are marked interrupted/cancelled before Session recovery begins.
 
@@ -206,22 +206,22 @@ This boundary is deliberate. The Python instruction pointer and effect results
 are not checkpointed, and the effect request ID is not a deterministic durable
 idempotency key. Restarting arbitrary workflow source at line one would replay
 committed Agent/action effects and corrupt budgets. Durable continuation of
-active WorkflowRuns requires a general effect journal plus deterministic replay;
-until that exists, callers should retry an interrupted run as a new WorkflowRun.
+active Workflows requires a general effect journal plus deterministic replay;
+until that exists, callers should retry an interrupted Workflow as a new Workflow.
 
 ## Skills and workflow roots
 
-Research-local skills live at:
+Project-local skills live at:
 
 ```text
-.papermachine/researches/<research-id>/skills/<slug>/SKILL.md
+<project-root>/.papermachine/skills/<slug>/SKILL.md
 ```
 
 Workflow source lives at:
 
 ```text
 workflows/builtin/<slug>/workflow.py
-workflows/user/<slug>/<version>/workflow.py
+<project-root>/.papermachine/workflows/<slug>/workflow.py
 ```
 
 Built-in and user workflows use the same validator and runtime. The directory
@@ -233,6 +233,6 @@ split expresses ownership and review status, not extra privileges.
 - Treating the Codex CLI as a subprocess or library kernel.
 - MCP, plugins, apps, connectors, approvals compatibility, or a marketplace.
 - A second workflow engine based on a separate graph or node abstraction.
-- A browser Python IDE. The Library is a catalog, generator, structural
-  inspector, validator, and publisher with an advanced source escape hatch.
+- A browser Python IDE. The Workflow page is a catalog, generator, structural
+  inspector, validator, and saver with an advanced source escape hatch.
 - A distributed, authenticated multi-tenant scheduler in the local-first release.

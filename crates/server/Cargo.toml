@@ -14,7 +14,7 @@ futures.workspace = true
 mime_guess.workspace = true
 papermachine-model = { path = "../model" }
 papermachine-protocol = { path = "../protocol" }
-papermachine-research = { path = "../research" }
+papermachine-workflow = { path = "../workflow" }
 papermachine-session = { path = "../session" }
 papermachine-skills = { path = "../skills" }
 papermachine-store = { path = "../store" }

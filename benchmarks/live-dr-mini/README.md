@@ -21,14 +21,14 @@ reference and submitted structured answer; research Sessions never receive it.
 
 The default matrix compares one persistent researcher with the coverage-ledger
 workflow at one and two evaluator rounds, with two repeats per task. At most two
-WorkflowRuns execute at once so cache warming and wall-time measurements are not
+Workflows execute at once so cache warming and wall-time measurements are not
 dominated by a burst of competing runs:
 
 ```bash
 python3 benchmarks/live-dr-mini/run_matrix.py
 ```
 
-Ctrl-C asks every in-flight WorkflowRun to cancel before the runner exits. The
+Ctrl-C asks every in-flight Workflow to cancel before the runner exits. The
 runner records model tokens, cached input, hosted web-search actions,
 search-query counts, Responses continuation hits, workflow and runtime source
 hashes, raw deliverables, grader cost, and precision/recall/F1. The primary

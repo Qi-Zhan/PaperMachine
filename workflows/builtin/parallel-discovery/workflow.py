@@ -28,7 +28,6 @@ class Synthesizer(Agent):
 @workflow(
     slug="parallel-discovery",
     name="Parallel discovery",
-    version="0.3.0",
     description="Run bounded independent research Sessions concurrently, then synthesize their evidence in a dedicated Session.",
     input_schema={
         "type": "object",

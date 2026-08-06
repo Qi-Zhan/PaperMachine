@@ -5,46 +5,181 @@ use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
 use papermachine_protocol::HumanRequestStatus;
+use papermachine_protocol::Project;
+use papermachine_protocol::Session;
 use papermachine_protocol::TaskScopeStatus;
 use papermachine_protocol::TimerPolicy;
 use papermachine_protocol::TimerStatus;
-use papermachine_protocol::WorkflowId;
-use papermachine_protocol::WorkflowManifest;
-use papermachine_protocol::WorkflowRunEventPayload;
-use papermachine_protocol::WorkflowRunStatus;
-use papermachine_protocol::WorkflowSnapshot;
-use papermachine_protocol::WorkflowSource;
+use papermachine_protocol::WorkflowEventPayload;
+use papermachine_protocol::WorkflowProgram;
+use papermachine_protocol::WorkflowProgramId;
+use papermachine_protocol::WorkflowProgramManifest;
+use papermachine_protocol::WorkflowProgramSnapshot;
+use papermachine_protocol::WorkflowProgramSource;
+use papermachine_protocol::WorkflowStatus;
 use papermachine_store::Store;
 use serde_json::json;
+use tempfile::TempDir;
 use tempfile::tempdir;
 
-fn workflow() -> WorkflowSnapshot {
-    WorkflowSnapshot {
-        manifest: WorkflowManifest {
-            id: WorkflowId::new(),
+#[test]
+fn project_creation_initializes_owned_directory_and_rejects_reuse() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store =
+        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
+    let root = directory.path().join("paper-project");
+    let project = store
+        .create_project("Paper", "Directory ownership", &root)
+        .expect("project should be created");
+
+    assert_eq!(
+        project.root_path,
+        root.canonicalize()
+            .expect("Project root should be canonicalizable")
+            .to_string_lossy()
+    );
+    let metadata = root.join(".papermachine");
+    for child in ["prompts", "workflows", "skills", "state"] {
+        assert!(metadata.join(child).is_dir(), "missing {child} directory");
+    }
+    let config = std::fs::read_to_string(metadata.join("project.toml"))
+        .expect("project config should be readable");
+    assert!(config.contains(&project.id.to_string()));
+    assert!(config.contains("name = \"Paper\""));
+    assert!(
+        store.create_project("Duplicate", "", &root).is_err(),
+        "one directory must belong to only one Project"
+    );
+    assert!(
+        store
+            .create_project("Relative", "", "relative/path")
+            .is_err(),
+        "Project roots must be absolute"
+    );
+}
+
+#[test]
+fn project_level_workflow_keeps_program_snapshot_after_program_update() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store =
+        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
+    let project = project(&store, &directory, "Snapshot", "");
+    let mut original = workflow();
+    original.project_id = Some(project.id);
+    original.source = WorkflowProgramSource::User;
+    original.definition_path = ".papermachine/workflows/parallel-review/workflow.py".to_string();
+    original.sha256 = "original-sha".to_string();
+    original.source_code = "async def main(ctx): return {'revision': 1}\n".to_string();
+    store
+        .register_workflow_program(&WorkflowProgram {
+            project_id: original.project_id,
+            manifest: original.manifest.clone(),
+            source: original.source,
+            definition_path: original.definition_path.clone(),
+            sha256: original.sha256.clone(),
+            updated_at: chrono::Utc::now(),
+        })
+        .expect("original program should register");
+
+    let workflow = store
+        .create_workflow(
+            project.id,
+            None,
+            original,
+            "Summarize the Project",
+            json!({}),
+            None,
+            "test-model",
+            AgentAccessProfile::Research,
+            Vec::new(),
+        )
+        .expect("Project-level Workflow should be created without a Session");
+
+    let mut replacement = workflow.program.clone();
+    replacement.manifest.id = WorkflowProgramId::new();
+    replacement.sha256 = "replacement-sha".to_string();
+    replacement.source_code = "async def main(ctx): return {'revision': 2}\n".to_string();
+    store
+        .register_workflow_program(&WorkflowProgram {
+            project_id: replacement.project_id,
+            manifest: replacement.manifest.clone(),
+            source: replacement.source,
+            definition_path: replacement.definition_path.clone(),
+            sha256: replacement.sha256.clone(),
+            updated_at: chrono::Utc::now(),
+        })
+        .expect("replacement program should register");
+
+    let persisted = store
+        .get_workflow(workflow.id)
+        .expect("Workflow should remain readable");
+    assert_eq!(persisted.started_from_session_id, None);
+    assert_eq!(persisted.program.sha256, "original-sha");
+    assert!(persisted.program.source_code.contains("revision': 1"));
+    assert_eq!(
+        store
+            .list_project_workflows(project.id)
+            .expect("Project Workflows should load"),
+        vec![persisted]
+    );
+    let registrations = store
+        .list_workflow_programs()
+        .expect("programs should load");
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].sha256, "replacement-sha");
+}
+
+fn workflow() -> WorkflowProgramSnapshot {
+    WorkflowProgramSnapshot {
+        project_id: None,
+        manifest: WorkflowProgramManifest {
+            id: WorkflowProgramId::new(),
             slug: "parallel-review".to_string(),
             name: "Parallel review".to_string(),
-            version: "0.1.0".to_string(),
             description: "Run independent Sessions and synthesize them.".to_string(),
             entrypoint: "main".to_string(),
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             default_budget: Budget::default(),
         },
-        source: WorkflowSource::Builtin,
+        source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/parallel-review/workflow.py".to_string(),
         sha256: "test-source".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }
 
+fn project(store: &Store, directory: &TempDir, name: &str, description: &str) -> Project {
+    store
+        .create_project(name, description, directory.path().join("project"))
+        .expect("project should be created")
+}
+
+fn workflow_for_session(
+    store: &Store,
+    session: &Session,
+    objective: &str,
+) -> papermachine_protocol::Workflow {
+    store
+        .create_workflow(
+            session.project_id,
+            Some(session.id),
+            workflow(),
+            objective,
+            json!({}),
+            None,
+            "test-model",
+            AgentAccessProfile::Research,
+            Vec::new(),
+        )
+        .expect("workflow should be created")
+}
+
 #[test]
 fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path()).expect("store should open");
-    let research = store
-        .create_research("Access snapshots", "")
-        .expect("research should be created");
+    let research = project(&store, &directory, "Access snapshots", "");
     let session = store
         .create_session_with_access(
             research.id,
@@ -112,17 +247,13 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
 fn collaboration_state_is_research_owned_and_events_are_ordered() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path()).expect("store should open");
-    let research = store
-        .create_research("Paper", "Test research")
-        .expect("research should be created");
+    let research = project(&store, &directory, "Paper", "Test research");
     let origin = store
         .create_session(research.id, "Claim audit", "", "test-model", Vec::new())
         .expect("origin Session should be created");
-    let run = store
-        .create_workflow_run(origin.id, workflow(), "Research a claim", json!({}), None)
-        .expect("run should be created");
+    let run = workflow_for_session(&store, &origin, "Research a claim");
     store
-        .set_workflow_run_status(run.id, WorkflowRunStatus::Running, None)
+        .set_workflow_status(run.id, WorkflowStatus::Running, None)
         .expect("run should start");
 
     let researcher = store
@@ -208,7 +339,7 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
     );
 
     let events = store
-        .list_workflow_run_events(run.id, 0)
+        .list_workflow_events(run.id, 0)
         .expect("events should load");
     assert_eq!(
         events
@@ -219,30 +350,27 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
     );
     assert!(events.iter().any(|event| matches!(
         event.payload,
-        WorkflowRunEventPayload::ParticipantCreated { .. }
+        WorkflowEventPayload::ParticipantCreated { .. }
     )));
-    assert!(events.iter().any(|event| matches!(
-        event.payload,
-        WorkflowRunEventPayload::SignalPublished { .. }
-    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, WorkflowEventPayload::SignalPublished { .. }))
+    );
 }
 
 #[test]
 fn database_reopens_and_artifacts_are_content_addressed() {
     let directory = tempdir().expect("temporary directory should be created");
-    let database = directory.path().join("papermachine-v3.db");
-    let artifacts = directory.path().join("artifacts-v3");
-    let (research_id, workflow_run_id) = {
+    let database = directory.path().join("papermachine.db");
+    let artifacts = directory.path().join("artifacts");
+    let (project_id, workflow_id) = {
         let store = Store::open(&database, &artifacts).expect("store should open");
-        let research = store
-            .create_research("Persistent", "Reopen test")
-            .expect("research should be created");
+        let research = project(&store, &directory, "Persistent", "Reopen test");
         let session = store
             .create_session(research.id, "Persistence", "", "test-model", Vec::new())
             .expect("Session should be created");
-        let run = store
-            .create_workflow_run(session.id, workflow(), "Persist", json!({}), None)
-            .expect("run should be created");
+        let run = workflow_for_session(&store, &session, "Persist");
         let artifact = store
             .create_artifact(
                 research.id,
@@ -264,18 +392,18 @@ fn database_reopens_and_artifacts_are_content_addressed() {
 
     let reopened = Store::open(&database, &artifacts).expect("store should reopen");
     assert_eq!(
-        reopened.list_researches().expect("researches should load")[0].id,
-        research_id
+        reopened.list_projects().expect("projects should load")[0].id,
+        project_id
     );
     assert_eq!(
         reopened
-            .get_workflow_run(workflow_run_id)
+            .get_workflow(workflow_id)
             .expect("run should load")
             .id,
-        workflow_run_id
+        workflow_id
     );
     let stored = reopened
-        .list_artifacts(workflow_run_id)
+        .list_artifacts(workflow_id)
         .expect("artifacts should load");
     assert_eq!(stored.len(), 1);
     assert_eq!(
@@ -290,17 +418,13 @@ fn database_reopens_and_artifacts_are_content_addressed() {
 fn terminal_runs_close_pending_human_control_and_timer_state() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path()).expect("store should open");
-    let research = store
-        .create_research("Terminal cleanup", "")
-        .expect("Research should exist");
+    let research = project(&store, &directory, "Terminal cleanup", "");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
         .expect("Session should exist");
-    let run = store
-        .create_workflow_run(origin.id, workflow(), "Finish cleanly", json!({}), None)
-        .expect("run should exist");
+    let run = workflow_for_session(&store, &origin, "Finish cleanly");
     store
-        .set_workflow_run_status(run.id, WorkflowRunStatus::Running, None)
+        .set_workflow_status(run.id, WorkflowStatus::Running, None)
         .expect("run should start");
     let request = store
         .create_human_request(
@@ -327,7 +451,7 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         .expect("timer should start");
 
     store
-        .complete_workflow_run(run.id, json!({"ok": true}))
+        .complete_workflow(run.id, json!({"ok": true}))
         .expect("run should complete");
 
     assert_eq!(
@@ -371,15 +495,11 @@ fn concurrent_budget_updates_do_not_lose_deltas() {
 
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path()).expect("store should open");
-    let research = store
-        .create_research("Concurrent usage", "")
-        .expect("research should be created");
+    let research = project(&store, &directory, "Concurrent usage", "");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
         .expect("session should be created");
-    let run = store
-        .create_workflow_run(origin.id, workflow(), "Count all actions", json!({}), None)
-        .expect("run should be created");
+    let run = workflow_for_session(&store, &origin, "Count all actions");
 
     std::thread::scope(|scope| {
         for _ in 0..WORKERS {
@@ -403,7 +523,7 @@ fn concurrent_budget_updates_do_not_lose_deltas() {
 
     assert_eq!(
         store
-            .get_workflow_run(run.id)
+            .get_workflow(run.id)
             .expect("run should load")
             .usage
             .actions_started,
@@ -411,7 +531,7 @@ fn concurrent_budget_updates_do_not_lose_deltas() {
     );
     assert_eq!(
         store
-            .get_workflow_run(run.id)
+            .get_workflow(run.id)
             .expect("run should load")
             .usage
             .hosted_search_calls,

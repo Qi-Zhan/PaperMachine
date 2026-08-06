@@ -1143,30 +1143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "papermachine-research"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hex",
- "papermachine-agent",
- "papermachine-model",
- "papermachine-protocol",
- "papermachine-session",
- "papermachine-skills",
- "papermachine-store",
- "papermachine-tools",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "papermachine-server"
 version = "0.1.0"
 dependencies = [
@@ -1178,11 +1154,11 @@ dependencies = [
  "mime_guess",
  "papermachine-model",
  "papermachine-protocol",
- "papermachine-research",
  "papermachine-session",
  "papermachine-skills",
  "papermachine-store",
  "papermachine-tools",
+ "papermachine-workflow",
  "serde",
  "serde_json",
  "tempfile",
@@ -1221,6 +1197,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "papermachine-protocol",
+ "papermachine-store",
  "serde",
  "serde_yaml",
  "sha2",
@@ -1242,6 +1219,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "uuid",
 ]
 
@@ -1262,6 +1240,30 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+]
+
+[[package]]
+name = "papermachine-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "hex",
+ "papermachine-agent",
+ "papermachine-model",
+ "papermachine-protocol",
+ "papermachine-session",
+ "papermachine-skills",
+ "papermachine-store",
+ "papermachine-tools",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

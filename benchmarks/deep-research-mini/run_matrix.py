@@ -33,23 +33,19 @@ DIMENSIONS = (
 )
 CONDITIONS = {
     "single_agent": {
-        "workflow_slug": "single-agent-research",
-        "workflow_version": "0.5.0",
+        "program_slug": "single-agent-research",
         "input": {},
     },
     "evidence_r1": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {"route_count": 2, "max_rounds": 1, "max_followups_per_round": 2},
     },
     "evidence_r2": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {"route_count": 2, "max_rounds": 2, "max_followups_per_round": 2},
     },
     "evidence_r3": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 3,
             "minimum_route_count": 3,
@@ -58,8 +54,7 @@ CONDITIONS = {
         },
     },
     "evidence_r4": {
-        "workflow_slug": "evidence-loop",
-        "workflow_version": "0.6.0",
+        "program_slug": "evidence-loop",
         "input": {
             "route_count": 4,
             "minimum_route_count": 4,
@@ -82,9 +77,9 @@ RUNTIME_FILES = (
     "crates/model/src/providers.rs",
     "crates/protocol/src/event.rs",
     "crates/protocol/src/model.rs",
-    "crates/protocol/src/research.rs",
-    "crates/research/src/runtime.rs",
-    "crates/research/src/scheduler.rs",
+    "crates/protocol/src/project.rs",
+    "crates/workflow/src/runtime.rs",
+    "crates/workflow/src/scheduler.rs",
     "crates/server/src/lib.rs",
     "crates/session/src/lib.rs",
     "crates/store/src/database.rs",
@@ -124,7 +119,9 @@ class PaperMachineApi:
                 data = response.read()
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise ApiError(f"{method} {path} returned HTTP {error.code}: {detail}") from error
+            raise ApiError(
+                f"{method} {path} returned HTTP {error.code}: {detail}"
+            ) from error
         except urllib.error.URLError as error:
             raise ApiError(f"{method} {path} failed: {error}") from error
         return None if not data else json.loads(data)
@@ -190,13 +187,17 @@ def load_json(path: Path) -> Any:
 
 
 def fetch_json(url: str) -> Any:
-    request = urllib.request.Request(url, headers={"user-agent": "papermachine-benchmark/0.1"})
+    request = urllib.request.Request(
+        url, headers={"user-agent": "papermachine-benchmark/0.1"}
+    )
     with urllib.request.urlopen(request, timeout=120) as response:
         return json.loads(response.read())
 
 
 def fetch_text(url: str) -> str:
-    request = urllib.request.Request(url, headers={"user-agent": "papermachine-benchmark/0.1"})
+    request = urllib.request.Request(
+        url, headers={"user-agent": "papermachine-benchmark/0.1"}
+    )
     with urllib.request.urlopen(request, timeout=120) as response:
         return response.read().decode("utf-8")
 
@@ -216,13 +217,17 @@ def prepare_upstream_snapshot(
         if set(task_ids).issubset(available):
             return snapshot
 
-    commit = fetch_json(f"https://api.github.com/repos/{UPSTREAM_REPO}/commits/main")["sha"]
+    commit = fetch_json(f"https://api.github.com/repos/{UPSTREAM_REPO}/commits/main")[
+        "sha"
+    ]
     raw_root = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{commit}"
     query_text = fetch_text(f"{raw_root}/{QUERY_PATH}")
     criteria_text = fetch_text(f"{raw_root}/{CRITERIA_PATH}")
     query_map = {int(item["id"]): item for item in parse_jsonl(query_text)}
     criteria_map = {int(item["id"]): item for item in parse_jsonl(criteria_text)}
-    missing = sorted(set(task_ids) - query_map.keys() | set(task_ids) - criteria_map.keys())
+    missing = sorted(
+        set(task_ids) - query_map.keys() | set(task_ids) - criteria_map.keys()
+    )
     if missing:
         raise ValueError(f"upstream snapshot is missing task IDs: {missing}")
 
@@ -277,22 +282,31 @@ def build_jobs(
     return jobs
 
 
-def ensure_research(api: PaperMachineApi, name: str, description: str) -> str:
-    for research in api.get("/researches"):
-        if research["name"] == name:
-            return str(research["id"])
-    created = api.post("/researches", {"name": name, "description": description})
+def ensure_project(
+    api: PaperMachineApi,
+    name: str,
+    description: str,
+    root_path: Path,
+) -> str:
+    canonical_root = str(root_path.resolve())
+    for project in api.get("/projects"):
+        if project["root_path"] == canonical_root:
+            return str(project["id"])
+    created = api.post(
+        "/projects",
+        {"name": name, "description": description, "root_path": canonical_root},
+    )
     return str(created["id"])
 
 
 def create_origin_session(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     title: str,
     model: str,
 ) -> str:
     session = api.post(
-        f"/researches/{research_id}/sessions",
+        f"/projects/{project_id}/sessions",
         {
             "title": title,
             "instructions": "",
@@ -305,26 +319,29 @@ def create_origin_session(
 
 def launch_research_run(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     job: dict[str, Any],
     task: dict[str, Any],
     model: str,
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
     title = f"T{job['task_id']} {job['condition']} repeat {job['repeat']}"
-    session_id = create_origin_session(api, research_id, title, model)
+    session_id = create_origin_session(api, project_id, title, model)
     run = api.post(
-        f"/sessions/{session_id}/workflow-runs",
+        f"/projects/{project_id}/workflows",
         {
-            "workflow_slug": condition["workflow_slug"],
-            "workflow_version": condition["workflow_version"],
+            "program_slug": condition["program_slug"],
             "objective": task["prompt"],
             "input": condition["input"],
+            "started_from_session_id": session_id,
+            "model": model,
+            "access": "research",
+            "enabled_skills": [],
         },
     )
     return {
         "session_id": session_id,
-        "run_id": str(run["id"]),
+        "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
 
@@ -400,7 +417,9 @@ def operational_wall_time(job: dict[str, Any], phase: str) -> int:
     return successful + retry_time
 
 
-def capture_per_agent(api: PaperMachineApi, view: dict[str, Any]) -> list[dict[str, Any]]:
+def capture_per_agent(
+    api: PaperMachineApi, view: dict[str, Any]
+) -> list[dict[str, Any]]:
     agents = []
     for session in view.get("sessions", []):
         session_view = api.get(f"/sessions/{session['id']}")
@@ -451,7 +470,7 @@ def model_step_metadata(steps: list[dict[str, Any]]) -> dict[str, Any]:
     for step in steps:
         if step.get("kind") != "model":
             continue
-        metadata = ((step.get("output") or {}).get("request") or {})
+        metadata = (step.get("output") or {}).get("request") or {}
         for source, target in field_map.items():
             if metadata.get(source):
                 counters[target][str(metadata[source])] += 1
@@ -474,7 +493,7 @@ def capture_research_result(
     view: dict[str, Any],
     article_path: Path,
 ) -> dict[str, Any]:
-    run = view["workflow_run"]
+    run = view["workflow"]
     output = run.get("output") or {}
     report = output.get("report")
     if not isinstance(report, str) or not report.strip():
@@ -493,7 +512,7 @@ def capture_research_result(
     )
     result = {
         "status": run["status"],
-        "workflow_sha256": run["workflow"]["sha256"],
+        "workflow_sha256": run["program"]["sha256"],
         "created_at": run["created_at"],
         "completed_at": run["updated_at"],
         "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
@@ -502,7 +521,9 @@ def capture_research_result(
         "action_steps": int(usage.get("action_steps", 0)),
         "report_characters": len(report),
         "report_sha256": hashlib.sha256(report.encode()).hexdigest(),
-        "unique_direct_urls": len({match.rstrip(".,;:") for match in URL_RE.findall(report)}),
+        "unique_direct_urls": len(
+            {match.rstrip(".,;:") for match in URL_RE.findall(report)}
+        ),
         "article_path": str(article_path),
         "usage": token_usage(usage.get("tokens") or {}),
         "per_agent": agents,
@@ -558,18 +579,24 @@ def validate_and_score_grading(
         total_weight = sum(float(item["weight"]) for item in expected)
         if total_weight <= 0:
             raise ValueError(f"{dimension} has no positive criterion weight")
-        dimension_scores[dimension] = sum(
-            rating["score"] * float(criterion["weight"])
-            for rating, criterion in zip(ordered, expected)
-        ) / total_weight
+        dimension_scores[dimension] = (
+            sum(
+                rating["score"] * float(criterion["weight"])
+                for rating, criterion in zip(ordered, expected)
+            )
+            / total_weight
+        )
         normalized[dimension] = ordered
 
     weights = rubric["dimension_weight"]
     weight_total = sum(float(weights[dimension]) for dimension in DIMENSIONS)
-    overall_10 = sum(
-        dimension_scores[dimension] * float(weights[dimension])
-        for dimension in DIMENSIONS
-    ) / weight_total
+    overall_10 = (
+        sum(
+            dimension_scores[dimension] * float(weights[dimension])
+            for dimension in DIMENSIONS
+        )
+        / weight_total
+    )
     return {
         "overall_score_100": overall_10 * 10,
         "dimension_scores_100": {
@@ -583,19 +610,18 @@ def validate_and_score_grading(
 
 def launch_grader_run(
     api: PaperMachineApi,
-    research_id: str,
+    project_id: str,
     job: dict[str, Any],
     task: dict[str, Any],
     report: str,
     model: str,
 ) -> dict[str, Any]:
     title = f"Grade T{job['task_id']} {job['condition']} repeat {job['repeat']}"
-    session_id = create_origin_session(api, research_id, title, model)
+    session_id = create_origin_session(api, project_id, title, model)
     run = api.post(
-        f"/sessions/{session_id}/workflow-runs",
+        f"/projects/{project_id}/workflows",
         {
-            "workflow_slug": "report-grader",
-            "workflow_version": "0.4.0",
+            "program_slug": "report-grader",
             "objective": "Blindly grade the supplied final report against the full external rubric.",
             "input": {
                 "question": task["prompt"],
@@ -604,11 +630,15 @@ def launch_grader_run(
                 "language": task["language"],
                 "grader_model": model,
             },
+            "started_from_session_id": session_id,
+            "model": model,
+            "access": "model_only",
+            "enabled_skills": [],
         },
     )
     return {
         "session_id": session_id,
-        "run_id": str(run["id"]),
+        "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
 
@@ -638,67 +668,85 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
         "runs": len(selected),
         "score_mean": statistics.mean(scores) if scores else 0.0,
         "score_stdev": statistics.stdev(scores) if len(scores) > 1 else 0.0,
-        "successful_input_mean": statistics.mean(
-            int(usage["input_tokens"]) for usage in successful_usage
-        )
-        if successful_usage
-        else 0.0,
-        "successful_uncached_mean": statistics.mean(
-            int(usage["uncached_input_tokens"]) for usage in successful_usage
-        )
-        if successful_usage
-        else 0.0,
-        "input_mean": statistics.mean(int(usage["input_tokens"]) for usage in research_usage)
-        if research_usage
-        else 0.0,
-        "uncached_input_mean": statistics.mean(
-            int(usage["uncached_input_tokens"]) for usage in research_usage
-        )
-        if research_usage
-        else 0.0,
-        "output_mean": statistics.mean(int(usage["output_tokens"]) for usage in research_usage)
-        if research_usage
-        else 0.0,
-        "wall_time_mean": statistics.mean(
-            operational_wall_time(job, "research") for job in selected
-        )
-        if selected
-        else 0.0,
-        "cache_read_ratio": total_cached / total_input if total_input else 0.0,
-        "report_characters_mean": statistics.mean(
-            int(job["research"]["result"]["report_characters"]) for job in selected
-        )
-        if selected
-        else 0.0,
-        "direct_urls_mean": statistics.mean(
-            int(job["research"]["result"]["unique_direct_urls"]) for job in selected
-        )
-        if selected
-        else 0.0,
-        "draft_revisions": sum(
-            audit.get("revision_performed") is True for audit in draft_audits
+        "successful_input_mean": (
+            statistics.mean(int(usage["input_tokens"]) for usage in successful_usage)
+            if successful_usage
+            else 0.0
         ),
-        "final_audit_failures": sum(audit.get("pass") is not True for audit in draft_audits),
-        "dimension_means": {
-            dimension: statistics.mean(
-                float(job["grade"]["score"]["dimension_scores_100"][dimension])
-                for job in selected
+        "successful_uncached_mean": (
+            statistics.mean(
+                int(usage["uncached_input_tokens"]) for usage in successful_usage
+            )
+            if successful_usage
+            else 0.0
+        ),
+        "input_mean": (
+            statistics.mean(int(usage["input_tokens"]) for usage in research_usage)
+            if research_usage
+            else 0.0
+        ),
+        "uncached_input_mean": (
+            statistics.mean(
+                int(usage["uncached_input_tokens"]) for usage in research_usage
+            )
+            if research_usage
+            else 0.0
+        ),
+        "output_mean": (
+            statistics.mean(int(usage["output_tokens"]) for usage in research_usage)
+            if research_usage
+            else 0.0
+        ),
+        "wall_time_mean": (
+            statistics.mean(operational_wall_time(job, "research") for job in selected)
+            if selected
+            else 0.0
+        ),
+        "cache_read_ratio": total_cached / total_input if total_input else 0.0,
+        "report_characters_mean": (
+            statistics.mean(
+                int(job["research"]["result"]["report_characters"]) for job in selected
             )
             if selected
             else 0.0
+        ),
+        "direct_urls_mean": (
+            statistics.mean(
+                int(job["research"]["result"]["unique_direct_urls"]) for job in selected
+            )
+            if selected
+            else 0.0
+        ),
+        "draft_revisions": sum(
+            audit.get("revision_performed") is True for audit in draft_audits
+        ),
+        "final_audit_failures": sum(
+            audit.get("pass") is not True for audit in draft_audits
+        ),
+        "dimension_means": {
+            dimension: (
+                statistics.mean(
+                    float(job["grade"]["score"]["dimension_scores_100"][dimension])
+                    for job in selected
+                )
+                if selected
+                else 0.0
+            )
             for dimension in DIMENSIONS
         },
-        "grader_input_mean": statistics.mean(
-            int(usage["input_tokens"]) for usage in grader_usage
-        )
-        if grader_usage
-        else 0.0,
-        "grader_output_mean": statistics.mean(
-            int(usage["output_tokens"]) for usage in grader_usage
-        )
-        if grader_usage
-        else 0.0,
-        "grader_cache_read_ratio": grader_cached / grader_input if grader_input else 0.0,
+        "grader_input_mean": (
+            statistics.mean(int(usage["input_tokens"]) for usage in grader_usage)
+            if grader_usage
+            else 0.0
+        ),
+        "grader_output_mean": (
+            statistics.mean(int(usage["output_tokens"]) for usage in grader_usage)
+            if grader_usage
+            else 0.0
+        ),
+        "grader_cache_read_ratio": (
+            grader_cached / grader_input if grader_input else 0.0
+        ),
         "grader_alternate_shapes": sum(
             job["grade"].get("contract", {}).get("alternate_shape_normalized") is True
             for job in selected
@@ -759,7 +807,8 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
         "",
     ]
     lines.extend(
-        f"- `{condition}`: {CONDITION_DESCRIPTIONS[condition]}." for condition in conditions
+        f"- `{condition}`: {CONDITION_DESCRIPTIONS[condition]}."
+        for condition in conditions
     )
     lines.extend(
         [
@@ -773,7 +822,9 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
     )
     for task_id, task in tasks.items():
         question = str(task["prompt"]).replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| {task_id} | {task['topic']} | {task['language']} | {question} |")
+        lines.append(
+            f"| {task_id} | {task['topic']} | {task['language']} | {question} |"
+        )
 
     lines.extend(
         [
@@ -809,7 +860,9 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             job["research"]["result"] for job in jobs if job["condition"] == condition
         ]
         combined = {
-            key: dict(sum((Counter(result.get(key, {})) for result in results), Counter()))
+            key: dict(
+                sum((Counter(result.get(key, {})) for result in results), Counter())
+            )
             for key in (
                 "model_profiles",
                 "model_providers",
@@ -878,7 +931,9 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
         )
     for task_id in tasks:
         values = [mean(per_task[task_id][condition]) for condition in conditions]
-        lines.append(f"| {task_id} | " + " | ".join(f"{value:.2f}" for value in values) + " |")
+        lines.append(
+            f"| {task_id} | " + " | ".join(f"{value:.2f}" for value in values) + " |"
+        )
 
     by_pair = {(job["task_id"], job["repeat"], job["condition"]): job for job in jobs}
     lines.extend(
@@ -911,13 +966,16 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             f"pairs; `{right}` won {sum(value > 0 for value in score_deltas)}/{len(score_deltas)}."
         )
     if len(conditions) < 2:
-        lines.append("- Only one condition was selected, so there is no paired comparison.")
+        lines.append(
+            "- Only one condition was selected, so there is no paired comparison."
+        )
     for condition in conditions:
         if not condition.startswith("evidence_"):
             continue
         condition_jobs = [job for job in jobs if job["condition"] == condition]
         followup_runs = sum(
-            int(job["research"]["result"].get("rounds", 1)) > 1 for job in condition_jobs
+            int(job["research"]["result"].get("rounds", 1)) > 1
+            for job in condition_jobs
         )
         lines.append(
             f"- `{condition}` opened at least one evaluator follow-up round in "
@@ -1004,7 +1062,9 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             f"{attempt.get('agents_created', 0)} | {attempt.get('action_steps', 0)} |"
         )
 
-    best_condition = max(conditions, key=lambda condition: aggregates[condition]["score_mean"])
+    best_condition = max(
+        conditions, key=lambda condition: aggregates[condition]["score_mean"]
+    )
     baseline = conditions[0]
     lines.extend(
         [
@@ -1071,7 +1131,7 @@ def cancel_inflight(api: PaperMachineApi, state: dict[str, Any]) -> int:
                 continue
             attempt = attempts[-1]
             try:
-                api.post_empty(f"/workflow-runs/{attempt['run_id']}/cancel")
+                api.post_empty(f"/workflows/{attempt['workflow_id']}/cancel")
             except ApiError as error:
                 attempt["cancel_error"] = str(error)
             else:
@@ -1098,7 +1158,7 @@ def run_research_phase(
     state_path: Path,
     tasks: dict[int, dict[str, Any]],
     articles_dir: Path,
-    research_id: str,
+    project_id: str,
     model: str,
     poll_seconds: float,
     max_attempts: int,
@@ -1116,8 +1176,8 @@ def run_research_phase(
             if not research["attempts"] or research.get("status") == "pending_retry":
                 continue
             attempt = research["attempts"][-1]
-            view = api.get(f"/workflow-runs/{attempt['run_id']}")
-            status = str(view["workflow_run"]["status"])
+            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            status = str(view["workflow"]["status"])
             research["status"] = status
             attempt["status"] = status
             if status in {"created", "running", "paused"}:
@@ -1126,7 +1186,9 @@ def run_research_phase(
             if status == "completed":
                 try:
                     article_path = articles_dir / f"{job['key']}.md"
-                    research["result"] = capture_research_result(api, view, article_path)
+                    research["result"] = capture_research_result(
+                        api, view, article_path
+                    )
                 except (KeyError, TypeError, ValueError) as error:
                     status = "invalid_output"
                     attempt["error"] = f"invalid research output: {error}"
@@ -1136,15 +1198,12 @@ def run_research_phase(
                     continue
             if status in {"failed", "cancelled", "invalid_output"}:
                 attempt["error"] = str(
-                    attempt.get("error") or view["workflow_run"].get("error") or status
+                    attempt.get("error") or view["workflow"].get("error") or status
                 )
-                record_attempt_metrics(attempt, view["workflow_run"])
-                if (
-                    attempt.get("cancelled_by_runner")
-                    or (
-                        len(research["attempts"]) < max_attempts
-                        and is_retryable_error(attempt["error"])
-                    )
+                record_attempt_metrics(attempt, view["workflow"])
+                if attempt.get("cancelled_by_runner") or (
+                    len(research["attempts"]) < max_attempts
+                    and is_retryable_error(attempt["error"])
                 ):
                     research["status"] = "pending_retry"
                 else:
@@ -1161,7 +1220,7 @@ def run_research_phase(
                 continue
             attempt = launch_research_run(
                 api,
-                research_id,
+                project_id,
                 job,
                 tasks[int(job["task_id"])],
                 model,
@@ -1190,7 +1249,7 @@ def run_grading_phase(
     state_path: Path,
     tasks: dict[int, dict[str, Any]],
     grades_dir: Path,
-    research_id: str,
+    project_id: str,
     model: str,
     poll_seconds: float,
     max_attempts: int,
@@ -1212,8 +1271,8 @@ def run_grading_phase(
             if not grade["attempts"] or grade.get("status") == "pending_retry":
                 continue
             attempt = grade["attempts"][-1]
-            view = api.get(f"/workflow-runs/{attempt['run_id']}")
-            run = view["workflow_run"]
+            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            run = view["workflow"]
             status = str(run["status"])
             grade["status"] = status
             attempt["status"] = status
@@ -1235,7 +1294,7 @@ def run_grading_phase(
                     grade["score"] = score
                     grade["usage"] = token_usage(usage.get("tokens") or {})
                     grade["wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
-                    grade["workflow_sha256"] = run["workflow"]["sha256"]
+                    grade["workflow_sha256"] = run["program"]["sha256"]
                     contract = run["output"].get("contract")
                     if isinstance(contract, dict):
                         grade["contract"] = contract
@@ -1278,7 +1337,7 @@ def run_grading_phase(
             )
             attempt = launch_grader_run(
                 api,
-                research_id,
+                project_id,
                 job,
                 tasks[int(job["task_id"])],
                 report,
@@ -1304,19 +1363,20 @@ def run_grading_phase(
         time.sleep(poll_seconds)
 
 
-def validate_workflows(api: PaperMachineApi, conditions: list[str]) -> None:
-    available = {(item["manifest"]["slug"], item["manifest"]["version"]) for item in api.get("/workflows")}
-    required = {
-        (
-            CONDITIONS[condition]["workflow_slug"],
-            CONDITIONS[condition]["workflow_version"],
-        )
-        for condition in conditions
+def validate_workflows(
+    api: PaperMachineApi,
+    project_id: str,
+    required: set[str],
+) -> None:
+    available = {
+        item["manifest"]["slug"]
+        for item in api.get(f"/projects/{project_id}/workflow-programs")
     }
-    required.add(("report-grader", "0.4.0"))
     missing = sorted(required - available)
     if missing:
-        raise RuntimeError(f"PaperMachine server is missing workflows: {missing}; restart it")
+        raise RuntimeError(
+            f"PaperMachine server is missing workflows: {missing}; restart it"
+        )
 
 
 def backfill_retry_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
@@ -1335,8 +1395,8 @@ def backfill_retry_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
                     )
                 ):
                     continue
-                view = api.get(f"/workflow-runs/{attempt['run_id']}")
-                record_attempt_metrics(attempt, view["workflow_run"])
+                view = api.get(f"/workflows/{attempt['workflow_id']}")
+                record_attempt_metrics(attempt, view["workflow"])
                 changed = True
     return changed
 
@@ -1366,11 +1426,17 @@ def main() -> int:
         raise ValueError("repeats must be at least 2")
     if args.max_attempts < 1 or args.max_parallel_runs < 1:
         raise ValueError("max-attempts and max-parallel-runs must be positive")
-    task_ids = [int(value.strip()) for value in args.task_ids.split(",") if value.strip()]
-    conditions = [value.strip() for value in args.conditions.split(",") if value.strip()]
+    task_ids = [
+        int(value.strip()) for value in args.task_ids.split(",") if value.strip()
+    ]
+    conditions = [
+        value.strip() for value in args.conditions.split(",") if value.strip()
+    ]
     unknown_conditions = sorted(set(conditions) - CONDITIONS.keys())
     if not conditions or unknown_conditions:
-        raise ValueError(f"conditions must be non-empty and known; unknown={unknown_conditions}")
+        raise ValueError(
+            f"conditions must be non-empty and known; unknown={unknown_conditions}"
+        )
     if len(task_ids) < 4:
         raise ValueError("the matrix must contain more than three tasks")
 
@@ -1381,7 +1447,11 @@ def main() -> int:
     state_path = run_dir / "state.json"
     report_path = run_dir / "report.md"
     snapshot = prepare_upstream_snapshot(task_ids, snapshot_path, args.refresh_upstream)
-    tasks = {int(task["id"]): task for task in snapshot["tasks"] if int(task["id"]) in task_ids}
+    tasks = {
+        int(task["id"]): task
+        for task in snapshot["tasks"]
+        if int(task["id"]) in task_ids
+    }
     jobs = build_jobs(task_ids, conditions, args.repeats, args.seed)
 
     if state_path.exists():
@@ -1401,7 +1471,9 @@ def main() -> int:
             if key == "conditions" and isinstance(expected_value, dict):
                 expected_value = list(expected_value)
             if expected_value != value:
-                raise ValueError(f"existing run differs for {key}: {expected_value!r} != {value!r}")
+                raise ValueError(
+                    f"existing run differs for {key}: {expected_value!r} != {value!r}"
+                )
     else:
         state = {
             "schema_version": 1,
@@ -1429,7 +1501,7 @@ def main() -> int:
                 )
             },
             "runtime_source_sha256": runtime_fingerprint(repository_root),
-            "researches": {},
+            "projects": {},
             "jobs": jobs,
         }
         save_state(state_path, state)
@@ -1450,25 +1522,32 @@ def main() -> int:
     health = api.get("/health")
     if health.get("model_mode") == "demo":
         raise RuntimeError("benchmark requires a substantive model provider")
-    validate_workflows(api, conditions)
     if "server_health" not in state:
         state["server_health"] = health
         save_state(state_path, state)
     if backfill_retry_metrics(api, state):
         save_state(state_path, state)
 
-    if "research" not in state["researches"]:
-        state["researches"]["research"] = ensure_research(
+    if "research" not in state["projects"]:
+        state["projects"]["research"] = ensure_project(
             api,
             f"Benchmark research - {args.run_name}",
             "Controlled research runs for the auto-research benchmark matrix.",
+            run_dir / "projects" / "research",
         )
-    if "grader" not in state["researches"]:
-        state["researches"]["grader"] = ensure_research(
+    if "grader" not in state["projects"]:
+        state["projects"]["grader"] = ensure_project(
             api,
             f"Benchmark graders - {args.run_name}",
             "Independent post-write grading Sessions using the full upstream rubric.",
+            run_dir / "projects" / "grader",
         )
+    validate_workflows(
+        api,
+        state["projects"]["research"],
+        {CONDITIONS[condition]["program_slug"] for condition in conditions},
+    )
+    validate_workflows(api, state["projects"]["grader"], {"report-grader"})
     save_state(state_path, state)
 
     try:
@@ -1478,7 +1557,7 @@ def main() -> int:
             state_path,
             tasks,
             run_dir / "articles",
-            state["researches"]["research"],
+            state["projects"]["research"],
             args.model,
             args.poll_seconds,
             args.max_attempts,
@@ -1490,7 +1569,7 @@ def main() -> int:
             state_path,
             tasks,
             run_dir / "grades",
-            state["researches"]["grader"],
+            state["projects"]["grader"],
             args.grader_model,
             args.poll_seconds,
             args.max_attempts,
@@ -1499,7 +1578,7 @@ def main() -> int:
     except KeyboardInterrupt:
         cancelled = cancel_inflight(api, state)
         save_state(state_path, state)
-        print(f"cancelled {cancelled} in-flight WorkflowRuns", file=sys.stderr)
+        print(f"cancelled {cancelled} in-flight Workflows", file=sys.stderr)
         return 130
     report = render_report(state, tasks)
     atomic_write_text(report_path, report)

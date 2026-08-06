@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use papermachine_protocol::BudgetUsage;
-use papermachine_protocol::WorkflowRunId;
-use papermachine_protocol::WorkflowRunStatus;
+use papermachine_protocol::WorkflowId;
+use papermachine_protocol::WorkflowStatus;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use serde_json::Value;
@@ -15,38 +15,38 @@ use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-pub type RunOutcome = Result<Value, String>;
+pub type WorkflowOutcome = Result<Value, String>;
 
 #[async_trait]
-pub trait WorkflowRunExecutor: Send + Sync {
+pub trait WorkflowRuntime: Send + Sync {
     async fn execute(
         &self,
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         cancellation: CancellationToken,
-    ) -> RunOutcome;
+    ) -> WorkflowOutcome;
 }
 
 #[derive(Clone)]
-pub struct WorkflowRunScheduler {
+pub struct WorkflowScheduler {
     inner: Arc<SchedulerInner>,
 }
 
 struct SchedulerInner {
     store: Arc<Store>,
-    executor: Arc<dyn WorkflowRunExecutor>,
+    executor: Arc<dyn WorkflowRuntime>,
     permits: Arc<Semaphore>,
-    handles: Mutex<HashMap<WorkflowRunId, ScheduledRun>>,
+    handles: Mutex<HashMap<WorkflowId, ScheduledRun>>,
 }
 
 struct ScheduledRun {
     cancellation: CancellationToken,
-    outcome: watch::Receiver<Option<RunOutcome>>,
+    outcome: watch::Receiver<Option<WorkflowOutcome>>,
 }
 
-impl WorkflowRunScheduler {
+impl WorkflowScheduler {
     pub fn new(
         store: Arc<Store>,
-        executor: Arc<dyn WorkflowRunExecutor>,
+        executor: Arc<dyn WorkflowRuntime>,
         max_concurrent_runs: usize,
     ) -> Self {
         Self {
@@ -59,22 +59,22 @@ impl WorkflowRunScheduler {
         }
     }
 
-    pub async fn start(&self, run_id: WorkflowRunId) -> Result<bool, WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow_run(run_id)?;
+    pub async fn start(&self, workflow_id: WorkflowId) -> Result<bool, WorkflowSchedulerError> {
+        let run = self.inner.store.get_workflow(workflow_id)?;
         if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalRun {
-                run_id,
+            return Err(WorkflowSchedulerError::TerminalWorkflow {
+                workflow_id,
                 status: run.status,
             });
         }
         let mut handles = self.inner.handles.lock().await;
-        if handles.contains_key(&run_id) {
+        if handles.contains_key(&workflow_id) {
             return Ok(false);
         }
         let cancellation = CancellationToken::new();
         let (outcome_tx, outcome_rx) = watch::channel(None);
         handles.insert(
-            run_id,
+            workflow_id,
             ScheduledRun {
                 cancellation: cancellation.clone(),
                 outcome: outcome_rx,
@@ -83,7 +83,7 @@ impl WorkflowRunScheduler {
         drop(handles);
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let outcome = run_scheduled(Arc::clone(&inner), run_id, cancellation).await;
+            let outcome = run_scheduled(Arc::clone(&inner), workflow_id, cancellation).await;
             let _ = outcome_tx.send(Some(outcome));
         });
         Ok(true)
@@ -91,13 +91,11 @@ impl WorkflowRunScheduler {
 
     /// Marks runs that lost their in-memory Python control state as failed.
     /// This must happen before SessionRuntime recovers standalone Turns.
-    pub fn reconcile_process_restart(&self) -> Result<Vec<WorkflowRunId>, WorkflowSchedulerError> {
-        const REASON: &str = "WorkflowRun interrupted by server restart; durable Python effect replay is not available. Start a new run to retry safely.";
+    pub fn reconcile_process_restart(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
+        const REASON: &str = "Workflow interrupted by server restart; durable Python effect replay is not available. Start a new run to retry safely.";
         let mut failed = Vec::new();
-        for run in self.inner.store.list_interrupted_workflow_runs()? {
-            self.inner
-                .store
-                .fail_interrupted_workflow_run(run.id, REASON)?;
+        for run in self.inner.store.list_interrupted_workflows()? {
+            self.inner.store.fail_interrupted_workflow(run.id, REASON)?;
             failed.push(run.id);
         }
         Ok(failed)
@@ -106,9 +104,9 @@ impl WorkflowRunScheduler {
     /// Starts runs that were durably created but had not begun executing when
     /// the previous process stopped. Running/paused Python programs cannot be
     /// restarted safely until workflow effects have deterministic replay keys.
-    pub async fn recover(&self) -> Result<Vec<WorkflowRunId>, WorkflowSchedulerError> {
+    pub async fn recover(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
         let mut started = Vec::new();
-        for run in self.inner.store.list_created_workflow_runs()? {
+        for run in self.inner.store.list_created_workflows()? {
             if self.start(run.id).await? {
                 started.push(run.id);
             }
@@ -116,65 +114,68 @@ impl WorkflowRunScheduler {
         Ok(started)
     }
 
-    pub async fn pause(&self, run_id: WorkflowRunId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow_run(run_id)?;
+    pub async fn pause(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
+        let run = self.inner.store.get_workflow(workflow_id)?;
         if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalRun {
-                run_id,
+            return Err(WorkflowSchedulerError::TerminalWorkflow {
+                workflow_id,
                 status: run.status,
             });
         }
-        self.inner.store.set_workflow_run_status(
-            run_id,
-            WorkflowRunStatus::Paused,
+        self.inner.store.set_workflow_status(
+            workflow_id,
+            WorkflowStatus::Paused,
             Some("paused by user".to_string()),
         )?;
         Ok(())
     }
 
-    pub async fn resume(&self, run_id: WorkflowRunId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow_run(run_id)?;
+    pub async fn resume(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
+        let run = self.inner.store.get_workflow(workflow_id)?;
         if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalRun {
-                run_id,
+            return Err(WorkflowSchedulerError::TerminalWorkflow {
+                workflow_id,
                 status: run.status,
             });
         }
         self.inner
             .store
-            .set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)?;
-        self.start(run_id).await?;
+            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)?;
+        self.start(workflow_id).await?;
         Ok(())
     }
 
-    pub async fn cancel(&self, run_id: WorkflowRunId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow_run(run_id)?;
+    pub async fn cancel(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
+        let run = self.inner.store.get_workflow(workflow_id)?;
         if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalRun {
-                run_id,
+            return Err(WorkflowSchedulerError::TerminalWorkflow {
+                workflow_id,
                 status: run.status,
             });
         }
-        self.inner.store.set_workflow_run_status(
-            run_id,
-            WorkflowRunStatus::Cancelled,
+        self.inner.store.set_workflow_status(
+            workflow_id,
+            WorkflowStatus::Cancelled,
             Some("cancelled by user".to_string()),
         )?;
-        if let Some(handle) = self.inner.handles.lock().await.get(&run_id) {
+        if let Some(handle) = self.inner.handles.lock().await.get(&workflow_id) {
             handle.cancellation.cancel();
         }
         Ok(())
     }
 
-    pub async fn wait(&self, run_id: WorkflowRunId) -> Result<RunOutcome, WorkflowSchedulerError> {
+    pub async fn wait(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<WorkflowOutcome, WorkflowSchedulerError> {
         let mut outcome = self
             .inner
             .handles
             .lock()
             .await
-            .get(&run_id)
+            .get(&workflow_id)
             .map(|handle| handle.outcome.clone())
-            .ok_or(WorkflowSchedulerError::NotScheduled(run_id))?;
+            .ok_or(WorkflowSchedulerError::NotScheduled(workflow_id))?;
         loop {
             if let Some(result) = outcome.borrow().clone() {
                 return Ok(result);
@@ -182,28 +183,28 @@ impl WorkflowRunScheduler {
             outcome
                 .changed()
                 .await
-                .map_err(|_| WorkflowSchedulerError::OutcomeChannelClosed(run_id))?;
+                .map_err(|_| WorkflowSchedulerError::OutcomeChannelClosed(workflow_id))?;
         }
     }
 }
 
 async fn run_scheduled(
     inner: Arc<SchedulerInner>,
-    run_id: WorkflowRunId,
+    workflow_id: WorkflowId,
     cancellation: CancellationToken,
-) -> RunOutcome {
+) -> WorkflowOutcome {
     let _permit = tokio::select! {
         permit = Arc::clone(&inner.permits).acquire_owned() => permit.map_err(|error| error.to_string())?,
         _ = cancellation.cancelled() => return Err("cancelled before execution started".to_string()),
     };
     let run = inner
         .store
-        .get_workflow_run(run_id)
+        .get_workflow(workflow_id)
         .map_err(|error| error.to_string())?;
-    if run.status == WorkflowRunStatus::Created {
+    if run.status == WorkflowStatus::Created {
         inner
             .store
-            .set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)
+            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
             .map_err(|error| error.to_string())?;
     }
     let started = Instant::now();
@@ -216,14 +217,14 @@ async fn run_scheduled(
         Some(limit) => {
             let remaining = limit.saturating_sub(run.usage.wall_time_seconds);
             tokio::select! {
-                result = inner.executor.execute(run_id, execution.clone()) => result,
+                result = inner.executor.execute(workflow_id, execution.clone()) => result,
                 _ = tokio::time::sleep(Duration::from_secs(remaining)) => {
                     execution.cancel();
                     Err(format!("wall-time budget exceeded after {limit} seconds"))
                 }
             }
         }
-        None => inner.executor.execute(run_id, execution).await,
+        None => inner.executor.execute(workflow_id, execution).await,
     };
     let elapsed = started
         .elapsed()
@@ -232,7 +233,7 @@ async fn run_scheduled(
     inner
         .store
         .add_budget_usage(
-            run_id,
+            workflow_id,
             BudgetUsage {
                 wall_time_seconds: elapsed,
                 ..BudgetUsage::default()
@@ -241,15 +242,15 @@ async fn run_scheduled(
         .map_err(|error| error.to_string())?;
     let current = inner
         .store
-        .get_workflow_run(run_id)
+        .get_workflow(workflow_id)
         .map_err(|error| error.to_string())?;
     if cancellation.is_cancelled() {
         if !current.status.is_terminal() {
             inner
                 .store
-                .set_workflow_run_status(
-                    run_id,
-                    WorkflowRunStatus::Cancelled,
+                .set_workflow_status(
+                    workflow_id,
+                    WorkflowStatus::Cancelled,
                     Some("cancelled by user".to_string()),
                 )
                 .map_err(|error| error.to_string())?;
@@ -259,13 +260,13 @@ async fn run_scheduled(
             Ok(output) => {
                 inner
                     .store
-                    .complete_workflow_run(run_id, output.clone())
+                    .complete_workflow(workflow_id, output.clone())
                     .map_err(|error| error.to_string())?;
             }
             Err(error) => {
                 inner
                     .store
-                    .set_workflow_run_status(run_id, WorkflowRunStatus::Failed, Some(error.clone()))
+                    .set_workflow_status(workflow_id, WorkflowStatus::Failed, Some(error.clone()))
                     .map_err(|store_error| store_error.to_string())?;
             }
         }
@@ -277,15 +278,15 @@ async fn run_scheduled(
 pub enum WorkflowSchedulerError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("WorkflowRun {run_id} is terminal with status {status:?}")]
-    TerminalRun {
-        run_id: WorkflowRunId,
-        status: WorkflowRunStatus,
+    #[error("Workflow {workflow_id} is terminal with status {status:?}")]
+    TerminalWorkflow {
+        workflow_id: WorkflowId,
+        status: WorkflowStatus,
     },
-    #[error("WorkflowRun {0} is not scheduled in this process")]
-    NotScheduled(WorkflowRunId),
-    #[error("outcome channel for WorkflowRun {0} closed unexpectedly")]
-    OutcomeChannelClosed(WorkflowRunId),
+    #[error("Workflow {0} is not scheduled in this process")]
+    NotScheduled(WorkflowId),
+    #[error("outcome channel for Workflow {0} closed unexpectedly")]
+    OutcomeChannelClosed(WorkflowId),
 }
 
 #[cfg(test)]
@@ -294,14 +295,16 @@ mod tests {
     use papermachine_protocol::ActionStatus;
     use papermachine_protocol::AgentAccessProfile;
     use papermachine_protocol::Budget;
+    use papermachine_protocol::Session;
     use papermachine_protocol::SessionStatus;
     use papermachine_protocol::StepKind;
     use papermachine_protocol::StepStatus;
     use papermachine_protocol::TurnStatus;
-    use papermachine_protocol::WorkflowId;
-    use papermachine_protocol::WorkflowManifest;
-    use papermachine_protocol::WorkflowSnapshot;
-    use papermachine_protocol::WorkflowSource;
+    use papermachine_protocol::Workflow;
+    use papermachine_protocol::WorkflowProgramId;
+    use papermachine_protocol::WorkflowProgramManifest;
+    use papermachine_protocol::WorkflowProgramSnapshot;
+    use papermachine_protocol::WorkflowProgramSource;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -310,34 +313,50 @@ mod tests {
     }
 
     #[async_trait]
-    impl WorkflowRunExecutor for StaticExecutor {
+    impl WorkflowRuntime for StaticExecutor {
         async fn execute(
             &self,
-            _workflow_run_id: WorkflowRunId,
+            _workflow_id: WorkflowId,
             _cancellation: CancellationToken,
-        ) -> RunOutcome {
+        ) -> WorkflowOutcome {
             Ok(self.output.clone())
         }
     }
 
-    fn workflow() -> WorkflowSnapshot {
-        WorkflowSnapshot {
-            manifest: WorkflowManifest {
-                id: WorkflowId::new(),
+    fn workflow() -> WorkflowProgramSnapshot {
+        WorkflowProgramSnapshot {
+            project_id: None,
+            manifest: WorkflowProgramManifest {
+                id: WorkflowProgramId::new(),
                 slug: "scheduler-test".to_string(),
                 name: "Scheduler test".to_string(),
-                version: "0.1.0".to_string(),
                 description: String::new(),
                 entrypoint: "main".to_string(),
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 default_budget: Budget::default(),
             },
-            source: WorkflowSource::Builtin,
+            source: WorkflowProgramSource::Builtin,
             definition_path: "builtin/scheduler-test/workflow.py".to_string(),
             sha256: "test".to_string(),
             source_code: String::new(),
         }
+    }
+
+    fn create_test_workflow(store: &Store, session: &Session, objective: &str) -> Workflow {
+        store
+            .create_workflow(
+                session.project_id,
+                Some(session.id),
+                workflow(),
+                objective,
+                json!({}),
+                None,
+                "test-model",
+                AgentAccessProfile::Research,
+                Vec::new(),
+            )
+            .expect("workflow should be created")
     }
 
     #[tokio::test]
@@ -346,15 +365,13 @@ mod tests {
         let store =
             Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
         let research = store
-            .create_research("Scheduler", "")
+            .create_project("Scheduler", "", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
             .expect("session should be created");
-        let run = store
-            .create_workflow_run(session.id, workflow(), "Run", json!({}), None)
-            .expect("run should be created");
-        let scheduler = WorkflowRunScheduler::new(
+        let run = create_test_workflow(&store, &session, "Run");
+        let scheduler = WorkflowScheduler::new(
             Arc::clone(&store),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
@@ -369,11 +386,11 @@ mod tests {
             .expect("run should remain scheduled")
             .expect("execution should succeed");
         let completed = store
-            .get_workflow_run(run.id)
+            .get_workflow(run.id)
             .expect("completed run should load");
 
         assert_eq!(output, json!({"report": "done"}));
-        assert_eq!(completed.status, WorkflowRunStatus::Completed);
+        assert_eq!(completed.status, WorkflowStatus::Completed);
         assert_eq!(completed.output, Some(output));
         assert_eq!(completed.usage.wall_time_seconds, 1);
     }
@@ -384,16 +401,14 @@ mod tests {
         let store =
             Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
         let research = store
-            .create_research("Restart", "")
+            .create_project("Restart", "", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
             .expect("session should be created");
-        let interrupted_run = store
-            .create_workflow_run(session.id, workflow(), "Interrupted", json!({}), None)
-            .expect("run should be created");
+        let interrupted_run = create_test_workflow(&store, &session, "Interrupted");
         store
-            .set_workflow_run_status(interrupted_run.id, WorkflowRunStatus::Running, None)
+            .set_workflow_status(interrupted_run.id, WorkflowStatus::Running, None)
             .expect("run should be running");
         let participant = store
             .create_participant(
@@ -452,11 +467,9 @@ mod tests {
                 json!({}),
             )
             .expect("scheduled invocation should be created");
-        let created_run = store
-            .create_workflow_run(session.id, workflow(), "Created", json!({}), None)
-            .expect("created run should be created");
+        let created_run = create_test_workflow(&store, &session, "Created");
 
-        let scheduler = WorkflowRunScheduler::new(
+        let scheduler = WorkflowScheduler::new(
             Arc::clone(&store),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
@@ -469,9 +482,9 @@ mod tests {
         assert_eq!(failed, vec![interrupted_run.id]);
 
         let failed_run = store
-            .get_workflow_run(interrupted_run.id)
+            .get_workflow(interrupted_run.id)
             .expect("failed run should load");
-        assert_eq!(failed_run.status, WorkflowRunStatus::Failed);
+        assert_eq!(failed_run.status, WorkflowStatus::Failed);
         assert!(
             failed_run
                 .error
@@ -527,10 +540,10 @@ mod tests {
             .expect("created run should complete");
         assert_eq!(
             store
-                .get_workflow_run(created_run.id)
+                .get_workflow(created_run.id)
                 .expect("created run should load")
                 .status,
-            WorkflowRunStatus::Completed
+            WorkflowStatus::Completed
         );
     }
 }

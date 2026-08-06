@@ -9,8 +9,8 @@
         <button
           class="icon-button"
           type="button"
-          :title="t('sidebar.searchResearch')"
-          :aria-label="t('sidebar.searchResearch')"
+          :title="t('sidebar.searchProject')"
+          :aria-label="t('sidebar.searchProject')"
           @click="searchVisible = !searchVisible"
         >
           <Search :size="16" />
@@ -18,9 +18,9 @@
         <button
           class="icon-button"
           type="button"
-          :title="t('sidebar.newResearch')"
-          :aria-label="t('sidebar.newResearch')"
-          @click="$emit('new-research')"
+          :title="t('sidebar.newProject')"
+          :aria-label="t('sidebar.newProject')"
+          @click="$emit('new-project')"
         >
           <FolderPlus :size="16" />
         </button>
@@ -51,32 +51,32 @@
       </button>
     </div>
 
-    <nav class="research-tree" :aria-label="t('sidebar.research')">
-      <p class="sidebar-section-label">{{ t('sidebar.research') }}</p>
-      <p v-if="researches.length === 0" class="sidebar-empty">{{ t('sidebar.noResearch') }}</p>
-      <section v-for="research in filteredResearches" :key="research.id" class="research-group">
+    <nav class="project-tree" :aria-label="t('sidebar.project')">
+      <p class="sidebar-section-label">{{ t('sidebar.project') }}</p>
+      <p v-if="projects.length === 0" class="sidebar-empty">{{ t('sidebar.noProject') }}</p>
+      <section v-for="project in filteredProjects" :key="project.id" class="project-group">
         <div
-          class="research-row"
-          :data-active="research.id === selectedResearchId && !selectedSessionId"
+          class="project-row"
+          :data-active="project.id === selectedProjectId && !selectedSessionId"
         >
-          <button class="research-select" type="button" @click="$emit('select-research', research.id)">
+          <button class="project-select" type="button" @click="$emit('select-project', project.id)">
             <ChevronDown :size="14" />
             <Folder :size="15" />
-            <span>{{ research.name }}</span>
+            <span>{{ project.name }}</span>
           </button>
           <button
             class="row-icon-button"
             type="button"
             :title="t('sidebar.newSession')"
             :aria-label="t('sidebar.newSession')"
-            @click="$emit('new-session', research.id)"
+            @click="$emit('new-session', project.id)"
           >
             <Plus :size="14" />
           </button>
         </div>
         <div class="session-list">
           <button
-            v-for="session in visibleSessions(research.id)"
+            v-for="session in visibleSessions(project.id)"
             :key="session.id"
             class="session-row"
             :data-active="session.id === selectedSessionId"
@@ -111,12 +111,12 @@ import { ChevronDown, Folder, FolderPlus, GitBranch, Plus, ScanSearch, Search, X
 import { computed, ref } from 'vue'
 import { formatDate } from '../format'
 import { useAppI18n } from '../i18n'
-import type { Research, Session } from '../types'
+import type { Project, Session } from '../types'
 
 const props = defineProps<{
-  researches: Research[]
-  sessionsByResearch: Record<string, Session[]>
-  selectedResearchId: string | null
+  projects: Project[]
+  sessionsByProject: Record<string, Session[]>
+  selectedProjectId: string | null
   selectedSessionId: string | null
   mode: string
   online: boolean
@@ -126,10 +126,10 @@ const props = defineProps<{
 defineEmits<{
   home: []
   'close-sidebar': []
-  'new-research': []
-  'new-session': [researchId: string]
+  'new-project': []
+  'new-session': [projectId: string]
   'open-workflows': []
-  'select-research': [researchId: string]
+  'select-project': [projectId: string]
   'select-session': [sessionId: string]
 }>()
 
@@ -137,18 +137,18 @@ const searchVisible = ref(false)
 const query = ref('')
 const { locale, setLocale, t } = useAppI18n()
 const normalizedQuery = computed(() => query.value.trim().toLocaleLowerCase())
-const filteredResearches = computed(() => {
-  if (!normalizedQuery.value) return props.researches
-  return props.researches.filter((research) => {
-    if (research.name.toLocaleLowerCase().includes(normalizedQuery.value)) return true
-    return (props.sessionsByResearch[research.id] ?? []).some((session) =>
+const filteredProjects = computed(() => {
+  if (!normalizedQuery.value) return props.projects
+  return props.projects.filter((project) => {
+    if (project.name.toLocaleLowerCase().includes(normalizedQuery.value)) return true
+    return (props.sessionsByProject[project.id] ?? []).some((session) =>
       session.title.toLocaleLowerCase().includes(normalizedQuery.value),
     )
   })
 })
 
-function visibleSessions(researchId: string): Session[] {
-  const sessions = props.sessionsByResearch[researchId] ?? []
+function visibleSessions(projectId: string): Session[] {
+  const sessions = props.sessionsByProject[projectId] ?? []
   if (!normalizedQuery.value) return sessions
   return sessions.filter((session) =>
     session.title.toLocaleLowerCase().includes(normalizedQuery.value),

@@ -31,12 +31,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::WorkflowRunExecutor;
+use crate::WorkflowRuntime;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
-pub struct PythonWorkflowExecutor {
+pub struct PythonWorkflowRuntime {
     store: Arc<Store>,
     sessions: SessionRuntime,
     python: PathBuf,
@@ -44,7 +44,7 @@ pub struct PythonWorkflowExecutor {
     work_root: PathBuf,
 }
 
-impl PythonWorkflowExecutor {
+impl PythonWorkflowRuntime {
     pub fn new(
         store: Arc<Store>,
         sessions: SessionRuntime,
@@ -63,15 +63,15 @@ impl PythonWorkflowExecutor {
 
     async fn execute_inner(
         &self,
-        run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         cancellation: CancellationToken,
     ) -> Result<Value, WorkflowRuntimeError> {
-        let run = self.store.get_workflow_run(run_id)?;
+        let run = self.store.get_workflow(workflow_id)?;
         let workspace = self.work_root.join(run.id.to_string());
         materialize_runtime(
             &workspace,
             &self.python_runtime_root,
-            &run.workflow.source_code,
+            &run.program.source_code,
         )
         .await?;
         let mut command = sandboxed_python_command(&self.python, &workspace)?;
@@ -95,7 +95,7 @@ impl PythonWorkflowExecutor {
             .take()
             .ok_or(WorkflowRuntimeError::MissingPipe("stderr"))?;
         let initialization = json!({
-            "run_id": run.id,
+            "workflow_id": run.id,
             "objective": run.objective,
             "input": run.input,
         });
@@ -109,7 +109,7 @@ impl PythonWorkflowExecutor {
         let context = Arc::new(RunEffectContext {
             store: Arc::clone(&self.store),
             sessions: self.sessions.clone(),
-            run_id,
+            workflow_id,
             cancellation: effect_cancellation.clone(),
             action_permits: Arc::new(Semaphore::new(
                 run.budget.max_concurrent_actions.max(1) as usize
@@ -212,13 +212,13 @@ impl PythonWorkflowExecutor {
 }
 
 #[async_trait]
-impl WorkflowRunExecutor for PythonWorkflowExecutor {
+impl WorkflowRuntime for PythonWorkflowRuntime {
     async fn execute(
         &self,
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
-        self.execute_inner(workflow_run_id, cancellation)
+        self.execute_inner(workflow_id, cancellation)
             .await
             .map_err(|error| error.to_string())
     }
@@ -227,7 +227,7 @@ impl WorkflowRunExecutor for PythonWorkflowExecutor {
 struct RunEffectContext {
     store: Arc<Store>,
     sessions: SessionRuntime,
-    run_id: WorkflowRunId,
+    workflow_id: WorkflowId,
     cancellation: CancellationToken,
     action_permits: Arc<Semaphore>,
     agent_gates: Mutex<HashMap<AgentInstanceId, Arc<Mutex<()>>>>,
@@ -265,20 +265,21 @@ impl RunEffectContext {
             if self.cancellation.is_cancelled() {
                 return Err(WorkflowRuntimeError::Cancelled);
             }
-            let run = self.store.get_workflow_run(self.run_id)?;
+            let run = self.store.get_workflow(self.workflow_id)?;
             match run.status {
-                WorkflowRunStatus::Created | WorkflowRunStatus::Running => return Ok(()),
-                WorkflowRunStatus::Paused => {
+                WorkflowStatus::Created | WorkflowStatus::Running => return Ok(()),
+                WorkflowStatus::Paused
+                | WorkflowStatus::WaitingForUser
+                | WorkflowStatus::WaitingForTimer
+                | WorkflowStatus::WaitingForSignal => {
                     let mut events = self.store.subscribe();
                     tokio::select! {
                         _ = self.cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
                         _ = events.recv() => {}
                     }
                 }
-                WorkflowRunStatus::Completed
-                | WorkflowRunStatus::Failed
-                | WorkflowRunStatus::Cancelled => {
-                    return Err(WorkflowRuntimeError::RunTerminal(run.status));
+                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
+                    return Err(WorkflowRuntimeError::WorkflowTerminal(run.status));
                 }
             }
         }
@@ -286,12 +287,10 @@ impl RunEffectContext {
 
     async fn create_agent(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: CreateAgentEffect = serde_json::from_value(payload)?;
-        let origin = self
-            .store
-            .get_session(self.store.get_workflow_run(self.run_id)?.origin_session_id)?;
-        let initial_access = std::cmp::min(payload.access, origin.access);
+        let workflow = self.store.get_workflow(self.workflow_id)?;
+        let initial_access = std::cmp::min(payload.access, workflow.access);
         let participant = self.store.create_participant(
-            self.run_id,
+            self.workflow_id,
             payload.class_name,
             payload.name,
             payload.role,
@@ -320,9 +319,9 @@ impl RunEffectContext {
         let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let participant = self.store.get_participant(agent_id)?;
-        if participant.workflow_run_id != self.run_id {
+        if participant.workflow_id != self.workflow_id {
             return Err(WorkflowRuntimeError::Protocol(
-                "cannot change access for an Agent in another WorkflowRun".to_string(),
+                "cannot change access for an Agent in another Workflow".to_string(),
             ));
         }
         let current = self.store.get_session(participant.session_id)?.access;
@@ -343,7 +342,7 @@ impl RunEffectContext {
         requested: AgentAccessProfile,
     ) -> Result<(), WorkflowRuntimeError> {
         let request = self.store.create_human_request(
-            self.run_id,
+            self.workflow_id,
             None,
             None,
             participant.session_id,
@@ -389,7 +388,7 @@ impl RunEffectContext {
         let participant = self.store.get_participant(agent_id)?;
         let objective = format_action_objective(&payload.prompt, &payload.arguments);
         let invocation = self.store.create_action_invocation(
-            self.run_id,
+            self.workflow_id,
             scope_id,
             agent_id,
             payload.action_name,
@@ -411,8 +410,9 @@ impl RunEffectContext {
             )
         };
         let _agent_guard = gate.lock().await;
-        let run = self.store.get_workflow_run(self.run_id)?;
-        let relationship_context = relationship_instructions(&self.store, self.run_id, agent_id)?;
+        let run = self.store.get_workflow(self.workflow_id)?;
+        let relationship_context =
+            relationship_instructions(&self.store, self.workflow_id, agent_id)?;
         let mut interruption_guidance = None;
         loop {
             self.checkpoint().await?;
@@ -457,7 +457,7 @@ impl RunEffectContext {
                     payload.max_output_tokens,
                     payload.response_format.clone(),
                     WorkflowTurnContext {
-                        workflow_run_id: self.run_id,
+                        workflow_id: self.workflow_id,
                         action_invocation_id: invocation.id,
                         action_attempt_id: attempt.id,
                     },
@@ -493,7 +493,7 @@ impl RunEffectContext {
                         attempt.id,
                         ActionStatus::Cancelled,
                         None,
-                        Some("WorkflowRun cancelled".to_string()),
+                        Some("Workflow cancelled".to_string()),
                     )?;
                     return Err(WorkflowRuntimeError::Cancelled);
                 }
@@ -514,7 +514,9 @@ impl RunEffectContext {
     fn create_team(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: TeamEffect = serde_json::from_value(payload)?;
         let members = parse_ids(&payload.member_ids)?;
-        let team = self.store.create_team(self.run_id, payload.name, members)?;
+        let team = self
+            .store
+            .create_team(self.workflow_id, payload.name, members)?;
         Ok(json!({"team_id": team.id}))
     }
 
@@ -534,7 +536,7 @@ impl RunEffectContext {
         let target = AgentInstanceId::from_str(&payload.target_agent_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let relation = self.store.set_relation(
-            self.run_id,
+            self.workflow_id,
             source,
             target,
             payload.kind,
@@ -551,9 +553,12 @@ impl RunEffectContext {
             .map(TaskScopeId::from_str)
             .transpose()
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let scope =
-            self.store
-                .create_task_scope(self.run_id, parent, payload.name, payload.objective)?;
+        let scope = self.store.create_task_scope(
+            self.workflow_id,
+            parent,
+            payload.name,
+            payload.objective,
+        )?;
         Ok(json!({"task_scope_id": scope.id}))
     }
 
@@ -578,7 +583,7 @@ impl RunEffectContext {
         let payload: TimerEffect = serde_json::from_value(payload)?;
         if let Some(timer) = self
             .store
-            .list_timers(self.run_id)?
+            .list_timers(self.workflow_id)?
             .into_iter()
             .find(|timer| {
                 timer.name == payload.name
@@ -599,7 +604,7 @@ impl RunEffectContext {
         };
         let timer =
             self.store
-                .create_timer(self.run_id, payload.name, payload.interval_ms, policy)?;
+                .create_timer(self.workflow_id, payload.name, payload.interval_ms, policy)?;
         Ok(json!({"timer_id": timer.id}))
     }
 
@@ -635,7 +640,7 @@ impl RunEffectContext {
         let payload: ChannelEffect = serde_json::from_value(payload)?;
         if let Some(channel) = self
             .store
-            .list_channels(self.run_id)?
+            .list_channels(self.workflow_id)?
             .into_iter()
             .find(|item| item.name == payload.name)
         {
@@ -643,7 +648,7 @@ impl RunEffectContext {
         }
         let channel = self
             .store
-            .create_channel(self.run_id, payload.name, payload.schema)?;
+            .create_channel(self.workflow_id, payload.name, payload.schema)?;
         Ok(json!({"channel_id": channel.id}))
     }
 
@@ -689,7 +694,7 @@ impl RunEffectContext {
 
     async fn ask_human(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: AskHumanEffect = serde_json::from_value(payload)?;
-        let run = self.store.get_workflow_run(self.run_id)?;
+        let run = self.store.get_workflow(self.workflow_id)?;
         let session_id = if let Some(agent_id) = payload.agent_instance_id {
             self.store
                 .get_participant(
@@ -697,11 +702,21 @@ impl RunEffectContext {
                         .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?,
                 )?
                 .session_id
+        } else if let Some(session_id) = run.started_from_session_id {
+            session_id
         } else {
-            run.origin_session_id
+            self.store
+                .list_participants(self.workflow_id)?
+                .first()
+                .map(|participant| participant.session_id)
+                .ok_or_else(|| {
+                    WorkflowRuntimeError::Protocol(
+                        "workflow-level ask_human requires a participant Session".to_string(),
+                    )
+                })?
         };
         let request = self.store.create_human_request(
-            self.run_id,
+            self.workflow_id,
             None,
             None,
             session_id,
@@ -745,15 +760,13 @@ impl HumanRequestBroker for StoreHumanRequestBroker {
         question: String,
         response_schema: Value,
     ) -> Result<Value, ToolError> {
-        let run_id = context.workflow_run_id.ok_or_else(|| {
-            ToolError::Execution(
-                "ask_human is available only inside a WorkflowRun action".to_string(),
-            )
+        let workflow_id = context.workflow_id.ok_or_else(|| {
+            ToolError::Execution("ask_human is available only inside a Workflow action".to_string())
         })?;
         let request = self
             .store
             .create_human_request(
-                run_id,
+                workflow_id,
                 context.action_invocation_id,
                 context.action_attempt_id,
                 context.session_id,
@@ -947,16 +960,16 @@ async fn drain_limited<R: AsyncRead + Unpin>(
 
 fn relationship_instructions(
     store: &Store,
-    run_id: WorkflowRunId,
+    workflow_id: WorkflowId,
     agent_id: AgentInstanceId,
 ) -> Result<String, WorkflowRuntimeError> {
     let participants = store
-        .list_participants(run_id)?
+        .list_participants(workflow_id)?
         .into_iter()
         .map(|participant| (participant.id, participant.name))
         .collect::<HashMap<_, _>>();
     let mut lines = Vec::new();
-    for relation in store.list_relations(run_id)? {
+    for relation in store.list_relations(workflow_id)? {
         if relation.source_agent_id == agent_id || relation.target_agent_id == agent_id {
             let source = participants
                 .get(&relation.source_agent_id)
@@ -1169,10 +1182,10 @@ pub enum WorkflowRuntimeError {
     },
     #[error("workflow sandbox unavailable: {0}")]
     Sandbox(String),
-    #[error("WorkflowRun was cancelled")]
+    #[error("Workflow was cancelled")]
     Cancelled,
-    #[error("WorkflowRun is terminal: {0:?}")]
-    RunTerminal(WorkflowRunStatus),
+    #[error("Workflow is terminal: {0:?}")]
+    WorkflowTerminal(WorkflowStatus),
     #[error("Agent action failed: {0}")]
     Action(String),
 }

@@ -17,12 +17,12 @@ use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelToolChoice;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::ReasoningEffort;
-use papermachine_protocol::ResearchId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowRunId;
+use papermachine_protocol::WorkflowId;
 use papermachine_tools::ReadFileTool;
 use papermachine_tools::ToolRegistry;
 use papermachine_tools::WriteFileTool;
@@ -104,7 +104,7 @@ async fn agent_executes_a_tool_then_follows_up() {
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -112,7 +112,7 @@ async fn agent_executes_a_tool_then_follows_up() {
         "Use tools and report evidence.",
         "Write the evidence file.",
     );
-    request.workflow_run_id = Some(WorkflowRunId::new());
+    request.workflow_id = Some(WorkflowId::new());
     request.max_steps = 2;
 
     let result = runtime
@@ -210,7 +210,7 @@ async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
     std::fs::write(directory.path().join("evidence.txt"), "evidence")
         .expect("fixture should be written");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -262,7 +262,7 @@ async fn hosted_search_uses_a_stable_per_response_batch_limit() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -313,7 +313,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
     .with_control(Arc::new(FinishNowControl));
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -365,7 +365,7 @@ async fn model_only_access_omits_local_and_hosted_tools() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -425,7 +425,7 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
     let directory = tempdir().expect("temporary workspace should be created");
     let session_id = SessionId::new();
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         session_id,
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -465,7 +465,7 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         .prompt_cache
         .as_ref()
         .expect("final request should have a prompt-cache configuration");
-    assert!(compact_cache.key.ends_with("-pmv3"));
+    assert!(compact_cache.key.ends_with("-session"));
     assert_ne!(compact_cache.key, expected_transport_key);
     assert_eq!(compact_cache, final_cache);
     assert_eq!(
@@ -580,7 +580,7 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -629,7 +629,7 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -700,7 +700,7 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
@@ -708,7 +708,7 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         "Return a short response.",
         "Test stream recovery.",
     );
-    request.workflow_run_id = Some(WorkflowRunId::new());
+    request.workflow_id = Some(WorkflowId::new());
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -771,7 +771,7 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let request = AgentTurnRequest::new(
-        ResearchId::new(),
+        ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),

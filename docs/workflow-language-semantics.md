@@ -7,14 +7,14 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 
 | Term | Identity | Semantics |
 |---|---|---|
-| `Research` | `ResearchId` | Ownership root for Sessions, WorkflowRuns, skills, artifacts, and UI overview. |
+| `Project` | `ProjectId` | Directory-backed ownership root for Sessions, Workflows, skills, artifacts, and UI overview. |
 | `Session` | `SessionId` | Durable multi-turn conversation and workspace. It has `user` or `workflow_agent` origin, never a parent Session. |
 | `Turn` | `TurnId` | One user/model interaction inside a Session. |
 | `AgentStep` | `StepId` | Inspectable model, tool, workflow, or system step under a Turn. |
-| `WorkflowDefinition` | `(slug, version, sha256)` | Validated Python source plus literal manifest. |
-| `WorkflowRun` | `WorkflowRunId` | One execution of an immutable workflow snapshot inside a Research. |
-| origin Session | `origin_session_id` | Session from which a run was started. It is provenance, not ownership. |
-| `Agent instance` | `AgentInstanceId` | One workflow actor backed by exactly one Research-owned Session. |
+| `WorkflowProgram` | `(project_id?, slug, sha256)` | Validated Python source plus literal manifest. A missing Project denotes a built-in. |
+| `Workflow` | `WorkflowId` | One execution of an immutable workflow snapshot inside a Project. |
+| starting Session | `started_from_session_id?` | Optional Session from which a Workflow was started. It is provenance, not ownership. |
+| `Agent instance` | `AgentInstanceId` | One workflow actor backed by exactly one Project-owned Session. |
 | `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent. |
 | `ActionAttempt` | `ActionAttemptId` | One execution attempt for an invocation; it may be replaced after interruption. |
 | `Team` | `TeamId` | Named mutable set of Agent instances. |
@@ -29,18 +29,18 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 
 | ID | Invariant |
 |---|---|
-| I1 | Every Session belongs directly to one Research. |
-| I2 | A WorkflowRun belongs to the same Research as its origin Session. |
+| I1 | Every Session belongs directly to one Project. |
+| I2 | A Workflow belongs directly to one Project; a starting Session is optional and, when present, belongs to that Project. |
 | I3 | Every Agent instance in a run owns exactly one Session with origin `workflow_agent`. |
 | I4 | Agent Sessions remain navigable after retirement, completion, failure, or cancellation. |
 | I5 | An ActionInvocation belongs to one Agent instance and its Session. |
 | I6 | Every ActionAttempt belongs to one ActionInvocation and has at most one Turn. |
-| I7 | A run may refer only to Sessions, Agents, scopes, channels, and controls in the same Research/run. |
+| I7 | A run may refer only to Sessions, Agents, scopes, channels, and controls in the same Project/run. |
 | I8 | A workflow source snapshot and SHA-256 are immutable after run creation. |
-| I9 | Published `(slug, version)` bytes are immutable. A revision requires a new version. |
+| I9 | A Project has at most one editable WorkflowProgram per slug. Saving that slug replaces the program, never existing Workflow snapshots. |
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
 
-The UI may visually group Agent Sessions beneath a WorkflowRun. This does not
+The UI may visually group Agent Sessions beneath a Workflow. This does not
 create a Session parent/child relation.
 
 ## 3. Definition and run creation
@@ -52,10 +52,10 @@ only when there are no error diagnostics.
 Starting a run performs these operations atomically enough to expose one
 consistent created run:
 
-1. Resolve `(slug, version)` in the catalog.
+1. Resolve `slug` in the Project-visible catalog (Project source overrides a built-in of the same slug).
 2. Validate the user input against `input_schema`.
-3. Copy source, manifest, owner, path, and SHA-256 into a WorkflowSnapshot.
-4. Create a WorkflowRun with `created` status and the launching Session as origin.
+3. Copy source, manifest, owner, path, and SHA-256 into a WorkflowProgramSnapshot.
+4. Create a Project-owned Workflow with `created` status and an optional starting Session.
 5. Schedule the run; the worker changes it to `running` before interpreting effects.
 
 The run's output is the value returned by the Python entrypoint. The runner
@@ -69,15 +69,15 @@ human request targeted at that Agent, or explicit retirement calls
 `create_agent`. Rust then:
 
 1. checks run status and `max_agents`;
-2. creates a Session in the run's Research;
-3. resolves model and skills from Agent overrides or the origin Session;
+2. creates a Session in the run's Project;
+3. resolves model and skills from Agent overrides or the Workflow defaults;
 4. creates the WorkflowParticipant mapping;
 5. emits Session-created, workflow-attached, and participant-created events.
 
 Each Session has one user-facing access profile, expanded into granular runtime
 capabilities:
 
-| Profile | Files | Commands | Research network | Model-visible resource tools |
+| Profile | Files | Commands | Project network | Model-visible resource tools |
 |---|---|---|---|---|
 | `model_only` | None | None | None | `ask_human` only. |
 | `read_only` | Read Session workspace | None | None | `read_file`, `ask_human`. |
@@ -118,7 +118,7 @@ not Agent research-network access.
 An `@action` method declares a prompt and argument signature. The method body is
 not executed as agent logic. Calling it creates an awaitable; awaiting that
 value requests `invoke_action`. `@action(max_steps=N)` may set a smaller
-per-action model-sample limit; the WorkflowRun's `max_action_steps` remains the
+per-action model-sample limit; the Workflow's `max_action_steps` remains the
 hard ceiling. Setting `max_steps=1` also disables tools for that action because
 the first sample must be the final response. `@action(max_search_calls=N)` sets
 a hosted web-search allowance across the Turn; zero disables hosted search
@@ -149,7 +149,7 @@ ActionInvocation
 ```
 
 The runtime formats the action docstring/decorator prompt and bound arguments
-as the Turn objective. It adds the WorkflowRun objective, relevant directed
+as the Turn objective. It adds the Workflow objective, relevant directed
 relations, and interruption guidance to the Session instructions.
 
 | Invocation/attempt status | Meaning |
@@ -163,7 +163,7 @@ relations, and interruption guidance to the Session instructions.
 | `cancelled` | Run or Turn cancellation ended the invocation. |
 
 One completed action returns its assistant output string. Usage and Step count
-are added to WorkflowRun budget usage. Provider-reported usage from incomplete
+are added to Workflow budget usage. Provider-reported usage from incomplete
 samples is retained across retries. If every retry fails, the final model Step
 is persisted as failed and the consumed usage is still charged to the run.
 When an output limit or a reasoning-only completion produces no message or tool
@@ -226,7 +226,7 @@ There are two request paths:
 
 The response schema is stored with the request. The HTTP API validates an
 answer before resolution. While at least one request is open,
-`WorkflowRun.attention_required` is true.
+`Workflow.attention_required` is true.
 
 Control messages are asynchronous:
 
@@ -276,10 +276,13 @@ marked completed when the workflow completes.
 
 ## 12. Completion, failure, and budgets
 
-| WorkflowRun status | Entry condition | Effects accepted |
+| Workflow status | Entry condition | Effects accepted |
 |---|---|---|
 | `created` | Durable run exists, waiting for scheduler. | Checkpoints may proceed into startup. |
 | `running` | Worker is interpreting source. | Yes, subject to validation/budgets. |
+| `waiting_for_user` | Workflow requested user input. | Resume follows a validated user response. |
+| `waiting_for_timer` | Workflow is waiting for a timer deadline. | Timer wake-up resumes execution. |
+| `waiting_for_signal` | Workflow is waiting for a Channel Signal. | Matching Signal resumes execution. |
 | `paused` | User paused the run. | Existing calls wait at checkpoints. |
 | `completed` | Python submitted output, the process exited successfully, final usage was recorded, and Rust committed the output. | No new domain work. |
 | `failed` | Python, action, protocol, sandbox, or budget failure. | No. |
@@ -320,10 +323,10 @@ protocol error.
 ## 13. Persistence and replay boundary
 
 All authoritative entities and ordered events are durable. Workflow source is
-snapshotted. Standalone Session Turns have restart recovery. A WorkflowRun still
+snapshotted. Standalone Session Turns have restart recovery. A Workflow still
 in `created` state is started after restart because no Python effect has run.
 
-A `running` or `paused` WorkflowRun cannot be continued safely today. On server
+A `running` or `paused` Workflow cannot be continued safely today. On server
 restart it is failed with an explicit restart-interruption reason; unfinished
 ActionInvocations and ActionAttempts become `interrupted`, attached Turns become
 `interrupted`, and their running Steps become `cancelled`. This reconciliation
@@ -334,7 +337,7 @@ The current effect request ID is only a concurrent request/response correlation
 ID, not a deterministic durable idempotency key. True active-run continuation
 requires a durable effect-result journal and replay of Python from the beginning
 against that journal. Until then, retry an interrupted execution as a new
-WorkflowRun rather than replaying committed effects.
+Workflow rather than replaying committed effects.
 
 ## 14. Representative trace
 

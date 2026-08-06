@@ -13,35 +13,35 @@ use papermachine_protocol::SessionStatus;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnStatus;
-use papermachine_protocol::WorkflowId;
-use papermachine_protocol::WorkflowManifest;
-use papermachine_protocol::WorkflowRunStatus;
-use papermachine_protocol::WorkflowSnapshot;
-use papermachine_protocol::WorkflowSource;
+use papermachine_protocol::WorkflowProgramId;
+use papermachine_protocol::WorkflowProgramManifest;
+use papermachine_protocol::WorkflowProgramSnapshot;
+use papermachine_protocol::WorkflowProgramSource;
+use papermachine_protocol::WorkflowStatus;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
 use papermachine_session::WorkflowTurnContext;
-use papermachine_skills::ResearchSkillCatalog;
+use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::Store;
 use papermachine_tools::ToolRegistry;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-fn workflow_snapshot(budget: Budget) -> WorkflowSnapshot {
-    WorkflowSnapshot {
-        manifest: WorkflowManifest {
-            id: WorkflowId::new(),
+fn workflow_snapshot(budget: Budget) -> WorkflowProgramSnapshot {
+    WorkflowProgramSnapshot {
+        project_id: None,
+        manifest: WorkflowProgramManifest {
+            id: WorkflowProgramId::new(),
             slug: "budget-test".to_string(),
             name: "Budget test".to_string(),
-            version: "0.1.0".to_string(),
             description: "Exercise per-step token accounting.".to_string(),
             entrypoint: "main".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             output_schema: serde_json::json!({"type": "object"}),
             default_budget: budget,
         },
-        source: WorkflowSource::Builtin,
+        source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/budget-test/workflow.py".to_string(),
         sha256: "budget-test".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
@@ -84,13 +84,11 @@ async fn cancelling_a_turn_closes_its_running_model_step() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_research("Cancellation", "")
+        .create_project("Cancellation", "", directory.path().join("project"))
         .expect("research should be created");
-    let skills = Arc::new(ResearchSkillCatalog::new(
-        directory.path().join("researches"),
-    ));
+    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
-        .ensure_research(research.id)
+        .ensure_project(research.id)
         .expect("research directories should exist");
     let session = store
         .create_session(research.id, "Session", "", "test-model", Vec::new())
@@ -101,7 +99,6 @@ async fn cancelling_a_turn_closes_its_running_model_step() {
         ToolRegistry::default(),
         skills,
         SessionRuntimeConfig {
-            workspace_root: directory.path().join("workspaces"),
             default_model: "test-model".to_string(),
             model_context_window: 128_000,
             max_concurrent_turns: 1,
@@ -154,13 +151,15 @@ async fn later_turns_reuse_the_completed_session_history() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_research("Persistent conversation", "")
+        .create_project(
+            "Persistent conversation",
+            "",
+            directory.path().join("project"),
+        )
         .expect("research should be created");
-    let skills = Arc::new(ResearchSkillCatalog::new(
-        directory.path().join("researches"),
-    ));
+    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
-        .ensure_research(research.id)
+        .ensure_project(research.id)
         .expect("research directories should exist");
     let session = store
         .create_session(research.id, "Session", "", "test-model", Vec::new())
@@ -175,7 +174,6 @@ async fn later_turns_reuse_the_completed_session_history() {
         ToolRegistry::default(),
         skills,
         SessionRuntimeConfig {
-            workspace_root: directory.path().join("workspaces"),
             default_model: "test-model".to_string(),
             model_context_window: 128_000,
             max_concurrent_turns: 1,
@@ -204,7 +202,7 @@ async fn later_turns_reuse_the_completed_session_history() {
         .prompt_cache
         .as_ref()
         .expect("second request should have a prompt-cache configuration");
-    assert!(first_cache.key.ends_with("-pmv3"));
+    assert!(first_cache.key.ends_with("-session"));
     assert_ne!(first_cache.key, expected_transport_key);
     assert_eq!(first_cache, second_cache);
     assert_eq!(
@@ -233,7 +231,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_research("Budget", "")
+        .create_project("Budget", "", directory.path().join("project"))
         .expect("research should be created");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -243,16 +241,20 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         ..Budget::default()
     };
     let run = store
-        .create_workflow_run(
-            origin.id,
+        .create_workflow(
+            research.id,
+            Some(origin.id),
             workflow_snapshot(budget),
             "Stay within budget",
             serde_json::json!({}),
             None,
+            "test-model",
+            papermachine_protocol::AgentAccessProfile::Research,
+            Vec::new(),
         )
         .expect("run should be created");
     store
-        .set_workflow_run_status(run.id, WorkflowRunStatus::Running, None)
+        .set_workflow_status(run.id, WorkflowStatus::Running, None)
         .expect("run should start");
     let participant = store
         .create_participant(
@@ -281,11 +283,9 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         .expect("attempt should start");
 
     let model = ScriptedModelClient::new([response("This response exceeds the budget.")]);
-    let skills = Arc::new(ResearchSkillCatalog::new(
-        directory.path().join("researches"),
-    ));
+    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
-        .ensure_research(research.id)
+        .ensure_project(research.id)
         .expect("research directories should exist");
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
@@ -293,7 +293,6 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         ToolRegistry::default(),
         skills,
         SessionRuntimeConfig {
-            workspace_root: directory.path().join("workspaces"),
             default_model: "test-model".to_string(),
             model_context_window: 128_000,
             max_concurrent_turns: 1,
@@ -313,7 +312,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             None,
             None,
             WorkflowTurnContext {
-                workflow_run_id: run.id,
+                workflow_id: run.id,
                 action_invocation_id: invocation.id,
                 action_attempt_id: attempt.id,
             },
@@ -323,7 +322,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         .expect_err("turn should stop after exceeding the token budget");
     assert!(error.to_string().contains("token budget exceeded"));
     let updated = store
-        .get_workflow_run(run.id)
+        .get_workflow(run.id)
         .expect("run should load after budget failure");
     assert_eq!(updated.usage.tokens.input_tokens, 10);
     assert_eq!(updated.usage.tokens.output_tokens, 3);

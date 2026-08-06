@@ -5,8 +5,8 @@ use crate::ArtifactId;
 use crate::ChannelId;
 use crate::ControlMessageId;
 use crate::HumanRequestId;
+use crate::ProjectId;
 use crate::RelationId;
-use crate::ResearchId;
 use crate::SessionId;
 use crate::SignalId;
 use crate::TaskScopeId;
@@ -14,8 +14,8 @@ use crate::TeamId;
 use crate::TimerId;
 use crate::TokenUsage;
 use crate::TurnId;
-use crate::WorkflowRunId;
-use crate::WorkflowSnapshot;
+use crate::WorkflowId;
+use crate::WorkflowProgramSnapshot;
 use chrono::DateTime;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -25,38 +25,50 @@ use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowRunStatus {
+pub enum WorkflowStatus {
     Created,
     Running,
+    WaitingForUser,
+    WaitingForTimer,
+    WaitingForSignal,
     Paused,
     Completed,
     Failed,
     Cancelled,
 }
 
-impl WorkflowRunStatus {
+impl WorkflowStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct Research {
-    pub id: ResearchId,
+pub struct Project {
+    pub id: ProjectId,
     pub name: String,
     pub description: String,
+    /// Canonical absolute directory owned by this Project.
+    pub root_path: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowRun {
-    pub id: WorkflowRunId,
-    pub research_id: ResearchId,
-    pub origin_session_id: SessionId,
-    pub workflow: WorkflowSnapshot,
+pub struct Workflow {
+    pub id: WorkflowId,
+    pub project_id: ProjectId,
+    /// Optional Session from which the user started this Workflow. Project-level
+    /// and built-in background Workflows do not need one.
+    pub started_from_session_id: Option<SessionId>,
+    pub program: WorkflowProgramSnapshot,
     pub objective: String,
-    pub status: WorkflowRunStatus,
+    pub default_model: String,
+    #[serde(default)]
+    pub access: crate::AgentAccessProfile,
+    #[serde(default)]
+    pub enabled_skills: Vec<String>,
+    pub status: WorkflowStatus,
     pub input: Value,
     pub output: Option<Value>,
     pub error: Option<String>,
@@ -124,7 +136,7 @@ pub enum ParticipantStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowParticipant {
     pub id: AgentInstanceId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub session_id: SessionId,
     pub class_name: String,
     pub name: String,
@@ -149,7 +161,7 @@ pub enum TaskScopeStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct TaskScope {
     pub id: TaskScopeId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub parent_id: Option<TaskScopeId>,
     pub name: String,
     pub objective: String,
@@ -182,7 +194,7 @@ impl ActionStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ActionInvocation {
     pub id: ActionInvocationId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub task_scope_id: Option<TaskScopeId>,
     pub agent_instance_id: AgentInstanceId,
     pub session_id: SessionId,
@@ -199,7 +211,7 @@ pub struct ActionInvocation {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ActionAttempt {
     pub id: ActionAttemptId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub invocation_id: ActionInvocationId,
     pub number: u32,
     pub turn_id: Option<TurnId>,
@@ -213,7 +225,7 @@ pub struct ActionAttempt {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowTeam {
     pub id: TeamId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub name: String,
     pub member_ids: Vec<AgentInstanceId>,
     pub created_at: DateTime<Utc>,
@@ -223,7 +235,7 @@ pub struct WorkflowTeam {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct AgentRelation {
     pub id: RelationId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub source_agent_id: AgentInstanceId,
     pub target_agent_id: AgentInstanceId,
     pub kind: String,
@@ -251,7 +263,7 @@ pub enum TimerStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowTimer {
     pub id: TimerId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub name: String,
     pub interval_ms: u64,
     pub policy: TimerPolicy,
@@ -266,7 +278,7 @@ pub struct WorkflowTimer {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowChannel {
     pub id: ChannelId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub name: String,
     pub schema: Value,
     pub created_at: DateTime<Utc>,
@@ -275,7 +287,7 @@ pub struct WorkflowChannel {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowSignal {
     pub id: SignalId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub channel_id: ChannelId,
     pub sender_agent_id: Option<AgentInstanceId>,
     pub sequence: u64,
@@ -294,7 +306,7 @@ pub enum HumanRequestStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct HumanRequest {
     pub id: HumanRequestId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub session_id: SessionId,
@@ -326,7 +338,7 @@ pub enum ControlMessageStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ControlMessage {
     pub id: ControlMessageId,
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub session_id: SessionId,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub kind: ControlMessageKind,
@@ -354,8 +366,8 @@ pub enum ArtifactKind {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Artifact {
     pub id: ArtifactId,
-    pub research_id: ResearchId,
-    pub workflow_run_id: WorkflowRunId,
+    pub project_id: ProjectId,
+    pub workflow_id: WorkflowId,
     pub session_id: Option<SessionId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub kind: ArtifactKind,

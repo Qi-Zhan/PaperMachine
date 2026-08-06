@@ -1,10 +1,10 @@
 <template>
   <Teleport to="body">
-    <div v-if="run" class="artifact-backdrop" @mousedown.self="$emit('close')">
+    <div v-if="workflow" class="artifact-backdrop" @mousedown.self="$emit('close')">
       <section class="artifact-dialog workflow-output-dialog" role="dialog" aria-modal="true">
         <header class="artifact-dialog-header">
           <div>
-            <p class="eyebrow">{{ run.workflow.manifest.name }} · {{ run.status }}</p>
+            <p class="eyebrow">{{ workflow.program.manifest.name }} · {{ workflow.status }}</p>
             <h2>{{ t('workflow.output') }}</h2>
           </div>
           <button
@@ -50,35 +50,35 @@
 import { Braces, FileText, X } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { useAppI18n } from '../i18n'
-import type { WorkflowRun } from '../types'
+import type { Workflow } from '../types'
 import MarkdownView from './MarkdownView.vue'
 
-const props = defineProps<{ run: WorkflowRun | null }>()
+const props = defineProps<{ workflow: Workflow | null }>()
 defineEmits<{ close: [] }>()
 
 const { t } = useAppI18n()
 const view = ref<'report' | 'data'>('data')
 const report = computed<string | null>(() => {
-  const output = props.run?.output
+  const output = props.workflow?.output
   if (typeof output === 'string') return output
   if (isRecord(output) && typeof output.report === 'string') return output.report
   return null
 })
 const hasReport = computed(() => report.value !== null)
 const hasStructuredData = computed(() => {
-  const output = props.run?.output
+  const output = props.workflow?.output
   return typeof output !== 'string' && output !== null && output !== undefined
 })
 const formattedOutput = computed(() => {
   try {
-    return JSON.stringify(props.run?.output ?? null, null, 2)
+    return JSON.stringify(props.workflow?.output ?? null, null, 2)
   } catch {
-    return String(props.run?.output ?? '')
+    return String(props.workflow?.output ?? '')
   }
 })
 
 watch(
-  () => props.run,
+  () => props.workflow,
   () => {
     view.value = report.value !== null ? 'report' : 'data'
   },

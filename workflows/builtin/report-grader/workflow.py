@@ -134,7 +134,6 @@ def _grading_contract_errors(grading, criteria):
 @workflow(
     slug="report-grader",
     name="Report grader",
-    version="0.4.0",
     description="Blindly grade one completed report against a full external rubric in a separate no-tool Session, with deterministic contract validation and bounded in-Session repair.",
     input_schema={
         "type": "object",

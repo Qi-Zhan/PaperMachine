@@ -71,9 +71,9 @@ macro_rules! entity_id {
     };
 }
 
-entity_id!(ResearchId);
+entity_id!(ProjectId);
+entity_id!(WorkflowProgramId);
 entity_id!(WorkflowId);
-entity_id!(WorkflowRunId);
 entity_id!(AgentInstanceId);
 entity_id!(TeamId);
 entity_id!(RelationId);

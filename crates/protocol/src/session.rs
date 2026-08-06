@@ -1,7 +1,7 @@
 use crate::ModelInputItem;
 use crate::ModelResponseFormat;
+use crate::ProjectId;
 use crate::ReasoningEffort;
-use crate::ResearchId;
 use crate::SessionId;
 use crate::StepId;
 use crate::TokenUsage;
@@ -89,7 +89,7 @@ impl std::fmt::Display for AgentAccessProfile {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Session {
     pub id: SessionId,
-    pub research_id: ResearchId,
+    pub project_id: ProjectId,
     pub origin: SessionOrigin,
     pub title: String,
     pub instructions: String,

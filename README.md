@@ -1,28 +1,29 @@
 # PaperMachine
 
-PaperMachine is a local-first auto-research workbench. A **Research** owns all
-of its durable, Codex-like **Sessions** and **WorkflowRuns**. A Session is the
+PaperMachine is a local-first auto-research workbench. A **Project** owns all
+of its durable, Codex-like **Sessions** and **Workflows**. A Session is the
 main workbench: each user message creates a Turn, and model samples, tool calls,
 retries, context trims, usage, and output remain inspectable under that Turn.
 
-A workflow is a versioned Python collaboration protocol. It creates Agent
-instances, and every Agent instance is backed by an ordinary Research-owned
+A WorkflowProgram is a Python collaboration protocol. Starting it creates a
+durable Workflow that snapshots the exact program source. It creates Agent
+instances, and every Agent instance is backed by an ordinary Project-owned
 Session. The workflow combines those Sessions; it does not create a separate
 Session hierarchy.
 
 ```text
-Research
+Project
   Sessions
     Turn -> model/tool Steps
-  WorkflowRuns
-    origin Session
+  Workflows
+    optional starting Session
     Agent instance <-> Session
       Action -> Attempt -> Turn -> Steps
     Teams, relations, scopes, timers, channels, human requests
 ```
 
-This is the v3 domain model and has no legacy compatibility layer. State lives
-in `.papermachine/papermachine-v3.db`.
+There is no legacy compatibility layer. Server state lives under
+`.papermachine/state/`; every Project is anchored to its own absolute directory.
 
 ## Codex relationship
 
@@ -39,7 +40,7 @@ Codex is source material, not PaperMachine's runtime dependency. PaperMachine
 does not launch or embed the Codex CLI. It deliberately omits Codex app-server,
 CLI/TUI protocols, approvals compatibility, MCP, plugins, apps, connectors,
 telemetry, and the global skill marketplace. Skills are small packages owned by
-one Research.
+one Project.
 
 ## Repository layout
 
@@ -51,16 +52,16 @@ one Research.
 - `crates/agent`: sampling, tool execution, retry, control checkpoints, context.
 - `crates/session`: durable multi-turn Session and workflow-action runtime.
 - `crates/store`: SQLite documents/events and content-addressed artifacts.
-- `crates/research`: Python DSL validation, effect interpretation, scheduling.
+- `crates/workflow`: Python DSL validation, effect interpretation, scheduling.
 - `crates/server`: HTTP/SSE API and static web serving.
-- `apps/web`: Research overview, Session workbench, and Workflow page.
+- `apps/web`: Project overview, Session workbench, and Workflow page.
 - `python/papermachine`: user-facing DSL and the isolated effect client.
 - `workflows/builtin`: reviewed workflows shipped with PaperMachine.
-- `workflows/user`: locally authored or LLM-generated workflow versions.
+- `<project>/.papermachine/workflows`: Project-owned user WorkflowPrograms.
 
 ## Current capabilities
 
-- Run multiple Researches, Sessions, Turns, and WorkflowRuns concurrently.
+- Run multiple Projects, Sessions, Turns, and Workflows concurrently.
 - Configure multiple AI providers in PaperMachine's own TOML file and select a
   model profile per Session or workflow Agent. Provider model IDs, credentials,
   transport policy, and context windows do not come from Codex.
@@ -70,7 +71,7 @@ one Research.
   WebSocket state, distinguish cache writes from cache reads, and compact long
   histories at 90% of the available context budget.
 - Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
-- Enable Research-local skills per Session and snapshot them per Turn.
+- Enable Project-local skills per Session and snapshot them per Turn.
 - Assign each Session/Workflow Agent one of five access profiles. Profiles are
   snapshotted per Turn and enforced in model tool exposure, registry dispatch,
   built-in tools, path resolution, and command sandboxing; upgrades requested
@@ -80,9 +81,9 @@ one Research.
   own Session Turns.
 - Add Agents dynamically; define Teams, directed relations, task scopes,
   channels/signals, background tasks, and durable timer records.
-- Pause, resume, or cancel a run; guide an Agent at the next safe boundary;
+- Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
   interrupt an attempt; or let workflow/model code request typed human input.
-- Generate, inspect, validate, and publish workflow source from the Workflow
+- Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every
   hosted call as an inspectable Tool Step. `fetch_url` remains available for

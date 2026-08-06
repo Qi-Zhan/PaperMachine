@@ -3,19 +3,19 @@
     <div v-if="mobileSidebarOpen" class="mobile-sidebar-backdrop" @click="mobileSidebarOpen = false" />
     <div class="sidebar-region" :data-mobile-open="mobileSidebarOpen">
       <AppSidebar
-        :researches="researches"
-        :sessions-by-research="sessionsByResearch"
-        :selected-research-id="selectedResearchId"
+        :projects="projects"
+        :sessions-by-project="sessionsByProject"
+        :selected-project-id="selectedProjectId"
         :selected-session-id="selectedSessionId"
         :mode="health?.model_mode ?? 'demo'"
         :online="online"
         :workflows-active="workflowLibraryOpen"
         @home="showHome"
         @close-sidebar="mobileSidebarOpen = false"
-        @new-research="researchDialogOpen = true"
+        @new-project="projectDialogOpen = true"
         @new-session="openSessionDialog"
         @open-workflows="openWorkflowLibrary"
-        @select-research="selectResearch"
+        @select-project="selectProject"
         @select-session="selectSession"
       />
     </div>
@@ -27,13 +27,14 @@
       </div>
 
       <WorkflowLibrary
-        v-else-if="workflowLibraryOpen"
-        :workflows="workflows"
+        v-else-if="workflowLibraryOpen && selectedProjectId"
+        :project-id="selectedProjectId"
+        :workflows="workflowPrograms"
         @open-sidebar="mobileSidebarOpen = true"
         @saved="workflowSaved"
       />
 
-      <div v-else-if="researches.length === 0" class="zero-state">
+      <div v-else-if="projects.length === 0" class="zero-state">
         <header class="zero-state-header">
           <button
             class="icon-button mobile-only"
@@ -46,31 +47,31 @@
           </button>
           <span class="brand-mark zero-mobile-brand"><ScanSearch :size="16" /></span>
           <strong class="zero-mobile-brand">PaperMachine</strong>
-          <strong class="zero-desktop-title">Research</strong>
+          <strong class="zero-desktop-title">Project</strong>
         </header>
         <div class="zero-state-main">
           <FolderSearch2 :size="28" />
-          <h1>{{ t('zero.createResearch') }}</h1>
-          <button class="primary-button" type="button" @click="researchDialogOpen = true">
+          <h1>{{ t('zero.createProject') }}</h1>
+          <button class="primary-button" type="button" @click="projectDialogOpen = true">
             <FolderPlus :size="16" />
-            {{ t('sidebar.newResearch') }}
+            {{ t('sidebar.newProject') }}
           </button>
         </div>
       </div>
 
       <SessionWorkspace
-        v-else-if="sessionView && selectedResearch"
-        :research="selectedResearch"
+        v-else-if="sessionView && selectedProject"
+        :project="selectedProject"
         :view="sessionView"
         :events="sessionEvents"
-        :skills="researchSkills"
-        :workflow-run-view="workflowRunView"
+        :skills="projectSkills"
+        :workflow-view="workflowView"
         :workflow-loading="workflowLoading"
         :stream-connected="streamConnected"
         :skills-busy="skillsBusy"
         :access-busy="accessBusy"
         @open-sidebar="mobileSidebarOpen = true"
-        @select-research="selectResearch"
+        @select-project="selectProject"
         @select-session="selectSession"
         @send="createTurn"
         @cancel-turn="cancelTurn"
@@ -87,12 +88,12 @@
         @open-workflow-output="selectedWorkflowOutput = $event"
       />
 
-      <ResearchOverview
-        v-else-if="researchOverview"
-        :overview="researchOverview"
-        :skills="researchSkills"
+      <ProjectOverview
+        v-else-if="projectOverview"
+        :overview="projectOverview"
+        :skills="projectSkills"
         @open-sidebar="mobileSidebarOpen = true"
-        @new-session="openSessionDialog(researchOverview.research.id)"
+        @new-session="openSessionDialog(projectOverview.project.id)"
         @new-skill="skillDialogOpen = true"
         @select-session="selectSession"
         @open-artifact="selectedArtifact = $event"
@@ -109,18 +110,18 @@
       </div>
     </section>
 
-    <NewResearchDialog
-      :open="researchDialogOpen"
+    <NewProjectDialog
+      :open="projectDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
       @close="closeDialogs"
-      @submit="createResearch"
+      @submit="createProject"
     />
     <NewSessionDialog
       :open="sessionDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
-      :research="dialogResearch"
+      :project="dialogProject"
       :skills="dialogSkills"
       :model-profiles="health?.model_profiles ?? []"
       :default-model="health?.default_model ?? ''"
@@ -131,21 +132,21 @@
       :open="skillDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
-      :research-name="selectedResearch?.name ?? ''"
+      :project-name="selectedProject?.name ?? ''"
       @close="closeDialogs"
       @submit="createSkill"
     />
-    <WorkflowRunDialog
+    <StartWorkflowDialog
       :open="workflowDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
       :session="sessionView?.session ?? null"
-      :workflows="workflows"
+      :workflows="workflowPrograms"
       @close="closeDialogs"
-      @submit="createWorkflowRun"
+      @submit="createWorkflow"
     />
     <ArtifactDialog :artifact="selectedArtifact" @close="selectedArtifact = null" />
-    <WorkflowOutputDialog :run="selectedWorkflowOutput" @close="selectedWorkflowOutput = null" />
+    <WorkflowOutputDialog :workflow="selectedWorkflowOutput" @close="selectedWorkflowOutput = null" />
   </div>
 </template>
 
@@ -164,41 +165,41 @@ import { api, sessionEventTypes } from './api'
 import { useAppI18n } from './i18n'
 import AppSidebar from './components/AppSidebar.vue'
 import ArtifactDialog from './components/ArtifactDialog.vue'
-import NewResearchDialog from './components/NewResearchDialog.vue'
+import NewProjectDialog from './components/NewProjectDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import NewSkillDialog from './components/NewSkillDialog.vue'
-import ResearchOverview from './components/ResearchOverview.vue'
+import ProjectOverview from './components/ProjectOverview.vue'
 import SessionWorkspace from './components/SessionWorkspace.vue'
 import WorkflowLibrary from './components/WorkflowLibrary.vue'
-import WorkflowRunDialog from './components/WorkflowRunDialog.vue'
+import StartWorkflowDialog from './components/StartWorkflowDialog.vue'
 import WorkflowOutputDialog from './components/WorkflowOutputDialog.vue'
 import type {
   AgentAccessProfile,
   Artifact,
   CreateSessionInput,
   Health,
-  Research,
-  ResearchOverview as ResearchOverviewType,
-  ResearchSkill,
+  Project,
+  ProjectOverview as ProjectOverviewType,
+  ProjectSkill,
   Session,
   SessionEvent,
   SessionView,
-  WorkflowRegistration,
-  WorkflowRun,
-  WorkflowRunView,
+  WorkflowProgram,
+  Workflow,
+  WorkflowView,
 } from './types'
 
-const researches = ref<Research[]>([])
+const projects = ref<Project[]>([])
 const { t } = useAppI18n()
-const workflows = ref<WorkflowRegistration[]>([])
-const sessionsByResearch = reactive<Record<string, Session[]>>({})
-const skillsByResearch = reactive<Record<string, ResearchSkill[]>>({})
-const selectedResearchId = ref<string | null>(null)
+const workflowPrograms = ref<WorkflowProgram[]>([])
+const sessionsByProject = reactive<Record<string, Session[]>>({})
+const skillsByProject = reactive<Record<string, ProjectSkill[]>>({})
+const selectedProjectId = ref<string | null>(null)
 const selectedSessionId = ref<string | null>(null)
-const researchOverview = ref<ResearchOverviewType | null>(null)
+const projectOverview = ref<ProjectOverviewType | null>(null)
 const sessionView = ref<SessionView | null>(null)
 const sessionEvents = ref<SessionEvent[]>([])
-const workflowRunView = ref<WorkflowRunView | null>(null)
+const workflowView = ref<WorkflowView | null>(null)
 const workflowLoading = ref(false)
 const health = ref<Health | null>(null)
 const online = ref(false)
@@ -209,55 +210,50 @@ const dialogError = ref('')
 const dialogBusy = ref(false)
 const skillsBusy = ref(false)
 const accessBusy = ref(false)
-const researchDialogOpen = ref(false)
+const projectDialogOpen = ref(false)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
 const workflowDialogOpen = ref(false)
-const dialogResearchId = ref<string | null>(null)
+const dialogProjectId = ref<string | null>(null)
 const mobileSidebarOpen = ref(false)
 const selectedArtifact = ref<Artifact | null>(null)
-const selectedWorkflowOutput = ref<WorkflowRun | null>(null)
+const selectedWorkflowOutput = ref<Workflow | null>(null)
 const workflowLibraryOpen = ref(false)
 
 let sessionEventSource: EventSource | null = null
 let refreshTimer: number | null = null
 let pollTimer: number | null = null
 
-const selectedResearch = computed(
-  () => researches.value.find((research) => research.id === selectedResearchId.value) ?? null,
+const selectedProject = computed(
+  () => projects.value.find((project) => project.id === selectedProjectId.value) ?? null,
 )
-const researchSkills = computed(() =>
-  selectedResearchId.value ? (skillsByResearch[selectedResearchId.value] ?? []) : [],
+const projectSkills = computed(() =>
+  selectedProjectId.value ? (skillsByProject[selectedProjectId.value] ?? []) : [],
 )
-const dialogResearch = computed(
-  () => researches.value.find((research) => research.id === dialogResearchId.value) ?? null,
+const dialogProject = computed(
+  () => projects.value.find((project) => project.id === dialogProjectId.value) ?? null,
 )
 const dialogSkills = computed(() =>
-  dialogResearchId.value ? (skillsByResearch[dialogResearchId.value] ?? []) : [],
+  dialogProjectId.value ? (skillsByProject[dialogProjectId.value] ?? []) : [],
 )
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   try {
-    const [healthResult, researchResult, workflowResult] = await Promise.all([
+    const [healthResult, projectResult] = await Promise.all([
       api.health(),
-      api.listResearches(),
-      api.listWorkflows(),
+      api.listProjects(),
     ])
     health.value = healthResult
     online.value = true
-    researches.value = researchResult
-    workflows.value = workflowResult
-    await Promise.all(researchResult.map((research) => refreshResearchIndex(research.id)))
+    projects.value = projectResult
+    await Promise.all(projectResult.map((project) => refreshProjectIndex(project.id)))
     const initialRoute = readRoute()
     let restored = false
     if (initialRoute?.kind === 'session') restored = await selectSession(initialRoute.id)
-    else if (initialRoute?.kind === 'research') restored = await selectResearch(initialRoute.id)
-    else if (initialRoute?.kind === 'workflows') {
-      openWorkflowLibrary()
-      restored = true
-    }
-    if (!restored && researchResult[0]) await selectResearch(researchResult[0].id)
+    else if (initialRoute?.kind === 'project') restored = await selectProject(initialRoute.id)
+    else if (initialRoute?.kind === 'workflows') restored = await openWorkflowLibrary(initialRoute.id)
+    if (!restored && projectResult[0]) await selectProject(projectResult[0].id)
   } catch (error) {
     online.value = false
     globalError.value = messageOf(error)
@@ -272,44 +268,45 @@ onBeforeUnmount(() => {
   clearTimers()
 })
 
-async function refreshResearchIndex(researchId: string) {
-  const overview = await api.getResearch(researchId)
-  sessionsByResearch[researchId] = overview.sessions
-  const index = researches.value.findIndex((research) => research.id === researchId)
-  if (index >= 0) researches.value[index] = overview.research
-  if (selectedResearchId.value === researchId && !selectedSessionId.value) researchOverview.value = overview
+async function refreshProjectIndex(projectId: string) {
+  const overview = await api.getProject(projectId)
+  sessionsByProject[projectId] = overview.sessions
+  const index = projects.value.findIndex((project) => project.id === projectId)
+  if (index >= 0) projects.value[index] = overview.project
+  if (selectedProjectId.value === projectId && !selectedSessionId.value) projectOverview.value = overview
   return overview
 }
 
-async function ensureResearchSkills(researchId: string, refresh = false) {
-  if (!refresh && skillsByResearch[researchId]) return skillsByResearch[researchId]
-  const skills = await api.listResearchSkills(researchId)
-  skillsByResearch[researchId] = skills
+async function ensureProjectSkills(projectId: string, refresh = false) {
+  if (!refresh && skillsByProject[projectId]) return skillsByProject[projectId]
+  const skills = await api.listProjectSkills(projectId)
+  skillsByProject[projectId] = skills
   return skills
 }
 
-async function selectResearch(researchId: string): Promise<boolean> {
+async function selectProject(projectId: string): Promise<boolean> {
   closeSessionStream()
   clearPoll()
-  selectedResearchId.value = researchId
+  selectedProjectId.value = projectId
   selectedSessionId.value = null
   sessionView.value = null
   sessionEvents.value = []
-  workflowRunView.value = null
+  workflowView.value = null
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
   try {
     const [overview] = await Promise.all([
-      refreshResearchIndex(researchId),
-      ensureResearchSkills(researchId),
+      refreshProjectIndex(projectId),
+      ensureProjectSkills(projectId),
+      loadWorkflowPrograms(projectId),
     ])
-    if (selectedResearchId.value === researchId && !selectedSessionId.value) {
-      researchOverview.value = overview
-      writeRoute('research', researchId)
+    if (selectedProjectId.value === projectId && !selectedSessionId.value) {
+      projectOverview.value = overview
+      writeRoute('project', projectId)
     }
     return true
   } catch (error) {
-    if (selectedResearchId.value === researchId) selectedResearchId.value = null
+    if (selectedProjectId.value === projectId) selectedProjectId.value = null
     globalError.value = messageOf(error)
     return false
   }
@@ -319,7 +316,7 @@ async function selectSession(sessionId: string): Promise<boolean> {
   selectedSessionId.value = sessionId
   sessionView.value = null
   sessionEvents.value = []
-  workflowRunView.value = null
+  workflowView.value = null
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
   closeSessionStream()
@@ -327,15 +324,16 @@ async function selectSession(sessionId: string): Promise<boolean> {
   try {
     const [view, events] = await Promise.all([api.getSession(sessionId), api.listSessionEvents(sessionId)])
     if (selectedSessionId.value !== sessionId) return false
-    selectedResearchId.value = view.session.research_id
+    selectedProjectId.value = view.session.project_id
     sessionView.value = view
     sessionEvents.value = events
     await Promise.all([
-      ensureResearchSkills(view.session.research_id),
-      refreshResearchIndex(view.session.research_id),
+      ensureProjectSkills(view.session.project_id),
+      refreshProjectIndex(view.session.project_id),
+      loadWorkflowPrograms(view.session.project_id),
     ])
     connectSessionStream(sessionId, events.at(-1)?.sequence ?? 0)
-    const latestWorkflow = view.workflow_runs[0]
+    const latestWorkflow = view.workflows[0]
     if (latestWorkflow) void inspectWorkflow(latestWorkflow.id)
     writeRoute('session', sessionId)
     syncPoll()
@@ -393,16 +391,14 @@ async function refreshSession(sessionId: string) {
     const view = await api.getSession(sessionId)
     if (selectedSessionId.value !== sessionId) return
     sessionView.value = view
-    const sessions = sessionsByResearch[view.session.research_id] ?? []
-    sessionsByResearch[view.session.research_id] = [
+    const sessions = sessionsByProject[view.session.project_id] ?? []
+    sessionsByProject[view.session.project_id] = [
       view.session,
       ...sessions.filter((session) => session.id !== view.session.id),
     ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
-    await refreshResearchIndex(view.session.research_id)
-    if (workflowRunView.value) {
-      const current = view.workflow_runs.find(
-        (run) => run.id === workflowRunView.value?.workflow_run.id,
-      )
+    await refreshProjectIndex(view.session.project_id)
+    if (workflowView.value) {
+      const current = view.workflows.find((workflow) => workflow.id === workflowView.value?.workflow.id)
       if (current) void inspectWorkflow(current.id, true)
     }
     syncPoll()
@@ -424,7 +420,9 @@ function syncPoll() {
 function hasActiveWork(view: SessionView): boolean {
   return (
     view.turns.some((turn) => turn.status === 'queued' || turn.status === 'running') ||
-    view.workflow_runs.some((run) => ['created', 'running', 'paused'].includes(run.status))
+    view.workflows.some((workflow) =>
+      ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(workflow.status),
+    )
   )
 }
 
@@ -441,43 +439,57 @@ function clearTimers() {
 
 function showHome() {
   workflowLibraryOpen.value = false
-  if (selectedResearchId.value) void selectResearch(selectedResearchId.value)
-  else if (researches.value[0]) void selectResearch(researches.value[0].id)
+  if (selectedProjectId.value) void selectProject(selectedProjectId.value)
+  else if (projects.value[0]) void selectProject(projects.value[0].id)
 }
 
-function openWorkflowLibrary() {
-  writeRoute('workflows')
+async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projects.value[0]?.id): Promise<boolean> {
+  if (!projectId) return false
+  selectedProjectId.value = projectId
+  try {
+    await loadWorkflowPrograms(projectId, true)
+  } catch (error) {
+    globalError.value = messageOf(error)
+    return false
+  }
+  writeRoute('workflows', projectId)
   closeSessionStream()
   clearPoll()
   selectedSessionId.value = null
   sessionView.value = null
   sessionEvents.value = []
-  workflowRunView.value = null
+  workflowView.value = null
   workflowLibraryOpen.value = true
   mobileSidebarOpen.value = false
+  return true
 }
 
-function workflowSaved(workflow: WorkflowRegistration) {
-  workflows.value = [
-    ...workflows.value.filter(
-      (candidate) =>
-        candidate.manifest.slug !== workflow.manifest.slug ||
-        candidate.manifest.version !== workflow.manifest.version,
-    ),
+function workflowSaved(workflow: WorkflowProgram) {
+  workflowPrograms.value = [
+    ...workflowPrograms.value.filter((candidate) => candidate.manifest.slug !== workflow.manifest.slug),
     workflow,
   ].sort((left, right) => left.manifest.name.localeCompare(right.manifest.name))
 }
 
-async function inspectWorkflow(workflowRunId: string, quiet = false) {
+async function loadWorkflowPrograms(projectId: string, refresh = false) {
+  if (!refresh && selectedProjectId.value === projectId && workflowPrograms.value.length) {
+    return workflowPrograms.value
+  }
+  const programs = await api.listWorkflowPrograms(projectId)
+  if (selectedProjectId.value === projectId) workflowPrograms.value = programs
+  return programs
+}
+
+async function inspectWorkflow(workflowId: string, quiet = false) {
   if (!quiet) workflowLoading.value = true
   try {
-    const view = await api.getWorkflowRun(workflowRunId)
+    const view = await api.getWorkflow(workflowId)
     if (
       selectedSessionId.value &&
-      (view.workflow_run.origin_session_id === selectedSessionId.value ||
+      (view.workflow.started_from_session_id === selectedSessionId.value ||
         view.participants.some((participant) => participant.session_id === selectedSessionId.value))
     ) {
-      workflowRunView.value = view
+      workflowView.value = view
     }
   } catch (error) {
     if (!quiet) globalError.value = messageOf(error)
@@ -486,35 +498,35 @@ async function inspectWorkflow(workflowRunId: string, quiet = false) {
   }
 }
 
-function openSessionDialog(researchId: string) {
+function openSessionDialog(projectId: string) {
   workflowLibraryOpen.value = false
-  dialogResearchId.value = researchId
+  dialogProjectId.value = projectId
   dialogError.value = ''
   sessionDialogOpen.value = true
-  void ensureResearchSkills(researchId).catch((error) => {
+  void ensureProjectSkills(projectId).catch((error) => {
     dialogError.value = messageOf(error)
   })
 }
 
 function closeDialogs() {
   if (dialogBusy.value) return
-  researchDialogOpen.value = false
+  projectDialogOpen.value = false
   sessionDialogOpen.value = false
   skillDialogOpen.value = false
   workflowDialogOpen.value = false
   dialogError.value = ''
 }
 
-async function createResearch(input: { name: string; description: string }) {
+async function createProject(input: { name: string; description: string; rootPath: string }) {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const research = await api.createResearch(input.name, input.description)
-    researches.value = [research, ...researches.value]
-    sessionsByResearch[research.id] = []
-    skillsByResearch[research.id] = []
-    researchDialogOpen.value = false
-    await selectResearch(research.id)
+    const project = await api.createProject(input.name, input.description, input.rootPath)
+    projects.value = [project, ...projects.value]
+    sessionsByProject[project.id] = []
+    skillsByProject[project.id] = []
+    projectDialogOpen.value = false
+    await selectProject(project.id)
   } catch (error) {
     dialogError.value = messageOf(error)
   } finally {
@@ -523,13 +535,13 @@ async function createResearch(input: { name: string; description: string }) {
 }
 
 async function createSession(input: CreateSessionInput) {
-  const research = dialogResearch.value
-  if (!research) return
+  const project = dialogProject.value
+  if (!project) return
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const session = await api.createSession(research.id, input)
-    sessionsByResearch[research.id] = [session, ...(sessionsByResearch[research.id] ?? [])]
+    const session = await api.createSession(project.id, input)
+    sessionsByProject[project.id] = [session, ...(sessionsByProject[project.id] ?? [])]
     sessionDialogOpen.value = false
     await selectSession(session.id)
   } catch (error) {
@@ -584,8 +596,8 @@ async function updateSessionAccess(access: AgentAccessProfile) {
   try {
     const session = await api.updateSessionAccess(view.session.id, access)
     if (sessionView.value?.session.id === session.id) sessionView.value.session = session
-    const sessions = sessionsByResearch[session.research_id] ?? []
-    sessionsByResearch[session.research_id] = [
+    const sessions = sessionsByProject[session.project_id] ?? []
+    sessionsByProject[session.project_id] = [
       session,
       ...sessions.filter((candidate) => candidate.id !== session.id),
     ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
@@ -598,13 +610,13 @@ async function updateSessionAccess(access: AgentAccessProfile) {
 }
 
 async function createSkill(input: { slug: string; name: string; description: string; instructions: string }) {
-  const researchId = selectedResearchId.value
-  if (!researchId) return
+  const projectId = selectedProjectId.value
+  if (!projectId) return
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const skill = await api.createResearchSkill(researchId, input)
-    skillsByResearch[researchId] = [...(skillsByResearch[researchId] ?? []), skill].sort((left, right) =>
+    const skill = await api.createProjectSkill(projectId, input)
+    skillsByProject[projectId] = [...(skillsByProject[projectId] ?? []), skill].sort((left, right) =>
       left.name.localeCompare(right.name),
     )
     skillDialogOpen.value = false
@@ -615,8 +627,8 @@ async function createSkill(input: { slug: string; name: string; description: str
   }
 }
 
-async function createWorkflowRun(input: {
-  workflow: WorkflowRegistration
+async function createWorkflow(input: {
+  workflow: WorkflowProgram
   objective: string
   input: Record<string, unknown>
 }) {
@@ -625,20 +637,23 @@ async function createWorkflowRun(input: {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const workflowRun = await api.createWorkflowRun(view.session.id, {
-      workflow_slug: input.workflow.manifest.slug,
-      workflow_version: input.workflow.manifest.version,
+    const workflow = await api.createWorkflow(view.session.project_id, {
+      program_slug: input.workflow.manifest.slug,
       objective: input.objective,
       input: input.input,
+      started_from_session_id: view.session.id,
+      model: view.session.model,
+      access: view.session.access,
+      enabled_skills: view.session.enabled_skills,
     })
     if (sessionView.value?.session.id === view.session.id) {
       sessionView.value = {
         ...sessionView.value,
-        workflow_runs: [workflowRun, ...sessionView.value.workflow_runs],
+        workflows: [workflow, ...sessionView.value.workflows.filter((candidate) => candidate.id !== workflow.id)],
       }
     }
     workflowDialogOpen.value = false
-    await inspectWorkflow(workflowRun.id)
+    await inspectWorkflow(workflow.id)
     syncPoll()
   } catch (error) {
     dialogError.value = messageOf(error)
@@ -647,27 +662,27 @@ async function createWorkflowRun(input: {
   }
 }
 
-async function cancelWorkflow(workflowRunId: string) {
+async function cancelWorkflow(workflowId: string) {
   try {
-    await api.cancelWorkflowRun(workflowRunId)
+    await api.cancelWorkflow(workflowId)
     if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
-async function pauseWorkflow(workflowRunId: string) {
+async function pauseWorkflow(workflowId: string) {
   try {
-    await api.pauseWorkflowRun(workflowRunId)
+    await api.pauseWorkflow(workflowId)
     if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
-async function resumeWorkflow(workflowRunId: string) {
+async function resumeWorkflow(workflowId: string) {
   try {
-    await api.resumeWorkflowRun(workflowRunId)
+    await api.resumeWorkflow(workflowId)
     if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
@@ -675,7 +690,7 @@ async function resumeWorkflow(workflowRunId: string) {
 }
 
 async function sendWorkflowControl(input: {
-  workflowRunId: string
+  workflowId: string
   sessionId: string
   kind: 'guide' | 'interrupt' | 'finish'
   content: string
@@ -683,22 +698,22 @@ async function sendWorkflowControl(input: {
 }) {
   try {
     await api.sendControl(
-      input.workflowRunId,
+      input.workflowId,
       input.sessionId,
       input.kind,
       input.content,
       input.actionInvocationId,
     )
-    await inspectWorkflow(input.workflowRunId, true)
+    await inspectWorkflow(input.workflowId, true)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
-async function answerHumanRequest(input: { requestId: string; answer: unknown; workflowRunId: string }) {
+async function answerHumanRequest(input: { requestId: string; answer: unknown; workflowId: string }) {
   try {
     await api.answerHumanRequest(input.requestId, input.answer)
-    await inspectWorkflow(input.workflowRunId, true)
+    await inspectWorkflow(input.workflowId, true)
     if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
@@ -717,15 +732,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function writeRoute(kind: 'research' | 'session' | 'workflows', id?: string) {
+function writeRoute(kind: 'project' | 'session' | 'workflows', id?: string) {
   const hash = id ? `#${kind}/${encodeURIComponent(id)}` : `#${kind}`
   if (window.location.hash !== hash) window.history.replaceState(null, '', hash)
 }
 
-function readRoute(): { kind: 'research' | 'session'; id: string } | { kind: 'workflows' } | null {
+function readRoute(): { kind: 'project' | 'session' | 'workflows'; id: string } | null {
   const [kind, encodedId] = window.location.hash.slice(1).split('/', 2)
-  if (kind === 'workflows') return { kind }
-  if ((kind === 'research' || kind === 'session') && encodedId) {
+  if ((kind === 'project' || kind === 'session' || kind === 'workflows') && encodedId) {
     return { kind, id: decodeURIComponent(encodedId) }
   }
   return null

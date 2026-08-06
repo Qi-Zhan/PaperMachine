@@ -8,7 +8,7 @@ members = [
     "crates/store",
     "crates/skills",
     "crates/session",
-    "crates/research",
+    "crates/workflow",
     "crates/server",
 ]
 resolver = "2"

@@ -95,7 +95,6 @@ class Reviewer(Agent):
 @workflow(
     slug={requested_slug:?},
     name={requested_name:?},
-    version="0.1.0",
     description="Run two independent evidence routes and synthesize their disagreements.",
     input_schema={{"type": "object", "additionalProperties": False}},
     output_schema={{"type": "object", "properties": {{"summary": {{"type": "string"}}}}}},

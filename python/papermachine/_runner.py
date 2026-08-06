@@ -82,7 +82,7 @@ async def run() -> None:
         context = WorkflowContext(
             objective=str(initialization["objective"]),
             input=dict(initialization.get("input") or {}),
-            run_id=str(initialization["run_id"]),
+            workflow_id=str(initialization["workflow_id"]),
         )
         result = await function(context)
         await client.send("complete", {"output": result})

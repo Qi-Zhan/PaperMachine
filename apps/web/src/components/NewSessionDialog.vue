@@ -4,7 +4,7 @@
       <form class="dialog-panel" @submit.prevent="submit">
         <header class="dialog-header">
           <div>
-            <p class="eyebrow">{{ research?.name }}</p>
+            <p class="eyebrow">{{ project?.name }}</p>
             <h2>{{ t('dialog.newSession') }}</h2>
           </div>
           <button class="icon-button" type="button" :title="t('common.close')" :aria-label="t('common.close')" @click="$emit('close')">
@@ -60,7 +60,7 @@
         <p class="access-profile-description">{{ selectedAccessDescription }}</p>
 
         <fieldset v-if="skills.length" class="skill-picker">
-          <legend>{{ t('research.skills') }}</legend>
+          <legend>{{ t('project.skills') }}</legend>
           <label v-for="skill in skills" :key="skill.slug" class="check-row">
             <input v-model="enabledSkills" type="checkbox" :value="skill.slug" />
             <span>
@@ -89,14 +89,14 @@ import { LoaderCircle, MessageSquarePlus, X } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAppI18n } from '../i18n'
 import { AGENT_ACCESS_PROFILES } from '../types'
-import type { AgentAccessProfile, CreateSessionInput, ModelProfile, Research, ResearchSkill } from '../types'
+import type { AgentAccessProfile, CreateSessionInput, ModelProfile, Project, ProjectSkill } from '../types'
 
 const props = defineProps<{
   open: boolean
   busy: boolean
   error?: string
-  research: Research | null
-  skills: ResearchSkill[]
+  project: Project | null
+  skills: ProjectSkill[]
   modelProfiles: ModelProfile[]
   defaultModel: string
 }>()

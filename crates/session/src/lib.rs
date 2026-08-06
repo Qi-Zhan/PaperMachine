@@ -28,9 +28,9 @@ use papermachine_protocol::Turn;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WebSearchContextSize;
-use papermachine_protocol::WorkflowRunId;
-use papermachine_protocol::WorkflowRunStatus;
-use papermachine_skills::ResearchSkillCatalog;
+use papermachine_protocol::WorkflowId;
+use papermachine_protocol::WorkflowStatus;
+use papermachine_skills::ProjectSkillCatalog;
 use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
@@ -54,8 +54,7 @@ struct SessionRuntimeInner {
     store: Arc<Store>,
     model: Arc<dyn ModelClient>,
     tools: ToolRegistry,
-    skills: Arc<ResearchSkillCatalog>,
-    workspace_root: PathBuf,
+    skills: Arc<ProjectSkillCatalog>,
     default_model: String,
     model_context_window: usize,
     permits: Arc<Semaphore>,
@@ -64,7 +63,6 @@ struct SessionRuntimeInner {
 
 #[derive(Clone, Debug)]
 pub struct SessionRuntimeConfig {
-    pub workspace_root: PathBuf,
     pub default_model: String,
     pub model_context_window: usize,
     pub max_concurrent_turns: usize,
@@ -72,7 +70,7 @@ pub struct SessionRuntimeConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct WorkflowTurnContext {
-    pub workflow_run_id: WorkflowRunId,
+    pub workflow_id: WorkflowId,
     pub action_invocation_id: ActionInvocationId,
     pub action_attempt_id: ActionAttemptId,
 }
@@ -82,7 +80,7 @@ impl SessionRuntime {
         store: Arc<Store>,
         model: Arc<dyn ModelClient>,
         tools: ToolRegistry,
-        skills: Arc<ResearchSkillCatalog>,
+        skills: Arc<ProjectSkillCatalog>,
         config: SessionRuntimeConfig,
     ) -> Self {
         Self {
@@ -91,7 +89,6 @@ impl SessionRuntime {
                 model,
                 tools,
                 skills,
-                workspace_root: config.workspace_root,
                 default_model: config.default_model,
                 model_context_window: config.model_context_window,
                 permits: Arc::new(Semaphore::new(config.max_concurrent_turns.max(1))),
@@ -206,11 +203,11 @@ impl SessionRuntime {
         } else {
             session.model.clone()
         };
-        let workspace = session_workspace(&self.inner, &session);
+        let workspace = session_workspace(&self.inner, &session)?;
         let resolved =
             self.inner
                 .skills
-                .resolve(session.research_id, &session.enabled_skills, &workspace)?;
+                .resolve(session.project_id, &session.enabled_skills, &workspace)?;
         let session_instructions = [session.instructions.trim(), additional_instructions.trim()]
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -238,7 +235,7 @@ impl SessionRuntime {
         let mut recovered = Vec::with_capacity(turns.len());
         for turn in turns {
             let session = self.inner.store.get_session(turn.session_id)?;
-            let workspace = session_workspace(&self.inner, &session);
+            let workspace = session_workspace(&self.inner, &session)?;
             self.inner
                 .skills
                 .resolve_snapshots(&workspace, &turn.skill_snapshots)?;
@@ -313,15 +310,13 @@ async fn run_scheduled_turn(
     let turn = inner.store.start_turn(turn_id)?;
     let session = inner.store.get_session(turn.session_id)?;
     let history = previous_history(&inner.store, &turn)?;
-    let workspace = session_workspace(&inner, &session);
-    let workflow_run_id = workflow_context
-        .as_ref()
-        .map(|context| context.workflow_run_id);
+    let workspace = session_workspace(&inner, &session)?;
+    let workflow_id = workflow_context.as_ref().map(|context| context.workflow_id);
     let event_sink = Arc::new(SessionAgentEventSink::new(
         Arc::clone(&inner.store),
         session.id,
         turn.id,
-        workflow_run_id,
+        workflow_id,
     ));
     let events: Arc<dyn AgentEventSink> = event_sink.clone();
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
@@ -330,7 +325,7 @@ async fn run_scheduled_turn(
     let runtime = AgentRuntime::new(Arc::clone(&inner.model), inner.tools.clone(), events)
         .with_control(control);
     let mut request = AgentTurnRequest::new(
-        session.research_id,
+        session.project_id,
         session.id,
         turn.id,
         workspace,
@@ -339,10 +334,10 @@ async fn run_scheduled_turn(
         turn.input.clone(),
     );
     if let Some(context) = workflow_context {
-        request.workflow_run_id = Some(context.workflow_run_id);
+        request.workflow_id = Some(context.workflow_id);
         request.action_invocation_id = Some(context.action_invocation_id);
         request.action_attempt_id = Some(context.action_attempt_id);
-        let run = inner.store.get_workflow_run(context.workflow_run_id)?;
+        let run = inner.store.get_workflow(context.workflow_id)?;
         if let Some(limit) = run.budget.max_hosted_search_calls {
             let remaining = limit.saturating_sub(run.usage.hosted_search_calls);
             request.max_search_calls = Some(
@@ -410,16 +405,19 @@ impl AgentControlPlane for StoreAgentControlPlane {
         context: AgentCheckpointContext,
         cancellation: CancellationToken,
     ) -> Result<AgentCheckpoint, String> {
-        let Some(run_id) = context.workflow_run_id else {
+        let Some(workflow_id) = context.workflow_id else {
             return Ok(AgentCheckpoint::default());
         };
         loop {
             let run = self
                 .store
-                .get_workflow_run(run_id)
+                .get_workflow(workflow_id)
                 .map_err(|error| error.to_string())?;
             match run.status {
-                WorkflowRunStatus::Paused => {
+                WorkflowStatus::Paused
+                | WorkflowStatus::WaitingForUser
+                | WorkflowStatus::WaitingForTimer
+                | WorkflowStatus::WaitingForSignal => {
                     let turn = self
                         .store
                         .get_turn(context.turn_id)
@@ -439,7 +437,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         }
                     }
                 }
-                WorkflowRunStatus::Created | WorkflowRunStatus::Running => {
+                WorkflowStatus::Created | WorkflowStatus::Running => {
                     if let Some(error) = workflow_action_step_budget_error(
                         &run.budget,
                         run.usage.action_steps,
@@ -466,7 +464,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                                 guidance: Vec::new(),
                                 interrupt: None,
                                 finish: Some(format!(
-                                    "The WorkflowRun hosted web-search budget is exhausted: used {} of {limit} calls. Finish from evidence already gathered and state any remaining limitations.",
+                                    "The Workflow hosted web-search budget is exhausted: used {} of {limit} calls. Finish from evidence already gathered and state any remaining limitations.",
                                     run.usage.hosted_search_calls
                                 )),
                             });
@@ -474,12 +472,10 @@ impl AgentControlPlane for StoreAgentControlPlane {
                     }
                     break;
                 }
-                WorkflowRunStatus::Completed
-                | WorkflowRunStatus::Failed
-                | WorkflowRunStatus::Cancelled => {
+                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
                     return Ok(AgentCheckpoint {
                         guidance: Vec::new(),
-                        interrupt: Some(format!("WorkflowRun entered {:?}", run.status)),
+                        interrupt: Some(format!("Workflow entered {:?}", run.status)),
                         finish: None,
                     });
                 }
@@ -496,7 +492,11 @@ impl AgentControlPlane for StoreAgentControlPlane {
         }
         let messages = self
             .store
-            .take_control_messages(run_id, context.session_id, context.action_invocation_id)
+            .take_control_messages(
+                workflow_id,
+                context.session_id,
+                context.action_invocation_id,
+            )
             .map_err(|error| error.to_string())?;
         let mut checkpoint = AgentCheckpoint::default();
         for message in messages {
@@ -513,11 +513,10 @@ impl AgentControlPlane for StoreAgentControlPlane {
 fn session_workspace(
     inner: &SessionRuntimeInner,
     session: &papermachine_protocol::Session,
-) -> PathBuf {
-    inner
-        .workspace_root
-        .join(session.research_id.to_string())
-        .join(session.id.to_string())
+) -> Result<PathBuf, StoreError> {
+    Ok(PathBuf::from(
+        inner.store.get_project(session.project_id)?.root_path,
+    ))
 }
 
 fn previous_history(store: &Store, current: &Turn) -> Result<Vec<ModelInputItem>, StoreError> {
@@ -543,7 +542,7 @@ struct SessionAgentEventSink {
     store: Arc<Store>,
     session_id: SessionId,
     turn_id: TurnId,
-    workflow_run_id: Option<WorkflowRunId>,
+    workflow_id: Option<WorkflowId>,
     model_steps: Mutex<HashMap<u32, StepId>>,
     tool_steps: Mutex<HashMap<String, StepId>>,
     compaction_steps: Mutex<Vec<StepId>>,
@@ -554,13 +553,13 @@ impl SessionAgentEventSink {
         store: Arc<Store>,
         session_id: SessionId,
         turn_id: TurnId,
-        workflow_run_id: Option<WorkflowRunId>,
+        workflow_id: Option<WorkflowId>,
     ) -> Self {
         Self {
             store,
             session_id,
             turn_id,
-            workflow_run_id,
+            workflow_id,
             model_steps: Mutex::new(HashMap::new()),
             tool_steps: Mutex::new(HashMap::new()),
             compaction_steps: Mutex::new(Vec::new()),
@@ -620,11 +619,11 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                if let Some(run_id) = self.workflow_run_id {
+                if let Some(workflow_id) = self.workflow_id {
                     let run = self
                         .store
                         .add_budget_usage(
-                            run_id,
+                            workflow_id,
                             BudgetUsage {
                                 tokens: usage,
                                 ..BudgetUsage::default()
@@ -662,11 +661,11 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                if let Some(run_id) = self.workflow_run_id {
+                if let Some(workflow_id) = self.workflow_id {
                     let run = self
                         .store
                         .add_budget_usage(
-                            run_id,
+                            workflow_id,
                             BudgetUsage {
                                 tokens: usage,
                                 ..BudgetUsage::default()
@@ -758,11 +757,11 @@ impl AgentEventSink for SessionAgentEventSink {
                     )
                     .map_err(|error| error.to_string())?;
                 if tool_name == "web_search"
-                    && let Some(run_id) = self.workflow_run_id
+                    && let Some(workflow_id) = self.workflow_id
                 {
                     self.store
                         .add_budget_usage(
-                            run_id,
+                            workflow_id,
                             BudgetUsage {
                                 hosted_search_calls: 1,
                                 ..BudgetUsage::default()
@@ -818,11 +817,11 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                if let Some(run_id) = self.workflow_run_id {
+                if let Some(workflow_id) = self.workflow_id {
                     let run = self
                         .store
                         .add_budget_usage(
-                            run_id,
+                            workflow_id,
                             BudgetUsage {
                                 tokens: usage,
                                 ..BudgetUsage::default()
@@ -855,13 +854,13 @@ impl AgentEventSink for SessionAgentEventSink {
 
 impl SessionAgentEventSink {
     async fn charge_action_step(&self) -> Result<(), String> {
-        let Some(run_id) = self.workflow_run_id else {
+        let Some(workflow_id) = self.workflow_id else {
             return Ok(());
         };
         let run = self
             .store
             .add_budget_usage(
-                run_id,
+                workflow_id,
                 BudgetUsage {
                     action_steps: 1,
                     ..BudgetUsage::default()

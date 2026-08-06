@@ -13,7 +13,7 @@ server process. Before catalog registration, the AST validator:
 - requires exactly one literal `@workflow(...)` manifest;
 - rejects file, dynamic-code, reflection, dunder, process, socket, environment,
   and other explicitly forbidden names/calls;
-- validates slug, semantic version, schemas, and budget metadata;
+- validates slug, schemas, and budget metadata;
 - extracts Agent/action and coordination summaries for inspection.
 
 Validation is a usability and defense-in-depth layer, not the isolation
@@ -27,8 +27,9 @@ The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, budgets, and Session serialization before applying them.
 
-Published user versions are immutable by `(slug, version)`. A WorkflowRun also
-stores the exact source and SHA-256 it started with.
+Saving the same Project-local slug replaces the editable program source. Every
+Workflow stores an immutable snapshot of the exact source and SHA-256 it started
+with, so later edits cannot change execution history.
 
 ## Agent tools
 
@@ -86,9 +87,9 @@ not silently rewrite the endpoint.
   readable to sandboxed commands unless denied by the profile.
 - The AST policy is intentionally small and should not be treated as a proof
   that Python code is harmless; OS isolation remains mandatory.
-- Active WorkflowRuns fail explicitly after a server restart because Python
+- Active Workflows fail explicitly after a server restart because Python
   control state and effect results do not yet have a durable replay journal.
-  Retry creates a new WorkflowRun; transparent active-run continuation remains
+  Retry creates a new Workflow; transparent active-run continuation remains
   unavailable until effects have deterministic replay keys.
 - Raw, uncached-token, and run-wide hosted-search budgets are checked at
   effect/model boundaries. One in-flight response can exceed a remaining token,

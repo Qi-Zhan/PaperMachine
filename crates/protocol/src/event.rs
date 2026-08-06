@@ -9,7 +9,7 @@ use crate::ControlMessageKind;
 use crate::EventId;
 use crate::HumanRequestId;
 use crate::ModelToolCall;
-use crate::ResearchId;
+use crate::ProjectId;
 use crate::SessionId;
 use crate::SessionStatus;
 use crate::SignalId;
@@ -20,8 +20,8 @@ use crate::TimerId;
 use crate::TokenUsage;
 use crate::TurnId;
 use crate::TurnStatus;
-use crate::WorkflowRunId;
-use crate::WorkflowRunStatus;
+use crate::WorkflowId;
+use crate::WorkflowStatus;
 use chrono::DateTime;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -30,27 +30,26 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowRunEvent {
+pub struct WorkflowEvent {
     pub id: EventId,
     pub sequence: u64,
-    pub research_id: ResearchId,
-    pub workflow_run_id: WorkflowRunId,
+    pub project_id: ProjectId,
+    pub workflow_id: WorkflowId,
     pub occurred_at: DateTime<Utc>,
     #[serde(flatten)]
-    pub payload: WorkflowRunEventPayload,
+    pub payload: WorkflowEventPayload,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkflowRunEventPayload {
-    WorkflowRunCreated {
+pub enum WorkflowEventPayload {
+    WorkflowCreated {
         objective: String,
-        workflow_slug: String,
-        workflow_version: String,
+        program_slug: String,
         source_sha256: String,
     },
-    WorkflowRunStatusChanged {
-        status: WorkflowRunStatus,
+    WorkflowStatusChanged {
+        status: WorkflowStatus,
         reason: Option<String>,
     },
     ParticipantCreated {
@@ -204,21 +203,21 @@ pub enum SessionEventPayload {
         error: String,
     },
     WorkflowAgentAttached {
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         agent_instance_id: AgentInstanceId,
         role: String,
     },
     HumanRequestOpened {
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         human_request_id: HumanRequestId,
         question: String,
     },
     HumanRequestResolved {
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         human_request_id: HumanRequestId,
     },
     ControlMessageApplied {
-        workflow_run_id: WorkflowRunId,
+        workflow_id: WorkflowId,
         control_message_id: ControlMessageId,
         kind: ControlMessageKind,
         content: String,

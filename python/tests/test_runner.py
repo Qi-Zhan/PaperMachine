@@ -18,7 +18,7 @@ class RunnerProtocolTest(unittest.TestCase):
             workflow = Path(directory) / "workflow.py"
             workflow.write_text(
                 "from papermachine import workflow\n"
-                "@workflow(slug='test', name='Test', version='0.1.0')\n"
+                "@workflow(slug='test', name='Test', description='Runner test')\n"
                 "async def main(ctx):\n"
                 "    return {'ok': True}\n",
                 encoding="utf-8",
@@ -45,7 +45,8 @@ class RunnerProtocolTest(unittest.TestCase):
             assert process.stdin is not None
             assert process.stdout is not None
             process.stdin.write(
-                json.dumps({"run_id": "test-run", "objective": "test", "input": {}}) + "\n"
+                json.dumps({"workflow_id": "test-workflow", "objective": "test", "input": {}})
+                + "\n"
             )
             process.stdin.flush()
 

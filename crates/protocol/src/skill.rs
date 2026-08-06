@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ResearchSkill {
+pub struct ProjectSkill {
     pub slug: String,
     pub name: String,
     pub description: String,

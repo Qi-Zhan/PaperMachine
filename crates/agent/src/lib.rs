@@ -22,16 +22,16 @@ use papermachine_protocol::ModelRequestMetadata;
 use papermachine_protocol::ModelResponseFormat;
 use papermachine_protocol::ModelToolCall;
 use papermachine_protocol::ModelToolChoice;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::PromptCacheConfig;
 use papermachine_protocol::PromptCacheStrategy;
 use papermachine_protocol::ReasoningEffort;
-use papermachine_protocol::ResearchId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
-use papermachine_protocol::WorkflowRunId;
+use papermachine_protocol::WorkflowId;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolRegistry;
 use serde_json::Value;
@@ -53,15 +53,15 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 const COMPACTION_PROMPT: &str = "You are performing a context checkpoint compaction. Create a concise handoff summary for the model that will continue this research session. Include current progress and decisions, important constraints and user guidance, verified evidence with source URLs, unresolved questions, and concrete next steps. Preserve exact identifiers, quantities, and caveats that matter. Do not continue the research or call tools; return only the handoff summary.";
 const SUMMARY_PREFIX: &str = "Another model worked on this research session and produced the following checkpoint. Use it to continue without repeating completed work:";
 const FINAL_SAMPLE_PROMPT: &str = "This is the final model sample allowed for this Turn. Do not call tools. Synthesize the best self-contained answer supported by the evidence already gathered, and state any remaining limitations.";
-const PROMPT_CACHE_KEY_VERSION: &str = "pmv3";
+const PROMPT_CACHE_KEY_NAMESPACE: &str = "papermachine-session";
 const DEFAULT_MAX_HOSTED_TOOL_CALLS_PER_RESPONSE: u32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct AgentTurnRequest {
-    pub research_id: ResearchId,
+    pub project_id: ProjectId,
     pub session_id: SessionId,
     pub turn_id: TurnId,
-    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub workspace_root: PathBuf,
@@ -85,7 +85,7 @@ pub struct AgentTurnRequest {
 impl AgentTurnRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        research_id: ResearchId,
+        project_id: ProjectId,
         session_id: SessionId,
         turn_id: TurnId,
         workspace_root: PathBuf,
@@ -94,10 +94,10 @@ impl AgentTurnRequest {
         objective: impl Into<String>,
     ) -> Self {
         Self {
-            research_id,
+            project_id,
             session_id,
             turn_id,
-            workflow_run_id: None,
+            workflow_id: None,
             action_invocation_id: None,
             action_attempt_id: None,
             workspace_root,
@@ -199,10 +199,10 @@ pub struct AgentCheckpoint {
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentCheckpointContext {
-    pub research_id: ResearchId,
+    pub project_id: ProjectId,
     pub session_id: SessionId,
     pub turn_id: TurnId,
-    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
 }
@@ -369,10 +369,10 @@ impl AgentRuntime {
                 .control
                 .checkpoint(
                     AgentCheckpointContext {
-                        research_id: request.research_id,
+                        project_id: request.project_id,
                         session_id: request.session_id,
                         turn_id: request.turn_id,
-                        workflow_run_id: request.workflow_run_id,
+                        workflow_id: request.workflow_id,
                         action_invocation_id: request.action_invocation_id,
                         action_attempt_id: request.action_attempt_id,
                     },
@@ -869,10 +869,10 @@ impl AgentRuntime {
         let result = match parsed_arguments {
             Ok(arguments) => {
                 let context = ToolContext {
-                    research_id: request.research_id,
+                    project_id: request.project_id,
                     session_id: request.session_id,
                     turn_id: request.turn_id,
-                    workflow_run_id: request.workflow_run_id,
+                    workflow_id: request.workflow_id,
                     action_invocation_id: request.action_invocation_id,
                     action_attempt_id: request.action_attempt_id,
                     workspace_root: request.workspace_root.clone(),
@@ -972,7 +972,7 @@ fn inspectable_model_output(
 
 fn prompt_cache_config(request: &ModelRequest) -> PromptCacheConfig {
     let stable_prefix = json!({
-        "version": PROMPT_CACHE_KEY_VERSION,
+        "namespace": PROMPT_CACHE_KEY_NAMESPACE,
         // This is a routing/cache-affinity key, not a content digest. Keep it
         // stable across actions, response schemas, tools, and compaction in one
         // durable Session; the provider still matches reusable content by the
@@ -986,7 +986,7 @@ fn prompt_cache_config(request: &ModelRequest) -> PromptCacheConfig {
     PromptCacheConfig {
         // Put entropy first as a defensive measure for compatible gateways
         // that truncate or namespace routing keys at punctuation.
-        key: format!("{}-{PROMPT_CACHE_KEY_VERSION}", &hash[..32]),
+        key: format!("{}-session", &hash[..32]),
         strategy: PromptCacheStrategy::Auto,
     }
 }
@@ -1220,7 +1220,7 @@ mod tests {
         assert_eq!(first, changed);
         assert_eq!(first, changed_shape);
         assert_ne!(first, second);
-        assert!(first.key.ends_with("-pmv3"));
+        assert!(first.key.ends_with("-session"));
         assert!(!first.key.contains("session-a"));
     }
 

@@ -14,7 +14,6 @@ from papermachine import workflow
 @workflow(
     slug="budget-warning",
     name="Budget warning",
-    version="0.1.0",
     description="Exercise the budget diagnostic.",
     input_schema={"type": "object"},
     output_schema={"type": "object"},
@@ -42,7 +41,6 @@ from papermachine import workflow
 @workflow(
     slug="sized-budget",
     name="Sized budget",
-    version="0.1.0",
     description="Exercise a sufficient budget.",
     input_schema={"type": "object"},
     output_schema={"type": "object"},

@@ -1,6 +1,7 @@
 use crate::AgentAccessProfile;
 use crate::Budget;
-use crate::WorkflowId;
+use crate::ProjectId;
+use crate::WorkflowProgramId;
 use chrono::DateTime;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -9,11 +10,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowManifest {
-    pub id: WorkflowId,
+pub struct WorkflowProgramManifest {
+    pub id: WorkflowProgramId,
     pub slug: String,
     pub name: String,
-    pub version: String,
     pub description: String,
     pub entrypoint: String,
     pub input_schema: Value,
@@ -23,24 +23,27 @@ pub struct WorkflowManifest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowSource {
+pub enum WorkflowProgramSource {
     Builtin,
     User,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowRegistration {
-    pub manifest: WorkflowManifest,
-    pub source: WorkflowSource,
+pub struct WorkflowProgram {
+    /// `None` denotes a built-in program; user programs belong to one Project.
+    pub project_id: Option<ProjectId>,
+    pub manifest: WorkflowProgramManifest,
+    pub source: WorkflowProgramSource,
     pub definition_path: String,
     pub sha256: String,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowSnapshot {
-    pub manifest: WorkflowManifest,
-    pub source: WorkflowSource,
+pub struct WorkflowProgramSnapshot {
+    pub project_id: Option<ProjectId>,
+    pub manifest: WorkflowProgramManifest,
+    pub source: WorkflowProgramSource,
     pub definition_path: String,
     pub sha256: String,
     pub source_code: String,
@@ -49,7 +52,7 @@ pub struct WorkflowSnapshot {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowValidation {
     pub valid: bool,
-    pub manifest: Option<WorkflowManifest>,
+    pub manifest: Option<WorkflowProgramManifest>,
     #[serde(default)]
     pub agents: Vec<WorkflowAgentDeclaration>,
     #[serde(default)]

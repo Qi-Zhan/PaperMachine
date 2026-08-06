@@ -4,7 +4,7 @@
       <form class="dialog-panel" @submit.prevent="submit">
         <header class="dialog-header">
           <div>
-            <p class="eyebrow">{{ researchName }}</p>
+            <p class="eyebrow">{{ projectName }}</p>
             <h2>{{ t('dialog.newSkill') }}</h2>
           </div>
           <button class="icon-button" type="button" :title="t('common.close')" :aria-label="t('common.close')" @click="$emit('close')">
@@ -48,7 +48,7 @@ const props = defineProps<{
   open: boolean
   busy: boolean
   error?: string
-  researchName: string
+  projectName: string
 }>()
 const emit = defineEmits<{
   close: []

@@ -646,7 +646,7 @@ def every(
 class WorkflowContext:
     objective: str
     input: dict[str, Any]
-    run_id: str
+    workflow_id: str
 
 
 class _Runtime:
@@ -662,7 +662,7 @@ def _set_runtime(runtime: _Runtime) -> None:
 
 def _require_runtime() -> _Runtime:
     if _runtime is None:
-        raise RuntimeError("PaperMachine DSL operation used outside a WorkflowRun")
+        raise RuntimeError("PaperMachine DSL operation used outside a Workflow")
     return _runtime
 
 

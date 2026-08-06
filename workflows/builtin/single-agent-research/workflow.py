@@ -18,7 +18,6 @@ class Researcher(Agent):
 @workflow(
     slug="single-agent-research",
     name="Single-agent research",
-    version="0.5.0",
     description="Let one persistent research Session use bounded hosted web search, reason, and produce the exact requested deliverable without evaluator or writer handoffs, with a run-level step budget sized for the full search allowance.",
     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
     output_schema={

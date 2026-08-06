@@ -14,14 +14,14 @@
         <button
           class="icon-button"
           type="button"
-          :title="t('session.researchOverview')"
-          :aria-label="t('session.researchOverview')"
+          :title="t('session.projectOverview')"
+          :aria-label="t('session.projectOverview')"
           @click="navigateBack"
         >
           <ArrowLeft :size="17" />
         </button>
         <div class="session-heading-copy">
-          <p class="eyebrow">{{ research.name }}<template v-if="view.session.origin === 'workflow_agent'"> · {{ t('session.workflowAgent') }}</template></p>
+          <p class="eyebrow">{{ project.name }}<template v-if="view.session.origin === 'workflow_agent'"> · {{ t('session.workflowAgent') }}</template></p>
           <h1 :title="view.session.title">{{ view.session.title }}</h1>
         </div>
       </div>
@@ -256,12 +256,12 @@
               </span>
             </label>
           </div>
-          <p v-else class="section-empty">{{ t('research.noSkills') }}</p>
+          <p v-else class="section-empty">{{ t('project.noSkills') }}</p>
         </section>
 
         <section class="inspector-section workflow-inspector-section">
           <div class="inspector-title-row">
-            <h3>{{ t('session.workflowRuns') }}</h3>
+            <h3>{{ t('session.workflows') }}</h3>
             <button
               class="icon-button"
               type="button"
@@ -272,46 +272,46 @@
               <Plus :size="14" />
             </button>
           </div>
-          <div v-if="view.workflow_runs.length" class="workflow-run-list">
+          <div v-if="view.workflows.length" class="workflow-run-list">
             <button
-              v-for="workflowRun in view.workflow_runs"
-              :key="workflowRun.id"
+              v-for="workflow in view.workflows"
+              :key="workflow.id"
               type="button"
-              :data-active="workflowRunView?.workflow_run.id === workflowRun.id"
-              @click="$emit('inspect-workflow', workflowRun.id)"
+              :data-active="workflowView?.workflow.id === workflow.id"
+              @click="$emit('inspect-workflow', workflow.id)"
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflowRun.objective }}</strong>
-                <small>{{ formatDateTime(workflowRun.updated_at) }}</small>
+                <strong>{{ workflow.objective }}</strong>
+                <small>{{ formatDateTime(workflow.updated_at) }}</small>
               </span>
-              <span class="status-pin" :data-status="workflowRun.status" />
+              <span class="status-pin" :data-status="workflow.status" />
             </button>
           </div>
-          <p v-else class="section-empty">{{ t('session.noWorkflowRuns') }}</p>
+          <p v-else class="section-empty">{{ t('session.noWorkflows') }}</p>
 
           <div v-if="workflowLoading" class="inspector-loading"><LoaderCircle class="spin" :size="16" /></div>
-          <div v-else-if="workflowRunView" class="workflow-run-detail">
+          <div v-else-if="workflowView" class="workflow-run-detail">
             <div class="workflow-detail-heading">
-              <StatusBadge :status="workflowRunView.workflow_run.status" />
+              <StatusBadge :status="workflowView.workflow.status" />
               <span class="workflow-detail-controls">
                 <button
-                  v-if="workflowRunView.workflow_run.status === 'running'"
+                  v-if="workflowView.workflow.status === 'running'"
                   class="icon-button"
                   type="button"
                   :title="t('session.pauseWorkflow')"
                   :aria-label="t('session.pauseWorkflow')"
-                  @click="$emit('pause-workflow', workflowRunView.workflow_run.id)"
+                  @click="$emit('pause-workflow', workflowView.workflow.id)"
                 >
                   <Pause :size="12" fill="currentColor" />
                 </button>
                 <button
-                  v-if="workflowRunView.workflow_run.status === 'paused'"
+                  v-if="workflowView.workflow.status === 'paused'"
                   class="icon-button"
                   type="button"
                   :title="t('session.resumeWorkflow')"
                   :aria-label="t('session.resumeWorkflow')"
-                  @click="$emit('resume-workflow', workflowRunView.workflow_run.id)"
+                  @click="$emit('resume-workflow', workflowView.workflow.id)"
                 >
                   <Play :size="12" fill="currentColor" />
                 </button>
@@ -321,7 +321,7 @@
                 type="button"
                 :title="t('session.cancelWorkflow')"
                 :aria-label="t('session.cancelWorkflow')"
-                @click="$emit('cancel-workflow', workflowRunView.workflow_run.id)"
+                @click="$emit('cancel-workflow', workflowView.workflow.id)"
               >
                 <Square :size="12" fill="currentColor" />
               </button>
@@ -329,10 +329,10 @@
             </div>
 
             <button
-              v-if="workflowRunView.workflow_run.output !== null"
+              v-if="workflowView.workflow.output !== null"
               class="workflow-output-button"
               type="button"
-              @click="$emit('open-workflow-output', workflowRunView.workflow_run)"
+              @click="$emit('open-workflow-output', workflowView.workflow)"
             >
               <FileText :size="14" />
               <span>{{ t('session.viewWorkflowOutput') }}</span>
@@ -392,9 +392,9 @@
               <p v-if="humanAnswerError" class="form-error">{{ humanAnswerError }}</p>
             </div>
 
-            <div v-if="workflowRunView.participants.length" class="participant-session-list">
+            <div v-if="workflowView.participants.length" class="participant-session-list">
               <button
-                v-for="(participant, index) in workflowRunView.participants"
+                v-for="(participant, index) in workflowView.participants"
                 :key="participant.id"
                 type="button"
                 @click="$emit('select-session', participant.session_id)"
@@ -408,8 +408,8 @@
               </button>
             </div>
 
-            <div v-if="workflowRunView.actions.length" class="workflow-action-list">
-              <div v-for="action in workflowRunView.actions.slice(-6).reverse()" :key="action.id">
+            <div v-if="workflowView.actions.length" class="workflow-action-list">
+              <div v-for="action in workflowView.actions.slice(-6).reverse()" :key="action.id">
                 <Activity :size="13" />
                 <span>
                   <strong>{{ action.action_name }}</strong>
@@ -419,8 +419,8 @@
               </div>
             </div>
 
-            <div v-if="workflowRunView.timers.length" class="workflow-action-list">
-              <div v-for="timer in workflowRunView.timers" :key="timer.id">
+            <div v-if="workflowView.timers.length" class="workflow-action-list">
+              <div v-for="timer in workflowView.timers" :key="timer.id">
                 <AlarmClock :size="13" />
                 <span>
                   <strong>{{ timer.name }}</strong>
@@ -429,9 +429,9 @@
                 <span class="status-pin" :data-status="timer.status" />
               </div>
             </div>
-            <div v-if="workflowRunView.artifacts.length" class="inspector-artifact-list">
+            <div v-if="workflowView.artifacts.length" class="inspector-artifact-list">
               <button
-                v-for="artifact in workflowRunView.artifacts"
+                v-for="artifact in workflowView.artifacts"
                 :key="artifact.id"
                 type="button"
                 @click="$emit('open-artifact', artifact)"
@@ -491,24 +491,24 @@ import { liveAssistantOutput } from '../sessionEvents'
 import type {
   AgentAccessProfile,
   Artifact,
-  Research,
-  ResearchSkill,
+  Project,
+  ProjectSkill,
   SessionEvent,
   SessionView,
   Turn,
   HumanRequest,
-  WorkflowRunView,
-  WorkflowRun,
+  WorkflowView,
+  Workflow,
 } from '../types'
 import MarkdownView from './MarkdownView.vue'
 import StatusBadge from './StatusBadge.vue'
 
 const props = defineProps<{
-  research: Research
+  project: Project
   view: SessionView
   events: SessionEvent[]
-  skills: ResearchSkill[]
-  workflowRunView: WorkflowRunView | null
+  skills: ProjectSkill[]
+  workflowView: WorkflowView | null
   workflowLoading: boolean
   streamConnected: boolean
   skillsBusy: boolean
@@ -516,21 +516,21 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   'open-sidebar': []
-  'select-research': [researchId: string]
+  'select-project': [projectId: string]
   'select-session': [sessionId: string]
   send: [input: string]
   'cancel-turn': [turnId: string]
   'open-workflow': []
-  'inspect-workflow': [workflowRunId: string]
-  'pause-workflow': [workflowRunId: string]
-  'resume-workflow': [workflowRunId: string]
-  'cancel-workflow': [workflowRunId: string]
-  'send-control': [input: { workflowRunId: string; sessionId: string; kind: 'guide' | 'interrupt' | 'finish'; content: string; actionInvocationId?: string }]
-  'answer-human': [input: { requestId: string; answer: unknown; workflowRunId: string }]
+  'inspect-workflow': [workflowId: string]
+  'pause-workflow': [workflowId: string]
+  'resume-workflow': [workflowId: string]
+  'cancel-workflow': [workflowId: string]
+  'send-control': [input: { workflowId: string; sessionId: string; kind: 'guide' | 'interrupt' | 'finish'; content: string; actionInvocationId?: string }]
+  'answer-human': [input: { requestId: string; answer: unknown; workflowId: string }]
   'update-skills': [slugs: string[]]
   'update-access': [access: AgentAccessProfile]
   'open-artifact': [artifact: Artifact]
-  'open-workflow-output': [workflowRun: WorkflowRun]
+  'open-workflow-output': [workflow: Workflow]
 }>()
 
 const draft = ref('')
@@ -554,18 +554,20 @@ const activeTurn = computed(() =>
   props.view.turns.find((turn) => ['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status)),
 )
 const workflowIsActive = computed(() =>
-  ['created', 'running', 'paused'].includes(props.workflowRunView?.workflow_run.status ?? ''),
+  ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(
+    props.workflowView?.workflow.status ?? '',
+  ),
 )
 const currentParticipant = computed(() =>
-  props.workflowRunView?.participants.find((participant) => participant.session_id === props.view.session.id) ?? null,
+  props.workflowView?.participants.find((participant) => participant.session_id === props.view.session.id) ?? null,
 )
 const currentAction = computed(() =>
-  props.workflowRunView?.actions.find(
+  props.workflowView?.actions.find(
     (action) => action.session_id === props.view.session.id && action.status === 'running',
   ) ?? null,
 )
 const openHumanRequests = computed(() =>
-  props.workflowRunView?.human_requests.filter((request) => request.status === 'open') ?? [],
+  props.workflowView?.human_requests.filter((request) => request.status === 'open') ?? [],
 )
 
 watch(
@@ -628,17 +630,17 @@ function pretty(value: unknown): string {
   }
 }
 function navigateBack() {
-  emit('select-research', props.research.id)
+  emit('select-project', props.project.id)
 }
 function participantName(agentId: string) {
-  return props.workflowRunView?.participants.find((participant) => participant.id === agentId)?.name ?? shortId(agentId)
+  return props.workflowView?.participants.find((participant) => participant.id === agentId)?.name ?? shortId(agentId)
 }
 function submitControl(kind: 'guide' | 'interrupt' | 'finish') {
   const content = controlDraft.value.trim() || (kind === 'finish' ? t('session.finishDefault') : '')
-  const run = props.workflowRunView?.workflow_run
-  if (!content || !run) return
+  const workflow = props.workflowView?.workflow
+  if (!content || !workflow) return
   emit('send-control', {
-    workflowRunId: run.id,
+    workflowId: workflow.id,
     sessionId: props.view.session.id,
     kind,
     content,
@@ -659,12 +661,12 @@ function submitHumanAnswer(request: HumanRequest) {
     }
   }
   humanAnswerError.value = ''
-  emit('answer-human', { requestId: request.id, answer, workflowRunId: request.workflow_run_id })
+  emit('answer-human', { requestId: request.id, answer, workflowId: request.workflow_id })
   delete humanAnswers[request.id]
 }
 function submitBooleanHumanAnswer(request: HumanRequest, answer: boolean) {
   humanAnswerError.value = ''
-  emit('answer-human', { requestId: request.id, answer, workflowRunId: request.workflow_run_id })
+  emit('answer-human', { requestId: request.id, answer, workflowId: request.workflow_id })
 }
 function requestAccessChange(event: Event) {
   const select = event.target as HTMLSelectElement

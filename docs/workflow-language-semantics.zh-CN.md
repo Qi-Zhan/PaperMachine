@@ -7,14 +7,14 @@
 
 | 术语 | 标识 | 语义 |
 |---|---|---|
-| `Research` | `ResearchId` | Session、WorkflowRun、skill、artifact 和总览 UI 的所有权根。 |
+| `Project` | `ProjectId` | 绑定目录的所有权根，管理 Session、Workflow、skill、artifact 和总览 UI。 |
 | `Session` | `SessionId` | 持久的多轮对话与 workspace。来源为 `user` 或 `workflow_agent`，不存在 parent Session。 |
 | `Turn` | `TurnId` | Session 中的一次用户/模型交互。 |
 | `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
-| `WorkflowDefinition` | `(slug, version, sha256)` | 通过校验的 Python 源码及字面量 manifest。 |
-| `WorkflowRun` | `WorkflowRunId` | Research 内对某个不可变 workflow 快照的一次执行。 |
-| origin Session | `origin_session_id` | 发起该 run 的 Session。它表示来源，不表示所有权。 |
-| `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Research-owned Session 承载。 |
+| `WorkflowProgram` | `(project_id?, slug, sha256)` | 通过校验的 Python 源码及字面量 manifest；无 Project 表示 built-in。 |
+| `Workflow` | `WorkflowId` | Project 内对某个不可变 workflow 快照的一次执行。 |
+| starting Session | `started_from_session_id?` | 可选的发起 Session。它表示来源，不表示所有权。 |
+| `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Project-owned Session 承载。 |
 | `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录。 |
 | `ActionAttempt` | `ActionAttemptId` | invocation 的一次执行尝试；被 interrupt 后可以产生新的 attempt。 |
 | `Team` | `TeamId` | 一组可动态修改的具名 Agent instance。 |
@@ -23,24 +23,24 @@
 | `WorkflowTimer` | `TimerId` | 定时触发状态：interval、policy、status、fire count 与 deadline。 |
 | `Channel` / `Signal` | `ChannelId` / `SignalId` | 具名数据流及其中有序、持久的值。 |
 | `HumanRequest` | `HumanRequestId` | 带类型的问题；回答后恢复暂停的 workflow 或 tool call。 |
-| `ControlMessage` | `ControlMessageId` | 发往某个 Session/action 边界的待处理 `guide` 或 `interrupt`。 |
+| `ControlMessage` | `ControlMessageId` | 发往某个 Session/action 边界的待处理 `guide`、`finish` 或 `interrupt`。 |
 
 ## 2. 所有权与标识不变量
 
 | ID | 不变量 |
 |---|---|
-| I1 | 每个 Session 都直接属于一个 Research。 |
-| I2 | WorkflowRun 与它的 origin Session 属于同一个 Research。 |
+| I1 | 每个 Session 都直接属于一个 Project。 |
+| I2 | Workflow 直接属于一个 Project；starting Session 可选，若存在则必须属于同一 Project。 |
 | I3 | run 中每个 Agent instance 恰好拥有一个来源为 `workflow_agent` 的 Session。 |
 | I4 | Agent Session 在 retired、completed、failed 或 cancelled 后仍然可导航。 |
 | I5 | ActionInvocation 属于一个 Agent instance 及其 Session。 |
 | I6 | 每个 ActionAttempt 属于一个 ActionInvocation，并且最多关联一个 Turn。 |
-| I7 | run 只能引用同一 Research/run 内的 Session、Agent、scope、channel 与 control。 |
+| I7 | run 只能引用同一 Project/run 内的 Session、Agent、scope、channel 与 control。 |
 | I8 | run 创建之后，其 workflow 源码快照与 SHA-256 不可变。 |
-| I9 | 已发布 `(slug, version)` 的字节不可变；修改必须发布新版本。 |
+| I9 | 每个 Project 的每个 slug 最多有一个可编辑 WorkflowProgram；覆盖保存不会改变已创建 Workflow 的快照。 |
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
 
-UI 可以在视觉上把 Agent Session 分组到某个 WorkflowRun 下面，但这不会
+UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
 建立 Session 的父子关系。
 
 ## 3. Definition 与 run 创建
@@ -51,10 +51,10 @@ UI 可以在视觉上把 Agent Session 分组到某个 WorkflowRun 下面，但�
 
 启动 run 时会完成以下操作，从而暴露一个一致的 created run：
 
-1. 在 catalog 中解析 `(slug, version)`。
+1. 按 `slug` 在 Project 可见 catalog 中解析；同 slug 的 Project source 覆盖 built-in。
 2. 按 `input_schema` 校验用户输入。
-3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowSnapshot。
-4. 创建状态为 `created` 的 WorkflowRun，并记录发起它的 origin Session。
+3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowProgramSnapshot。
+4. 创建 Project-owned、状态为 `created` 的 Workflow，并可选记录 starting Session。
 5. 调度该 run；worker 在解释 effect 前把它改为 `running`。
 
 run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` effect
@@ -67,14 +67,14 @@ run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` ef
 或显式 retire 会触发 `create_agent`。随后 Rust：
 
 1. 检查 run 状态与 `max_agents`；
-2. 在该 run 的 Research 下创建 Session；
-3. 从 Agent override 或 origin Session 解析 model 与 skills；
+2. 在该 run 的 Project 下创建 Session；
+3. 从 Agent override 或 Workflow defaults 解析 model 与 skills；
 4. 创建 WorkflowParticipant 映射；
 5. 发出 Session-created、workflow-attached 与 participant-created 事件。
 
 每个 Session 有一个面向用户的权限档位，runtime 会把它展开为细粒度能力：
 
-| 档位 | 文件 | 命令 | Research 网络 | Model 可见的资源工具 |
+| 档位 | 文件 | 命令 | Project 网络 | Model 可见的资源工具 |
 |---|---|---|---|---|
 | `model_only` | 无 | 无 | 无 | 只有 `ask_human`。 |
 | `read_only` | 只读 Session workspace | 无 | 无 | `read_file`、`ask_human`。 |
@@ -96,7 +96,7 @@ Turn。Session UI 遵守同一规则，并在选择 `full_access` 时二次确�
 Model sample 前会过滤 tool definitions，但这不是唯一安全边界。registry 与
 每个 built-in tool 会按 Turn 快照再次检查；路径解析遵循对应文件策略；命令
 执行层会独立选择 sandbox 与 network policy。Model provider API 的网络流量
-属于 runtime transport，不等同于 Agent 的 Research 网络权限。
+属于 runtime transport，不等同于 Agent 的 Project 网络权限。
 
 | Participant 状态 | 含义 | 可否继续执行 action |
 |---|---|---|
@@ -111,7 +111,7 @@ Model sample 前会过滤 tool definitions，但这不是唯一安全边界。re
 
 `@action` 方法声明 prompt 和参数签名。方法体不会作为 agent 逻辑执行。
 调用方法会产生一个 awaitable；await 它会请求 `invoke_action`。
-`@action(max_steps=N)` 可缩小单个 action 的模型采样次数，WorkflowRun 的
+`@action(max_steps=N)` 可缩小单个 action 的模型采样次数，Workflow 的
 `max_action_steps` 仍是硬上限；`max_steps=1` 会让第一次采样直接成为禁用工具的
 最终回答。`@action(max_search_calls=N)` 限制整个 Turn 内的 hosted web search
 次数，设为 `0` 会禁用 hosted search，但不会改变 Agent 的其他权限。若 endpoint
@@ -138,7 +138,7 @@ ActionInvocation
 ```
 
 runtime 把 action docstring/decorator prompt 与绑定后的参数格式化成 Turn
-objective，并把 WorkflowRun objective、与该 Agent 有关的有向关系、以及
+objective，并把 Workflow objective、与该 Agent 有关的有向关系、以及
 interrupt guidance 加到 Session instructions 中。
 
 | Invocation/Attempt 状态 | 含义 |
@@ -152,7 +152,7 @@ interrupt guidance 加到 Session instructions 中。
 | `cancelled` | run 或 Turn cancellation 终止了 invocation。 |
 
 完成的 action 返回 assistant 输出字符串。usage 与 Step 数会累加到
-WorkflowRun budget usage。provider 对 incomplete sample 返回的 usage 会跨重试
+Workflow budget usage。provider 对 incomplete sample 返回的 usage 会跨重试
 累积；如果所有重试都失败，最后一个 model Step 会以 failed 状态持久化，已经
 消耗的 token 仍然计入该 run。若 output limit 或只有 reasoning 的 completion
 没有产生 message/tool call，有限重试会降低 reasoning effort，并明确要求按原始
@@ -210,13 +210,14 @@ relation 不会自动发消息，也不会自动调用 target。
 | 模型工具 `ask_human` | action Turn 内的 tool call | Turn 和 Session 变为 `waiting_for_human`；回答作为 tool output 返回。 |
 
 response schema 会与 request 一起保存。HTTP API 在 resolve 前校验答案。
-只要仍有 open request，`WorkflowRun.attention_required` 就为 true。
+只要仍有 open request，`Workflow.attention_required` 就为 true。
 
 Control message 是异步的：
 
 | Control | 精确语义 |
 |---|---|
 | `guide` | 向某个 Session/action 排队。在下一个 Agent checkpoint，它会作为 user-history item 加入下一次 model sample 前的上下文；不会推翻已完成工作。 |
+| `finish` | 在下一个 checkpoint 加入指令，并强制当前 Action 的下一次 model sample 禁用 tools、直接交付最终回答；Workflow 随后继续。 |
 | `interrupt` | 在下一个 checkpoint，把当前 Turn/Attempt 标记为 interrupted。action runtime 为同一个 ActionInvocation 创建新 Attempt，并把 control 文本作为重启 guidance。 |
 | pause | 把 run 设为 `paused`。workflow 与 Agent checkpoint 等待；已经在途的 provider response 不会回滚。 |
 | resume | 把 run 设为 `running`，等待中的 checkpoint 继续。 |
@@ -258,10 +259,13 @@ callback 中的 action 每次都会创建新 Turn。workflow 完成时，active 
 
 ## 12. 完成、失败与 Budget
 
-| WorkflowRun 状态 | 进入条件 | 是否接受 effect |
+| Workflow 状态 | 进入条件 | 是否接受 effect |
 |---|---|---|
 | `created` | run 已持久化，等待 scheduler。 | checkpoint 可以进入启动阶段。 |
 | `running` | worker 正在解释源码。 | 可以，但受校验与 budget 约束。 |
+| `waiting_for_user` | Workflow 正在请求用户输入。 | 用户提交通过校验的回答后继续。 |
+| `waiting_for_timer` | Workflow 正在等待 timer deadline。 | timer 唤醒后继续。 |
+| `waiting_for_signal` | Workflow 正在等待 Channel Signal。 | 收到匹配 Signal 后继续。 |
 | `paused` | 用户暂停 run。 | 已有调用在 checkpoint 等待。 |
 | `completed` | `complete` 已保存输出。 | 不再接受新领域工作。 |
 | `failed` | Python、action、protocol、sandbox 或 budget 失败。 | 不接受。 |
@@ -294,10 +298,10 @@ protocol error。
 ## 13. 持久化与 Replay 边界
 
 所有权威 entity 与有序 event 都会持久化，workflow 源码也会被快照。独立的
-Session Turn 支持重启恢复。仍处于 `created` 的 WorkflowRun 可以在重启后启动，
+Session Turn 支持重启恢复。仍处于 `created` 的 Workflow 可以在重启后启动，
 因为它还没有执行任何 Python effect。
 
-当前无法安全续跑 `running` 或 `paused` WorkflowRun。server 重启时，这类 run
+当前无法安全续跑 `running` 或 `paused` Workflow。server 重启时，这类 run
 会带着明确的 restart-interruption 原因进入 `failed`；未完成的
 ActionInvocation/ActionAttempt 进入 `interrupted`，关联 Turn 进入
 `interrupted`，运行中的 Step 进入 `cancelled`。这一步发生在独立 Session
@@ -306,7 +310,7 @@ ActionInvocation/ActionAttempt 进入 `interrupted`，关联 Turn 进入
 当前 effect request ID 只用于并发 request/response 关联，并不是确定性的持久
 idempotency key。真正的 active-run continuation 需要持久 effect-result journal，
 并让 Python 从头执行时只重放 journal 中的结果。在实现它之前，应把中断执行
-作为新的 WorkflowRun 重试，而不是重放已经 commit 的 effect。
+作为新的 Workflow 重试，而不是重放已经 commit 的 effect。
 
 ## 14. 代表性执行轨迹
 

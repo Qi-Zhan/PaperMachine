@@ -4,22 +4,22 @@ import type {
   ControlMessage,
   ControlMessageKind,
   CreateSessionInput,
-  CreateWorkflowRunInput,
+  CreateWorkflowInput,
   GeneratedWorkflow,
   Health,
   HumanRequest,
-  Research,
-  ResearchOverview,
-  ResearchSkill,
+  Project,
+  ProjectOverview,
+  ProjectSkill,
   Session,
   SessionEvent,
   SessionView,
   Turn,
   WorkflowGenerationInput,
-  WorkflowRegistration,
-  WorkflowRun,
-  WorkflowRunView,
-  WorkflowSource,
+  WorkflowProgram,
+  Workflow,
+  WorkflowView,
+  WorkflowProgramSource,
   WorkflowValidation,
 } from './types'
 
@@ -43,17 +43,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<Health>('/health'),
-  listResearches: () => request<Research[]>('/researches'),
-  createResearch: (name: string, description: string) =>
-    request<Research>('/researches', { method: 'POST', body: JSON.stringify({ name, description }) }),
-  getResearch: (researchId: string) => request<ResearchOverview>(`/researches/${researchId}`),
-  listResearchSkills: (researchId: string) => request<ResearchSkill[]>(`/researches/${researchId}/skills`),
-  createResearchSkill: (
-    researchId: string,
+  listProjects: () => request<Project[]>('/projects'),
+  createProject: (name: string, description: string, rootPath: string) =>
+    request<Project>('/projects', { method: 'POST', body: JSON.stringify({ name, description, root_path: rootPath }) }),
+  getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
+  listProjectSkills: (projectId: string) => request<ProjectSkill[]>(`/projects/${projectId}/skills`),
+  createProjectSkill: (
+    projectId: string,
     input: { slug: string; name: string; description: string; instructions: string },
-  ) => request<ResearchSkill>(`/researches/${researchId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
-  createSession: (researchId: string, input: CreateSessionInput) =>
-    request<Session>(`/researches/${researchId}/sessions`, { method: 'POST', body: JSON.stringify(input) }),
+  ) => request<ProjectSkill>(`/projects/${projectId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
+  createSession: (projectId: string, input: CreateSessionInput) =>
+    request<Session>(`/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify(input) }),
   getSession: (sessionId: string) => request<SessionView>(`/sessions/${sessionId}`),
   createTurn: (sessionId: string, input: string) =>
     request<Turn>(`/sessions/${sessionId}/turns`, { method: 'POST', body: JSON.stringify({ input }) }),
@@ -64,33 +64,33 @@ export const api = {
     request<Session>(`/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
   listSessionEvents: (sessionId: string, after = 0) =>
     request<SessionEvent[]>(`/sessions/${sessionId}/events?after=${after}`),
-  createWorkflowRun: (sessionId: string, input: CreateWorkflowRunInput) =>
-    request<WorkflowRun>(`/sessions/${sessionId}/workflow-runs`, { method: 'POST', body: JSON.stringify(input) }),
-  getWorkflowRun: (runId: string) => request<WorkflowRunView>(`/workflow-runs/${runId}`),
-  pauseWorkflowRun: (runId: string) => request<void>(`/workflow-runs/${runId}/pause`, { method: 'POST' }),
-  resumeWorkflowRun: (runId: string) => request<void>(`/workflow-runs/${runId}/resume`, { method: 'POST' }),
-  cancelWorkflowRun: (runId: string) => request<void>(`/workflow-runs/${runId}/cancel`, { method: 'POST' }),
+  createWorkflow: (projectId: string, input: CreateWorkflowInput) =>
+    request<Workflow>(`/projects/${projectId}/workflows`, { method: 'POST', body: JSON.stringify(input) }),
+  getWorkflow: (workflowId: string) => request<WorkflowView>(`/workflows/${workflowId}`),
+  pauseWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/pause`, { method: 'POST' }),
+  resumeWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/resume`, { method: 'POST' }),
+  cancelWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/cancel`, { method: 'POST' }),
   sendControl: (
     runId: string,
     sessionId: string,
     kind: ControlMessageKind,
     content: string,
     actionInvocationId?: string,
-  ) => request<ControlMessage>(`/workflow-runs/${runId}/sessions/${sessionId}/control`, {
+  ) => request<ControlMessage>(`/workflows/${runId}/sessions/${sessionId}/control`, {
     method: 'POST',
     body: JSON.stringify({ kind, content, action_invocation_id: actionInvocationId ?? null }),
   }),
   answerHumanRequest: (requestId: string, answer: unknown) =>
     request<HumanRequest>(`/human-requests/${requestId}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
-  listWorkflows: () => request<WorkflowRegistration[]>('/workflows'),
-  getWorkflow: (slug: string, version: string) =>
-    request<WorkflowSource>(`/workflows/${encodeURIComponent(slug)}/${encodeURIComponent(version)}`),
+  listWorkflowPrograms: (projectId: string) => request<WorkflowProgram[]>(`/projects/${projectId}/workflow-programs`),
+  getWorkflowProgram: (projectId: string, slug: string) =>
+    request<WorkflowProgramSource>(`/projects/${projectId}/workflow-programs/${encodeURIComponent(slug)}`),
   generateWorkflow: (input: WorkflowGenerationInput) =>
-    request<GeneratedWorkflow>('/workflows/generate', { method: 'POST', body: JSON.stringify(input) }),
+    request<GeneratedWorkflow>('/workflow-programs/generate', { method: 'POST', body: JSON.stringify(input) }),
   validateWorkflow: (source: string) =>
-    request<WorkflowValidation>('/workflows/validate', { method: 'POST', body: JSON.stringify({ source }) }),
-  saveWorkflow: (source: string) =>
-    request<WorkflowRegistration>('/workflows', { method: 'POST', body: JSON.stringify({ source }) }),
+    request<WorkflowValidation>('/workflow-programs/validate', { method: 'POST', body: JSON.stringify({ source }) }),
+  saveWorkflowProgram: (projectId: string, source: string) =>
+    request<WorkflowProgram>(`/projects/${projectId}/workflow-programs`, { method: 'POST', body: JSON.stringify({ source }) }),
   artifactUrl: (artifact: Artifact) => `${API_ROOT}/artifacts/${artifact.id}/content`,
   readArtifact: async (artifact: Artifact) => {
     const response = await fetch(`${API_ROOT}/artifacts/${artifact.id}/content`)

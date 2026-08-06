@@ -1,8 +1,10 @@
-//! Research-local skill packages using the Codex `SKILL.md` shape.
+//! Project-local skill packages using the Codex `SKILL.md` shape.
 
-use papermachine_protocol::ResearchId;
-use papermachine_protocol::ResearchSkill;
+use papermachine_protocol::ProjectId;
+use papermachine_protocol::ProjectSkill;
 use papermachine_protocol::SkillSnapshot;
+use papermachine_store::Store;
+use papermachine_store::StoreError;
 use serde::Deserialize;
 use sha2::Digest;
 use sha2::Sha256;
@@ -10,11 +12,12 @@ use std::collections::BTreeSet;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone)]
-pub struct ResearchSkillCatalog {
-    root: PathBuf,
+pub struct ProjectSkillCatalog {
+    store: Arc<Store>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,34 +33,34 @@ struct SkillFrontmatter {
     description: String,
 }
 
-impl ResearchSkillCatalog {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+impl ProjectSkillCatalog {
+    pub fn new(store: Arc<Store>) -> Self {
+        Self { store }
     }
 
-    pub fn ensure_research(&self, research_id: ResearchId) -> Result<PathBuf, SkillError> {
-        let root = self.research_root(research_id);
+    pub fn ensure_project(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
+        let root = self.project_root(project_id)?;
         std::fs::create_dir_all(root.join("skills"))?;
         std::fs::create_dir_all(root.join("sources"))?;
         Ok(root)
     }
 
-    pub fn list(&self, research_id: ResearchId) -> Result<Vec<ResearchSkill>, SkillError> {
-        let skills_root = self.ensure_research(research_id)?.join("skills");
+    pub fn list(&self, project_id: ProjectId) -> Result<Vec<ProjectSkill>, SkillError> {
+        let skills_root = self.ensure_project(project_id)?.join("skills");
         let mut directories = std::fs::read_dir(&skills_root)?.collect::<Result<Vec<_>, _>>()?;
         directories.sort_by_key(std::fs::DirEntry::file_name);
         let mut skills = Vec::new();
         for entry in directories {
             if entry.file_type()?.is_dir() {
-                skills.push(self.load(research_id, &entry.file_name().to_string_lossy())?);
+                skills.push(self.load(project_id, &entry.file_name().to_string_lossy())?);
             }
         }
         Ok(skills)
     }
 
-    pub fn load(&self, research_id: ResearchId, slug: &str) -> Result<ResearchSkill, SkillError> {
+    pub fn load(&self, project_id: ProjectId, slug: &str) -> Result<ProjectSkill, SkillError> {
         validate_slug(slug)?;
-        let package = self.research_root(research_id).join("skills").join(slug);
+        let package = self.project_root(project_id)?.join("skills").join(slug);
         let skill_path = package.join("SKILL.md");
         if !skill_path.is_file() {
             return Err(SkillError::NotFound(slug.to_string()));
@@ -65,11 +68,11 @@ impl ResearchSkillCatalog {
         ensure_package_is_regular(&package, &package)?;
         let source = std::fs::read_to_string(&skill_path)?;
         let (frontmatter, instructions) = parse_skill_markdown(&source)?;
-        Ok(ResearchSkill {
+        Ok(ProjectSkill {
             slug: slug.to_string(),
             name: frontmatter.name,
             description: frontmatter.description,
-            relative_path: format!("researches/{research_id}/skills/{slug}/SKILL.md"),
+            relative_path: format!(".papermachine/skills/{slug}/SKILL.md"),
             sha256: hash_package(&package)?,
             instructions: instructions.to_string(),
         })
@@ -77,12 +80,12 @@ impl ResearchSkillCatalog {
 
     pub fn create(
         &self,
-        research_id: ResearchId,
+        project_id: ProjectId,
         slug: &str,
         name: &str,
         description: &str,
         instructions: &str,
-    ) -> Result<ResearchSkill, SkillError> {
+    ) -> Result<ProjectSkill, SkillError> {
         validate_slug(slug)?;
         if name.trim().is_empty() || description.trim().is_empty() || instructions.trim().is_empty()
         {
@@ -90,7 +93,7 @@ impl ResearchSkillCatalog {
                 "skill name, description, and instructions must not be empty".to_string(),
             ));
         }
-        let package = self.ensure_research(research_id)?.join("skills").join(slug);
+        let package = self.ensure_project(project_id)?.join("skills").join(slug);
         if package.exists() {
             return Err(SkillError::AlreadyExists(slug.to_string()));
         }
@@ -104,36 +107,40 @@ impl ResearchSkillCatalog {
         let temporary = package.join("SKILL.md.tmp");
         std::fs::write(&temporary, document)?;
         std::fs::rename(&temporary, package.join("SKILL.md"))?;
-        self.load(research_id, slug)
+        self.load(project_id, slug)
     }
 
     pub fn validate_enabled(
         &self,
-        research_id: ResearchId,
+        project_id: ProjectId,
         slugs: &[String],
     ) -> Result<(), SkillError> {
         for slug in unique_slugs(slugs)? {
-            self.load(research_id, slug)?;
+            self.load(project_id, slug)?;
         }
         Ok(())
     }
 
     pub fn resolve(
         &self,
-        research_id: ResearchId,
+        project_id: ProjectId,
         slugs: &[String],
         session_workspace: &Path,
     ) -> Result<ResolvedSkills, SkillError> {
         let mut snapshots = Vec::new();
         let mut sections = Vec::new();
         for slug in unique_slugs(slugs)? {
-            let skill = self.load(research_id, slug)?;
+            let skill = self.load(project_id, slug)?;
             let hash_prefix = skill.sha256.get(..16).unwrap_or(&skill.sha256);
-            let relative_package = PathBuf::from(".skills").join(slug).join(hash_prefix);
+            let relative_package = PathBuf::from(".papermachine")
+                .join("state")
+                .join("skill-snapshots")
+                .join(slug)
+                .join(hash_prefix);
             let destination = session_workspace.join(&relative_package);
             if !destination.exists() {
                 copy_package(
-                    &self.research_root(research_id).join("skills").join(slug),
+                    &self.project_root(project_id)?.join("skills").join(slug),
                     &destination,
                 )?;
             }
@@ -157,7 +164,7 @@ impl ResearchSkillCatalog {
                 String::new()
             } else {
                 format!(
-                    "Research-local skills enabled for this turn:\n\n{}",
+                    "Project-local skills enabled for this turn:\n\n{}",
                     sections.join("\n\n")
                 )
             },
@@ -197,14 +204,14 @@ impl ResearchSkillCatalog {
             String::new()
         } else {
             format!(
-                "Research-local skills enabled for this turn:\n\n{}",
+                "Project-local skills enabled for this turn:\n\n{}",
                 sections.join("\n\n")
             )
         })
     }
 
-    fn research_root(&self, research_id: ResearchId) -> PathBuf {
-        self.root.join(research_id.to_string())
+    fn project_root(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
+        Ok(PathBuf::from(self.store.get_project(project_id)?.root_path).join(".papermachine"))
     }
 }
 
@@ -359,6 +366,8 @@ fn copy_package(source: &Path, destination: &Path) -> Result<(), SkillError> {
 
 #[derive(Debug, Error)]
 pub enum SkillError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error("skill not found: {0}")]
     NotFound(String),
     #[error("skill already exists: {0}")]

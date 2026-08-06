@@ -13,10 +13,13 @@ SPEC.loader.exec_module(run_matrix)
 
 class LiveDrMatrixTests(unittest.TestCase):
     def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
-        attempts = [{"run_id": "failed-run"}]
+        attempts = [{"workflow_id": "failed-run"}]
         state = {
             "jobs": [
-                {"failed": True, "research": {"status": "failed", "attempts": attempts}},
+                {
+                    "failed": True,
+                    "research": {"status": "failed", "attempts": attempts},
+                },
                 {
                     "grade_failed": True,
                     "research": {"result": {}},
@@ -31,8 +34,12 @@ class LiveDrMatrixTests(unittest.TestCase):
         self.assertEqual(state["jobs"][1]["grade"]["status"], "pending_retry")
 
     def test_build_jobs_is_balanced_and_deterministic(self) -> None:
-        first = run_matrix.build_jobs(["0", "22"], ["single_agent", "coverage_r2"], 2, 7)
-        second = run_matrix.build_jobs(["0", "22"], ["single_agent", "coverage_r2"], 2, 7)
+        first = run_matrix.build_jobs(
+            ["0", "22"], ["single_agent", "coverage_r2"], 2, 7
+        )
+        second = run_matrix.build_jobs(
+            ["0", "22"], ["single_agent", "coverage_r2"], 2, 7
+        )
         self.assertEqual(first, second)
         self.assertEqual(len(first), 8)
 
@@ -110,19 +117,19 @@ class LiveDrMatrixTests(unittest.TestCase):
                 {
                     "research": {
                         "status": "running",
-                        "attempts": [{"run_id": "run-1"}],
+                        "attempts": [{"workflow_id": "run-1"}],
                     }
                 },
                 {
                     "research": {
                         "status": "completed",
-                        "attempts": [{"run_id": "run-2"}],
+                        "attempts": [{"workflow_id": "run-2"}],
                     }
                 },
             ]
         }
         self.assertEqual(run_matrix.cancel_inflight(api, state), 1)
-        self.assertEqual(api.paths, ["/workflow-runs/run-1/cancel"])
+        self.assertEqual(api.paths, ["/workflows/run-1/cancel"])
 
     def test_snapshot_ground_truths_remain_encrypted(self) -> None:
         snapshot = json.loads(Path(__file__).with_name("tasks.json").read_text())

@@ -15,23 +15,33 @@ export type TurnStatus =
   | 'cancelled'
 export type StepKind = 'model' | 'tool' | 'workflow' | 'system'
 export type StepStatus = 'running' | 'completed' | 'failed' | 'cancelled'
-export type WorkflowRunStatus = 'created' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+export type WorkflowStatus =
+  | 'created'
+  | 'running'
+  | 'waiting_for_user'
+  | 'waiting_for_timer'
+  | 'waiting_for_signal'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 export type ParticipantStatus = 'active' | 'waiting_for_human' | 'retired' | 'failed'
 export type ActionStatus = 'scheduled' | 'running' | 'waiting_for_human' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
 export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
 
-export interface Research {
+export interface Project {
   id: Id
   name: string
   description: string
+  root_path: string
   created_at: string
   updated_at: string
 }
 
 export interface Session {
   id: Id
-  research_id: Id
+  project_id: Id
   origin: SessionOrigin
   title: string
   instructions: string
@@ -112,11 +122,10 @@ export interface BudgetUsage {
   estimated_cost_usd: number | null
 }
 
-export interface WorkflowManifest {
+export interface WorkflowProgramManifest {
   id: Id
   slug: string
   name: string
-  version: string
   description: string
   entrypoint: string
   input_schema: Record<string, unknown>
@@ -124,25 +133,29 @@ export interface WorkflowManifest {
   default_budget: Budget
 }
 
-export interface WorkflowRegistration {
-  manifest: WorkflowManifest
+export interface WorkflowProgram {
+  project_id: Id | null
+  manifest: WorkflowProgramManifest
   source: 'builtin' | 'user'
   definition_path: string
   sha256: string
   updated_at: string
 }
 
-export interface WorkflowSnapshot extends WorkflowRegistration {
+export interface WorkflowProgramSnapshot extends WorkflowProgram {
   source_code: string
 }
 
-export interface WorkflowRun {
+export interface Workflow {
   id: Id
-  research_id: Id
-  origin_session_id: Id
-  workflow: WorkflowSnapshot
+  project_id: Id
+  started_from_session_id: Id | null
+  program: WorkflowProgramSnapshot
   objective: string
-  status: WorkflowRunStatus
+  default_model: string
+  access: AgentAccessProfile
+  enabled_skills: string[]
+  status: WorkflowStatus
   input: Record<string, unknown>
   output: unknown | null
   error: string | null
@@ -155,7 +168,7 @@ export interface WorkflowRun {
 
 export interface WorkflowParticipant {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   session_id: Id
   class_name: string
   name: string
@@ -170,7 +183,7 @@ export interface WorkflowParticipant {
 
 export interface TaskScope {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   parent_id: Id | null
   name: string
   objective: string
@@ -181,7 +194,7 @@ export interface TaskScope {
 
 export interface ActionInvocation {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   task_scope_id: Id | null
   agent_instance_id: Id
   session_id: Id
@@ -197,7 +210,7 @@ export interface ActionInvocation {
 
 export interface ActionAttempt {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   invocation_id: Id
   number: number
   turn_id: Id | null
@@ -210,7 +223,7 @@ export interface ActionAttempt {
 
 export interface WorkflowTeam {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   name: string
   member_ids: Id[]
   created_at: string
@@ -219,7 +232,7 @@ export interface WorkflowTeam {
 
 export interface AgentRelation {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   source_agent_id: Id
   target_agent_id: Id
   kind: string
@@ -229,7 +242,7 @@ export interface AgentRelation {
 
 export interface WorkflowTimer {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   name: string
   interval_ms: number
   policy: 'coalesce' | 'skip' | 'queue'
@@ -241,12 +254,12 @@ export interface WorkflowTimer {
   updated_at: string
 }
 
-export interface WorkflowChannel { id: Id; workflow_run_id: Id; name: string; schema: unknown; created_at: string }
-export interface WorkflowSignal { id: Id; workflow_run_id: Id; channel_id: Id; sender_agent_id: Id | null; sequence: number; value: unknown; created_at: string }
+export interface WorkflowChannel { id: Id; workflow_id: Id; name: string; schema: unknown; created_at: string }
+export interface WorkflowSignal { id: Id; workflow_id: Id; channel_id: Id; sender_agent_id: Id | null; sequence: number; value: unknown; created_at: string }
 
 export interface HumanRequest {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   action_invocation_id: Id | null
   action_attempt_id: Id | null
   session_id: Id
@@ -261,7 +274,7 @@ export interface HumanRequest {
 
 export interface ControlMessage {
   id: Id
-  workflow_run_id: Id
+  workflow_id: Id
   session_id: Id
   action_invocation_id: Id | null
   kind: ControlMessageKind
@@ -273,8 +286,8 @@ export interface ControlMessage {
 
 export interface Artifact {
   id: Id
-  research_id: Id
-  workflow_run_id: Id
+  project_id: Id
+  workflow_id: Id
   session_id: Id | null
   action_invocation_id: Id | null
   kind: string
@@ -287,7 +300,7 @@ export interface Artifact {
   created_at: string
 }
 
-export interface ResearchSkill {
+export interface ProjectSkill {
   slug: string
   name: string
   description: string
@@ -296,10 +309,10 @@ export interface ResearchSkill {
   instructions: string
 }
 
-export interface ResearchOverview {
-  research: Research
+export interface ProjectOverview {
+  project: Project
   sessions: Session[]
-  workflow_runs: WorkflowRun[]
+  workflows: Workflow[]
   workflow_participants: WorkflowParticipant[]
   human_requests: HumanRequest[]
   artifacts: Artifact[]
@@ -309,13 +322,13 @@ export interface SessionView {
   session: Session
   turns: Turn[]
   steps: AgentStep[]
-  workflow_runs: WorkflowRun[]
+  workflows: Workflow[]
   workflow_memberships: WorkflowParticipant[]
   human_requests: HumanRequest[]
 }
 
-export interface WorkflowRunView {
-  workflow_run: WorkflowRun
+export interface WorkflowView {
+  workflow: Workflow
   participants: WorkflowParticipant[]
   sessions: Session[]
   actions: ActionInvocation[]
@@ -370,7 +383,7 @@ export interface ModelProvider {
   prompt_cache_mode: string
 }
 
-export interface WorkflowSource { registration: WorkflowRegistration; source: string }
+export interface WorkflowProgramSource { registration: WorkflowProgram; source: string }
 export interface WorkflowAgentDeclaration { class_name: string; actions: string[]; access: AgentAccessProfile }
 export interface WorkflowTimerDeclaration { callback: string; seconds: number | null; policy: string | null }
 export interface WorkflowFeatureSummary {
@@ -386,7 +399,7 @@ export interface WorkflowFeatureSummary {
 export interface WorkflowDiagnostic { severity: 'error' | 'warning'; message: string; line: number | null; column: number | null }
 export interface WorkflowValidation {
   valid: boolean
-  manifest: WorkflowManifest | null
+  manifest: WorkflowProgramManifest | null
   agents: WorkflowAgentDeclaration[]
   features: WorkflowFeatureSummary
   diagnostics: WorkflowDiagnostic[]
@@ -400,4 +413,12 @@ export interface CreateSessionInput {
   enabled_skills: string[]
   access: AgentAccessProfile
 }
-export interface CreateWorkflowRunInput { workflow_slug: string; workflow_version: string; objective: string; input: Record<string, unknown> }
+export interface CreateWorkflowInput {
+  program_slug: string
+  objective: string
+  input: Record<string, unknown>
+  started_from_session_id?: Id
+  model: string
+  access: AgentAccessProfile
+  enabled_skills: string[]
+}

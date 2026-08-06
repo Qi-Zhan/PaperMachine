@@ -35,7 +35,6 @@ class Synthesizer(Agent):
 @workflow(
     slug="parallel-review",
     name="Parallel review",
-    version="0.1.0",
     description="Run independent Sessions, then synthesize them.",
     input_schema={
         "type": "object",
@@ -86,13 +85,12 @@ must be Python literals.
 |---|---|
 | `slug` | Lowercase kebab-case catalog key. |
 | `name` | Human-readable name. |
-| `version` | Immutable semantic version. |
-| `description` | Protocol purpose shown in the Library. |
+| `description` | Protocol purpose shown on the Workflow page. |
 | `input_schema` | Supported JSON Schema subset checked before scheduling. |
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 | `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
 
-The runtime provides `ctx.objective`, `ctx.input`, and `ctx.run_id`.
+The runtime provides `ctx.objective`, `ctx.input`, and `ctx.workflow_id`.
 
 ## DSL surface
 
@@ -166,12 +164,12 @@ The catalog scans:
 
 ```text
 workflows/builtin/<slug>/workflow.py
-workflows/user/<slug>/<version>/workflow.py
+<project-root>/.papermachine/workflows/<slug>/workflow.py
 ```
 
-Both roots pass through the same AST validator. Publishing a user workflow
-writes the validated source to its version directory. Re-publishing identical
-bytes is harmless; different bytes for the same slug/version are rejected.
+Both roots pass through the same AST validator. Saving a user WorkflowProgram
+writes validated source to its Project directory. Saving the same slug replaces
+the editable source; already-created Workflows keep their original source snapshot.
 
 The Workflow page uses the validator's AST summary to show Agent classes,
 actions, parallel blocks, Teams, relations, scopes, channels, timers, background

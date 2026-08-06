@@ -1,6 +1,6 @@
 <template>
-  <div class="research-overview">
-    <header class="page-header research-page-header">
+  <div class="project-overview">
+    <header class="page-header project-page-header">
       <div class="page-leading">
         <button
           class="icon-button mobile-only"
@@ -12,8 +12,8 @@
           <PanelLeft :size="18" />
         </button>
         <div>
-          <p class="eyebrow">Research</p>
-          <h1>{{ overview.research.name }}</h1>
+          <p class="eyebrow">Project</p>
+          <h1>{{ overview.project.name }}</h1>
         </div>
       </div>
       <button class="primary-button" type="button" @click="$emit('new-session')">
@@ -22,24 +22,24 @@
       </button>
     </header>
 
-    <main class="research-content">
-      <section class="research-summary">
-        <p class="research-description">{{ overview.research.description || t('research.noDescription') }}</p>
+    <main class="project-content">
+      <section class="project-summary">
+        <p class="project-description">{{ overview.project.description || t('project.noDescription') }}</p>
         <dl class="summary-metrics">
           <div>
-            <dt>{{ t('research.sessions') }}</dt>
+            <dt>{{ t('project.sessions') }}</dt>
             <dd>{{ overview.sessions.length }}</dd>
           </div>
           <div>
-            <dt>{{ t('research.active') }}</dt>
+            <dt>{{ t('project.active') }}</dt>
             <dd>{{ activeSessions }}</dd>
           </div>
           <div>
-            <dt>{{ t('research.workflowRuns') }}</dt>
-            <dd>{{ overview.workflow_runs.length }}</dd>
+            <dt>{{ t('project.workflowRuns') }}</dt>
+            <dd>{{ overview.workflows.length }}</dd>
           </div>
           <div>
-            <dt>{{ t('research.artifacts') }}</dt>
+            <dt>{{ t('project.artifacts') }}</dt>
             <dd>{{ overview.artifacts.length }}</dd>
           </div>
         </dl>
@@ -47,7 +47,7 @@
 
       <section class="overview-section sessions-index">
         <div class="section-heading">
-          <h2>{{ t('research.sessions') }}</h2>
+          <h2>{{ t('project.sessions') }}</h2>
           <span>{{ overview.sessions.length }}</span>
         </div>
         <div v-if="standaloneSessions.length" class="data-list" role="list">
@@ -72,16 +72,16 @@
         </div>
         <div
           v-for="group in workflowGroups"
-          :key="group.run.id"
+          :key="group.workflow.id"
           class="workflow-session-group"
         >
           <div class="workflow-session-group-heading">
             <GitBranch :size="14" />
             <span>
-              <strong>{{ group.run.workflow.manifest.name }}</strong>
-              <small>{{ group.run.objective }}</small>
+              <strong>{{ group.workflow.program.manifest.name }}</strong>
+              <small>{{ group.workflow.objective }}</small>
             </span>
-            <StatusBadge :status="group.run.status" />
+            <StatusBadge :status="group.workflow.status" />
           </div>
           <div class="data-list" role="list">
             <button
@@ -103,43 +103,44 @@
         </div>
         <div v-if="!standaloneSessions.length && !workflowGroups.length" class="empty-band">
           <MessageSquare :size="18" />
-          <span>{{ t('research.noSessions') }}</span>
-          <button class="text-command" type="button" @click="$emit('new-session')">{{ t('research.createSession') }}</button>
+          <span>{{ t('project.noSessions') }}</span>
+          <button class="text-command" type="button" @click="$emit('new-session')">{{ t('project.createSession') }}</button>
         </div>
       </section>
 
       <div class="overview-columns">
         <section class="overview-section">
           <div class="section-heading">
-            <h2>{{ t('research.workflowActivity') }}</h2>
-            <span>{{ overview.workflow_runs.length }}</span>
+            <h2>{{ t('project.workflowActivity') }}</h2>
+            <span>{{ overview.workflows.length }}</span>
           </div>
-          <div v-if="overview.workflow_runs.length" class="compact-list">
+          <div v-if="overview.workflows.length" class="compact-list">
             <button
-              v-for="workflowRun in overview.workflow_runs.slice(0, 8)"
-              :key="workflowRun.id"
+              v-for="workflow in overview.workflows.slice(0, 8)"
+              :key="workflow.id"
               type="button"
-              @click="$emit('select-session', workflowRun.origin_session_id)"
+              :disabled="!workflowSessionId(workflow)"
+              @click="openWorkflowSession(workflow)"
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflowRun.objective }}</strong>
-                <small>{{ formatDate(workflowRun.updated_at) }}</small>
+                <strong>{{ workflow.objective }}</strong>
+                <small>{{ workflow.program.manifest.name }} · {{ formatDate(workflow.updated_at) }}</small>
               </span>
-              <StatusBadge :status="workflowRun.status" />
+              <StatusBadge :status="workflow.status" />
             </button>
           </div>
-          <p v-else class="section-empty">{{ t('research.noWorkflowActivity') }}</p>
+          <p v-else class="section-empty">{{ t('project.noWorkflowActivity') }}</p>
         </section>
 
         <section class="overview-section">
           <div class="section-heading">
-            <h2>{{ t('research.skills') }}</h2>
+            <h2>{{ t('project.skills') }}</h2>
             <button
               class="icon-button"
               type="button"
-              :title="t('research.newSkill')"
-              :aria-label="t('research.newSkill')"
+              :title="t('project.newSkill')"
+              :aria-label="t('project.newSkill')"
               @click="$emit('new-skill')"
             >
               <Plus :size="15" />
@@ -155,13 +156,13 @@
               <code>{{ skill.slug }}</code>
             </div>
           </div>
-          <p v-else class="section-empty">{{ t('research.noSkills') }}</p>
+          <p v-else class="section-empty">{{ t('project.noSkills') }}</p>
         </section>
       </div>
 
       <section class="overview-section artifact-index">
         <div class="section-heading">
-          <h2>{{ t('research.artifacts') }}</h2>
+          <h2>{{ t('project.artifacts') }}</h2>
           <span>{{ overview.artifacts.length }}</span>
         </div>
         <div v-if="overview.artifacts.length" class="artifact-grid">
@@ -179,13 +180,13 @@
             <ExternalLink :size="13" />
           </button>
         </div>
-        <p v-else class="section-empty">{{ t('research.noArtifacts') }}</p>
+        <p v-else class="section-empty">{{ t('project.noArtifacts') }}</p>
       </section>
     </main>
 
     <footer class="overview-composer">
       <button class="composer-shell" type="button" @click="$emit('new-session')">
-        <span>{{ t('research.startSessionIn', { name: overview.research.name }) }}</span>
+        <span>{{ t('project.startSessionIn', { name: overview.project.name }) }}</span>
         <span class="composer-submit"><ArrowUp :size="17" /></span>
       </button>
     </footer>
@@ -209,12 +210,12 @@ import {
 import { computed } from 'vue'
 import { formatDate, formatDateTime } from '../format'
 import { useAppI18n } from '../i18n'
-import type { Artifact, ResearchOverview, ResearchSkill } from '../types'
+import type { Artifact, ProjectOverview, ProjectSkill, Workflow } from '../types'
 import StatusBadge from './StatusBadge.vue'
 
-const props = defineProps<{ overview: ResearchOverview; skills: ResearchSkill[] }>()
+const props = defineProps<{ overview: ProjectOverview; skills: ProjectSkill[] }>()
 const { t } = useAppI18n()
-defineEmits<{
+const emit = defineEmits<{
   'open-sidebar': []
   'new-session': []
   'new-skill': []
@@ -231,11 +232,11 @@ const standaloneSessions = computed(() =>
   props.overview.sessions.filter((session) => session.origin === 'user'),
 )
 const workflowGroups = computed(() =>
-  props.overview.workflow_runs
-    .map((run) => ({
-      run,
+  props.overview.workflows
+    .map((workflow) => ({
+      workflow,
       sessions: props.overview.workflow_participants
-        .filter((participant) => participant.workflow_run_id === run.id)
+        .filter((participant) => participant.workflow_id === workflow.id)
         .map((participant) => ({
           participant,
           session: props.overview.sessions.find((session) => session.id === participant.session_id),
@@ -244,4 +245,14 @@ const workflowGroups = computed(() =>
     }))
     .filter((group) => group.sessions.length),
 )
+
+function workflowSessionId(workflow: Workflow): string | null {
+  if (workflow.started_from_session_id) return workflow.started_from_session_id
+  return props.overview.workflow_participants.find((participant) => participant.workflow_id === workflow.id)?.session_id ?? null
+}
+
+function openWorkflowSession(workflow: Workflow) {
+  const sessionId = workflowSessionId(workflow)
+  if (sessionId) emit('select-session', sessionId)
+}
 </script>
