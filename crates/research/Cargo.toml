@@ -1,0 +1,31 @@
+[package]
+name = "papermachine-research"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+hex.workspace = true
+papermachine-agent = { path = "../agent" }
+papermachine-model = { path = "../model" }
+papermachine-protocol = { path = "../protocol" }
+papermachine-session = { path = "../session" }
+papermachine-store = { path = "../store" }
+papermachine-tools = { path = "../tools" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+papermachine-skills = { path = "../skills" }
+tempfile = "3.20"
+
+[lints]
+workspace = true

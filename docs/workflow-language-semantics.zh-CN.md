@@ -1,0 +1,327 @@
+# Workflow 语言语义
+
+本文定义当前 PaperMachine Python DSL 的可执行语义。它描述 runtime
+实际会做什么，而不是未来的图形化语法设想。
+
+## 1. 领域词汇
+
+| 术语 | 标识 | 语义 |
+|---|---|---|
+| `Research` | `ResearchId` | Session、WorkflowRun、skill、artifact 和总览 UI 的所有权根。 |
+| `Session` | `SessionId` | 持久的多轮对话与 workspace。来源为 `user` 或 `workflow_agent`，不存在 parent Session。 |
+| `Turn` | `TurnId` | Session 中的一次用户/模型交互。 |
+| `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
+| `WorkflowDefinition` | `(slug, version, sha256)` | 通过校验的 Python 源码及字面量 manifest。 |
+| `WorkflowRun` | `WorkflowRunId` | Research 内对某个不可变 workflow 快照的一次执行。 |
+| origin Session | `origin_session_id` | 发起该 run 的 Session。它表示来源，不表示所有权。 |
+| `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Research-owned Session 承载。 |
+| `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录。 |
+| `ActionAttempt` | `ActionAttemptId` | invocation 的一次执行尝试；被 interrupt 后可以产生新的 attempt。 |
+| `Team` | `TeamId` | 一组可动态修改的具名 Agent instance。 |
+| `AgentRelation` | `RelationId` | 会作为 action 上下文注入的有向、带类型关系。 |
+| `TaskScope` | `TaskScopeId` | 对相关 action invocation 的持久、可嵌套分组。 |
+| `WorkflowTimer` | `TimerId` | 定时触发状态：interval、policy、status、fire count 与 deadline。 |
+| `Channel` / `Signal` | `ChannelId` / `SignalId` | 具名数据流及其中有序、持久的值。 |
+| `HumanRequest` | `HumanRequestId` | 带类型的问题；回答后恢复暂停的 workflow 或 tool call。 |
+| `ControlMessage` | `ControlMessageId` | 发往某个 Session/action 边界的待处理 `guide` 或 `interrupt`。 |
+
+## 2. 所有权与标识不变量
+
+| ID | 不变量 |
+|---|---|
+| I1 | 每个 Session 都直接属于一个 Research。 |
+| I2 | WorkflowRun 与它的 origin Session 属于同一个 Research。 |
+| I3 | run 中每个 Agent instance 恰好拥有一个来源为 `workflow_agent` 的 Session。 |
+| I4 | Agent Session 在 retired、completed、failed 或 cancelled 后仍然可导航。 |
+| I5 | ActionInvocation 属于一个 Agent instance 及其 Session。 |
+| I6 | 每个 ActionAttempt 属于一个 ActionInvocation，并且最多关联一个 Turn。 |
+| I7 | run 只能引用同一 Research/run 内的 Session、Agent、scope、channel 与 control。 |
+| I8 | run 创建之后，其 workflow 源码快照与 SHA-256 不可变。 |
+| I9 | 已发布 `(slug, version)` 的字节不可变；修改必须发布新版本。 |
+| I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
+
+UI 可以在视觉上把 Agent Session 分组到某个 WorkflowRun 下面，但这不会
+建立 Session 的父子关系。
+
+## 3. Definition 与 run 创建
+
+源码中必须恰好有一个 async 函数带字面量 `@workflow(...)` metadata。
+校验会产出 manifest 和 AST 结构摘要。只有不存在 error diagnostic 的源码
+才可执行。
+
+启动 run 时会完成以下操作，从而暴露一个一致的 created run：
+
+1. 在 catalog 中解析 `(slug, version)`。
+2. 按 `input_schema` 校验用户输入。
+3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowSnapshot。
+4. 创建状态为 `created` 的 WorkflowRun，并记录发起它的 origin Session。
+5. 调度该 run；worker 在解释 effect 前把它改为 `running`。
+
+run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` effect
+把它交给 Rust。
+
+## 4. Agent 语义
+
+`Agent(...)` 构造函数只在 Python 本地同步执行，不会立刻创建 Session。
+第一次 action、Team activate、relation、channel send、针对该 Agent 的人工请求，
+或显式 retire 会触发 `create_agent`。随后 Rust：
+
+1. 检查 run 状态与 `max_agents`；
+2. 在该 run 的 Research 下创建 Session；
+3. 从 Agent override 或 origin Session 解析 model 与 skills；
+4. 创建 WorkflowParticipant 映射；
+5. 发出 Session-created、workflow-attached 与 participant-created 事件。
+
+每个 Session 有一个面向用户的权限档位，runtime 会把它展开为细粒度能力：
+
+| 档位 | 文件 | 命令 | Research 网络 | Model 可见的资源工具 |
+|---|---|---|---|---|
+| `model_only` | 无 | 无 | 无 | 只有 `ask_human`。 |
+| `read_only` | 只读 Session workspace | 无 | 无 | `read_file`、`ask_human`。 |
+| `workspace` | 读写 Session workspace | 沙箱执行，禁止网络 | 无 | `read_file`、`write_file`、`exec_command`、`ask_human`。 |
+| `research` | 读写 Session workspace | 沙箱执行，禁止网络 | 托管 web search 与受控的公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search、`ask_human`。 |
+| `full_access` | 读写宿主机文件系统 | 不受限 | 不受限 | 所有已注册工具与托管 web search。 |
+
+Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
+`access=` 覆盖；默认值是 `research`。origin Session 的档位是 Agent 创建时
+的初始上限。请求不高于上限时直接创建；高于上限时，先按上限创建 Agent，
+再发起 boolean HumanRequest。拒绝会使该次创建失败。因此，origin Session
+本身为 `full_access` 表示用户此前已经明确授权。
+
+`await agent.set_access(profile)` 修改现有 Agent。降级无需批准；任何升级
+都会创建 HumanRequest。只有 Session 没有 active Turn 时才能修改权限。
+每个 Turn 在创建时保存不可变的权限快照，所以之后修改 Session 只影响后续
+Turn。Session UI 遵守同一规则，并在选择 `full_access` 时二次确认。
+
+Model sample 前会过滤 tool definitions，但这不是唯一安全边界。registry 与
+每个 built-in tool 会按 Turn 快照再次检查；路径解析遵循对应文件策略；命令
+执行层会独立选择 sandbox 与 network policy。Model provider API 的网络流量
+属于 runtime transport，不等同于 Agent 的 Research 网络权限。
+
+| Participant 状态 | 含义 | 可否继续执行 action |
+|---|---|---|
+| `active` | Session 已存在，Agent 可以被调度。 | 可以。 |
+| `waiting_for_human` | 预留的 participant 级注意力状态。 | 由 runtime 决定。 |
+| `retired` | workflow 主动移除了该 Agent。 | 不可以。 |
+| `failed` | Agent 无法继续。 | 不可以。 |
+
+`await agent.retire()` 会保留完整 Session 历史，但拒绝之后的 action。
+
+## 5. Action、Attempt 与 Turn 语义
+
+`@action` 方法声明 prompt 和参数签名。方法体不会作为 agent 逻辑执行。
+调用方法会产生一个 awaitable；await 它会请求 `invoke_action`。
+`@action(max_steps=N)` 可缩小单个 action 的模型采样次数，WorkflowRun 的
+`max_action_steps` 仍是硬上限；`max_steps=1` 会让第一次采样直接成为禁用工具的
+最终回答。`@action(max_search_calls=N)` 限制整个 Turn 内的 hosted web search
+次数，设为 `0` 会禁用 hosted search，但不会改变 Agent 的其他权限。若 endpoint
+支持 Responses API 的 `max_tool_calls`，该限制由 provider 硬执行；若代理拒绝此
+字段，PaperMachine 会在 model step 中记录 `runtime_fallback`，并在相邻采样之间
+停止继续搜索，因此单个 provider response 仍可能超出目标次数。每个 response
+最多从剩余额度中获得 4 次调用，并收到内容稳定的对应控制指令；支持其中任一机制的
+endpoint 都不会让单个 response 吞掉整个 Turn，且 continuation identity 不会变化。
+`reasoning_effort`（`none`、`low`、`medium`、`high`、`xhigh` 或 `max`）可覆盖
+该 action 的服务端默认推理强度，`max_output_tokens` 则设置每次模型响应的输出
+上限；两者都会固化到 Turn，并出现在 model step 的输入元数据里。
+`search_context_size`（`low`、`medium` 或 `high`）控制每次 hosted search 附带
+多少检索上下文；范围明确的探索 route 应先用 `low`，只有确实需要更丰富页面
+上下文时再提高。
+由于兼容 endpoint 对 Responses WebSocket beta 中的 `max_output_tokens` 支持并不
+一致，显式设置输出上限的 action 会走 HTTP SSE，并记录
+`max_output_tokens_requires_http`。输出上限适合单次采样的 planner、evaluator 和
+writer；需要增量 WebSocket 续接的多步 research action 应省略它。
+
+```text
+ActionInvocation
+  Attempt 1 -> Turn 1 -> model/tool Steps
+  Attempt 2 -> Turn 2 -> model/tool Steps   # 只在 interrupt/retry 后出现
+```
+
+runtime 把 action docstring/decorator prompt 与绑定后的参数格式化成 Turn
+objective，并把 WorkflowRun objective、与该 Agent 有关的有向关系、以及
+interrupt guidance 加到 Session instructions 中。
+
+| Invocation/Attempt 状态 | 含义 |
+|---|---|
+| `scheduled` | invocation 已持久化，但尚未获得执行许可。 |
+| `running` | Attempt 与 Turn 正在执行。 |
+| `waiting_for_human` | 模型发起的 tool call 正等待人工回答。 |
+| `completed` | Turn 输出已保存并返回 Python。 |
+| `interrupted` | 当前 attempt 结束；runtime 会为同一个 invocation 创建新 attempt。 |
+| `failed` | runtime/model/tool 失败终止了 invocation。 |
+| `cancelled` | run 或 Turn cancellation 终止了 invocation。 |
+
+完成的 action 返回 assistant 输出字符串。usage 与 Step 数会累加到
+WorkflowRun budget usage。provider 对 incomplete sample 返回的 usage 会跨重试
+累积；如果所有重试都失败，最后一个 model Step 会以 failed 状态持久化，已经
+消耗的 token 仍然计入该 run。若 output limit 或只有 reasoning 的 completion
+没有产生 message/tool call，有限重试会降低 reasoning effort，并明确要求按原始
+格式交付 final answer。
+
+## 6. 并发
+
+`await together(a(), b(), ...)` 是唯一特殊的并发 combinator。它使用
+`asyncio.gather`，并按参数顺序返回 tuple。
+
+启动前，`together` 会检查直接传入的 `_ActionCall`。如果两个 call 指向同一
+Agent 对象，它会抛出 `ValueError`，并且该组 action 一个也不会启动。
+Rust runtime 还会独立应用：
+
+- 受 `max_concurrent_actions` 约束的 run 级 semaphore；
+- 每个 Agent instance 一个 mutex，用于串行化其 Session 中的 Turn；
+- Session runtime 的全局 concurrent-Turn 上限。
+
+因此，不同 Agent Session 可以同步工作。同一 Agent 的 call 即使通过普通
+Python task 并发创建，也会在 per-Agent gate 排队。
+
+`background(awaitable)` 会创建普通 asyncio task 并登记到 runner。
+`join()` 观察结果，`cancel()` 取消任务。entrypoint 退出时，所有未结束的
+background task 都会被取消。
+
+## 7. Team 与 Relation
+
+`Team(name, *members)` 在 `activate`、`add` 或 `remove` 前只存在于 Python
+本地。Team membership 会持久化，但没有隐式调度语义：它是分组与控制
+primitive，不是隐藏的执行循环。
+
+`relate(source, target, kind, instructions)` 创建一条有向关系。Agent action
+执行前，Rust 会收集所有涉及该 Agent 的入边和出边，并注入可读的关系上下文。
+relation 不会自动发消息，也不会自动调用 target。
+
+在 Agent budget 用尽前，可以动态创建 Agent 和修改 Team。把 Agent 从 Team
+移除不会 retire 它；retire 必须显式执行。
+
+## 8. Task Scope
+
+`async with scope(name, objective)` 会打开 TaskScope，并把 ID 压入 runner
+本地的 scope stack。在 block 中创建的 action 会记录这个 scope ID。
+嵌套 scope 会把当前 scope 记录为 parent。
+
+正常退出时 scope 变为 `completed`；异常退出时变为 `cancelled`，之后继续
+传播 Python exception。scope 状态本身不会取消 action。
+
+## 9. 人工交互与控制
+
+存在两条人工请求路径：
+
+| 路径 | 暂停位置 | Session/Turn 行为 |
+|---|---|---|
+| DSL `await ask_human(...)` | workflow coroutine | request 属于指定 Agent Session 或 origin Session；不要求存在 Turn。 |
+| 模型工具 `ask_human` | action Turn 内的 tool call | Turn 和 Session 变为 `waiting_for_human`；回答作为 tool output 返回。 |
+
+response schema 会与 request 一起保存。HTTP API 在 resolve 前校验答案。
+只要仍有 open request，`WorkflowRun.attention_required` 就为 true。
+
+Control message 是异步的：
+
+| Control | 精确语义 |
+|---|---|
+| `guide` | 向某个 Session/action 排队。在下一个 Agent checkpoint，它会作为 user-history item 加入下一次 model sample 前的上下文；不会推翻已完成工作。 |
+| `interrupt` | 在下一个 checkpoint，把当前 Turn/Attempt 标记为 interrupted。action runtime 为同一个 ActionInvocation 创建新 Attempt，并把 control 文本作为重启 guidance。 |
+| pause | 把 run 设为 `paused`。workflow 与 Agent checkpoint 等待；已经在途的 provider response 不会回滚。 |
+| resume | 把 run 设为 `running`，等待中的 checkpoint 继续。 |
+| cancel | 把 run 设为 `cancelled`，并把 cancellation 传播到 Python、model 与 tool。 |
+
+guide/interrupt 的 delivery 在 Store 层持久且 at-most-once：checkpoint 消费
+pending message 时会把它标记为 applied。
+
+## 10. Channel 与 Signal
+
+`Channel(name, schema)` 会在一个 run 内创建或复用具名 channel。
+`publish(value, sender=...)` 追加一个 Signal，其 sequence 在 channel 内单调递增。
+`receive()` 等待该 Channel 对象本地 cursor 之后的第一个 Signal，推进 cursor，
+并返回 value。
+
+schema 目前会保存供检查，但尚未用于校验 Signal value。publish 不会自动
+调用 subscriber；receive 必须显式执行。
+
+## 11. Timer
+
+`@every(seconds=..., policy=..., name=...)` 创建 TimerHandle，并启动一个
+background loop：
+
+1. 按名字注册或复用 active timer；
+2. 等待 `next_fire_at`；
+3. 持久化一次 fire，推进 count/deadline，并更新 budget usage；
+4. await callback；
+5. 重复。
+
+| Policy | 目标调度语义 | 当前 executor 行为 |
+|---|---|---|
+| `coalesce` | 把错过的多个 tick 合并为一次运行。 | 每次 wait 返回执行一次 callback。 |
+| `skip` | 上一次工作未完成时跳过 tick。 | 已记录，行为尚未区分。 |
+| `queue` | 把每个 tick 保留为排队工作。 | 已记录，行为尚未区分。 |
+
+timer loop 会 await callback，所以同一个 TimerHandle 的 callback 不会重叠。
+callback 中的 action 每次都会创建新 Turn。workflow 完成时，active timer record
+会变为 completed。
+
+## 12. 完成、失败与 Budget
+
+| WorkflowRun 状态 | 进入条件 | 是否接受 effect |
+|---|---|---|
+| `created` | run 已持久化，等待 scheduler。 | checkpoint 可以进入启动阶段。 |
+| `running` | worker 正在解释源码。 | 可以，但受校验与 budget 约束。 |
+| `paused` | 用户暂停 run。 | 已有调用在 checkpoint 等待。 |
+| `completed` | `complete` 已保存输出。 | 不再接受新领域工作。 |
+| `failed` | Python、action、protocol、sandbox 或 budget 失败。 | 不接受。 |
+| `cancelled` | 用户/runtime 取消。 | 不接受。 |
+
+Budget 字段包括 `max_agents`、`max_concurrent_actions`、`max_action_steps`、
+`max_total_tokens`、`max_uncached_tokens`、`max_hosted_search_calls`、
+`max_wall_time_seconds` 与可选 `max_cost_usd`。`max_total_tokens` 是 provider
+原始 input + output 的安全上限；
+`max_uncached_tokens` 是成本上限，按
+`input_tokens - cached_input_tokens + output_tokens` 计算，因此缓存读取仍被记录，
+但不会消耗未缓存额度。`max_action_steps` 是整个 run 内持久化 model、local tool、
+hosted tool 与 compaction Step 的总上限；Step 创建时立即计费，即使所在 action
+之后失败也不会丢失成本，并在每次模型采样前检查。多个并发中的 provider response
+一次返回多个 tool Step 时仍可能产生小幅、有界的超限。`max_hosted_search_calls`
+限制整个 run 内 provider-hosted
+search、open-page 与 find-in-page 的总次数；每个研究 action 还应声明
+`max_search_calls`，避免一次 provider 响应吃完整个 run 的额度。
+Agent、action、step、timer、hosted-search、token 与 wall-time usage 都会持久化。
+部分限制只在 effect/model 边界检查，并发中的响应可能让 run 级搜索总数小幅超限，
+endpoint 支持 `max_tool_calls` 时 action 级限制由 provider 硬执行；代理不支持时，
+runtime 只能在 model sample 之间执行限制，单个 response 仍可能超过 4 次的软
+批量上限。cost enforcement 需要 provider 提供 cost estimate。
+
+未捕获的 Python exception 会让 runner 退出，并以有长度限制的 stderr 使 run
+失败。action failure 会作为 effect exception 返回 Python；workflow 若不捕获，
+run 就会失败。entrypoint 正常 return 会发送 `complete`；未 complete 就退出属于
+protocol error。
+
+## 13. 持久化与 Replay 边界
+
+所有权威 entity 与有序 event 都会持久化，workflow 源码也会被快照。独立的
+Session Turn 支持重启恢复。仍处于 `created` 的 WorkflowRun 可以在重启后启动，
+因为它还没有执行任何 Python effect。
+
+当前无法安全续跑 `running` 或 `paused` WorkflowRun。server 重启时，这类 run
+会带着明确的 restart-interruption 原因进入 `failed`；未完成的
+ActionInvocation/ActionAttempt 进入 `interrupted`，关联 Turn 进入
+`interrupted`，运行中的 Step 进入 `cancelled`。这一步发生在独立 Session
+恢复之前，从而避免 action Turn 丢失 WorkflowTurnContext 与 run budget 记账。
+
+当前 effect request ID 只用于并发 request/response 关联，并不是确定性的持久
+idempotency key。真正的 active-run continuation 需要持久 effect-result journal，
+并让 Python 从头执行时只重放 journal 中的结果。在实现它之前，应把中断执行
+作为新的 WorkflowRun 重试，而不是重放已经 commit 的 effect。
+
+## 14. 代表性执行轨迹
+
+以内置 parallel-discovery workflow、两个 perspective 为例：
+
+| 时间 | Python 操作 | 持久结果 |
+|---|---|---|
+| T0 | 构造两个 Researcher、一个 Synthesizer 和一个 Team。 | 第一次使用前没有 effect。 |
+| T1 | `await team.activate()` | 三个 Agent instance/Session 与一个 Team 已存在。 |
+| T2 | 创建两条 `reports_to` relation。 | 有向关系记录已存在。 |
+| T3 | 进入 `scope(...)`。 | open TaskScope 已存在。 |
+| T4 | `await together(researcher1.investigate(...), researcher2.investigate(...))` | 两个 ActionInvocation 在两个 Session 中并行执行。 |
+| T5 | 两个 action 完成。 | 两个 Turn 与输出已持久化；scope 以 completed 关闭。 |
+| T6 | `await synthesizer.synthesize(...)` | 第三个 ActionInvocation/Turn 消费前两个输出字符串。 |
+| T7 | `return {"summary": ...}` | runner 发送 `complete`；run output/status 持久化。 |
+
+任何时刻打开 Agent Session，看到的都是与普通 user Session 相同的多轮对话，
+model/tool 执行细节也同样折叠在每个 Turn 下。

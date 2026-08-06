@@ -1,0 +1,236 @@
+use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::ResearchId;
+use papermachine_protocol::SessionId;
+use papermachine_protocol::TurnId;
+use papermachine_protocol::WorkflowRunId;
+use papermachine_tools::ExecCommandTool;
+use papermachine_tools::FetchUrlTool;
+use papermachine_tools::ReadFileTool;
+use papermachine_tools::ToolContext;
+use papermachine_tools::ToolError;
+use papermachine_tools::ToolExecutor;
+use papermachine_tools::ToolRegistry;
+use papermachine_tools::WriteFileTool;
+use serde_json::json;
+use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
+
+fn context(root: &std::path::Path) -> ToolContext {
+    context_with_access(root, AgentAccessProfile::Research)
+}
+
+fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> ToolContext {
+    ToolContext {
+        research_id: ResearchId::new(),
+        session_id: SessionId::new(),
+        turn_id: TurnId::new(),
+        workflow_run_id: Some(WorkflowRunId::new()),
+        action_invocation_id: None,
+        action_attempt_id: None,
+        workspace_root: root.to_path_buf(),
+        access,
+        cancellation: CancellationToken::new(),
+    }
+}
+
+#[test]
+fn registry_exposes_exact_tools_for_each_access_profile() {
+    let registry = ToolRegistry::builder()
+        .register(ReadFileTool)
+        .expect("read tool should register")
+        .register(WriteFileTool)
+        .expect("write tool should register")
+        .register(ExecCommandTool)
+        .expect("command tool should register")
+        .register(FetchUrlTool)
+        .expect("fetch tool should register")
+        .build();
+    let names = |access| {
+        registry
+            .definitions_for(access)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(names(AgentAccessProfile::ModelOnly), Vec::<String>::new());
+    assert_eq!(names(AgentAccessProfile::ReadOnly), vec!["read_file"]);
+    assert_eq!(
+        names(AgentAccessProfile::Workspace),
+        vec!["exec_command", "read_file", "write_file"]
+    );
+    assert_eq!(
+        names(AgentAccessProfile::Research),
+        vec!["exec_command", "fetch_url", "read_file", "write_file"]
+    );
+    assert_eq!(
+        names(AgentAccessProfile::FullAccess),
+        vec!["exec_command", "fetch_url", "read_file", "write_file"]
+    );
+}
+
+#[tokio::test]
+async fn registry_rejects_a_hidden_tool_call() {
+    let directory = tempdir().expect("temporary directory should be created");
+    std::fs::write(directory.path().join("evidence.txt"), "private")
+        .expect("probe should be written");
+    let registry = ToolRegistry::builder()
+        .register(ReadFileTool)
+        .expect("read tool should register")
+        .build();
+    let error = registry
+        .execute(
+            "read_file",
+            context_with_access(directory.path(), AgentAccessProfile::ModelOnly),
+            json!({"path": "evidence.txt"}),
+        )
+        .await
+        .expect_err("model-only profile must reject a forged read call");
+    assert!(matches!(error, ToolError::PermissionDenied { .. }));
+}
+
+#[tokio::test]
+async fn builtins_recheck_access_without_the_registry() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let write_error = WriteFileTool
+        .execute(
+            context_with_access(directory.path(), AgentAccessProfile::ReadOnly),
+            json!({"path": "forbidden.txt", "content": "no"}),
+        )
+        .await
+        .expect_err("read-only profile must reject direct writes");
+    let command_error = ExecCommandTool
+        .execute(
+            context_with_access(directory.path(), AgentAccessProfile::ReadOnly),
+            json!({"command": "true"}),
+        )
+        .await
+        .expect_err("read-only profile must reject direct commands");
+    let fetch_error = FetchUrlTool
+        .execute(
+            context_with_access(directory.path(), AgentAccessProfile::Workspace),
+            json!({"url": "https://example.com"}),
+        )
+        .await
+        .expect_err("workspace profile must reject direct network fetches");
+    assert!(matches!(write_error, ToolError::PermissionDenied { .. }));
+    assert!(matches!(command_error, ToolError::PermissionDenied { .. }));
+    assert!(matches!(fetch_error, ToolError::PermissionDenied { .. }));
+}
+
+#[tokio::test]
+async fn full_access_can_read_and_write_outside_the_workspace() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    let outside = directory.path().join("outside.txt");
+    std::fs::write(&outside, "host data").expect("outside probe should be written");
+    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
+    let read = ReadFileTool
+        .execute(access.clone(), json!({"path": outside}))
+        .await
+        .expect("full access should read an absolute host path");
+    assert_eq!(read.value["content"], "host data");
+
+    let command = format!("/bin/cat '{}'", outside.display());
+    let command = ExecCommandTool
+        .execute(access.clone(), json!({"command": command}))
+        .await
+        .expect("full access should run an unrestricted host command");
+    assert_eq!(command.value["stdout"], "host data");
+    assert_eq!(command.value["sandbox_backend"], "unrestricted");
+
+    let written = directory.path().join("written-outside.txt");
+    WriteFileTool
+        .execute(
+            access,
+            json!({"path": written, "content": "allowed by explicit grant"}),
+        )
+        .await
+        .expect("full access should write an absolute host path");
+    assert_eq!(
+        std::fs::read_to_string(written).expect("outside write should exist"),
+        "allowed by explicit grant"
+    );
+}
+
+#[tokio::test]
+async fn write_then_read_stays_in_workspace() {
+    let directory = tempdir().expect("temporary directory should be created");
+    WriteFileTool
+        .execute(
+            context(directory.path()),
+            json!({"path": "notes/result.md", "content": "evidence"}),
+        )
+        .await
+        .expect("write should succeed");
+    let output = ReadFileTool
+        .execute(
+            context(directory.path()),
+            json!({"path": "notes/result.md"}),
+        )
+        .await
+        .expect("read should succeed");
+    assert_eq!(output.value["content"], "evidence");
+}
+
+#[tokio::test]
+async fn parent_path_escape_is_rejected() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let error = ReadFileTool
+        .execute(context(directory.path()), json!({"path": "../secret"}))
+        .await
+        .expect_err("escape should fail");
+    assert!(matches!(error, ToolError::PathOutsideWorkspace(_)));
+}
+
+#[tokio::test]
+async fn command_output_is_structured() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let output = ExecCommandTool
+        .execute(
+            context(directory.path()),
+            json!({"command": "printf 'paper-machine'"}),
+        )
+        .await
+        .expect("command should run");
+    assert_eq!(output.value["exit_code"], 0);
+    assert_eq!(output.value["stdout"], "paper-machine");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn command_heredoc_uses_the_session_temp_directory() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let output = ExecCommandTool
+        .execute(
+            context(directory.path()),
+            json!({"command": "python3 - <<'PY'\nprint('heredoc-ok')\nPY"}),
+        )
+        .await
+        .expect("heredoc command should run inside the sandbox");
+    assert_eq!(output.value["exit_code"], 0);
+    assert_eq!(output.value["stdout"], "heredoc-ok\n");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn command_cannot_read_or_write_outside_its_workspace() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should be created");
+    let secret = directory.path().join("host-secret.txt");
+    std::fs::write(&secret, "must-not-leak").expect("probe secret should be written");
+    let outside_write = directory.path().join("escaped.txt");
+    let command = format!(
+        "if /bin/cat '{}' >/dev/null 2>&1; then printf read-leaked; else printf read-denied; fi; if printf escaped >'{}' 2>/dev/null; then printf write-leaked; else printf write-denied; fi",
+        secret.display(),
+        outside_write.display(),
+    );
+    let output = ExecCommandTool
+        .execute(context(&workspace), json!({"command": command}))
+        .await
+        .expect("sandboxed command should run");
+    assert_eq!(output.value["stdout"], "read-deniedwrite-denied");
+    assert!(!outside_write.exists());
+}

@@ -1,0 +1,20 @@
+# PaperMachine owns model/provider configuration. Credentials are resolved
+# from the process environment and must never be committed here.
+default_model = "deepseek-flash"
+
+[providers.deepseek]
+kind = "open_ai_responses"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+max_request_retries = 3
+request_timeout_seconds = 60
+stream_idle_timeout_seconds = 300
+store_responses = false
+responses_websockets = false
+prompt_cache_mode = "implicit"
+reasoning_effort = "high"
+
+[models.deepseek-flash]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+context_window = 1000000

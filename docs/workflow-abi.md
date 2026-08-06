@@ -1,0 +1,179 @@
+# Python workflow ABI
+
+PaperMachine workflows are async Python programs written against the small
+`papermachine` DSL. Python expresses the collaboration protocol; the Rust
+runtime interprets every stateful operation as a typed effect.
+
+## Minimal source
+
+```python
+from papermachine import Agent, action, scope, together, workflow
+
+
+class Researcher(Agent):
+    access = "research"
+    role = "independent evidence route"
+
+    @action(
+        max_search_calls=16,
+        search_context_size="low",
+        reasoning_effort="high",
+        max_output_tokens=16_384,
+    )
+    async def investigate(self, question: str, perspective: str):
+        """Find evidence, counterevidence, provenance, and uncertainty."""
+
+
+class Synthesizer(Agent):
+    access = "model_only"
+
+    @action(max_steps=1, reasoning_effort="medium", max_output_tokens=8_192)
+    async def synthesize(self, question: str, findings: list[str]):
+        """Compare findings and return the strongest bounded conclusion."""
+
+
+@workflow(
+    slug="parallel-review",
+    name="Parallel review",
+    version="0.1.0",
+    description="Run independent Sessions, then synthesize them.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "perspectives": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+    },
+    output_schema={
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+    },
+    budget={
+        "max_agents": 8,
+        "max_concurrent_actions": 4,
+        "max_action_steps": 24,
+        "max_total_tokens": 1500000,
+        "max_uncached_tokens": 400000,
+        "max_hosted_search_calls": 64,
+        "max_wall_time_seconds": 7200,
+    },
+)
+async def main(ctx):
+    perspectives = ctx.input.get("perspectives") or ["support", "limitations"]
+    agents = [Researcher(name=f"Route {index + 1}") for index, _ in enumerate(perspectives)]
+    async with scope("Independent evidence", ctx.objective):
+        findings = await together(*(
+            agent.investigate(ctx.objective, perspective)
+            for agent, perspective in zip(agents, perspectives)
+        ))
+    summary = await Synthesizer(name="Synthesis").synthesize(ctx.objective, list(findings))
+    return {"summary": summary}
+```
+
+The body of an `@action` method is declarative. Its signature binds arguments;
+its decorator string or docstring becomes the action prompt. Awaiting the method
+asks Rust to create an ActionInvocation, an ActionAttempt, and a Turn in that
+Agent's Session.
+
+## Manifest
+
+`@workflow(...)` must appear exactly once on an async entrypoint and all values
+must be Python literals.
+
+| Field | Meaning |
+|---|---|
+| `slug` | Lowercase kebab-case catalog key. |
+| `name` | Human-readable name. |
+| `version` | Immutable semantic version. |
+| `description` | Protocol purpose shown in the Library. |
+| `input_schema` | Supported JSON Schema subset checked before scheduling. |
+| `output_schema` | Declared result contract; currently descriptive at completion. |
+| `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
+
+The runtime provides `ctx.objective`, `ctx.input`, and `ctx.run_id`.
+
+## DSL surface
+
+| Primitive | Effect |
+|---|---|
+| `Agent(...)` | Local declaration; first use creates an Agent instance and Session. |
+| `Agent(access=...)` | Overrides the class access profile for this instance. |
+| `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
+| `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, `reasoning_effort`, and `max_output_tokens` give each role its own sample, search, retrieval-context, compute, and output policy. |
+| `await together(...)` | Runs awaitables concurrently; duplicate same-Agent actions fail before starting. |
+| `Team(name, *agents)` | Creates a named, dynamically mutable membership set. |
+| `await team.add/remove(...)` | Changes Team membership. |
+| `await agent.retire()` | Prevents future actions while preserving its Session. |
+| `await relate(a, b, kind=..., instructions=...)` | Records a directed relation and injects relevant context into actions. |
+| `async with scope(name, objective)` | Opens/closes a durable task scope; scopes may nest. |
+| `Channel(name, schema=...)` | Creates a durable channel; publish emits ordered Signals, receive waits for the next one. |
+| `await ask_human(...)` | Suspends until a schema-validated answer is supplied. |
+| `background(awaitable)` | Starts concurrent workflow work and returns a joinable handle. |
+| `@every(seconds=..., policy=...)` | Starts a periodic callback backed by a durable timer record. |
+
+Ordinary Python `if`, `for`, `while`, functions, collections, and exceptions
+remain the workflow control language. Arbitrary imports, filesystem/network
+access, subprocesses, environment access, dynamic code, and reflection are not
+part of the ABI.
+
+Every Agent class should declare `access` as one of `model_only`, `read_only`,
+`workspace`, `research`, or `full_access`. `research` is the default. The
+origin Session's profile is the initial ceiling: creating an Agent above it
+opens a boolean HumanRequest before the first action. Creating one at or below
+the ceiling does not. A later `set_access` upgrade always opens a HumanRequest;
+a downgrade does not. A Turn keeps the profile snapshot captured at creation.
+
+## Effect protocol
+
+The isolated runner reserves stdout for newline-delimited JSON:
+
+```json
+{"id":"request-id","kind":"invoke_action","payload":{"agent_instance_id":"..."}}
+{"id":"request-id","ok":true,"result":{"output":"...","turn_id":"..."}}
+```
+
+The request ID correlates concurrent responses. It is not currently a durable
+idempotency key. Supported effect kinds are:
+
+```text
+create_agent      set_agent_access   retire_agent       invoke_action
+create_team       set_team_members    set_relation
+open_scope        close_scope         register_timer
+wait_timer        create_channel      publish_signal
+wait_signal       ask_human           complete
+```
+
+Rust rejects unknown effects and malformed or cross-run IDs.
+
+## Concurrency and timers
+
+`together` is explicit concurrency. A run-level semaphore enforces
+`max_concurrent_actions`; a per-Agent mutex ensures that one Session never runs
+two Turns concurrently. The output tuple preserves argument order, independent
+of completion order.
+
+Timers use `coalesce`, `skip`, or `queue` policy metadata and persist fire count,
+next fire time, and last fire time. The current single-process scheduler executes
+one callback per `wait_timer` response; complete backlog semantics for all three
+policies are not yet distinct. Periodic work is cancelled when the workflow
+entrypoint exits, and active timer records become completed.
+
+## Catalog and publication
+
+The catalog scans:
+
+```text
+workflows/builtin/<slug>/workflow.py
+workflows/user/<slug>/<version>/workflow.py
+```
+
+Both roots pass through the same AST validator. Publishing a user workflow
+writes the validated source to its version directory. Re-publishing identical
+bytes is harmless; different bytes for the same slug/version are rejected.
+
+The Workflow page uses the validator's AST summary to show Agent classes,
+actions, parallel blocks, Teams, relations, scopes, channels, timers, background
+tasks, human checkpoints, and diagnostics. Source remains available under
+Advanced source for precise review and edits.

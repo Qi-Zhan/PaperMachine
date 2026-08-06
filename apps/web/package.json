@@ -1,0 +1,25 @@
+{
+  "name": "@papermachine/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.28.0",
+    "dompurify": "^3.4.13",
+    "marked": "^18.0.8",
+    "vue": "^3.5.13",
+    "vue-i18n": "^11.4.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^2.1.9",
+    "vue-tsc": "^2.2.0"
+  }
+}

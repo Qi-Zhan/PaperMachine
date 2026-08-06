@@ -1,0 +1,1531 @@
+#!/usr/bin/env python3
+"""Run a resumable PaperMachine matrix on a pinned LiveDRBench slice.
+
+Research never receives the encrypted references. Every parseable final answer
+is graded afterward in a separate no-tool Session using the upstream semantic
+claim-matching rubric. A strict deterministic score remains as a cheap diagnostic.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import random
+import re
+import statistics
+import tempfile
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+
+CONDITIONS = {
+    "single_agent": {
+        "workflow_slug": "single-agent-research",
+        "workflow_version": "0.5.0",
+        "input": {},
+    },
+    "coverage_r1": {
+        "workflow_slug": "evidence-loop",
+        "workflow_version": "0.6.0",
+        "input": {
+            "route_count": 2,
+            "max_rounds": 1,
+            "max_followups_per_round": 2,
+        },
+    },
+    "coverage_r2": {
+        "workflow_slug": "evidence-loop",
+        "workflow_version": "0.6.0",
+        "input": {
+            "route_count": 2,
+            "max_rounds": 2,
+            "max_followups_per_round": 2,
+        },
+    },
+    "coverage_r3": {
+        "workflow_slug": "evidence-loop",
+        "workflow_version": "0.6.0",
+        "input": {
+            "route_count": 3,
+            "minimum_route_count": 3,
+            "max_rounds": 3,
+            "max_followups_per_round": 3,
+        },
+    },
+    "coverage_r4": {
+        "workflow_slug": "evidence-loop",
+        "workflow_version": "0.6.0",
+        "input": {
+            "route_count": 4,
+            "minimum_route_count": 4,
+            "max_rounds": 4,
+            "max_followups_per_round": 4,
+        },
+    },
+}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+RUNTIME_FILES = (
+    "benchmarks/live-dr-mini/run_matrix.py",
+    "crates/agent/src/lib.rs",
+    "crates/model/src/openai.rs",
+    "crates/model/src/providers.rs",
+    "crates/protocol/src/event.rs",
+    "crates/protocol/src/model.rs",
+    "crates/protocol/src/research.rs",
+    "crates/research/src/runtime.rs",
+    "crates/research/src/scheduler.rs",
+    "crates/server/src/lib.rs",
+    "crates/session/src/lib.rs",
+    "crates/store/src/database.rs",
+    "python/papermachine/__init__.py",
+    "python/papermachine/_runner.py",
+    "python/papermachine/_validate.py",
+    "papermachine.toml",
+    "workflows/builtin/evidence-loop/workflow.py",
+    "workflows/builtin/live-dr-grader/workflow.py",
+    "workflows/builtin/single-agent-research/workflow.py",
+)
+UPSTREAM_EVALUATOR = {
+    "repo": "https://github.com/microsoft/LiveDRBench",
+    "revision": "6ff85b67b35fa303907f6f275417622338acd1f6",
+    "files_sha256": {
+        "src/evaluate.py": "083ad8c264659c5d5b2810920855476a8b314673dc6998fc5a8f0cf1fbf384d0",
+        "src/evals/datasets_flights.py": "eb9b52c3c8d3de544b04c1dc173eb7f078b72abe8f3bbe17924cd211e013aa5e",
+        "src/evals/entities.py": "94a83fa7212b986038f9a576560432fa56fda8e9de21cc2b212cf3df8ba9d461",
+        "src/evals/priorart.py": "8b5a0fe527a7a12cb15a08200809d60ac2ca1ece7f296b6e76d9c519426915cc",
+        "src/evals/scifacts.py": "ee88d2c1b8378d46a4b6035c69bf0c089b8d0d12f4778282240b6a836bcda610",
+    },
+}
+
+
+class ApiError(RuntimeError):
+    pass
+
+
+class PaperMachineApi:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/") + "/api"
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=body,
+            method=method,
+            headers={"content-type": "application/json"} if body is not None else {},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = response.read()
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise ApiError(f"{method} {path} returned HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise ApiError(f"{method} {path} failed: {error}") from error
+        return None if not data else json.loads(data)
+
+    def get(self, path: str) -> Any:
+        return self.request("GET", path)
+
+    def post(self, path: str, payload: dict[str, Any]) -> Any:
+        return self.request("POST", path, payload)
+
+    def post_empty(self, path: str) -> Any:
+        return self.request("POST", path)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
+        handle.write(content)
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def derive_key(password: str, length: int) -> bytes:
+    digest = hashlib.sha256(password.encode()).digest()
+    return digest * (length // len(digest)) + digest[: length % len(digest)]
+
+
+def decrypt(ciphertext_b64: str, password: str) -> str:
+    encrypted = base64.b64decode(ciphertext_b64)
+    key = derive_key(password, len(encrypted))
+    return bytes(left ^ right for left, right in zip(encrypted, key)).decode()
+
+
+def normalize_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value)).casefold().strip()
+    return "".join(character for character in text if character.isalnum())
+
+
+def normalize_url(value: Any) -> str:
+    try:
+        parts = urlsplit(str(value).strip())
+    except ValueError:
+        return normalize_text(value)
+    return urlunsplit(
+        (
+            parts.scheme.casefold(),
+            parts.netloc.casefold(),
+            parts.path.rstrip("/"),
+            parts.query,
+            "",
+        )
+    )
+
+
+def equivalent(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(right, list):
+        return any(equivalent(left, candidate) for candidate in right)
+    if isinstance(left, list):
+        return any(equivalent(candidate, right) for candidate in left)
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        left_number = float(left)
+        right_number = float(right)
+        tolerance = max(abs(right_number) * 0.01, 1e-9)
+        return abs(left_number - right_number) <= tolerance
+    if isinstance(left, str) and isinstance(right, str):
+        if left.startswith("http") or right.startswith("http"):
+            return normalize_url(left) == normalize_url(right)
+        normalized_left = normalize_text(left)
+        normalized_right = normalize_text(right)
+        if normalized_left == normalized_right:
+            return True
+        left_words = {normalize_text(word) for word in re.findall(r"[\w-]+", left)}
+        right_words = {normalize_text(word) for word in re.findall(r"[\w-]+", right)}
+        left_words.discard("")
+        right_words.discard("")
+        shorter, longer = sorted((left_words, right_words), key=len)
+        return len(shorter) >= 2 and shorter.issubset(longer)
+    return left == right
+
+
+_MISSING = object()
+
+
+def normalize_field_name(value: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", str(value).casefold().replace("#", " number "))
+    normalized = []
+    for token in tokens:
+        if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+            token = token[:-1]
+        normalized.append(token)
+    return "".join(normalized)
+
+
+def field_value(value: dict[str, Any], key: str) -> Any:
+    if key in value:
+        return value[key]
+    normalized = normalize_field_name(key)
+    for candidate, candidate_value in value.items():
+        if normalize_field_name(candidate) == normalized:
+            return candidate_value
+    return _MISSING
+
+
+def selected_keys(value: dict[str, Any], ignored: set[str]) -> list[str]:
+    ignored_normalized = {normalize_field_name(key) for key in ignored}
+    return [
+        key
+        for key in value
+        if normalize_field_name(key) not in ignored_normalized
+    ]
+
+
+def json_candidates(text: str) -> list[Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    candidates = []
+    try:
+        candidates.append(json.loads(cleaned))
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(cleaned):
+        if character not in "[{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        if value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
+def expected_ground_truth(task: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    ground_truths = json.loads(decrypt(task["ground_truths"], task["canary"]))
+    misc = json.loads(decrypt(task["misc"], task["canary"]))
+    return ground_truths, misc
+
+
+def score_list_strings(expected: list[str], predicted: Any) -> dict[str, Any]:
+    if not isinstance(predicted, list) or any(not isinstance(item, str) for item in predicted):
+        raise ValueError("expected a JSON array of strings")
+    remaining = list(expected)
+    matched = 0
+    for item in predicted:
+        index = next(
+            (index for index, target in enumerate(remaining) if equivalent(item, target)),
+            None,
+        )
+        if index is not None:
+            matched += 1
+            remaining.pop(index)
+    return metric_counts(matched, len(predicted), len(expected))
+
+
+def score_dict_fields(
+    expected: dict[str, Any],
+    predicted: Any,
+    main_claims: list[str] | None = None,
+    ignore_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(predicted, dict):
+        raise ValueError("expected a JSON object")
+    ignored = set(ignore_keys or [])
+    expected_keys = selected_keys(expected, ignored)
+    predicted_keys = selected_keys(predicted, ignored)
+    for key in main_claims or []:
+        actual = field_value(predicted, key)
+        target = field_value(expected, key)
+        if actual is _MISSING or target is _MISSING or not equivalent(actual, target):
+            return metric_counts(0, len(predicted_keys), len(expected_keys))
+    matched = sum(
+        (actual := field_value(predicted, key)) is not _MISSING
+        and equivalent(actual, expected[key])
+        for key in expected_keys
+    )
+    return metric_counts(matched, len(predicted_keys), len(expected_keys))
+
+
+def score_list_dicts(
+    expected: list[dict[str, Any]],
+    predicted: Any,
+    primary_keys: list[str],
+    main_claims: list[str] | None = None,
+    ignore_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(predicted, list) or any(not isinstance(item, dict) for item in predicted):
+        raise ValueError("expected a JSON array of objects")
+    ignored = set(ignore_keys or [])
+    remaining = list(expected)
+    matched_claims = 0
+    predicted_claims = sum(len(selected_keys(item, ignored)) for item in predicted)
+    expected_claims = sum(len(selected_keys(item, ignored)) for item in expected)
+    for item in predicted:
+        index = next(
+            (
+                index
+                for index, target in enumerate(remaining)
+                if dicts_match_on_primary_keys(target, item, primary_keys)
+            ),
+            None,
+        )
+        if index is None:
+            continue
+        target = remaining.pop(index)
+        if any(
+            (actual := field_value(item, key)) is _MISSING
+            or (expected_value := field_value(target, key)) is _MISSING
+            or not equivalent(actual, expected_value)
+            for key in main_claims or []
+        ):
+            continue
+        matched_claims += sum(
+            (actual := field_value(item, key)) is not _MISSING
+            and equivalent(actual, target[key])
+            for key in selected_keys(target, ignored)
+        )
+    return metric_counts(matched_claims, predicted_claims, expected_claims)
+
+
+def dicts_match_on_primary_keys(
+    expected: dict[str, Any], predicted: dict[str, Any], primary_keys: list[str]
+) -> bool:
+    usable = [
+        key
+        for key in primary_keys
+        if field_value(expected, key) is not _MISSING
+        and field_value(predicted, key) is not _MISSING
+    ]
+    if not usable:
+        usable = [
+            key
+            for key in expected
+            if field_value(predicted, key) is not _MISSING
+        ][:1]
+    return bool(usable) and all(
+        equivalent(field_value(predicted, key), field_value(expected, key))
+        for key in usable
+    )
+
+
+def score_list_key(
+    expected: list[dict[str, Any]], predicted: Any, key: str, unique: bool = False
+) -> dict[str, Any]:
+    if not isinstance(predicted, list) or any(not isinstance(item, dict) for item in predicted):
+        raise ValueError("expected a JSON array of objects")
+    predicted_values = [field_value(item, key) for item in predicted]
+    predicted_values = [value for value in predicted_values if value is not _MISSING]
+    if unique:
+        remaining = [field_value(item, key) for item in expected]
+        matched = 0
+        for value in predicted_values:
+            index = next(
+                (
+                    index
+                    for index, target in enumerate(remaining)
+                    if equivalent(value, target)
+                ),
+                None,
+            )
+            if index is not None:
+                matched += 1
+                remaining.pop(index)
+    else:
+        expected_values = [field_value(item, key) for item in expected]
+        matched = sum(
+            any(equivalent(value, target) for target in expected_values)
+            for value in predicted_values
+        )
+    recall_matches = (
+        matched
+        if unique
+        else sum(
+            any(equivalent(value, field_value(item, key)) for value in predicted_values)
+            for item in expected
+        )
+    )
+    precision = matched / len(predicted_values) if predicted_values else 0.0
+    recall = recall_matches / len(expected) if expected else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "matched_claims": matched,
+        "predicted_claims": len(predicted_values),
+        "expected_claims": len(expected),
+    }
+
+
+def score_scifacts_materials(
+    expected: list[dict[str, Any]], predicted: Any
+) -> dict[str, Any]:
+    material = score_list_key(expected, predicted, "material")
+    paper = score_list_key(expected, predicted, "paper_title")
+    return {
+        "precision": material["precision"] * paper["precision"],
+        "recall": material["recall"] * paper["recall"],
+        "f1": material["f1"] * paper["f1"],
+        "matched_claims": min(material["matched_claims"], paper["matched_claims"]),
+        "predicted_claims": max(material["predicted_claims"], paper["predicted_claims"]),
+        "expected_claims": len(expected),
+        "per_key": {"material": material, "paper_title": paper},
+    }
+
+
+def metric_counts(matched: int, predicted: int, expected: int) -> dict[str, Any]:
+    precision = matched / predicted if predicted else 0.0
+    recall = matched / expected if expected else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "matched_claims": matched,
+        "predicted_claims": predicted,
+        "expected_claims": expected,
+    }
+
+
+def prediction_from_report(task: dict[str, Any], report: str) -> Any:
+    ground_truths, _ = expected_ground_truth(task)
+    expected = ground_truths[0]
+    candidates = json_candidates(report)
+    expected_type = list if isinstance(expected, list) else dict
+    candidate = next((value for value in candidates if isinstance(value, expected_type)), None)
+    if candidate is None:
+        raise ValueError("no compatible JSON value")
+    return candidate
+
+
+def score_report(task: dict[str, Any], report: str) -> dict[str, Any]:
+    ground_truths, misc = expected_ground_truth(task)
+    expected = ground_truths[0]
+    try:
+        candidate = prediction_from_report(task, report)
+    except ValueError as error:
+        return {**metric_counts(0, 0, claim_count(expected)), "parse_error": str(error)}
+    try:
+        eval_info = misc.get("eval_info", {})
+        main_claims = list(eval_info.get("main_claims") or [])
+        ignore_keys = list(eval_info.get("ignore_keys") or [])
+        if task["scorer"] == "list_strings":
+            score = score_list_strings(expected, candidate)
+        elif task["scorer"] == "dict_fields":
+            score = score_dict_fields(
+                expected, candidate, main_claims, ignore_keys
+            )
+        elif task["scorer"] == "list_dicts":
+            primary_keys = list(eval_info.get("primary_keys") or [])
+            if not primary_keys:
+                primary_keys = [next(iter(expected[0]))]
+            score = score_list_dicts(
+                expected,
+                candidate,
+                primary_keys,
+                main_claims,
+                ignore_keys,
+            )
+        elif task["scorer"] == "list_key":
+            score = score_list_key(
+                expected,
+                candidate,
+                str(task["score_key"]),
+                bool(task.get("unique_matches")),
+            )
+        elif task["scorer"] == "scifacts_materials":
+            score = score_scifacts_materials(expected, candidate)
+        else:
+            raise ValueError(f"unknown scorer {task['scorer']}")
+    except (TypeError, ValueError) as error:
+        return {**metric_counts(0, 0, claim_count(expected)), "parse_error": str(error)}
+    score["parse_error"] = None
+    return score
+
+
+def claim_count(value: Any) -> int:
+    if isinstance(value, dict):
+        return len(value)
+    if isinstance(value, list):
+        return sum(len(item) if isinstance(item, dict) else 1 for item in value)
+    return 1
+
+
+def token_usage(tokens: dict[str, Any]) -> dict[str, int | float]:
+    input_tokens = int(tokens.get("input_tokens", 0))
+    output_tokens = int(tokens.get("output_tokens", 0))
+    cached = int(tokens.get("cached_input_tokens", 0))
+    uncached = max(0, input_tokens - cached)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": int(tokens.get("cache_write_input_tokens", 0)),
+        "uncached_input_tokens": uncached,
+        "effective_tokens": uncached + output_tokens,
+        "cache_read_ratio": cached / input_tokens if input_tokens else 0.0,
+    }
+
+
+def ensure_research(api: PaperMachineApi, name: str, description: str) -> str:
+    for research in api.get("/researches"):
+        if research["name"] == name:
+            return str(research["id"])
+    return str(api.post("/researches", {"name": name, "description": description})["id"])
+
+
+def build_jobs(
+    task_keys: list[str], conditions: list[str], repeats: int, seed: int
+) -> list[dict[str, Any]]:
+    jobs = [
+        {
+            "key": f"task-{task_key}__{condition}__repeat-{repeat}",
+            "task_key": task_key,
+            "condition": condition,
+            "repeat": repeat,
+        }
+        for task_key in task_keys
+        for repeat in range(1, repeats + 1)
+        for condition in conditions
+    ]
+    random.Random(seed).shuffle(jobs)
+    return jobs
+
+
+def launch_run(
+    api: PaperMachineApi,
+    research_id: str,
+    job: dict[str, Any],
+    task: dict[str, Any],
+    model: str,
+) -> dict[str, Any]:
+    condition = CONDITIONS[job["condition"]]
+    session = api.post(
+        f"/researches/{research_id}/sessions",
+        {
+            "title": f"LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
+            "instructions": "",
+            "model": model,
+            "access": "research",
+            "enabled_skills": [],
+        },
+    )
+    run = api.post(
+        f"/sessions/{session['id']}/workflow-runs",
+        {
+            "workflow_slug": condition["workflow_slug"],
+            "workflow_version": condition["workflow_version"],
+            "objective": task["question"],
+            "input": condition["input"],
+        },
+    )
+    return {
+        "session_id": str(session["id"]),
+        "run_id": str(run["id"]),
+        "launched_at": utc_now(),
+    }
+
+
+def launch_grader_run(
+    api: PaperMachineApi,
+    research_id: str,
+    job: dict[str, Any],
+    task: dict[str, Any],
+    grader_model: str,
+) -> dict[str, Any]:
+    ground_truths, misc = expected_ground_truth(task)
+    if len(ground_truths) != 1:
+        raise ValueError("LiveDR mini expects exactly one reference output per task")
+    prediction = (job.get("research", {}).get("result") or {}).get("prediction")
+    if prediction is None:
+        raise ValueError("cannot launch semantic grader without a parsed prediction")
+    session = api.post(
+        f"/researches/{research_id}/sessions",
+        {
+            "title": f"Grade LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
+            "instructions": "",
+            "model": grader_model,
+            "access": "model_only",
+            "enabled_skills": [],
+        },
+    )
+    run = api.post(
+        f"/sessions/{session['id']}/workflow-runs",
+        {
+            "workflow_slug": "live-dr-grader",
+            "workflow_version": "0.2.0",
+            "objective": "Blindly apply the pinned upstream LiveDRBench claim-matching rubric.",
+            "input": {
+                "category": task["category"],
+                "ground_truth": ground_truths[0],
+                "prediction": prediction,
+                "eval_info": misc.get("eval_info") or {},
+                "grader_model": grader_model,
+            },
+        },
+    )
+    return {
+        "session_id": str(session["id"]),
+        "run_id": str(run["id"]),
+        "launched_at": utc_now(),
+    }
+
+
+def session_metrics(view: dict[str, Any]) -> dict[str, Any]:
+    turns = view.get("turns", [])
+    steps = view.get("steps", [])
+    usage = {
+        key: sum(int(turn.get("usage", {}).get(key, 0)) for turn in turns)
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+        )
+    }
+    hosted = [
+        step
+        for step in steps
+        if step.get("kind") == "tool" and step.get("name") == "web_search"
+    ]
+    hosted_actions = Counter(
+        str((step.get("input") or {}).get("type", "unknown")) for step in hosted
+    )
+    queries = []
+    for step in hosted:
+        payload = step.get("input") or {}
+        values = payload.get("queries") or ([payload["query"]] if payload.get("query") else [])
+        queries.extend(str(value) for value in values)
+    continuation_hits = 0
+    continuation_misses = Counter()
+    transports = Counter()
+    cache_modes = Counter()
+    model_profiles = Counter()
+    model_providers = Counter()
+    upstream_models = Counter()
+    fallback_reasons = Counter()
+    cache_keys = set()
+    explicit_breakpoints = 0
+    for step in steps:
+        if step.get("kind") != "model":
+            continue
+        metadata = ((step.get("output") or {}).get("request") or {})
+        if metadata.get("transport"):
+            transports[str(metadata["transport"])] += 1
+        if metadata.get("prompt_cache_mode"):
+            cache_modes[str(metadata["prompt_cache_mode"])] += 1
+        if metadata.get("model_profile"):
+            model_profiles[str(metadata["model_profile"])] += 1
+        if metadata.get("provider"):
+            model_providers[str(metadata["provider"])] += 1
+        if metadata.get("upstream_model"):
+            upstream_models[str(metadata["upstream_model"])] += 1
+        if metadata.get("prompt_cache_key"):
+            cache_keys.add(str(metadata["prompt_cache_key"]))
+        if metadata.get("prompt_cache_breakpoint"):
+            explicit_breakpoints += 1
+        if metadata.get("websocket_fallback_reason"):
+            fallback_reasons[str(metadata["websocket_fallback_reason"])] += 1
+        if metadata.get("used_previous_response_id"):
+            continuation_hits += 1
+        elif metadata.get("continuation_miss_reason"):
+            continuation_misses[str(metadata["continuation_miss_reason"])] += 1
+    return {
+        "name": view["session"]["title"],
+        "session_id": view["session"]["id"],
+        "turns": len(turns),
+        "steps": len(steps),
+        **token_usage(usage),
+        "hosted_search_calls": len(hosted),
+        "hosted_search_actions": dict(hosted_actions),
+        "unique_search_queries": len(set(queries)),
+        "continuation_hits": continuation_hits,
+        "continuation_misses": dict(continuation_misses),
+        "model_transports": dict(transports),
+        "prompt_cache_modes": dict(cache_modes),
+        "model_profiles": dict(model_profiles),
+        "model_providers": dict(model_providers),
+        "upstream_models": dict(upstream_models),
+        "prompt_cache_keys": sorted(cache_keys),
+        "explicit_cache_breakpoints": explicit_breakpoints,
+        "websocket_fallback_reasons": dict(fallback_reasons),
+    }
+
+
+def capture_result(
+    api: PaperMachineApi,
+    view: dict[str, Any],
+    task: dict[str, Any],
+    article_path: Path,
+) -> dict[str, Any]:
+    run = view["workflow_run"]
+    output = run.get("output") or {}
+    report = output.get("report")
+    if not isinstance(report, str) or not report.strip():
+        raise ValueError("completed run did not return a non-empty report")
+    atomic_write_text(article_path, report.rstrip() + "\n")
+    agents = [
+        session_metrics(api.get(f"/sessions/{session['id']}"))
+        for session in view.get("sessions", [])
+    ]
+    usage = run.get("usage") or {}
+    try:
+        prediction = prediction_from_report(task, report)
+    except ValueError:
+        prediction = None
+    result = {
+        "status": run["status"],
+        "workflow_sha256": run["workflow"]["sha256"],
+        "created_at": run["created_at"],
+        "completed_at": run["updated_at"],
+        "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "agents_created": int(usage.get("agents_created", 0)),
+        "actions_completed": int(usage.get("actions_completed", 0)),
+        "action_steps": int(usage.get("action_steps", 0)),
+        "usage": token_usage(usage.get("tokens") or {}),
+        "report_characters": len(report),
+        "report_sha256": hashlib.sha256(report.encode()).hexdigest(),
+        "article_path": str(article_path),
+        "hosted_search_calls": sum(agent["hosted_search_calls"] for agent in agents),
+        "hosted_search_actions": dict(
+            sum(
+                (Counter(agent["hosted_search_actions"]) for agent in agents),
+                Counter(),
+            )
+        ),
+        "unique_search_queries": sum(agent["unique_search_queries"] for agent in agents),
+        "continuation_hits": sum(agent["continuation_hits"] for agent in agents),
+        "model_transports": dict(
+            sum((Counter(agent["model_transports"]) for agent in agents), Counter())
+        ),
+        "prompt_cache_modes": dict(
+            sum((Counter(agent["prompt_cache_modes"]) for agent in agents), Counter())
+        ),
+        "model_profiles": dict(
+            sum((Counter(agent["model_profiles"]) for agent in agents), Counter())
+        ),
+        "model_providers": dict(
+            sum((Counter(agent["model_providers"]) for agent in agents), Counter())
+        ),
+        "upstream_models": dict(
+            sum((Counter(agent["upstream_models"]) for agent in agents), Counter())
+        ),
+        "prompt_cache_key_count": len(
+            {key for agent in agents for key in agent["prompt_cache_keys"]}
+        ),
+        "explicit_cache_breakpoints": sum(
+            agent["explicit_cache_breakpoints"] for agent in agents
+        ),
+        "websocket_fallback_reasons": dict(
+            sum(
+                (Counter(agent["websocket_fallback_reasons"]) for agent in agents),
+                Counter(),
+            )
+        ),
+        "per_agent": agents,
+        "prediction": prediction,
+        "score": score_report(task, report),
+    }
+    for key in (
+        "rounds",
+        "route_sessions_reused",
+        "plan",
+        "evaluation",
+        "draft_audit",
+    ):
+        if key in output:
+            result[key] = output[key]
+    return result
+
+
+def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, Any]:
+    run = view["workflow_run"]
+    grading = (run.get("output") or {}).get("grading")
+    if not isinstance(grading, dict):
+        raise ValueError("grader output is missing grading object")
+    for key in ("precision", "recall", "f1"):
+        value = grading.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"grader {key} must be numeric")
+        if not 0 <= float(value) <= 1:
+            raise ValueError(f"grader {key} must be between zero and one")
+    atomic_write_json(grade_path, grading)
+    usage = run.get("usage") or {}
+    return {
+        **grading,
+        "workflow_sha256": run["workflow"]["sha256"],
+        "usage": token_usage(usage.get("tokens") or {}),
+        "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "grade_path": str(grade_path),
+    }
+
+
+def record_failed_attempt(attempt: dict[str, Any], run: dict[str, Any]) -> None:
+    usage = run.get("usage") or {}
+    attempt["usage"] = token_usage(usage.get("tokens") or {})
+    attempt["wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+
+
+def is_retryable_error(error: str) -> bool:
+    lowered = error.casefold()
+    deterministic = (
+        "budget exceeded",
+        "budget exhausted",
+        "context window",
+        "invalid",
+        "schema",
+        "permission denied",
+    )
+    return not any(fragment in lowered for fragment in deterministic)
+
+
+def run_research_matrix(
+    api: PaperMachineApi,
+    state: dict[str, Any],
+    state_path: Path,
+    tasks: dict[str, dict[str, Any]],
+    articles_dir: Path,
+    research_id: str,
+    model: str,
+    poll_seconds: float,
+    max_attempts: int,
+    max_parallel_runs: int,
+) -> None:
+    for job in state["jobs"]:
+        job.setdefault("research", {"attempts": [], "status": "pending"})
+
+    while True:
+        active = 0
+        for job in state["jobs"]:
+            research = job["research"]
+            if "result" in research or job.get("failed"):
+                continue
+            if not research["attempts"] or research.get("status") == "pending_retry":
+                continue
+            attempt = research["attempts"][-1]
+            view = api.get(f"/workflow-runs/{attempt['run_id']}")
+            run = view["workflow_run"]
+            status = str(run["status"])
+            research["status"] = status
+            attempt["status"] = status
+            if status in {"created", "running", "paused"}:
+                active += 1
+                continue
+            if status == "completed":
+                try:
+                    result = capture_result(
+                        api,
+                        view,
+                        tasks[job["task_key"]],
+                        articles_dir / f"{job['key']}.txt",
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    status = "invalid_output"
+                    attempt["error"] = str(error)
+                    record_failed_attempt(attempt, run)
+                else:
+                    research["result"] = result
+                    research["status"] = "completed"
+                    save_state(state_path, state)
+                    continue
+            if status in {"failed", "cancelled", "invalid_output"}:
+                error = str(attempt.get("error") or run.get("error") or status)
+                attempt["error"] = error
+                if "usage" not in attempt:
+                    record_failed_attempt(attempt, run)
+                if attempt.get("cancelled_by_runner") or (
+                    len(research["attempts"]) < max_attempts and is_retryable_error(error)
+                ):
+                    research["status"] = "pending_retry"
+                else:
+                    job["failed"] = True
+                save_state(state_path, state)
+
+        for job in state["jobs"]:
+            if active >= max_parallel_runs:
+                break
+            research = job["research"]
+            if "result" in research or job.get("failed"):
+                continue
+            if research["attempts"] and research.get("status") != "pending_retry":
+                continue
+            attempt = launch_run(
+                api, research_id, job, tasks[job["task_key"]], model
+            )
+            attempt["runtime_source_sha256"] = state.get(
+                "current_runtime_source_sha256", {}
+            )
+            research["attempts"].append(attempt)
+            research["status"] = "created"
+            active += 1
+            save_state(state_path, state)
+
+        unfinished = sum(
+            "result" not in job["research"] and not job.get("failed")
+            for job in state["jobs"]
+        )
+        counts = Counter(
+            "failed"
+            if job.get("failed")
+            else job.get("research", {}).get("status", "pending")
+            for job in state["jobs"]
+        )
+        print(f"research: {dict(counts)}", flush=True)
+        if unfinished == 0:
+            return
+        time.sleep(poll_seconds)
+
+
+def run_grading_matrix(
+    api: PaperMachineApi,
+    state: dict[str, Any],
+    state_path: Path,
+    tasks: dict[str, dict[str, Any]],
+    grades_dir: Path,
+    research_id: str,
+    grader_model: str,
+    poll_seconds: float,
+    max_attempts: int,
+    max_parallel_runs: int,
+) -> None:
+    for job in state["jobs"]:
+        if job.get("failed"):
+            continue
+        grade = job.setdefault("grade", {"attempts": [], "status": "pending"})
+        result = job.get("research", {}).get("result") or {}
+        if result.get("prediction") is None and "result" not in grade:
+            expected, _ = expected_ground_truth(tasks[job["task_key"]])
+            grade["result"] = {
+                **metric_counts(0, 0, claim_count(expected[0])),
+                "parse_error": (result.get("score") or {}).get("parse_error")
+                or "no compatible JSON value",
+                "usage": token_usage({}),
+                "wall_time_seconds": 0,
+                "method": "parse_failure_no_judge",
+            }
+            grade["status"] = "completed"
+    save_state(state_path, state)
+
+    while True:
+        active = 0
+        for job in state["jobs"]:
+            if job.get("failed"):
+                continue
+            grade = job["grade"]
+            if "result" in grade or job.get("grade_failed"):
+                continue
+            if not grade["attempts"] or grade.get("status") == "pending_retry":
+                continue
+            attempt = grade["attempts"][-1]
+            view = api.get(f"/workflow-runs/{attempt['run_id']}")
+            run = view["workflow_run"]
+            status = str(run["status"])
+            grade["status"] = status
+            attempt["status"] = status
+            if status in {"created", "running", "paused"}:
+                active += 1
+                continue
+            error: str | None = None
+            if status == "completed":
+                try:
+                    grade["result"] = capture_grader_result(
+                        view, grades_dir / f"{job['key']}.json"
+                    )
+                except (KeyError, TypeError, ValueError) as capture_error:
+                    error = f"invalid grade output: {capture_error}"
+                else:
+                    grade["status"] = "completed"
+                    save_state(state_path, state)
+                    continue
+            elif status in {"failed", "cancelled"}:
+                error = str(run.get("error") or status)
+            if error is not None:
+                attempt["error"] = error
+                record_failed_attempt(attempt, run)
+                if attempt.get("cancelled_by_runner") or (
+                    len(grade["attempts"]) < max_attempts and is_retryable_error(error)
+                ):
+                    grade["status"] = "pending_retry"
+                else:
+                    job["grade_failed"] = True
+                save_state(state_path, state)
+
+        for job in state["jobs"]:
+            if active >= max_parallel_runs:
+                break
+            if job.get("failed"):
+                continue
+            grade = job["grade"]
+            if "result" in grade or job.get("grade_failed"):
+                continue
+            if grade["attempts"] and grade.get("status") != "pending_retry":
+                continue
+            attempt = launch_grader_run(
+                api,
+                research_id,
+                job,
+                tasks[job["task_key"]],
+                grader_model,
+            )
+            attempt["runtime_source_sha256"] = state.get(
+                "current_runtime_source_sha256", {}
+            )
+            grade["attempts"].append(attempt)
+            grade["status"] = "created"
+            active += 1
+            save_state(state_path, state)
+
+        unfinished = sum(
+            not job.get("failed")
+            and "result" not in job.get("grade", {})
+            and not job.get("grade_failed")
+            for job in state["jobs"]
+        )
+        counts = Counter(
+            "skipped"
+            if job.get("failed")
+            else "failed"
+            if job.get("grade_failed")
+            else job.get("grade", {}).get("status", "pending")
+            for job in state["jobs"]
+        )
+        print(f"grade: {dict(counts)}", flush=True)
+        if unfinished == 0:
+            return
+        time.sleep(poll_seconds)
+
+
+def cancel_inflight(api: PaperMachineApi, state: dict[str, Any]) -> int:
+    cancelled = 0
+    for job in state.get("jobs", []):
+        for phase in ("research", "grade"):
+            phase_state = job.get(phase) or {}
+            if phase_state.get("status") not in {"created", "running", "paused"}:
+                continue
+            attempts = phase_state.get("attempts") or []
+            if not attempts:
+                continue
+            attempt = attempts[-1]
+            try:
+                api.post_empty(f"/workflow-runs/{attempt['run_id']}/cancel")
+            except ApiError as error:
+                attempt["cancel_error"] = str(error)
+            else:
+                attempt["status"] = "cancel_requested"
+                attempt["cancelled_by_runner"] = True
+                phase_state["status"] = "cancel_requested"
+                cancelled += 1
+    return cancelled
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = utc_now()
+    atomic_write_json(path, state)
+
+
+def reopen_terminal_failures(state: dict[str, Any]) -> int:
+    reopened = 0
+    for job in state["jobs"]:
+        if job.pop("failed", False):
+            job.setdefault("research", {"attempts": []})["status"] = "pending_retry"
+            reopened += 1
+        if job.pop("grade_failed", False) and "result" in job.get("research", {}):
+            job.setdefault("grade", {"attempts": []})["status"] = "pending_retry"
+            reopened += 1
+    return reopened
+
+
+def runtime_fingerprint(root: Path) -> dict[str, str]:
+    return {
+        relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        for relative in RUNTIME_FILES
+    }
+
+
+def record_runtime_snapshot(state: dict[str, Any], root: Path) -> dict[str, str]:
+    current = runtime_fingerprint(root)
+    history = state.setdefault("runtime_source_history", [])
+    original = state.get("runtime_source_sha256")
+    if original and not any(item.get("files_sha256") == original for item in history):
+        history.insert(
+            0,
+            {
+                "observed_at": state.get("created_at", utc_now()),
+                "files_sha256": original,
+            },
+        )
+    if not history or history[-1].get("files_sha256") != current:
+        history.append({"observed_at": utc_now(), "files_sha256": current})
+    state["current_runtime_source_sha256"] = current
+    return current
+
+
+def mean(values: list[float]) -> float:
+    return statistics.mean(values) if values else 0.0
+
+
+def operational_usage(job: dict[str, Any], phase: str) -> dict[str, int]:
+    keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+    total = {key: 0 for key in keys}
+    phase_state = job.get(phase) or {}
+    result_usage = (phase_state.get("result") or {}).get("usage") or {}
+    for key in keys:
+        total[key] += int(result_usage.get(key, 0))
+    for attempt in phase_state.get("attempts") or []:
+        usage = attempt.get("usage") or {}
+        for key in keys:
+            total[key] += int(usage.get(key, 0))
+    total["uncached_input_tokens"] = max(
+        0, total["input_tokens"] - total["cached_input_tokens"]
+    )
+    total["effective_tokens"] = total["uncached_input_tokens"] + total["output_tokens"]
+    return total
+
+
+def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
+    selected = [job for job in jobs if job["condition"] == condition]
+    research_results = [
+        job.get("research", {}).get("result") or {} for job in selected
+    ]
+    draft_audits = [
+        result["draft_audit"]
+        for result in research_results
+        if isinstance(result.get("draft_audit"), dict)
+    ]
+    grades = [job.get("grade", {}).get("result") or {} for job in selected]
+    research_usage = [operational_usage(job, "research") for job in selected]
+    grader_usage = [operational_usage(job, "grade") for job in selected]
+    total_input = sum(usage["input_tokens"] for usage in research_usage)
+    total_cached = sum(usage["cached_input_tokens"] for usage in research_usage)
+    transports = sum(
+        (Counter(result.get("model_transports", {})) for result in research_results),
+        Counter(),
+    )
+    cache_modes = sum(
+        (Counter(result.get("prompt_cache_modes", {})) for result in research_results),
+        Counter(),
+    )
+    return {
+        "runs": len(selected),
+        "graded": sum(bool(grade) for grade in grades),
+        "precision_mean": mean([float(grade.get("precision", 0.0)) for grade in grades]),
+        "recall_mean": mean([float(grade.get("recall", 0.0)) for grade in grades]),
+        "f1_mean": mean([float(grade.get("f1", 0.0)) for grade in grades]),
+        "deterministic_f1_mean": mean(
+            [float((result.get("score") or {}).get("f1", 0.0)) for result in research_results]
+        ),
+        "input_mean": mean([usage["input_tokens"] for usage in research_usage]),
+        "uncached_mean": mean([usage["uncached_input_tokens"] for usage in research_usage]),
+        "output_mean": mean([usage["output_tokens"] for usage in research_usage]),
+        "cache_read_ratio": total_cached / total_input if total_input else 0.0,
+        "wall_mean": mean([float(result.get("wall_time_seconds", 0)) for result in research_results]),
+        "search_calls_mean": mean([float(result.get("hosted_search_calls", 0)) for result in research_results]),
+        "search_queries_mean": mean([float(result.get("unique_search_queries", 0)) for result in research_results]),
+        "continuation_hits": sum(int(result.get("continuation_hits", 0)) for result in research_results),
+        "report_characters_mean": mean([float(result.get("report_characters", 0)) for result in research_results]),
+        "parse_failures": sum(bool((result.get("score") or {}).get("parse_error")) for result in research_results),
+        "two_round_runs": sum(int(result.get("rounds", 1)) > 1 for result in research_results),
+        "draft_revisions": sum(
+            audit.get("revision_performed") is True for audit in draft_audits
+        ),
+        "final_audit_failures": sum(audit.get("pass") is not True for audit in draft_audits),
+        "grader_effective_mean": mean([usage["effective_tokens"] for usage in grader_usage]),
+        "research_failures": sum(bool(job.get("failed")) for job in selected),
+        "grade_failures": sum(bool(job.get("grade_failed")) for job in selected),
+        "model_transports": dict(transports),
+        "prompt_cache_modes": dict(cache_modes),
+        "websocket_ratio": transports["responses_websocket"] / sum(transports.values())
+        if transports
+        else 0.0,
+        "fallback_steps": sum(
+            sum((result.get("websocket_fallback_reasons") or {}).values())
+            for result in research_results
+        ),
+        "explicit_cache_breakpoints": sum(
+            int(result.get("explicit_cache_breakpoints", 0)) for result in research_results
+        ),
+    }
+
+
+def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> str:
+    complete = [job for job in state["jobs"] if "result" in job.get("research", {})]
+    conditions = list(state["experiment"]["conditions"])
+    aggregates = {condition: aggregate(state["jobs"], condition) for condition in conditions}
+    lines = [
+        "# PaperMachine LiveDRBench mini report",
+        "",
+        f"Generated: {utc_now()}",
+        "",
+        f"Research model profile: `{state['experiment']['model']}`; grader profile: `{state['experiment']['grader_model']}`.",
+        "",
+        "This is a pinned development slice, not a leaderboard score. Research runs never receive references. Each parseable answer is judged afterward in an independent no-tool Session using the complete upstream semantic claim-matching rubric; metric arithmetic is deterministic. A stricter local scorer is retained only as a diagnostic.",
+        "",
+        "## Tasks",
+        "",
+        "| Key | Category | Reference | Question |",
+        "|---:|---|---|---|",
+    ]
+    for key, task in tasks.items():
+        question = task["question"].replace("|", "\\|").replace("\n", " ")
+        validity = task.get("reference_validity") or {}
+        reference_status = str(validity.get("status", "pinned"))
+        lines.append(
+            f"| {key} | {task['category']} | {reference_status} | {question} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Aggregate",
+            "",
+            "| Condition | Runs | Graded | Rubric P | Rubric R | Rubric F1 | Strict F1 | Input | Uncached | Output | Cache read | Wall | Search calls | Revised | Audit fail | Grader effective | Research fail | Grade fail |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for condition, values in aggregates.items():
+        lines.append(
+            f"| {condition} | {values['runs']} | {values['graded']} | {values['precision_mean']:.3f} | "
+            f"{values['recall_mean']:.3f} | {values['f1_mean']:.3f} | "
+            f"{values['deterministic_f1_mean']:.3f} | "
+            f"{values['input_mean']:.0f} | {values['uncached_mean']:.0f} | "
+            f"{values['output_mean']:.0f} | {values['cache_read_ratio']:.1%} | "
+            f"{values['wall_mean']:.0f}s | {values['search_calls_mean']:.1f} | "
+            f"{values['draft_revisions']} | {values['final_audit_failures']} | "
+            f"{values['grader_effective_mean']:.0f} | {values['research_failures']} | "
+            f"{values['grade_failures']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Transport and cache path",
+            "",
+            "| Condition | WebSocket model steps | HTTP SSE model steps | WebSocket ratio | Continuation hits | Fallback steps | Implicit-cache steps | Explicit breakpoints |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for condition, values in aggregates.items():
+        transports = values["model_transports"]
+        cache_modes = values["prompt_cache_modes"]
+        lines.append(
+            f"| {condition} | {transports.get('responses_websocket', 0)} | "
+            f"{transports.get('http_sse', 0)} | {values['websocket_ratio']:.1%} | "
+            f"{values['continuation_hits']} | {values['fallback_steps']} | "
+            f"{cache_modes.get('implicit', 0)} | {values['explicit_cache_breakpoints']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Per task",
+            "",
+            "| Task | Condition | Repeat | Rubric P | Rubric R | Rubric F1 | Strict F1 | Input | Cached | Search calls | Rounds | Revised | Audit | Continuation hits |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
+        ]
+    )
+    for job in sorted(complete, key=lambda item: (int(item["task_key"]), item["condition"], item["repeat"])):
+        result = job["research"]["result"]
+        score = job.get("grade", {}).get("result") or {}
+        strict = result["score"]
+        usage = result["usage"]
+        draft_audit = result.get("draft_audit")
+        revised = (
+            "yes"
+            if isinstance(draft_audit, dict)
+            and draft_audit.get("revision_performed") is True
+            else "no"
+        )
+        audit_status = (
+            "-"
+            if not isinstance(draft_audit, dict)
+            else ("pass" if draft_audit.get("pass") is True else "fail")
+        )
+        lines.append(
+            f"| {job['task_key']} | {job['condition']} | {job['repeat']} | "
+            f"{float(score.get('precision', 0)):.3f} | {float(score.get('recall', 0)):.3f} | "
+            f"{float(score.get('f1', 0)):.3f} | {strict['f1']:.3f} | "
+            f"{usage['input_tokens']} | {usage['cached_input_tokens']} | "
+            f"{result['hosted_search_calls']} | {result.get('rounds', 1)} | "
+            f"{revised} | {audit_status} | "
+            f"{result['continuation_hits']} |"
+        )
+    warnings = [
+        (key, task["reference_validity"])
+        for key, task in tasks.items()
+        if task.get("reference_validity")
+    ]
+    if warnings:
+        lines.extend(
+            [
+                "",
+                "## Reference validity warnings",
+                "",
+                "Scores on the tasks below are reported for reproducibility, but should not be used to compare workflows without live adjudication:",
+                "",
+            ]
+        )
+        for key, warning in warnings:
+            lines.append(
+                f"- Task {key} (`{warning['status']}`): {warning['note']}"
+            )
+    lines.extend(
+        [
+            "",
+            "## Validity limits",
+            "",
+            f"- The development slice contains {len(tasks)} tasks and is for workflow diagnosis, not leaderboard comparison.",
+            "- The semantic judge uses the same model family as the researchers, so judge-model bias remains possible; the Session is isolated and has no tools.",
+            "- The grader ports the upstream rubric to Responses and batches each task into one judgment action, so it is rubric-faithful but not byte-for-byte execution of the upstream Chat Completions script.",
+            "- Research or grading failures count as zero in aggregate means; grader tokens are reported separately.",
+            "- Hosted search results and indexed web content can change over time.",
+            "- Runtime source hashes are recorded in state.json because workflow source hash alone does not identify tool/runtime behavior.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def validate_workflows(api: PaperMachineApi, conditions: list[str]) -> None:
+    available = {
+        (item["manifest"]["slug"], item["manifest"]["version"])
+        for item in api.get("/workflows")
+    }
+    required = {
+        (
+            CONDITIONS[condition]["workflow_slug"],
+            CONDITIONS[condition]["workflow_version"],
+        )
+        for condition in conditions
+    }
+    required.add(("live-dr-grader", "0.2.0"))
+    missing = sorted(required - available)
+    if missing:
+        raise RuntimeError(f"server is missing workflows {missing}; restart PaperMachine")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--api-base", default="http://127.0.0.1:4310")
+    parser.add_argument("--task-keys", default="0,20,22,23,40,47,66,83")
+    parser.add_argument("--conditions", default=",".join(CONDITIONS))
+    parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=20260806)
+    parser.add_argument("--model", default="gpt-5.6-sol")
+    parser.add_argument("--grader-model", default="gpt-5.6-sol")
+    parser.add_argument("--run-name", default="hosted-search-8x3x2-2026-08-06")
+    parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument("--max-parallel-runs", type=int, default=2)
+    parser.add_argument("--retry-terminal-failures", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.repeats < 1:
+        raise ValueError("repeats must be positive")
+    if args.max_attempts < 1 or args.max_parallel_runs < 1:
+        raise ValueError("max-attempts and max-parallel-runs must be positive")
+    root = Path(__file__).resolve().parents[2]
+    snapshot = load_json(Path(__file__).with_name("tasks.json"))
+    available_tasks = {str(task["key"]): task for task in snapshot["tasks"]}
+    task_keys = [value.strip() for value in args.task_keys.split(",") if value.strip()]
+    conditions = [value.strip() for value in args.conditions.split(",") if value.strip()]
+    unknown_tasks = sorted(set(task_keys) - available_tasks.keys())
+    unknown_conditions = sorted(set(conditions) - CONDITIONS.keys())
+    if unknown_tasks or unknown_conditions:
+        raise ValueError(f"unknown tasks={unknown_tasks}, conditions={unknown_conditions}")
+    tasks = {key: available_tasks[key] for key in task_keys}
+    jobs = build_jobs(task_keys, conditions, args.repeats, args.seed)
+    run_dir = Path(__file__).with_name("runs") / args.run_name
+    state_path = run_dir / "state.json"
+    report_path = run_dir / "report.md"
+    articles_dir = run_dir / "articles"
+    grades_dir = run_dir / "grades"
+
+    api = PaperMachineApi(args.api_base)
+    health = api.get("/health")
+    validate_workflows(api, conditions)
+    if state_path.exists():
+        state = load_json(state_path)
+        expected = state["experiment"]
+        current = {
+            "task_keys": task_keys,
+            "conditions": conditions,
+            "repeats": args.repeats,
+            "seed": args.seed,
+            "model": args.model,
+            "grader_model": args.grader_model,
+            "max_parallel_runs": args.max_parallel_runs,
+        }
+        for key, value in current.items():
+            if expected[key] != value:
+                raise ValueError(f"existing run differs for {key}: {expected[key]!r} != {value!r}")
+    else:
+        state = {
+            "schema_version": 1,
+            "created_at": utc_now(),
+            "experiment": {
+                "name": args.run_name,
+                "task_keys": task_keys,
+                "conditions": conditions,
+                "condition_config": {key: CONDITIONS[key] for key in conditions},
+                "repeats": args.repeats,
+                "seed": args.seed,
+                "model": args.model,
+                "grader_model": args.grader_model,
+                "max_parallel_runs": args.max_parallel_runs,
+                "scoring_method": "independent_upstream_rubric_semantic_judge_plus_deterministic_metrics",
+            },
+            "upstream": {
+                key: snapshot[key]
+                for key in (
+                    "source_dataset",
+                    "source_repo",
+                    "source_revision",
+                    "source_file",
+                    "source_file_sha256",
+                )
+            },
+            "upstream_evaluator": UPSTREAM_EVALUATOR,
+            "server_health": health,
+            "runtime_source_sha256": runtime_fingerprint(root),
+            "jobs": jobs,
+        }
+        save_state(state_path, state)
+
+    record_runtime_snapshot(state, root)
+    save_state(state_path, state)
+
+    if args.retry_terminal_failures:
+        reopened = reopen_terminal_failures(state)
+        save_state(state_path, state)
+        print(f"reopened {reopened} terminal benchmark phases", flush=True)
+
+    research_id = ensure_research(
+        api,
+        f"LiveDRBench research - {args.run_name}",
+        "Structured claim-discovery runs with isolated upstream-rubric post-write grading.",
+    )
+    state["research_id"] = research_id
+    save_state(state_path, state)
+    try:
+        run_research_matrix(
+            api,
+            state,
+            state_path,
+            tasks,
+            articles_dir,
+            research_id,
+            args.model,
+            args.poll_seconds,
+            args.max_attempts,
+            args.max_parallel_runs,
+        )
+        run_grading_matrix(
+            api,
+            state,
+            state_path,
+            tasks,
+            grades_dir,
+            research_id,
+            args.grader_model,
+            args.poll_seconds,
+            args.max_attempts,
+            args.max_parallel_runs,
+        )
+    except KeyboardInterrupt:
+        cancelled = cancel_inflight(api, state)
+        save_state(state_path, state)
+        print(f"cancelled {cancelled} in-flight WorkflowRuns", flush=True)
+        return 130
+    atomic_write_text(report_path, render_report(state, tasks))
+    print(report_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

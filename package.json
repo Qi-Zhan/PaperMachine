@@ -1,0 +1,11 @@
+{
+  "name": "papermachine",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --dir apps/web dev",
+    "build": "pnpm --dir apps/web build",
+    "test": "pnpm --dir apps/web test"
+  }
+}
+

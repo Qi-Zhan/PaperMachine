@@ -1,0 +1,36 @@
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Rust
+/target/
+
+# JavaScript / web build output
+/node_modules/
+/apps/web/node_modules/
+/apps/web/dist/
+
+# Python
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# PaperMachine runtime state
+/data/
+/workspaces/
+/.papermachine/
+benchmarks/*/runs/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and local coverage output
+*.log
+coverage/
+*.lcov
