@@ -142,6 +142,22 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def workflow_wall_time_seconds(run: dict[str, Any]) -> int:
+    """Return end-to-end elapsed time, including time lost across restarts."""
+    usage = run.get("usage") or {}
+    runtime_seconds = max(0, int(usage.get("wall_time_seconds", 0)))
+    try:
+        created_at = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
+        updated_at = datetime.fromisoformat(str(run["updated_at"]).replace("Z", "+00:00"))
+        observed_seconds = max(
+            0,
+            math.ceil((updated_at - created_at).total_seconds()),
+        )
+    except (KeyError, TypeError, ValueError):
+        observed_seconds = 0
+    return max(runtime_seconds, observed_seconds)
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -358,7 +374,8 @@ def combined_token_usage(usages: list[dict[str, Any]]) -> dict[str, int | float]
 def record_attempt_metrics(attempt: dict[str, Any], run: dict[str, Any]) -> None:
     usage = run.get("usage") or {}
     attempt["usage"] = token_usage(usage.get("tokens") or {})
-    attempt["wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+    attempt["runtime_wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+    attempt["wall_time_seconds"] = workflow_wall_time_seconds(run)
     attempt["agents_created"] = int(usage.get("agents_created", 0))
     attempt["actions_completed"] = int(usage.get("actions_completed", 0))
     attempt["action_steps"] = int(usage.get("action_steps", 0))
@@ -497,7 +514,8 @@ def capture_research_result(
         "workflow_sha256": run["program"]["sha256"],
         "created_at": run["created_at"],
         "completed_at": run["updated_at"],
-        "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "runtime_wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "wall_time_seconds": workflow_wall_time_seconds(run),
         "agents_created": int(usage.get("agents_created", 0)),
         "actions_completed": int(usage.get("actions_completed", 0)),
         "action_steps": int(usage.get("action_steps", 0)),
@@ -1071,7 +1089,7 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             "- The point-wise grader is independent by Session and prompt, but currently uses the same model family as the research runs.",
             "- This experiment does not run the upstream reference-relative RACE judge or FACT citation scraper, so its absolute scores are not official DeepResearch Bench scores.",
             "- Prompt cache keys are stable routing-affinity keys scoped to one Session and model. They remain stable across that Session's turns, tools, schemas, and compaction, while provider cache reuse still requires a matching prompt prefix; cache telemetry is reported separately from Responses continuation hits.",
-            "- Token and wall-time comparisons use operational totals, including failed or invalid attempts before a successful retry.",
+            "- Token and wall-time comparisons use operational totals, including failed or invalid attempts before a successful retry. Wall time is the greater of runtime-recorded execution and Workflow creation-to-terminal elapsed time, so process restarts cannot silently erase user-visible waiting time.",
             "- Web content can change during the experiment; deterministic ordering reduces but cannot remove temporal drift.",
             f"- Terminal research failures: {len(research_failures)}; terminal grading failures: {len(grade_failures)}.",
             f"- Research retries: {research_retries}; grading retries: {grade_retries}.",
@@ -1272,7 +1290,12 @@ def run_grading_phase(
                     usage = run.get("usage") or {}
                     grade["score"] = score
                     grade["usage"] = token_usage(usage.get("tokens") or {})
-                    grade["wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+                    grade["created_at"] = run["created_at"]
+                    grade["completed_at"] = run["updated_at"]
+                    grade["runtime_wall_time_seconds"] = int(
+                        usage.get("wall_time_seconds", 0)
+                    )
+                    grade["wall_time_seconds"] = workflow_wall_time_seconds(run)
                     grade["workflow_sha256"] = run["program"]["sha256"]
                     contract = run["output"].get("contract")
                     if isinstance(contract, dict):
@@ -1358,25 +1381,63 @@ def validate_workflows(
         )
 
 
-def backfill_retry_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
+def backfill_wall_time_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
+    """Upgrade completed and failed phases recorded by older runner revisions."""
     changed = False
+    workflow_cache: dict[str, dict[str, Any]] = {}
+
+    def workflow(workflow_id: str) -> dict[str, Any]:
+        if workflow_id not in workflow_cache:
+            workflow_cache[workflow_id] = api.get(f"/workflows/{workflow_id}")[
+                "workflow"
+            ]
+        return workflow_cache[workflow_id]
+
     for job in state["jobs"]:
         for phase in ("research", "grade"):
-            for attempt in job.get(phase, {}).get("attempts", []):
+            phase_state = job.get(phase, {})
+            for attempt in phase_state.get("attempts", []):
                 if not attempt.get("error") or all(
                     key in attempt
                     for key in (
                         "usage",
                         "wall_time_seconds",
+                        "runtime_wall_time_seconds",
                         "agents_created",
                         "actions_completed",
                         "action_steps",
                     )
                 ):
                     continue
-                view = api.get(f"/workflows/{attempt['workflow_id']}")
-                record_attempt_metrics(attempt, view["workflow"])
+                record_attempt_metrics(attempt, workflow(attempt["workflow_id"]))
                 changed = True
+
+            target = (
+                phase_state.get("result")
+                if phase == "research"
+                else phase_state if "score" in phase_state else None
+            )
+            if not isinstance(target, dict) or "runtime_wall_time_seconds" in target:
+                continue
+            successful_attempt = next(
+                (
+                    attempt
+                    for attempt in reversed(phase_state.get("attempts", []))
+                    if attempt.get("status") == "completed" and not attempt.get("error")
+                ),
+                None,
+            )
+            if successful_attempt is None:
+                continue
+            run = workflow(successful_attempt["workflow_id"])
+            usage = run.get("usage") or {}
+            target["created_at"] = run["created_at"]
+            target["completed_at"] = run["updated_at"]
+            target["runtime_wall_time_seconds"] = int(
+                usage.get("wall_time_seconds", 0)
+            )
+            target["wall_time_seconds"] = workflow_wall_time_seconds(run)
+            changed = True
     return changed
 
 
@@ -1508,7 +1569,7 @@ def main() -> int:
     if "server_health" not in state:
         state["server_health"] = health
         save_state(state_path, state)
-    if backfill_retry_metrics(api, state):
+    if backfill_wall_time_metrics(api, state):
         save_state(state_path, state)
 
     if "research" not in state["projects"]:

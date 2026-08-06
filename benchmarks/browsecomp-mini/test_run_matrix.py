@@ -13,6 +13,16 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class BrowseCompMatrixTests(unittest.TestCase):
+    def test_workflow_wall_time_survives_runtime_restart(self) -> None:
+        run = {
+            "created_at": "2026-08-07T00:00:00Z",
+            "updated_at": "2026-08-07T00:05:00Z",
+            "usage": {"wall_time_seconds": 10},
+        }
+        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 300)
+        run["usage"]["wall_time_seconds"] = 400
+        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 400)
+
     def test_ensure_project_repairs_missing_reused_root(self) -> None:
         class FakeApi:
             def __init__(self, root_path: str) -> None:

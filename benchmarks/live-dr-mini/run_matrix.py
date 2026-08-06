@@ -12,6 +12,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -148,6 +149,22 @@ class PaperMachineApi:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def workflow_wall_time_seconds(run: dict[str, Any]) -> int:
+    """Return end-to-end elapsed time, including time lost across restarts."""
+    usage = run.get("usage") or {}
+    runtime_seconds = max(0, int(usage.get("wall_time_seconds", 0)))
+    try:
+        created_at = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
+        updated_at = datetime.fromisoformat(str(run["updated_at"]).replace("Z", "+00:00"))
+        observed_seconds = max(
+            0,
+            math.ceil((updated_at - created_at).total_seconds()),
+        )
+    except (KeyError, TypeError, ValueError):
+        observed_seconds = 0
+    return max(runtime_seconds, observed_seconds)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -765,7 +782,8 @@ def capture_result(
         "workflow_sha256": run["program"]["sha256"],
         "created_at": run["created_at"],
         "completed_at": run["updated_at"],
-        "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "runtime_wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "wall_time_seconds": workflow_wall_time_seconds(run),
         "agents_created": int(usage.get("agents_created", 0)),
         "actions_completed": int(usage.get("actions_completed", 0)),
         "action_steps": int(usage.get("action_steps", 0)),
@@ -844,7 +862,10 @@ def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, A
         **grading,
         "workflow_sha256": run["program"]["sha256"],
         "usage": token_usage(usage.get("tokens") or {}),
-        "wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "created_at": run["created_at"],
+        "completed_at": run["updated_at"],
+        "runtime_wall_time_seconds": int(usage.get("wall_time_seconds", 0)),
+        "wall_time_seconds": workflow_wall_time_seconds(run),
         "grade_path": str(grade_path),
     }
 
@@ -852,7 +873,8 @@ def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, A
 def record_failed_attempt(attempt: dict[str, Any], run: dict[str, Any]) -> None:
     usage = run.get("usage") or {}
     attempt["usage"] = token_usage(usage.get("tokens") or {})
-    attempt["wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+    attempt["runtime_wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
+    attempt["wall_time_seconds"] = workflow_wall_time_seconds(run)
 
 
 def is_retryable_error(error: str) -> bool:
