@@ -487,6 +487,59 @@ def model_step_metadata(steps: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def workflow_control_metrics(view: dict[str, Any]) -> dict[str, Any]:
+    """Summarize durable workflow control flow without inspecting report text."""
+    actions = view.get("actions") or []
+    attempts = view.get("attempts") or []
+    action_counts = Counter(
+        str(action.get("action_name", "unknown")) for action in actions
+    )
+    action_status_counts = Counter(
+        str(action.get("status", "unknown")) for action in actions
+    )
+    attempt_status_counts = Counter(
+        str(attempt.get("status", "unknown")) for attempt in attempts
+    )
+    attempts_by_invocation = Counter(
+        str(attempt.get("invocation_id", "unknown")) for attempt in attempts
+    )
+    research_phase_counts = Counter()
+    for action in actions:
+        if action.get("action_name") != "research":
+            continue
+        arguments = action.get("arguments")
+        if not isinstance(arguments, dict):
+            continue
+        phase = arguments.get("phase")
+        if isinstance(phase, str) and phase:
+            research_phase_counts[phase] += 1
+
+    output = (view.get("workflow") or {}).get("output") or {}
+    plan = output.get("plan") if isinstance(output, dict) else None
+    routes = plan.get("routes") if isinstance(plan, dict) else None
+    initial_route_count = len(routes) if isinstance(routes, list) else 0
+    initial_research_actions = research_phase_counts.get("initial", 0)
+    return {
+        "action_invocations": len(actions),
+        "action_attempts": len(attempts),
+        "action_counts": dict(action_counts),
+        "action_status_counts": dict(action_status_counts),
+        "action_attempt_status_counts": dict(attempt_status_counts),
+        "action_attempt_retries": sum(
+            max(0, count - 1) for count in attempts_by_invocation.values()
+        ),
+        "failed_action_attempts": sum(
+            attempt_status_counts.get(status, 0)
+            for status in ("failed", "interrupted", "cancelled")
+        ),
+        "research_phase_counts": dict(research_phase_counts),
+        "initial_route_count": initial_route_count,
+        "initial_contract_repairs": max(
+            0, initial_research_actions - initial_route_count
+        ),
+    }
+
+
 def capture_research_result(
     api: PaperMachineApi,
     view: dict[str, Any],
@@ -527,6 +580,7 @@ def capture_research_result(
         "article_path": str(article_path),
         "usage": token_usage(usage.get("tokens") or {}),
         "per_agent": agents,
+        "workflow_control": workflow_control_metrics(view),
         **{
             key: dict(sum((Counter(agent[key]) for agent in agents), Counter()))
             for key in metadata_keys
@@ -663,6 +717,40 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
     total_cached = sum(int(usage["cached_input_tokens"]) for usage in research_usage)
     grader_input = sum(int(usage["input_tokens"]) for usage in grader_usage)
     grader_cached = sum(int(usage["cached_input_tokens"]) for usage in grader_usage)
+    controls = [
+        job["research"]["result"].get("workflow_control") or {}
+        for job in selected
+    ]
+    completion_statuses = Counter(
+        str(
+            (job["research"]["result"].get("completion") or {}).get(
+                "status", "not_reported"
+            )
+        )
+        for job in selected
+    )
+    round_values = [
+        int(job["research"]["result"]["rounds"])
+        for job in selected
+        if "rounds" in job["research"]["result"]
+    ]
+    round_distribution = Counter(round_values)
+    action_counts = sum(
+        (Counter(control.get("action_counts") or {}) for control in controls),
+        Counter(),
+    )
+    research_phase_counts = sum(
+        (
+            Counter(control.get("research_phase_counts") or {})
+            for control in controls
+        ),
+        Counter(),
+    )
+    route_counts = [
+        int(control.get("initial_route_count", 0))
+        for control in controls
+        if int(control.get("initial_route_count", 0)) > 0
+    ]
     return {
         "runs": len(selected),
         "score_mean": statistics.mean(scores) if scores else 0.0,
@@ -721,6 +809,26 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
         ),
         "final_audit_failures": sum(
             audit.get("pass") is not True for audit in draft_audits
+        ),
+        "completion_statuses": dict(completion_statuses),
+        "completion_warnings": completion_statuses.get("warning", 0),
+        "rounds_mean": statistics.mean(round_values) if round_values else 0.0,
+        "rounds_max": max(round_values, default=0),
+        "round_distribution": dict(sorted(round_distribution.items())),
+        "initial_route_mean": statistics.mean(route_counts) if route_counts else 0.0,
+        "action_counts": dict(action_counts),
+        "initial_research_actions": research_phase_counts.get("initial", 0),
+        "followup_research_actions": research_phase_counts.get(
+            "evaluator_follow_up", 0
+        ),
+        "initial_contract_repairs": sum(
+            int(control.get("initial_contract_repairs", 0)) for control in controls
+        ),
+        "action_attempt_retries": sum(
+            int(control.get("action_attempt_retries", 0)) for control in controls
+        ),
+        "failed_action_attempts": sum(
+            int(control.get("failed_action_attempts", 0)) for control in controls
         ),
         "dimension_means": {
             dimension: (
@@ -877,6 +985,41 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             f"{json.dumps(combined['model_transports'], sort_keys=True)} | "
             f"{json.dumps(combined['prompt_cache_modes'], sort_keys=True)} | "
             f"{sum(int(result.get('continuation_hits', 0)) for result in results)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Workflow control behavior",
+            "",
+            "Whole-run operational retries are reported later. This table separately exposes durable Action invocations, evaluator follow-ups, semantic contract repair Actions, and retries of the same Action invocation.",
+            "",
+            "| Condition | Completion statuses | Actual rounds | Initial routes mean | Action counts | Initial research | Initial contract repairs | Follow-up research | Same-Action retries | Failed Action attempts |",
+            "|---|---|---|---:|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for condition, aggregate in aggregates.items():
+        round_distribution = aggregate["round_distribution"]
+        rounds = (
+            json.dumps(round_distribution, sort_keys=True)
+            if round_distribution
+            else "n/a"
+        )
+        route_mean = (
+            f"{aggregate['initial_route_mean']:.1f}"
+            if aggregate["initial_route_mean"]
+            else "n/a"
+        )
+        lines.append(
+            f"| {condition} | "
+            f"{json.dumps(aggregate['completion_statuses'], sort_keys=True)} | "
+            f"{rounds} | {route_mean} | "
+            f"{json.dumps(aggregate['action_counts'], sort_keys=True)} | "
+            f"{aggregate['initial_research_actions']} | "
+            f"{aggregate['initial_contract_repairs']} | "
+            f"{aggregate['followup_research_actions']} | "
+            f"{aggregate['action_attempt_retries']} | "
+            f"{aggregate['failed_action_attempts']} |"
         )
 
     lines.extend(
@@ -1383,17 +1526,18 @@ def validate_workflows(
         )
 
 
-def backfill_wall_time_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
+def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
     """Upgrade completed and failed phases recorded by older runner revisions."""
     changed = False
-    workflow_cache: dict[str, dict[str, Any]] = {}
+    workflow_view_cache: dict[str, dict[str, Any]] = {}
+
+    def workflow_view(workflow_id: str) -> dict[str, Any]:
+        if workflow_id not in workflow_view_cache:
+            workflow_view_cache[workflow_id] = api.get(f"/workflows/{workflow_id}")
+        return workflow_view_cache[workflow_id]
 
     def workflow(workflow_id: str) -> dict[str, Any]:
-        if workflow_id not in workflow_cache:
-            workflow_cache[workflow_id] = api.get(f"/workflows/{workflow_id}")[
-                "workflow"
-            ]
-        return workflow_cache[workflow_id]
+        return workflow_view(workflow_id)["workflow"]
 
     for job in state["jobs"]:
         for phase in ("research", "grade"):
@@ -1419,7 +1563,7 @@ def backfill_wall_time_metrics(api: PaperMachineApi, state: dict[str, Any]) -> b
                 if phase == "research"
                 else phase_state if "score" in phase_state else None
             )
-            if not isinstance(target, dict) or "runtime_wall_time_seconds" in target:
+            if not isinstance(target, dict):
                 continue
             successful_attempt = next(
                 (
@@ -1431,15 +1575,22 @@ def backfill_wall_time_metrics(api: PaperMachineApi, state: dict[str, Any]) -> b
             )
             if successful_attempt is None:
                 continue
-            run = workflow(successful_attempt["workflow_id"])
-            usage = run.get("usage") or {}
-            target["created_at"] = run["created_at"]
-            target["completed_at"] = run["updated_at"]
-            target["runtime_wall_time_seconds"] = int(
-                usage.get("wall_time_seconds", 0)
-            )
-            target["wall_time_seconds"] = workflow_wall_time_seconds(run)
-            changed = True
+            workflow_id = successful_attempt["workflow_id"]
+            if "runtime_wall_time_seconds" not in target:
+                run = workflow(workflow_id)
+                usage = run.get("usage") or {}
+                target["created_at"] = run["created_at"]
+                target["completed_at"] = run["updated_at"]
+                target["runtime_wall_time_seconds"] = int(
+                    usage.get("wall_time_seconds", 0)
+                )
+                target["wall_time_seconds"] = workflow_wall_time_seconds(run)
+                changed = True
+            if phase == "research" and "workflow_control" not in target:
+                target["workflow_control"] = workflow_control_metrics(
+                    workflow_view(workflow_id)
+                )
+                changed = True
     return changed
 
 
@@ -1571,7 +1722,7 @@ def main() -> int:
     if "server_health" not in state:
         state["server_health"] = health
         save_state(state_path, state)
-    if backfill_wall_time_metrics(api, state):
+    if backfill_result_metrics(api, state):
         save_state(state_path, state)
 
     if "research" not in state["projects"]:

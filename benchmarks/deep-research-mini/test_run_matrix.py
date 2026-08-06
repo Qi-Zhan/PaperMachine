@@ -12,6 +12,52 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class MatrixTests(unittest.TestCase):
+    def test_workflow_control_metrics_separates_repair_and_followup_actions(self) -> None:
+        actions = [
+            {"id": "plan", "action_name": "plan", "status": "completed"},
+            *[
+                {
+                    "id": f"initial-{index}",
+                    "action_name": "research",
+                    "status": "completed",
+                    "arguments": {"phase": "initial"},
+                }
+                for index in range(4)
+            ],
+            *[
+                {
+                    "id": f"followup-{index}",
+                    "action_name": "research",
+                    "status": "completed",
+                    "arguments": {"phase": "evaluator_follow_up"},
+                }
+                for index in range(2)
+            ],
+        ]
+        view = {
+            "workflow": {"output": {"plan": {"routes": [{}, {}, {}]}}},
+            "actions": actions,
+            "attempts": [
+                {"invocation_id": "initial-0", "status": "failed"},
+                {"invocation_id": "initial-0", "status": "completed"},
+                *[
+                    {"invocation_id": action["id"], "status": "completed"}
+                    for action in actions[2:]
+                ],
+            ],
+        }
+
+        metrics = run_matrix.workflow_control_metrics(view)
+
+        self.assertEqual(
+            metrics["research_phase_counts"],
+            {"initial": 4, "evaluator_follow_up": 2},
+        )
+        self.assertEqual(metrics["initial_route_count"], 3)
+        self.assertEqual(metrics["initial_contract_repairs"], 1)
+        self.assertEqual(metrics["action_attempt_retries"], 1)
+        self.assertEqual(metrics["failed_action_attempts"], 1)
+
     def test_workflow_wall_time_survives_runtime_restart(self) -> None:
         run = {
             "created_at": "2026-08-07T00:00:00Z",
@@ -198,6 +244,19 @@ class MatrixTests(unittest.TestCase):
                     "wall_time_seconds": 10,
                     "report_characters": 1000,
                     "unique_direct_urls": 3,
+                    "rounds": 2,
+                    "completion": {"status": "warning"},
+                    "workflow_control": {
+                        "action_counts": {"research": 3, "assess": 2},
+                        "research_phase_counts": {
+                            "initial": 2,
+                            "evaluator_follow_up": 1,
+                        },
+                        "initial_route_count": 2,
+                        "initial_contract_repairs": 0,
+                        "action_attempt_retries": 1,
+                        "failed_action_attempts": 1,
+                    },
                     "usage": run_matrix.token_usage(
                         {
                             "input_tokens": 100,
@@ -231,6 +290,10 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(aggregate["score_mean"], 75)
         self.assertEqual(aggregate["uncached_input_mean"], 60)
         self.assertEqual(aggregate["grader_input_mean"], 30)
+        self.assertEqual(aggregate["completion_statuses"], {"warning": 1})
+        self.assertEqual(aggregate["round_distribution"], {2: 1})
+        self.assertEqual(aggregate["followup_research_actions"], 1)
+        self.assertEqual(aggregate["action_attempt_retries"], 1)
 
     def test_operational_usage_includes_failed_attempt(self) -> None:
         job = {
