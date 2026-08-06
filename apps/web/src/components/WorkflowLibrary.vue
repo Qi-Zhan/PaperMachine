@@ -134,6 +134,8 @@
                     <div><dt>{{ t('workflow.timers') }}</dt><dd>{{ timerSummary }}</dd></div>
                     <div><dt>{{ t('workflow.backgroundTasks') }}</dt><dd>{{ validation.features.background_tasks }}</dd></div>
                     <div><dt>{{ t('workflow.humanCheckpoints') }}</dt><dd>{{ validation.features.human_checkpoints }}</dd></div>
+                    <div><dt>{{ t('workflow.projectSnapshots') }}</dt><dd>{{ validation.features.project_snapshots }}</dd></div>
+                    <div><dt>{{ t('workflow.publishedArtifacts') }}</dt><dd>{{ validation.features.artifacts }}</dd></div>
                   </dl>
                 </section>
               </div>

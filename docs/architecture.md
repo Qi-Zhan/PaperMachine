@@ -197,6 +197,15 @@ HumanRequest. The request marks the run as requiring attention; an action-level
 request also moves its Turn and Session to `waiting_for_human`. The validated
 answer is returned to the suspended call as its result.
 
+Workflow-level human, timer, and signal waits are durable suspension points.
+Once all Python branches are waiting on replayable effects, the isolated Python
+process exits and the scheduler releases its global run permit. The Workflow
+supervisor remains lightweight: it wakes on an answered direct HumanRequest, a
+due active timer, or a matching durable Signal, sets the run runnable, and
+replays the immutable program against its effect journal. Parallel branches can
+therefore combine `ask_human`, background timers, and Channels without keeping
+one idle process per long-lived Workflow.
+
 Workflow Agents declare `model_only`, `read_only`, `workspace`, `research`, or
 `full_access`. The origin Session profile is the initial creation ceiling.
 Creation above that ceiling and every later upgrade suspend on a boolean
@@ -227,6 +236,13 @@ result, and resumes at the next model sample. This avoids repeating a
 checkpointed completed sample or charging the Action-start budget twice. The
 effect journal is returned in Workflow views and is visible in the Session
 inspector.
+
+The Project Page is itself backed by ordinary Workflow data. A built-in
+`project-summary` run reads a bounded Rust-produced Project snapshot and
+publishes an immutable HTML report Artifact. The UI embeds only the newest
+Artifact in a sandboxed iframe; manual refreshes are one-shot runs, while an
+active refresh policy is simply a non-terminal scheduled Workflow. There is no
+separate summary-instance table or privileged summary daemon.
 
 ## Skills and workflow roots
 

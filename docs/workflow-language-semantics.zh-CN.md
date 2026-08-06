@@ -227,6 +227,19 @@ schema value 仍是普通 Python 值，相关 action 仍按 workflow 派发。
 response schema 会与 request 一起保存。HTTP API 在 resolve 前校验答案。
 只要仍有 open request，`Workflow.attention_required` 就为 true。
 
+`await wait(...)`、`Channel.receive()` 与 workflow 级 `ask_human(...)` 都是可
+replay 的挂起点。某个分支先收到“已挂起”的协议确认，而不是异常；只有当所有仍
+存活的 Python 分支都停在这类 effect 上时，runner 才声明 quiescent。Rust 保留
+这些 effect 的 `started` 状态，终止 Python 进程并释放全局执行 permit。任意等待
+条件就绪后 supervisor 会重放源码；已经完成的分支与领域变更直接复用 journal
+结果。因此一个分支等待 HumanRequest 时，后台 timer 仍可触发；并发分支先发布的
+Signal 也会在 replay 后恰好消费一次。
+
+`ctx.project.snapshot(...)` 只返回属于当前 Project 的、有界的持久状态；
+`publish_artifact(...)` 只接受文本，并由 effect path 派生 Artifact ID，因此 replay
+幂等。用户 Workflow 可以用这两个 effect 构建 Project 级视图，而不需要直接访问
+SQLite 或 host 文件。
+
 Control message 是异步的：
 
 | Control | 精确语义 |
@@ -331,6 +344,13 @@ call ID；恢复会复用 completed Tool Step 的真实输出，而进程消失�
 Step 会得到明确的 execution-unknown restart 结果。runtime 还会取消已经失去
 waiter 的 open human-tool request，然后从下一次 model sample 继续。workflow 级
 `ask_human` 本身是 journaled effect，因此会继续等待同一个确定性 HumanRequest。
+
+human、timer 与 signal wait 还支持不保留进程的挂起。Python effect client 会跟踪
+所有 pending future；只有全部 pending effect 都是可 replay wait 时才请求 runtime
+suspension。这个 quiescence 规则避免较早出现的 human wait 取消仍在运行的并发
+Agent action 或 Signal publisher。恢复时，open direct HumanRequest、active timer 与
+started signal wait 会重建唤醒条件。休眠时间不占 scheduler permit；每一段真正运行
+的 replay 仍会累计持久化 wall-time usage。
 
 两个 effect 之间的纯 Python 计算可能再次执行。对于同一源码快照和输入，作者
 必须保持 effect 序列确定；时间、随机数或其他非确定性不能让已经占用的逻辑路径

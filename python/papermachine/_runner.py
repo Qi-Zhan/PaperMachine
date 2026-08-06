@@ -18,23 +18,47 @@ class EffectClient:
     def __init__(self, reader: asyncio.StreamReader) -> None:
         self.reader = reader
         self.pending: dict[str, asyncio.Future[Any]] = {}
+        self.pending_kinds: dict[str, str] = {}
+        self.suspended: set[str] = set()
+        self.suspend_requested = False
         self.write_lock = asyncio.Lock()
+
+    async def write(self, message: dict[str, Any]) -> None:
+        async with self.write_lock:
+            _protocol_stdout.write(
+                json.dumps(message, separators=(",", ":")) + "\n"
+            )
+            _protocol_stdout.flush()
 
     async def send(self, effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         if effect_id in self.pending:
             raise RuntimeError(f"effect is already pending: {effect_id}")
         self.pending[effect_id] = future
-        async with self.write_lock:
-            _protocol_stdout.write(
-                json.dumps(
-                    {"id": effect_id, "kind": kind, "payload": payload},
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-            _protocol_stdout.flush()
+        self.pending_kinds[effect_id] = kind
+        self.suspended.discard(effect_id)
+        await self.write({"id": effect_id, "kind": kind, "payload": payload})
         return await future
+
+    async def request_suspension_if_quiescent(self) -> None:
+        # Let every runnable coroutine consume its latest normal response and
+        # emit its next durable effect before declaring the replayable Python
+        # program quiescent.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if (
+            not self.suspend_requested
+            and self.pending
+            and self.suspended.issuperset(self.pending)
+        ):
+            self.suspend_requested = True
+            await self.write(
+                {
+                    "id": "runtime:suspend",
+                    "kind": "runtime_suspend",
+                    "payload": {},
+                }
+            )
 
     async def read_responses(self) -> None:
         while True:
@@ -42,15 +66,25 @@ class EffectClient:
             if not line:
                 raise RuntimeError("Rust workflow runtime closed the protocol stream")
             response = json.loads(line)
-            future = self.pending.pop(str(response["id"]), None)
+            effect_id = str(response["id"])
+            future = self.pending.get(effect_id)
             if future is None or future.done():
                 continue
+            if response.get("suspended") is not None:
+                self.suspended.add(effect_id)
+                await self.request_suspension_if_quiescent()
+                continue
+            self.pending.pop(effect_id, None)
+            effect_kind = self.pending_kinds.pop(effect_id, "")
+            self.suspended.discard(effect_id)
             if response.get("ok"):
                 future.set_result(response.get("result"))
             else:
                 future.set_exception(
                     RuntimeError(str(response.get("error", "effect failed")))
                 )
+            if effect_kind != "complete":
+                await self.request_suspension_if_quiescent()
 
 
 def load_workflow(source_path: Path, entrypoint: str):

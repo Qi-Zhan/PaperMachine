@@ -91,7 +91,10 @@ must be Python literals.
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 | `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
 
-The runtime provides `ctx.objective`, `ctx.input`, and `ctx.workflow_id`.
+The runtime provides `ctx.objective`, `ctx.input`, `ctx.workflow_id`, and
+`ctx.project`. `await ctx.project.snapshot(...)` returns a bounded, structured
+view of the Project's durable Sessions, Turns, Workflow results, and Artifact
+metadata; it excludes summary runs themselves to avoid recursive summaries.
 
 ## DSL surface
 
@@ -113,6 +116,9 @@ The runtime provides `ctx.objective`, `ctx.input`, and `ctx.workflow_id`.
 | `action(message: HumanMessage)` | Creates a true user-origin Turn only after Rust verifies that the text exactly matches the referenced answered HumanRequest; the action prompt becomes a Workflow prompt layer. |
 | `background(awaitable)` | Starts concurrent workflow work and returns a joinable handle. |
 | `@every(seconds=..., policy=...)` | Starts a periodic callback backed by a durable timer record. |
+| `await wait(seconds=... / minutes=...)` | Suspends one branch until a named durable timer fires. |
+| `await ctx.project.snapshot(...)` | Reads bounded Project-owned research state through Rust; Python never opens the database directly. |
+| `await publish_artifact(...)` | Publishes a deterministic text Artifact, optionally associated with an Agent Session. |
 
 Ordinary Python `if`, `for`, `while`, functions, collections, and exceptions
 remain the workflow control language. Arbitrary imports, filesystem/network
@@ -134,6 +140,14 @@ The built-in `interactive-agent` is the reference conversational program. It
 uses an ordinary `while` loop: `ask_human(..., agent=agent)`, then
 `await agent.respond(message)`. The New Session UI starts this Workflow through
 the same Project Workflow API used for every other program.
+
+The built-in `project-summary` is the reference background program. It reads
+`ctx.project.snapshot()`, asks one persistent summary Agent to render a
+self-contained HTML report, publishes it as an Artifact, and optionally calls
+`wait(minutes=...)` before repeating. Its reviewed Agent prompt lives in source;
+the Project Page exposes the run's user-controlled Workflow system prompt and
+timer interval. A scheduled summary is therefore an ordinary durable Workflow,
+not a second "instance" entity or a hidden Project daemon.
 
 ## Effect protocol
 
@@ -157,7 +171,8 @@ create_agent      set_agent_access   retire_agent       invoke_action
 create_team       set_team_members    set_relation
 open_scope        close_scope         register_timer
 wait_timer        create_channel      publish_signal
-wait_signal       ask_human           complete
+wait_signal       ask_human           project_snapshot
+publish_artifact  complete
 ```
 
 Rust rejects unknown effects and malformed or cross-run IDs. On process
@@ -167,6 +182,14 @@ redispatched to deterministic domain-resource IDs. Unfinished Agent actions
 resume the same checkpointed Turn rather than sampling their first model step
 again.
 
+When every live Python branch is waiting on replayable effects such as
+`ask_human`, `wait_timer`, or `wait_signal`, the runner reports a quiescent
+suspension. Rust leaves those effects `started`, terminates the Python process,
+and releases the global run permit. A human answer, due timer, or matching
+Signal makes the Workflow runnable; source replay then completes whichever
+effect became ready. This allows many long-lived Workflows without reserving a
+Python process or execution permit for each idle wait.
+
 ## Concurrency and timers
 
 `together` is explicit concurrency. A run-level semaphore enforces
@@ -175,10 +198,11 @@ two Turns concurrently. The output tuple preserves argument order, independent
 of completion order.
 
 Timers use `coalesce`, `skip`, or `queue` policy metadata and persist fire count,
-next fire time, and last fire time. The current single-process scheduler executes
-one callback per `wait_timer` response; complete backlog semantics for all three
-policies are not yet distinct. Periodic work is cancelled when the workflow
-entrypoint exits, and active timer records become completed.
+next fire time, and last fire time. Dormant timer waits are scheduler wakeups,
+not sleeping Python processes. One callback runs per `wait_timer` response;
+complete backlog semantics for all three policies are not yet distinct.
+Periodic work is cancelled when the workflow entrypoint exits, and active timer
+records become completed.
 
 ## Catalog and publication
 
@@ -195,5 +219,6 @@ the editable source; already-created Workflows keep their original source snapsh
 
 The Workflow page uses the validator's AST summary to show Agent classes,
 actions, parallel blocks, Teams, relations, scopes, channels, timers, background
-tasks, human checkpoints, and diagnostics. Source remains available under
+tasks, human checkpoints, Project snapshots, Artifact publication, and
+diagnostics. Source remains available under
 Advanced source for precise review and edits.

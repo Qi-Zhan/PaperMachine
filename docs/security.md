@@ -27,6 +27,13 @@ The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, budgets, and Session serialization before applying them.
 
+`ctx.project.snapshot()` is a Rust-owned read effect, not database access from
+Python. It is fixed to the current Workflow's Project, excludes summary runs to
+avoid recursive ingestion, caps collection counts and per-Turn text, and omits
+provider reasoning and credentials. `publish_artifact(...)` accepts bounded
+text only, derives a deterministic Artifact ID from the Workflow/effect path,
+and verifies optional Agent ownership.
+
 Python also cannot label arbitrary action text as a human message. A
 user-origin workflow Action must name an answered direct HumanRequest and its
 annotated `HumanMessage` argument. Rust verifies Workflow/Session ownership,
@@ -36,6 +43,12 @@ Turn; the ActionInvocation retains the source HumanRequest ID for inspection.
 Saving the same Project-local slug replaces the editable program source. Every
 Workflow stores an immutable snapshot of the exact source and SHA-256 it started
 with, so later edits cannot change execution history.
+
+Generated project-summary HTML is untrusted model output. It is served with
+`nosniff` and a restrictive CSP (`sandbox`, no default network/source access,
+inline style and data images only), and the Project Page embeds it in an iframe
+with an empty sandbox permission set. It is never injected into the parent Vue
+DOM.
 
 ## Agent tools
 

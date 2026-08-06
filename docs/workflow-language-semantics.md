@@ -246,6 +246,22 @@ The response schema is stored with the request. The HTTP API validates an
 answer before resolution. While at least one request is open,
 `Workflow.attention_required` is true.
 
+`await wait(...)`, `Channel.receive()`, and workflow-level `ask_human(...)` are
+replayable suspension points. A branch first receives a suspended protocol
+acknowledgement rather than an exception. When every live Python branch is at
+such a point, the runner declares quiescence; Rust keeps each effect `started`,
+terminates the Python process, and releases the global execution permit. The
+supervisor wakes on any ready condition and replays source. Completed branches
+and domain mutations replay from their journaled results, so a timer may fire
+while another branch still has an open HumanRequest, and a Signal published by
+a concurrent branch is consumed exactly once after replay.
+
+`ctx.project.snapshot(...)` returns only bounded durable state owned by the
+current Project. `publish_artifact(...)` accepts text, derives its Artifact ID
+from the effect path, and is idempotent under replay. These effects let ordinary
+user Workflows build Project-level views without direct SQLite or host-file
+access.
+
 Control messages are asynchronous:
 
 | Control | Exact semantics |
@@ -363,6 +379,15 @@ disappeared becomes an explicit execution-unknown restart output. It also
 cancels a stale open human-tool request and resumes at the next sample. A direct
 workflow-level `ask_human` effect is itself journaled and continues waiting on
 its deterministic HumanRequest.
+
+Human, timer, and signal waits additionally support process-free suspension.
+The Python effect client tracks all pending futures; only when every pending
+effect is a replayable wait does it request runtime suspension. This quiescence
+rule prevents an early human wait from cancelling a concurrent Agent action or
+Signal publisher. On recovery, open direct HumanRequests, active timers, and
+started signal waits reconstruct the wake conditions. Dormant time is not a
+held scheduler permit; each active replay segment still contributes persisted
+wall-time usage.
 
 Pure Python computation between effects may execute again. Authors must keep
 the effect sequence deterministic for the same source snapshot and input; wall

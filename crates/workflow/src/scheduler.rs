@@ -1,11 +1,19 @@
 use async_trait::async_trait;
+use chrono::DateTime;
+use chrono::Utc;
 use papermachine_protocol::BudgetUsage;
+use papermachine_protocol::ChannelId;
+use papermachine_protocol::HumanRequestStatus;
+use papermachine_protocol::TimerStatus;
+use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkflowStatus;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -17,13 +25,31 @@ use tokio_util::sync::CancellationToken;
 
 pub type WorkflowOutcome = Result<Value, String>;
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WorkflowSuspension {
+    pub status: WorkflowStatus,
+    pub wake_at: Option<DateTime<Utc>>,
+}
+
+impl WorkflowSuspension {
+    pub const fn new(status: WorkflowStatus, wake_at: Option<DateTime<Utc>>) -> Self {
+        Self { status, wake_at }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkflowExecution {
+    Completed(Value),
+    Suspended(WorkflowSuspension),
+}
+
 #[async_trait]
 pub trait WorkflowRuntime: Send + Sync {
     async fn execute(
         &self,
         workflow_id: WorkflowId,
         cancellation: CancellationToken,
-    ) -> WorkflowOutcome;
+    ) -> Result<WorkflowExecution, String>;
 }
 
 #[derive(Clone)]
@@ -181,85 +207,246 @@ async fn run_scheduled(
     workflow_id: WorkflowId,
     cancellation: CancellationToken,
 ) -> WorkflowOutcome {
-    let _permit = tokio::select! {
-        permit = Arc::clone(&inner.permits).acquire_owned() => permit.map_err(|error| error.to_string())?,
-        _ = cancellation.cancelled() => return Err("cancelled before execution started".to_string()),
-    };
-    let run = inner
-        .store
-        .get_workflow(workflow_id)
-        .map_err(|error| error.to_string())?;
-    if run.status == WorkflowStatus::Created {
-        inner
+    let mut wake_at_hint = None;
+    loop {
+        let current = inner
             .store
-            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+            .get_workflow(workflow_id)
             .map_err(|error| error.to_string())?;
-    }
-    let started = Instant::now();
-    let execution = cancellation.child_token();
-    let result = match run.budget.max_wall_time_seconds {
-        Some(limit) if run.usage.wall_time_seconds >= limit => Err(format!(
-            "wall-time budget exhausted: used {} of {limit} seconds",
-            run.usage.wall_time_seconds
-        )),
-        Some(limit) => {
-            let remaining = limit.saturating_sub(run.usage.wall_time_seconds);
-            tokio::select! {
-                result = inner.executor.execute(workflow_id, execution.clone()) => result,
-                _ = tokio::time::sleep(Duration::from_secs(remaining)) => {
-                    execution.cancel();
-                    Err(format!("wall-time budget exceeded after {limit} seconds"))
-                }
-            }
+        if current.status.is_terminal() {
+            return current.output.ok_or_else(|| {
+                current
+                    .error
+                    .unwrap_or_else(|| format!("Workflow ended as {:?}", current.status))
+            });
         }
-        None => inner.executor.execute(workflow_id, execution).await,
-    };
-    let elapsed = started
-        .elapsed()
-        .as_secs()
-        .max(u64::from(!started.elapsed().is_zero()));
-    inner
-        .store
-        .add_budget_usage(
-            workflow_id,
-            BudgetUsage {
-                wall_time_seconds: elapsed,
-                ..BudgetUsage::default()
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    let current = inner
-        .store
-        .get_workflow(workflow_id)
-        .map_err(|error| error.to_string())?;
-    if cancellation.is_cancelled() {
-        if !current.status.is_terminal() {
-            inner
+        if !matches!(
+            current.status,
+            WorkflowStatus::Created | WorkflowStatus::Running
+        ) {
+            wait_until_runnable(
+                &inner.store,
+                workflow_id,
+                &cancellation,
+                wake_at_hint.take(),
+            )
+            .await?;
+            continue;
+        }
+
+        let permit = tokio::select! {
+            permit = Arc::clone(&inner.permits).acquire_owned() => permit.map_err(|error| error.to_string())?,
+            _ = cancellation.cancelled() => return Err("cancelled before execution started".to_string()),
+        };
+        let mut run = inner
+            .store
+            .get_workflow(workflow_id)
+            .map_err(|error| error.to_string())?;
+        if run.status == WorkflowStatus::Created {
+            run = inner
                 .store
-                .set_workflow_status(
-                    workflow_id,
-                    WorkflowStatus::Cancelled,
-                    Some("cancelled by user".to_string()),
-                )
+                .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
                 .map_err(|error| error.to_string())?;
         }
-    } else if !current.status.is_terminal() {
-        match &result {
-            Ok(output) => {
+        if run.status != WorkflowStatus::Running {
+            drop(permit);
+            continue;
+        }
+
+        let started = Instant::now();
+        let execution = cancellation.child_token();
+        let result = match run.budget.max_wall_time_seconds {
+            Some(limit) if run.usage.wall_time_seconds >= limit => Err(format!(
+                "wall-time budget exhausted: used {} of {limit} seconds",
+                run.usage.wall_time_seconds
+            )),
+            Some(limit) => {
+                let remaining = limit.saturating_sub(run.usage.wall_time_seconds);
+                tokio::select! {
+                    result = inner.executor.execute(workflow_id, execution.clone()) => result,
+                    _ = tokio::time::sleep(Duration::from_secs(remaining)) => {
+                        execution.cancel();
+                        Err(format!("wall-time budget exceeded after {limit} seconds"))
+                    }
+                }
+            }
+            None => inner.executor.execute(workflow_id, execution).await,
+        };
+        let elapsed = started
+            .elapsed()
+            .as_secs()
+            .max(u64::from(!started.elapsed().is_zero()));
+        inner
+            .store
+            .add_budget_usage(
+                workflow_id,
+                BudgetUsage {
+                    wall_time_seconds: elapsed,
+                    ..BudgetUsage::default()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(permit);
+
+        let current = inner
+            .store
+            .get_workflow(workflow_id)
+            .map_err(|error| error.to_string())?;
+        if cancellation.is_cancelled() {
+            if !current.status.is_terminal() {
+                inner
+                    .store
+                    .set_workflow_status(
+                        workflow_id,
+                        WorkflowStatus::Cancelled,
+                        Some("cancelled by user".to_string()),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            return Err("cancelled by user".to_string());
+        }
+        if current.status.is_terminal() {
+            continue;
+        }
+        match result {
+            Ok(WorkflowExecution::Completed(output)) => {
                 inner
                     .store
                     .complete_workflow(workflow_id, output.clone())
                     .map_err(|error| error.to_string())?;
+                return Ok(output);
+            }
+            Ok(WorkflowExecution::Suspended(suspension)) => {
+                if current.status != suspension.status {
+                    inner
+                        .store
+                        .set_workflow_status(workflow_id, suspension.status, None)
+                        .map_err(|error| error.to_string())?;
+                }
+                wake_at_hint = suspension.wake_at;
             }
             Err(error) => {
                 inner
                     .store
                     .set_workflow_status(workflow_id, WorkflowStatus::Failed, Some(error.clone()))
                     .map_err(|store_error| store_error.to_string())?;
+                return Err(error);
             }
         }
     }
-    result
+}
+
+async fn wait_until_runnable(
+    store: &Store,
+    workflow_id: WorkflowId,
+    cancellation: &CancellationToken,
+    wake_at_hint: Option<DateTime<Utc>>,
+) -> Result<(), String> {
+    let mut events = store.subscribe();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err("cancelled while Workflow was suspended".to_string());
+        }
+        let run = store
+            .get_workflow(workflow_id)
+            .map_err(|error| error.to_string())?;
+        match run.status {
+            WorkflowStatus::Created | WorkflowStatus::Running => return Ok(()),
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
+                return Err(run
+                    .error
+                    .unwrap_or_else(|| format!("Workflow ended as {:?}", run.status)));
+            }
+            WorkflowStatus::Paused => {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was paused".to_string()),
+                    _ = events.recv() => {}
+                }
+            }
+            WorkflowStatus::WaitingForUser
+            | WorkflowStatus::WaitingForTimer
+            | WorkflowStatus::WaitingForSignal => {
+                let open_direct_human_request = store
+                    .list_human_requests(workflow_id)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .any(|request| {
+                        request.status == HumanRequestStatus::Open && request.turn_id.is_none()
+                    });
+                let next_timer = store
+                    .list_timers(workflow_id)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .filter(|timer| timer.status == TimerStatus::Active)
+                    .map(|timer| timer.next_fire_at)
+                    .chain(wake_at_hint.iter().cloned())
+                    .min();
+                let ready_signal = workflow_has_ready_signal(store, workflow_id)?;
+
+                if ready_signal
+                    || (run.status == WorkflowStatus::WaitingForUser && !open_direct_human_request)
+                {
+                    store
+                        .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                if let Some(next_fire_at) = next_timer {
+                    let wait = (next_fire_at - Utc::now()).to_std().unwrap_or_default();
+                    if wait.is_zero() {
+                        store
+                            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                            .map_err(|error| error.to_string())?;
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                        _ = tokio::time::sleep(wait) => {
+                            store
+                                .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                                .map_err(|error| error.to_string())?;
+                            return Ok(());
+                        }
+                        _ = events.recv() => {}
+                    }
+                } else {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                        _ = events.recv() => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn workflow_has_ready_signal(store: &Store, workflow_id: WorkflowId) -> Result<bool, String> {
+    for effect in store
+        .list_workflow_effects(workflow_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|effect| {
+            effect.kind == "wait_signal" && effect.status == WorkflowEffectStatus::Started
+        })
+    {
+        let Some(channel_id) = effect.payload.get("channel_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let channel_id = ChannelId::from_str(channel_id).map_err(|error| error.to_string())?;
+        let after_sequence = effect
+            .payload
+            .get("after_sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        if !store
+            .list_signals(channel_id, after_sequence)
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Error)]
@@ -289,10 +476,75 @@ mod tests {
     use papermachine_protocol::WorkflowProgramSnapshot;
     use papermachine_protocol::WorkflowProgramSource;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
 
     struct StaticExecutor {
         output: Value,
+    }
+
+    struct SuspendOnceExecutor {
+        suspend_once: HashSet<WorkflowId>,
+        suspended: StdMutex<HashSet<WorkflowId>>,
+    }
+
+    struct SignalWaitExecutor {
+        waiting: WorkflowId,
+        executions: StdMutex<HashMap<WorkflowId, usize>>,
+    }
+
+    #[async_trait]
+    impl WorkflowRuntime for SignalWaitExecutor {
+        async fn execute(
+            &self,
+            workflow_id: WorkflowId,
+            _cancellation: CancellationToken,
+        ) -> Result<WorkflowExecution, String> {
+            *self
+                .executions
+                .lock()
+                .map_err(|error| error.to_string())?
+                .entry(workflow_id)
+                .or_default() += 1;
+            if workflow_id == self.waiting {
+                Ok(WorkflowExecution::Suspended(WorkflowSuspension::new(
+                    WorkflowStatus::WaitingForSignal,
+                    None,
+                )))
+            } else {
+                Ok(WorkflowExecution::Completed(json!({
+                    "workflow_id": workflow_id
+                })))
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowRuntime for SuspendOnceExecutor {
+        async fn execute(
+            &self,
+            workflow_id: WorkflowId,
+            _cancellation: CancellationToken,
+        ) -> Result<WorkflowExecution, String> {
+            let should_suspend = self.suspend_once.contains(&workflow_id)
+                && self
+                    .suspended
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .insert(workflow_id);
+            if should_suspend {
+                Ok(WorkflowExecution::Suspended(WorkflowSuspension::new(
+                    WorkflowStatus::WaitingForTimer,
+                    Some(Utc::now() + chrono::Duration::hours(1)),
+                )))
+            } else {
+                Ok(WorkflowExecution::Completed(json!({
+                    "workflow_id": workflow_id
+                })))
+            }
+        }
     }
 
     #[async_trait]
@@ -301,8 +553,8 @@ mod tests {
             &self,
             _workflow_id: WorkflowId,
             _cancellation: CancellationToken,
-        ) -> WorkflowOutcome {
-            Ok(self.output.clone())
+        ) -> Result<WorkflowExecution, String> {
+            Ok(WorkflowExecution::Completed(self.output.clone()))
         }
     }
 
@@ -424,5 +676,145 @@ mod tests {
                 WorkflowStatus::Completed
             );
         }
+    }
+
+    #[tokio::test]
+    async fn suspended_workflow_releases_the_global_execution_permit() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store =
+            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let research = store
+            .create_project("Suspension", "", directory.path().join("project"))
+            .expect("research should be created");
+        let session = store
+            .create_session(research.id, "Origin", "", "test-model", Vec::new())
+            .expect("session should be created");
+        let suspended_run = create_test_workflow(&store, &session, "Suspend");
+        let other_run = create_test_workflow(&store, &session, "Other");
+        let scheduler = WorkflowScheduler::new(
+            Arc::clone(&store),
+            Arc::new(SuspendOnceExecutor {
+                suspend_once: HashSet::from([suspended_run.id]),
+                suspended: StdMutex::new(HashSet::new()),
+            }),
+            1,
+        );
+
+        scheduler
+            .start(suspended_run.id)
+            .await
+            .expect("suspending Workflow should start");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store
+                    .get_workflow(suspended_run.id)
+                    .expect("Workflow should load")
+                    .status
+                    == WorkflowStatus::WaitingForTimer
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Workflow should suspend");
+
+        scheduler
+            .start(other_run.id)
+            .await
+            .expect("other Workflow should start");
+        tokio::time::timeout(Duration::from_secs(5), scheduler.wait(other_run.id))
+            .await
+            .expect("other Workflow must not starve behind the suspended run")
+            .expect("other Workflow should remain scheduled")
+            .expect("other Workflow should complete");
+
+        store
+            .set_workflow_status(suspended_run.id, WorkflowStatus::Running, None)
+            .expect("suspended Workflow should be resumed");
+        tokio::time::timeout(Duration::from_secs(5), scheduler.wait(suspended_run.id))
+            .await
+            .expect("resumed Workflow should finish")
+            .expect("resumed Workflow should remain scheduled")
+            .expect("resumed Workflow should complete");
+    }
+
+    #[tokio::test]
+    async fn unrelated_workflow_events_do_not_replay_a_signal_waiter() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store =
+            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let research = store
+            .create_project("Signals", "", directory.path().join("project"))
+            .expect("research should be created");
+        let session = store
+            .create_session(research.id, "Origin", "", "test-model", Vec::new())
+            .expect("session should be created");
+        let waiting_run = create_test_workflow(&store, &session, "Wait for signal");
+        let other_run = create_test_workflow(&store, &session, "Unrelated work");
+        let executor = Arc::new(SignalWaitExecutor {
+            waiting: waiting_run.id,
+            executions: StdMutex::new(HashMap::new()),
+        });
+        let scheduler = WorkflowScheduler::new(
+            Arc::clone(&store),
+            Arc::clone(&executor) as Arc<dyn WorkflowRuntime>,
+            1,
+        );
+
+        scheduler
+            .start(waiting_run.id)
+            .await
+            .expect("signal waiter should start");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store
+                    .get_workflow(waiting_run.id)
+                    .expect("Workflow should load")
+                    .status
+                    == WorkflowStatus::WaitingForSignal
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Workflow should wait for a signal");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        scheduler
+            .start(other_run.id)
+            .await
+            .expect("unrelated Workflow should start");
+        scheduler
+            .wait(other_run.id)
+            .await
+            .expect("unrelated Workflow should remain scheduled")
+            .expect("unrelated Workflow should complete");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            executor
+                .executions
+                .lock()
+                .expect("execution counts should remain available")
+                .get(&waiting_run.id),
+            Some(&1),
+            "an unrelated Workflow event must not replay the signal waiter",
+        );
+
+        scheduler
+            .cancel(waiting_run.id)
+            .await
+            .expect("signal waiter should be cancellable");
+        assert!(
+            scheduler
+                .wait(waiting_run.id)
+                .await
+                .expect("cancelled Workflow should remain scheduled")
+                .is_err()
+        );
     }
 }

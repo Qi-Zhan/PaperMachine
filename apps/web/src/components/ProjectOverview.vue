@@ -45,6 +45,88 @@
         </dl>
       </section>
 
+      <section class="overview-section project-progress-panel">
+        <div class="project-progress-heading">
+          <div>
+            <p class="eyebrow">{{ t('project.summaryEyebrow') }}</p>
+            <h2>{{ t('project.summaryTitle') }}</h2>
+            <p>{{ t('project.summaryDescription') }}</p>
+          </div>
+          <div class="project-progress-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="summaryBusy"
+              @click="runSummary(0)"
+            >
+              <LoaderCircle v-if="summaryBusy" class="spin" :size="14" />
+              <RefreshCw v-else :size="14" />
+              {{ t('project.summaryRefreshNow') }}
+            </button>
+            <button
+              class="primary-button"
+              type="button"
+              :disabled="summaryBusy || summaryIntervalDraft <= 0"
+              @click="runSummary(summaryIntervalDraft)"
+            >
+              <Clock3 :size="14" />
+              {{ activeSummaryWorkflow ? t('project.summaryUpdateSchedule') : t('project.summaryStartSchedule') }}
+            </button>
+            <button
+              v-if="activeSummaryWorkflow"
+              class="text-command"
+              type="button"
+              :disabled="summaryBusy"
+              @click="$emit('stop-summary', activeSummaryWorkflow.id)"
+            >
+              {{ t('project.summaryStopSchedule') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="project-progress-config">
+          <label>
+            <span>{{ t('project.summaryInterval') }}</span>
+            <span class="summary-interval-input">
+              <input v-model.number="summaryIntervalDraft" type="number" min="0.1" step="0.1" />
+              <small>{{ t('project.minutes') }}</small>
+            </span>
+          </label>
+          <label class="summary-prompt-field">
+            <span>{{ t('project.summaryPrompt') }}</span>
+            <textarea
+              v-model="summaryPromptDraft"
+              class="text-area"
+              :placeholder="t('project.summaryPromptPlaceholder')"
+            />
+          </label>
+        </div>
+
+        <div v-if="latestSummaryArtifact" class="project-progress-frame">
+          <div class="project-progress-frame-meta">
+            <span>
+              <span class="status-pin" :data-status="activeSummaryWorkflow ? 'waiting_for_timer' : 'completed'" />
+              {{ t('project.summaryUpdated', { date: formatDateTime(latestSummaryArtifact.created_at) }) }}
+            </span>
+            <button class="text-command" type="button" @click="$emit('open-artifact', latestSummaryArtifact)">
+              {{ t('project.summaryOpenArtifact') }}
+            </button>
+          </div>
+          <iframe
+            :src="api.artifactUrl(latestSummaryArtifact)"
+            :title="t('project.summaryFrameTitle')"
+            sandbox=""
+          />
+        </div>
+        <div v-else class="project-progress-empty">
+          <FileText :size="20" />
+          <div>
+            <strong>{{ t('project.summaryEmptyTitle') }}</strong>
+            <p>{{ t('project.summaryEmptyDescription') }}</p>
+          </div>
+        </div>
+      </section>
+
       <section class="overview-section sessions-index">
         <div class="section-heading">
           <h2>{{ t('project.sessions') }}</h2>
@@ -189,11 +271,11 @@
       <section class="overview-section artifact-index">
         <div class="section-heading">
           <h2>{{ t('project.artifacts') }}</h2>
-          <span>{{ overview.artifacts.length }}</span>
+          <span>{{ researchArtifacts.length }}</span>
         </div>
-        <div v-if="overview.artifacts.length" class="artifact-grid">
+        <div v-if="researchArtifacts.length" class="artifact-grid">
           <button
-            v-for="artifact in overview.artifacts.slice(0, 12)"
+            v-for="artifact in researchArtifacts.slice(0, 12)"
             :key="artifact.id"
             type="button"
             @click="$emit('open-artifact', artifact)"
@@ -232,16 +314,24 @@ import {
   LoaderCircle,
   PanelLeft,
   Plus,
+  RefreshCw,
   Save,
   Sparkles,
+  Clock3,
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
+import { api } from '../api'
 import { formatDate, formatDateTime } from '../format'
 import { useAppI18n } from '../i18n'
 import type { Artifact, ProjectOverview, ProjectSkill, Workflow } from '../types'
 import StatusBadge from './StatusBadge.vue'
 
-const props = defineProps<{ overview: ProjectOverview; skills: ProjectSkill[]; promptBusy: boolean }>()
+const props = defineProps<{
+  overview: ProjectOverview
+  skills: ProjectSkill[]
+  promptBusy: boolean
+  summaryBusy: boolean
+}>()
 const { t } = useAppI18n()
 const emit = defineEmits<{
   'open-sidebar': []
@@ -250,17 +340,72 @@ const emit = defineEmits<{
   'select-session': [sessionId: string]
   'open-artifact': [artifact: Artifact]
   'update-system-prompt': [systemPrompt: string]
+  'run-summary': [input: { systemPrompt: string; intervalMinutes: number; replaceWorkflowId?: string }]
+  'stop-summary': [workflowId: string]
 }>()
+
+const defaultSummaryPrompt =
+  'Summarize the current research state for a project collaborator. Prioritize evidence-backed conclusions, active work, blockers, unresolved questions, and concrete next steps. Keep provenance visible and do not hide failed or inconclusive routes.'
 
 const projectPromptDraft = ref(props.overview.system_prompt.content)
 const projectPromptChanged = computed(
   () => projectPromptDraft.value !== props.overview.system_prompt.content,
+)
+const summaryWorkflows = computed(() =>
+  props.overview.workflows.filter((workflow) => workflow.program.manifest.slug === 'project-summary'),
+)
+const activeSummaryWorkflow = computed(() =>
+  summaryWorkflows.value.find(
+    (workflow) =>
+      !['completed', 'failed', 'cancelled'].includes(workflow.status) &&
+      Number(workflow.input.interval_minutes ?? 0) > 0,
+  ),
+)
+const summaryPromptWorkflow = computed(() => activeSummaryWorkflow.value ?? summaryWorkflows.value[0])
+const scheduledSummaryWorkflow = computed(
+  () =>
+    activeSummaryWorkflow.value ??
+    summaryWorkflows.value.find((workflow) => Number(workflow.input.interval_minutes ?? 0) > 0),
+)
+const summaryPromptDraft = ref(summaryPromptWorkflow.value?.system_prompt || defaultSummaryPrompt)
+const summaryIntervalDraft = ref(
+  Number(scheduledSummaryWorkflow.value?.input.interval_minutes ?? 60),
+)
+const latestSummaryArtifact = computed(() =>
+  props.overview.artifacts.find((artifact) => artifact.metadata.role === 'project_summary'),
+)
+const researchArtifacts = computed(() =>
+  props.overview.artifacts.filter((artifact) => artifact.metadata.role !== 'project_summary'),
 )
 
 watch(
   () => [props.overview.project.id, props.overview.system_prompt.content] as const,
   () => {
     projectPromptDraft.value = props.overview.system_prompt.content
+  },
+)
+
+watch(
+  () => [
+    props.overview.project.id,
+    summaryPromptWorkflow.value?.id,
+    summaryPromptWorkflow.value?.system_prompt,
+  ] as const,
+  () => {
+    summaryPromptDraft.value = summaryPromptWorkflow.value?.system_prompt || defaultSummaryPrompt
+  },
+)
+
+watch(
+  () => [
+    props.overview.project.id,
+    scheduledSummaryWorkflow.value?.id,
+    scheduledSummaryWorkflow.value?.input.interval_minutes,
+  ] as const,
+  () => {
+    summaryIntervalDraft.value = Number(
+      scheduledSummaryWorkflow.value?.input.interval_minutes ?? 60,
+    )
   },
 )
 
@@ -295,5 +440,14 @@ function workflowSessionId(workflow: Workflow): string | null {
 function openWorkflowSession(workflow: Workflow) {
   const sessionId = workflowSessionId(workflow)
   if (sessionId) emit('select-session', sessionId)
+}
+
+function runSummary(intervalMinutes: number) {
+  emit('run-summary', {
+    systemPrompt: summaryPromptDraft.value,
+    intervalMinutes,
+    replaceWorkflowId:
+      intervalMinutes > 0 ? activeSummaryWorkflow.value?.id : undefined,
+  })
 }
 </script>

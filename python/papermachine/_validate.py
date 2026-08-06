@@ -64,6 +64,8 @@ class Validator(ast.NodeVisitor):
             "timers": [],
             "human_checkpoints": 0,
             "background_tasks": 0,
+            "project_snapshots": 0,
+            "artifacts": 0,
         }
 
     def error(self, node: ast.AST, message: str) -> None:
@@ -116,6 +118,24 @@ class Validator(ast.NodeVisitor):
                 self.features["human_checkpoints"] += 1
             elif name == "background":
                 self.features["background_tasks"] += 1
+            elif name == "publish_artifact":
+                self.features["artifacts"] += 1
+            elif name == "wait":
+                values = literal_call_keywords(node)
+                seconds = values.get("seconds")
+                minutes = values.get("minutes")
+                interval = seconds if isinstance(seconds, (int, float)) else None
+                if interval is None and isinstance(minutes, (int, float)):
+                    interval = minutes * 60
+                self.features["timers"].append(
+                    {
+                        "callback": values.get("name", "wait"),
+                        "seconds": float(interval) if interval is not None else None,
+                        "policy": values.get("policy"),
+                    }
+                )
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "snapshot":
+            self.features["project_snapshots"] += 1
         self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:

@@ -44,7 +44,7 @@ Available API:
 - @action, @action("prompt"), or @action(max_steps=N, max_search_calls=M, search_context_size="low", reasoning_effort="high", max_output_tokens=K) on async Agent methods. The method body is declarative; its docstring/prompt and arguments become a Codex-like Session Turn. Use max_steps=1 for evaluators and synthesizers that must reason only over supplied evidence without calling tools. Give every research action a finite max_search_calls allowance and normally use low search context for bounded parallel routes. Assign lower reasoning effort and a bounded output ceiling to planning/routing actions, and reserve higher effort for evidence judgment and final synthesis.
 - Annotate an action with -> dict, -> list, -> bool, -> int, or -> float when workflow control flow needs parsed JSON rather than raw text.
 - @workflow(slug=..., name=..., description=..., input_schema={...}, output_schema={...}, budget={...}) on exactly one async main(ctx).
-- ctx.objective, ctx.input, ctx.workflow_id.
+- ctx.objective, ctx.input, ctx.workflow_id, and await ctx.project.snapshot(max_sessions=..., max_turns_per_session=..., max_artifacts=...) for a bounded view of existing Project research.
 - await together(a.action(...), b.action(...)) for explicit concurrency. Never put two actions from the same Agent in one together().
 - Team(name, *agents), await team.add(agent), await team.remove(agent), await agent.retire().
 - await relate(source, target, kind="reviews", instructions="...").
@@ -52,9 +52,11 @@ Available API:
 - Channel(name, schema={...}); await channel.publish(value, sender=agent); await channel.receive().
 - await ask_human(question, response_schema={...}, agent=optional_agent).
 - @every(seconds=..., policy="coalesce") on a nested async callback for periodic work.
+- await wait(seconds=... or minutes=..., name="...") for a sequential durable timer wait.
 - background(coroutine) returns a handle with await handle.join().
+- await publish_artifact(name, text, kind="report", media_type="text/html; charset=utf-8", metadata={...}, agent=optional_agent) for durable text output. Generated HTML must be self-contained and script-free.
 
-Use ordinary Python if/for/while for long-running control logic. All imports must be a single `from papermachine import ...` statement. Do not import or access files, network, subprocesses, environment variables, reflection, MCP, plugins, or external libraries. Every Agent class must declare one access profile: `model_only`, `read_only`, `workspace`, `research`, or `full_access`. Use `research` only for Agents that gather external evidence, `model_only` for evaluators and writers that should use supplied evidence, and request `full_access` only when the user's description truly requires unrestricted host access because it pauses for explicit human approval. Prefer 2-4 clearly related Agent classes and keep the program understandable to a researcher editing it."#;
+Use ordinary Python if/for/while for long-running control logic. Human, timer, and Channel waits are durable and may coexist in background branches; the runtime releases idle Python processes only after every branch reaches a replayable wait. All imports must be a single `from papermachine import ...` statement. Do not import or access files, network, subprocesses, environment variables, reflection, MCP, plugins, or external libraries. Every Agent class must declare one access profile: `model_only`, `read_only`, `workspace`, `research`, or `full_access`. Use `research` only for Agents that gather external evidence, `model_only` for evaluators and writers that should use supplied evidence, and request `full_access` only when the user's description truly requires unrestricted host access because it pauses for explicit human approval. Prefer 2-4 clearly related Agent classes and keep the program understandable to a researcher editing it."#;
         let prompt = format!(
             "Create a workflow for this request:\n{description}\n\nRequested name: {}\nRequested slug: {}",
             request.name.as_deref().unwrap_or("choose a concise name"),

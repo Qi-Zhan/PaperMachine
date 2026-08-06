@@ -718,6 +718,49 @@ async def ask_human(
     return answer
 
 
+@dataclass(frozen=True)
+class ArtifactRef:
+    id: str
+    name: str
+    kind: str
+    media_type: str
+    size_bytes: int
+
+
+async def publish_artifact(
+    name: str,
+    content: str,
+    *,
+    kind: str = "other",
+    media_type: str = "text/plain; charset=utf-8",
+    metadata: dict[str, Any] | None = None,
+    agent: Agent | None = None,
+) -> ArtifactRef:
+    if not isinstance(content, str):
+        raise TypeError("publish_artifact() content must be text")
+    agent_id = None
+    if agent is not None:
+        agent_id = (await agent._ensure_remote())["agent_instance_id"]
+    result = await _effect(
+        "publish_artifact",
+        {
+            "name": name,
+            "content": content,
+            "kind": kind,
+            "media_type": media_type,
+            "metadata": metadata or {},
+            "agent_instance_id": agent_id,
+        },
+    )
+    return ArtifactRef(
+        id=str(result["artifact_id"]),
+        name=str(result["name"]),
+        kind=str(result["kind"]),
+        media_type=str(result["media_type"]),
+        size_bytes=int(result["size_bytes"]),
+    )
+
+
 class BackgroundTask(Generic[T]):
     def __init__(self, task: asyncio.Task[T]) -> None:
         self._task = task
@@ -803,11 +846,56 @@ def every(
     return decorate
 
 
+async def wait(
+    *,
+    seconds: float | None = None,
+    minutes: float | None = None,
+    policy: str = "coalesce",
+    name: str = "wait",
+) -> dict[str, Any]:
+    interval = seconds if seconds is not None else (minutes or 0) * 60
+    if interval <= 0:
+        raise ValueError("wait() requires a positive seconds or minutes interval")
+    if policy not in {"coalesce", "skip", "queue"}:
+        raise ValueError("timer policy must be coalesce, skip, or queue")
+    timer = await _effect(
+        "register_timer",
+        {
+            "name": name,
+            "interval_ms": max(1, int(interval * 1000)),
+            "policy": policy,
+        },
+    )
+    return await _effect("wait_timer", {"timer_id": timer["timer_id"]})
+
+
+class ProjectContext:
+    async def snapshot(
+        self,
+        *,
+        max_sessions: int = 50,
+        max_turns_per_session: int = 12,
+        max_artifacts: int = 50,
+    ) -> dict[str, Any]:
+        return await _effect(
+            "project_snapshot",
+            {
+                "max_sessions": max_sessions,
+                "max_turns_per_session": max_turns_per_session,
+                "max_artifacts": max_artifacts,
+            },
+        )
+
+
 @dataclass(frozen=True)
 class WorkflowContext:
     objective: str
     input: dict[str, Any]
     workflow_id: str
+
+    @property
+    def project(self) -> ProjectContext:
+        return ProjectContext()
 
 
 class _Runtime:
@@ -846,9 +934,11 @@ async def _effect(
 
 __all__ = [
     "Agent",
+    "ArtifactRef",
     "BackgroundTask",
     "Channel",
     "HumanMessage",
+    "ProjectContext",
     "Team",
     "TimerHandle",
     "WorkflowContext",
@@ -856,8 +946,10 @@ __all__ = [
     "ask_human",
     "background",
     "every",
+    "publish_artifact",
     "relate",
     "scope",
     "together",
+    "wait",
     "workflow",
 ]

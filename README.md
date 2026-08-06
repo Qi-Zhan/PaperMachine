@@ -16,6 +16,13 @@ Workflow. That program creates one persistent Agent Session, waits for a human
 message before every Turn, and can be inspected, cancelled, or continued like
 any other Workflow. There is no separate standalone-Session creation path.
 
+The **Project Page** can run the reviewed `project-summary` Workflow once or on
+a configurable durable timer. Its summary Agent reads a bounded snapshot of
+existing Project Sessions, Workflow results, and Artifact metadata, then
+publishes an immutable HTML progress report that the UI embeds in a sandboxed
+frame. The visible summary prompt is the run's ordinary Workflow system prompt;
+there is no hidden summary daemon or extra instance model.
+
 ```text
 Project
   Sessions
@@ -89,6 +96,13 @@ one Project.
   own Session Turns.
 - Add Agents dynamically; define Teams, directed relations, task scopes,
   channels/signals, background tasks, and durable timer records.
+- Suspend quiescent human/timer/signal waits without retaining an idle Python
+  process or global execution permit; replay wakes on an answer, due timer, or
+  durable Signal, including concurrent background-timer plus human-wait flows.
+- Read bounded Project state from Workflow code with `ctx.project.snapshot()`
+  and publish deterministic text/HTML Artifacts with `publish_artifact(...)`.
+- Generate a Project progress webpage manually or with the built-in scheduled
+  `project-summary` Workflow, with an explicit user-editable Workflow prompt.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
   interrupt an attempt; or let workflow/model code request typed human input.
 - Recover every non-terminal Workflow after a server restart by replaying its

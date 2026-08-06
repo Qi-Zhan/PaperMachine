@@ -95,12 +95,15 @@
         :overview="projectOverview"
         :skills="projectSkills"
         :prompt-busy="promptBusy"
+        :summary-busy="summaryBusy"
         @open-sidebar="mobileSidebarOpen = true"
         @new-session="openSessionDialog(projectOverview.project.id)"
         @new-skill="skillDialogOpen = true"
         @select-session="selectSession"
         @open-artifact="selectedArtifact = $event"
         @update-system-prompt="updateProjectSystemPrompt"
+        @run-summary="runProjectSummary"
+        @stop-summary="stopProjectSummary"
       />
 
       <div v-else class="full-loading"><LoaderCircle class="spin" :size="18" /></div>
@@ -215,6 +218,7 @@ const dialogBusy = ref(false)
 const skillsBusy = ref(false)
 const accessBusy = ref(false)
 const promptBusy = ref(false)
+const summaryBusy = ref(false)
 const projectDialogOpen = ref(false)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
@@ -308,6 +312,7 @@ async function selectProject(projectId: string): Promise<boolean> {
     if (selectedProjectId.value === projectId && !selectedSessionId.value) {
       projectOverview.value = overview
       writeRoute('project', projectId)
+      syncProjectPoll()
     }
     return true
   } catch (error) {
@@ -420,6 +425,46 @@ function syncPoll() {
     pollTimer = null
     if (selectedSessionId.value === sessionId) await refreshSession(sessionId)
   }, 900)
+}
+
+function syncProjectPoll() {
+  clearPoll()
+  const overview = projectOverview.value
+  if (!overview || selectedSessionId.value || workflowLibraryOpen.value) return
+  const delay = projectPollDelay(overview)
+  if (delay === null) return
+  const projectId = overview.project.id
+  pollTimer = window.setTimeout(async () => {
+    pollTimer = null
+    if (
+      selectedProjectId.value !== projectId ||
+      selectedSessionId.value ||
+      workflowLibraryOpen.value
+    ) return
+    try {
+      await refreshProjectIndex(projectId)
+    } catch (error) {
+      globalError.value = messageOf(error)
+    }
+    if (selectedProjectId.value === projectId && !selectedSessionId.value) syncProjectPoll()
+  }, delay)
+}
+
+function projectPollDelay(overview: ProjectOverviewType): number | null {
+  const active = overview.workflows.filter(
+    (workflow) => !['completed', 'failed', 'cancelled'].includes(workflow.status),
+  )
+  if (!active.length) return null
+  if (active.some((workflow) => ['created', 'running'].includes(workflow.status))) return 900
+  const timerIntervals = active
+    .filter((workflow) => workflow.status === 'waiting_for_timer')
+    .map((workflow) => Number(workflow.input.interval_minutes ?? 0))
+    .filter((minutes) => Number.isFinite(minutes) && minutes > 0)
+  if (timerIntervals.length) {
+    const shortestIntervalMs = Math.min(...timerIntervals) * 60_000
+    return Math.min(30_000, Math.max(1_000, shortestIntervalMs / 2))
+  }
+  return 5_000
 }
 
 function hasActiveWork(view: SessionView): boolean {
@@ -695,6 +740,78 @@ async function updateProjectSystemPrompt(systemPrompt: string) {
   } finally {
     promptBusy.value = false
   }
+}
+
+async function runProjectSummary(input: {
+  systemPrompt: string
+  intervalMinutes: number
+  replaceWorkflowId?: string
+}) {
+  const overview = projectOverview.value
+  if (!overview || summaryBusy.value) return
+  summaryBusy.value = true
+  globalError.value = ''
+  try {
+    const workflow = await api.createWorkflow(overview.project.id, {
+      program_slug: 'project-summary',
+      objective:
+        input.intervalMinutes > 0
+          ? `Refresh the Project progress page every ${input.intervalMinutes} minutes.`
+          : 'Refresh the Project progress page now.',
+      system_prompt: input.systemPrompt.trim(),
+      input: {
+        interval_minutes: input.intervalMinutes,
+        max_sessions: 50,
+        turns_per_session: 12,
+        max_artifacts: 50,
+      },
+      model: '',
+      access: 'model_only',
+      enabled_skills: [],
+    })
+    if (input.replaceWorkflowId && input.replaceWorkflowId !== workflow.id) {
+      await api.cancelWorkflow(input.replaceWorkflowId)
+    }
+    await waitForProjectSummary(overview.project.id, workflow.id)
+  } catch (error) {
+    globalError.value = messageOf(error)
+  } finally {
+    summaryBusy.value = false
+  }
+}
+
+async function stopProjectSummary(workflowId: string) {
+  const overview = projectOverview.value
+  if (!overview || summaryBusy.value) return
+  summaryBusy.value = true
+  try {
+    await api.cancelWorkflow(workflowId)
+    await refreshProjectIndex(overview.project.id)
+    syncProjectPoll()
+  } catch (error) {
+    globalError.value = messageOf(error)
+  } finally {
+    summaryBusy.value = false
+  }
+}
+
+async function waitForProjectSummary(projectId: string, workflowId: string) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const overview = await refreshProjectIndex(projectId)
+    const workflow = overview.workflows.find((candidate) => candidate.id === workflowId)
+    const artifact = overview.artifacts.find(
+      (candidate) => candidate.workflow_id === workflowId && candidate.metadata.role === 'project_summary',
+    )
+    if (workflow?.status === 'failed' || workflow?.status === 'cancelled') {
+      throw new Error(workflow.error ?? workflow.status)
+    }
+    if (artifact && workflow && ['completed', 'waiting_for_timer'].includes(workflow.status)) {
+      syncProjectPoll()
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 500))
+  }
+  throw new Error(t('project.summaryTimeout'))
 }
 
 async function createSkill(input: { slug: string; name: string; description: string; instructions: string }) {

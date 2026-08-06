@@ -32,7 +32,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::WorkflowExecution;
 use crate::WorkflowRuntime;
+use crate::WorkflowSuspension;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
 
@@ -117,6 +119,7 @@ impl PythonWorkflowRuntime {
             )),
             agent_gates: Mutex::new(HashMap::new()),
             effect_gates: Mutex::new(HashMap::new()),
+            suspensions: Mutex::new(HashMap::new()),
             completion: Mutex::new(None),
         });
         let (responses_tx, mut responses_rx) = mpsc::unbounded_channel::<EffectResponse>();
@@ -159,6 +162,19 @@ impl PythonWorkflowRuntime {
                     break;
                 }
             };
+            if request.kind == "runtime_suspend" {
+                match context.aggregate_suspension().await {
+                    Ok(suspension) => {
+                        terminate_child(&mut child).await;
+                        protocol_error = Some(WorkflowRuntimeError::Suspended(suspension));
+                    }
+                    Err(error) => {
+                        terminate_child(&mut child).await;
+                        protocol_error = Some(error);
+                    }
+                }
+                break;
+            }
             let effect_context = Arc::clone(&context);
             let sender = responses_tx.clone();
             handlers.spawn(async move {
@@ -169,12 +185,21 @@ impl PythonWorkflowRuntime {
                         ok: true,
                         result: Some(result),
                         error: None,
+                        suspended: None,
+                    },
+                    Err(WorkflowRuntimeError::Suspended(suspension)) => EffectResponse {
+                        id,
+                        ok: false,
+                        result: None,
+                        error: None,
+                        suspended: Some(suspension),
                     },
                     Err(error) => EffectResponse {
                         id,
                         ok: false,
                         result: None,
                         error: Some(error.to_string()),
+                        suspended: None,
                     },
                 };
                 let _ = sender.send(response);
@@ -219,10 +244,14 @@ impl WorkflowRuntime for PythonWorkflowRuntime {
         &self,
         workflow_id: WorkflowId,
         cancellation: CancellationToken,
-    ) -> Result<Value, String> {
-        self.execute_inner(workflow_id, cancellation)
-            .await
-            .map_err(|error| error.to_string())
+    ) -> Result<WorkflowExecution, String> {
+        match self.execute_inner(workflow_id, cancellation).await {
+            Ok(output) => Ok(WorkflowExecution::Completed(output)),
+            Err(WorkflowRuntimeError::Suspended(suspension)) => {
+                Ok(WorkflowExecution::Suspended(suspension))
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 
@@ -234,6 +263,7 @@ struct RunEffectContext {
     action_permits: Arc<Semaphore>,
     agent_gates: Mutex<HashMap<AgentInstanceId, Arc<Mutex<()>>>>,
     effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    suspensions: Mutex<HashMap<String, WorkflowSuspension>>,
     completion: Mutex<Option<Value>>,
 }
 
@@ -257,12 +287,14 @@ impl RunEffectContext {
         )?;
         match effect.status {
             WorkflowEffectStatus::Completed => {
+                self.suspensions.lock().await.remove(&request.id);
                 if request.kind == "complete" {
                     self.remember_completion(&request.payload).await?;
                 }
                 return Ok(effect.result.unwrap_or(Value::Null));
             }
             WorkflowEffectStatus::Failed => {
+                self.suspensions.lock().await.remove(&request.id);
                 return Err(WorkflowRuntimeError::ReplayedEffect {
                     key: request.id,
                     error: effect.error.unwrap_or_else(|| "effect failed".to_string()),
@@ -276,15 +308,60 @@ impl RunEffectContext {
             self.dispatch(&key, &request.kind, request.payload).await
         }
         .await;
-        self.store.finish_workflow_effect(
-            self.workflow_id,
-            &key,
-            result
-                .as_ref()
-                .map(Clone::clone)
-                .map_err(ToString::to_string),
-        )?;
+        if let Err(WorkflowRuntimeError::Suspended(suspension)) = &result {
+            self.suspensions
+                .lock()
+                .await
+                .insert(key.clone(), suspension.clone());
+        } else {
+            self.suspensions.lock().await.remove(&key);
+        }
+        if !matches!(
+            result,
+            Err(WorkflowRuntimeError::Suspended(_)
+                | WorkflowRuntimeError::Cancelled
+                | WorkflowRuntimeError::WorkflowTerminal(_))
+        ) {
+            self.store.finish_workflow_effect(
+                self.workflow_id,
+                &key,
+                result
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(ToString::to_string),
+            )?;
+        }
         result
+    }
+
+    async fn aggregate_suspension(&self) -> Result<WorkflowSuspension, WorkflowRuntimeError> {
+        let suspensions = self.suspensions.lock().await;
+        if suspensions.is_empty() {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Python runtime requested suspension without a pending durable wait".to_string(),
+            ));
+        }
+        let run = self.store.get_workflow(self.workflow_id)?;
+        let status = if run.status == WorkflowStatus::Paused {
+            WorkflowStatus::Paused
+        } else if suspensions
+            .values()
+            .any(|suspension| suspension.status == WorkflowStatus::WaitingForUser)
+        {
+            WorkflowStatus::WaitingForUser
+        } else if suspensions
+            .values()
+            .any(|suspension| suspension.status == WorkflowStatus::WaitingForTimer)
+        {
+            WorkflowStatus::WaitingForTimer
+        } else {
+            WorkflowStatus::WaitingForSignal
+        };
+        let wake_at = suspensions
+            .values()
+            .filter_map(|suspension| suspension.wake_at)
+            .min();
+        Ok(WorkflowSuspension::new(status, wake_at))
     }
 
     async fn dispatch(
@@ -309,6 +386,8 @@ impl RunEffectContext {
             "publish_signal" => self.publish_signal(effect_key, payload),
             "wait_signal" => self.wait_signal(payload).await,
             "ask_human" => self.ask_human(effect_key, payload).await,
+            "project_snapshot" => self.project_snapshot(payload),
+            "publish_artifact" => self.publish_artifact(effect_key, payload),
             "complete" => self.complete(payload).await,
             other => Err(WorkflowRuntimeError::Protocol(format!(
                 "unknown effect kind: {other}"
@@ -317,26 +396,20 @@ impl RunEffectContext {
     }
 
     async fn checkpoint(&self) -> Result<(), WorkflowRuntimeError> {
-        loop {
-            if self.cancellation.is_cancelled() {
-                return Err(WorkflowRuntimeError::Cancelled);
-            }
-            let run = self.store.get_workflow(self.workflow_id)?;
-            match run.status {
-                WorkflowStatus::Created | WorkflowStatus::Running => return Ok(()),
-                WorkflowStatus::Paused
-                | WorkflowStatus::WaitingForUser
-                | WorkflowStatus::WaitingForTimer
-                | WorkflowStatus::WaitingForSignal => {
-                    let mut events = self.store.subscribe();
-                    tokio::select! {
-                        _ = self.cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
-                        _ = events.recv() => {}
-                    }
-                }
-                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
-                    return Err(WorkflowRuntimeError::WorkflowTerminal(run.status));
-                }
+        if self.cancellation.is_cancelled() {
+            return Err(WorkflowRuntimeError::Cancelled);
+        }
+        let run = self.store.get_workflow(self.workflow_id)?;
+        match run.status {
+            WorkflowStatus::Created | WorkflowStatus::Running => Ok(()),
+            WorkflowStatus::Paused
+            | WorkflowStatus::WaitingForUser
+            | WorkflowStatus::WaitingForTimer
+            | WorkflowStatus::WaitingForSignal => Err(WorkflowRuntimeError::Suspended(
+                WorkflowSuspension::new(run.status, None),
+            )),
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
+                Err(WorkflowRuntimeError::WorkflowTerminal(run.status))
             }
         }
     }
@@ -383,13 +456,18 @@ impl RunEffectContext {
             ));
         }
         let current_access = self.store.get_session(participant.session_id)?.access;
-        if current_access < payload.access
-            && let Err(error) = self
+        if current_access < payload.access {
+            match self
                 .request_access_grant(effect_key, &participant, current_access, payload.access)
                 .await
-        {
-            let _ = self.store.retire_participant(participant.id);
-            return Err(error);
+            {
+                Ok(()) => {}
+                Err(error @ WorkflowRuntimeError::Suspended(_)) => return Err(error),
+                Err(error) => {
+                    let _ = self.store.retire_participant(participant.id);
+                    return Err(error);
+                }
+            }
         }
         let access = self.store.get_session(participant.session_id)?.access;
         Ok(json!({
@@ -459,7 +537,7 @@ impl RunEffectContext {
             }
             Err(error) => return Err(error.into()),
         };
-        let answer = wait_for_human(&self.store, request.id, &self.cancellation).await?;
+        let answer = human_answer_or_suspend(&self.store, request.id)?;
         if answer.as_bool() != Some(true) {
             return Err(WorkflowRuntimeError::Protocol(format!(
                 "human denied {requested} access for Agent {}",
@@ -899,30 +977,24 @@ impl RunEffectContext {
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let timer_id = id_field::<TimerId>(&payload, "timer_id")?;
-        loop {
-            self.checkpoint().await?;
-            let timer = self.store.get_timer(timer_id)?;
-            if timer.status != TimerStatus::Active {
-                return Err(WorkflowRuntimeError::Protocol(
-                    "timer is no longer active".to_string(),
-                ));
-            }
-            let wait = (timer.next_fire_at - Utc::now())
-                .to_std()
-                .unwrap_or_default();
-            if wait.is_zero() {
-                let fired = self.store.fire_timer_for_effect(timer_id, effect_key)?;
-                return Ok(
-                    json!({"fire_count": fired.fire_count, "fired_at": fired.last_fired_at}),
-                );
-            }
-            let mut events = self.store.subscribe();
-            tokio::select! {
-                _ = self.cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
-                _ = tokio::time::sleep(wait) => {},
-                _ = events.recv() => {},
-            }
+        self.checkpoint().await?;
+        let timer = self.store.get_timer(timer_id)?;
+        if timer.status != TimerStatus::Active {
+            return Err(WorkflowRuntimeError::Protocol(
+                "timer is no longer active".to_string(),
+            ));
         }
+        let wait = (timer.next_fire_at - Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        if wait.is_zero() {
+            let fired = self.store.fire_timer_for_effect(timer_id, effect_key)?;
+            return Ok(json!({"fire_count": fired.fire_count, "fired_at": fired.last_fired_at}));
+        }
+        Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
+            WorkflowStatus::WaitingForTimer,
+            Some(timer.next_fire_at),
+        )))
     }
 
     fn create_channel(
@@ -989,24 +1061,21 @@ impl RunEffectContext {
         let payload: WaitSignalEffect = serde_json::from_value(payload)?;
         let channel_id = ChannelId::from_str(&payload.channel_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        loop {
-            self.checkpoint().await?;
-            if let Some(signal) = self
-                .store
-                .list_signals(channel_id, payload.after_sequence)?
-                .into_iter()
-                .next()
-            {
-                return Ok(
-                    json!({"signal_id": signal.id, "sequence": signal.sequence, "value": signal.value}),
-                );
-            }
-            let mut events = self.store.subscribe();
-            tokio::select! {
-                _ = self.cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
-                _ = events.recv() => {},
-            }
+        self.checkpoint().await?;
+        if let Some(signal) = self
+            .store
+            .list_signals(channel_id, payload.after_sequence)?
+            .into_iter()
+            .next()
+        {
+            return Ok(
+                json!({"signal_id": signal.id, "sequence": signal.sequence, "value": signal.value}),
+            );
         }
+        Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
+            WorkflowStatus::WaitingForSignal,
+            None,
+        )))
     }
 
     async fn ask_human(
@@ -1057,8 +1126,213 @@ impl RunEffectContext {
             }
             Err(error) => return Err(error.into()),
         };
-        let answer = wait_for_human(&self.store, request.id, &self.cancellation).await?;
+        let answer = human_answer_or_suspend(&self.store, request.id)?;
         Ok(json!({"human_request_id": request.id, "answer": answer}))
+    }
+
+    fn project_snapshot(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+        let payload: ProjectSnapshotEffect = serde_json::from_value(payload)?;
+        let max_sessions = payload.max_sessions.clamp(1, 200);
+        let max_turns = payload.max_turns_per_session.clamp(1, 100);
+        let max_artifacts = payload.max_artifacts.clamp(1, 200);
+        let run = self.store.get_workflow(self.workflow_id)?;
+        let project = self.store.get_project(run.project_id)?;
+        let workflows = self.store.list_project_workflows(project.id)?;
+        let summary_workflow_ids = workflows
+            .iter()
+            .filter(|workflow| workflow.program.manifest.slug == "project-summary")
+            .map(|workflow| workflow.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut summary_session_ids = std::collections::HashSet::new();
+        for workflow_id in &summary_workflow_ids {
+            for participant in self.store.list_participants(*workflow_id)? {
+                summary_session_ids.insert(participant.session_id);
+            }
+        }
+
+        let sessions = self
+            .store
+            .list_sessions(project.id)?
+            .into_iter()
+            .filter(|session| !summary_session_ids.contains(&session.id))
+            .take(max_sessions)
+            .map(|session| {
+                let turns = self
+                    .store
+                    .list_turns(session.id)?
+                    .into_iter()
+                    .rev()
+                    .take(max_turns)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|turn| {
+                        let (input, input_truncated) = truncate_snapshot_text(&turn.input, 24_000);
+                        let (output, output_truncated) = turn
+                            .output
+                            .as_deref()
+                            .map(|value| truncate_snapshot_text(value, 48_000))
+                            .map_or((None, false), |(value, truncated)| (Some(value), truncated));
+                        json!({
+                            "id": turn.id,
+                            "origin": turn.origin,
+                            "status": turn.status,
+                            "input": input,
+                            "input_truncated": input_truncated,
+                            "output": output,
+                            "output_truncated": output_truncated,
+                            "updated_at": turn.updated_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, WorkflowRuntimeError>(json!({
+                    "id": session.id,
+                    "title": session.title,
+                    "origin": session.origin,
+                    "status": session.status,
+                    "updated_at": session.updated_at,
+                    "turns": turns,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let workflow_summaries = workflows
+            .into_iter()
+            .filter(|workflow| {
+                workflow.id != self.workflow_id
+                    && workflow.program.manifest.slug != "project-summary"
+            })
+            .take(200)
+            .map(|workflow| {
+                let output = workflow.output.as_ref().map(|value| {
+                    let serialized = serde_json::to_string(value).unwrap_or_default();
+                    let (content, truncated) = truncate_snapshot_text(&serialized, 48_000);
+                    json!({"json": content, "truncated": truncated})
+                });
+                json!({
+                    "id": workflow.id,
+                    "program": workflow.program.manifest.name,
+                    "program_slug": workflow.program.manifest.slug,
+                    "objective": workflow.objective,
+                    "status": workflow.status,
+                    "attention_required": workflow.attention_required,
+                    "output": output,
+                    "error": workflow.error,
+                    "updated_at": workflow.updated_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        let artifacts = self
+            .store
+            .list_project_artifacts(project.id)?
+            .into_iter()
+            .filter(|artifact| {
+                artifact.metadata.get("role").and_then(Value::as_str) != Some("project_summary")
+            })
+            .take(max_artifacts)
+            .map(|artifact| {
+                json!({
+                    "id": artifact.id,
+                    "workflow_id": artifact.workflow_id,
+                    "session_id": artifact.session_id,
+                    "kind": artifact.kind,
+                    "name": artifact.name,
+                    "media_type": artifact.media_type,
+                    "metadata": artifact.metadata,
+                    "created_at": artifact.created_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "captured_at": Utc::now(),
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+            },
+            "sessions": sessions,
+            "workflows": workflow_summaries,
+            "artifacts": artifacts,
+        }))
+    }
+
+    fn publish_artifact(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
+        let payload: PublishArtifactEffect = serde_json::from_value(payload)?;
+        let name = payload.name.trim();
+        if name.is_empty() {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Artifact name must not be empty".to_string(),
+            ));
+        }
+        if payload.content.len() > 4 * 1024 * 1024 {
+            return Err(WorkflowRuntimeError::Protocol(
+                "text Artifact content exceeds the 4 MiB Workflow limit".to_string(),
+            ));
+        }
+        if payload.content.contains('\0') {
+            return Err(WorkflowRuntimeError::Protocol(
+                "text Artifact content must not contain NUL bytes".to_string(),
+            ));
+        }
+        let kind = parse_artifact_kind(&payload.kind)?;
+        let workflow = self.store.get_workflow(self.workflow_id)?;
+        let session_id = payload
+            .agent_instance_id
+            .as_deref()
+            .map(AgentInstanceId::from_str)
+            .transpose()
+            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
+            .map(|agent_id| self.store.get_participant(agent_id))
+            .transpose()?
+            .map(|participant| {
+                if participant.workflow_id != self.workflow_id {
+                    Err(WorkflowRuntimeError::Protocol(
+                        "Artifact Agent belongs to another Workflow".to_string(),
+                    ))
+                } else {
+                    Ok(participant.session_id)
+                }
+            })
+            .transpose()?;
+        let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
+            self.workflow_id,
+            effect_key,
+            "artifact",
+        ));
+        let artifact = match self.store.get_artifact(artifact_id) {
+            Ok(artifact) => artifact,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_artifact_with_id(
+                    artifact_id,
+                    workflow.project_id,
+                    self.workflow_id,
+                    session_id,
+                    None,
+                    kind,
+                    name,
+                    payload.media_type,
+                    payload.metadata,
+                    payload.content.as_bytes(),
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if artifact.workflow_id != self.workflow_id || artifact.name != name {
+            return Err(WorkflowRuntimeError::Protocol(
+                "replayed Artifact has different Workflow or name".to_string(),
+            ));
+        }
+        Ok(json!({
+            "artifact_id": artifact.id,
+            "name": artifact.name,
+            "kind": artifact.kind,
+            "media_type": artifact.media_type,
+            "size_bytes": artifact.size_bytes,
+        }))
     }
 
     async fn complete(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
@@ -1122,6 +1396,21 @@ impl HumanRequestBroker for StoreHumanRequestBroker {
                 WorkflowRuntimeError::Cancelled => ToolError::Cancelled,
                 other => ToolError::Execution(other.to_string()),
             })
+    }
+}
+
+fn human_answer_or_suspend(
+    store: &Store,
+    request_id: HumanRequestId,
+) -> Result<Value, WorkflowRuntimeError> {
+    let request = store.get_human_request(request_id)?;
+    match request.status {
+        HumanRequestStatus::Answered => Ok(request.answer.unwrap_or(Value::Null)),
+        HumanRequestStatus::Cancelled => Err(WorkflowRuntimeError::Cancelled),
+        HumanRequestStatus::Open => Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
+            WorkflowStatus::WaitingForUser,
+            None,
+        ))),
     }
 }
 
@@ -1484,6 +1773,7 @@ struct EffectResponse {
     ok: bool,
     result: Option<Value>,
     error: Option<String>,
+    suspended: Option<WorkflowSuspension>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1600,6 +1890,66 @@ struct AskHumanEffect {
     agent_instance_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectSnapshotEffect {
+    #[serde(default = "default_snapshot_sessions")]
+    max_sessions: usize,
+    #[serde(default = "default_snapshot_turns")]
+    max_turns_per_session: usize,
+    #[serde(default = "default_snapshot_artifacts")]
+    max_artifacts: usize,
+}
+
+const fn default_snapshot_sessions() -> usize {
+    50
+}
+
+const fn default_snapshot_turns() -> usize {
+    12
+}
+
+const fn default_snapshot_artifacts() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishArtifactEffect {
+    name: String,
+    content: String,
+    kind: String,
+    media_type: String,
+    #[serde(default)]
+    metadata: Value,
+    agent_instance_id: Option<String>,
+}
+
+fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, WorkflowRuntimeError> {
+    match value {
+        "paper" => Ok(ArtifactKind::Paper),
+        "source" => Ok(ArtifactKind::Source),
+        "code" => Ok(ArtifactKind::Code),
+        "dataset" => Ok(ArtifactKind::Dataset),
+        "experiment" => Ok(ArtifactKind::Experiment),
+        "log" => Ok(ArtifactKind::Log),
+        "figure" => Ok(ArtifactKind::Figure),
+        "report" => Ok(ArtifactKind::Report),
+        "metric" => Ok(ArtifactKind::Metric),
+        "other" => Ok(ArtifactKind::Other),
+        other => Err(WorkflowRuntimeError::Protocol(format!(
+            "invalid Artifact kind: {other}"
+        ))),
+    }
+}
+
+fn truncate_snapshot_text(value: &str, max_chars: usize) -> (String, bool) {
+    let Some((byte_index, _)) = value.char_indices().nth(max_chars) else {
+        return (value.to_string(), false);
+    };
+    let mut truncated = value[..byte_index].to_string();
+    truncated.push_str("\n\n[Truncated by PaperMachine project snapshot]");
+    (truncated, true)
+}
+
 struct LimitedText {
     text: String,
     truncated: bool,
@@ -1631,6 +1981,8 @@ pub enum WorkflowRuntimeError {
     Sandbox(String),
     #[error("Workflow was cancelled")]
     Cancelled,
+    #[error("Workflow suspended as {0:?}")]
+    Suspended(WorkflowSuspension),
     #[error("Workflow is terminal: {0:?}")]
     WorkflowTerminal(WorkflowStatus),
     #[error("Agent action failed: {0}")]

@@ -12,6 +12,7 @@ use axum::extract::State;
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::http::header;
+use axum::http::header::HeaderName;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::Event;
@@ -1103,6 +1104,18 @@ async fn artifact_content(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, media_type);
+    response.headers_mut().insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    if artifact.media_type.starts_with("text/html") {
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+            ),
+        );
+    }
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=31536000, immutable"),

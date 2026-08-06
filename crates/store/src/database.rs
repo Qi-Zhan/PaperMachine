@@ -2494,6 +2494,10 @@ impl Store {
             resolved_at: None,
         };
         run.attention_required = true;
+        let previous_status = run.status;
+        if run.status != WorkflowStatus::Paused {
+            run.status = WorkflowStatus::WaitingForUser;
+        }
         run.updated_at = now;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -2525,6 +2529,19 @@ impl Store {
                 question: request.question.clone(),
             },
         )?;
+        let status_event = (run.status != previous_status)
+            .then(|| {
+                append_workflow_event_tx(
+                    &transaction,
+                    run.project_id,
+                    workflow_id,
+                    WorkflowEventPayload::WorkflowStatusChanged {
+                        status: run.status,
+                        reason: None,
+                    },
+                )
+            })
+            .transpose()?;
         let session_event = append_session_event_tx(
             &transaction,
             session_id,
@@ -2539,6 +2556,9 @@ impl Store {
         transaction.commit()?;
         drop(connection);
         self.shared.publish_workflow(run_event);
+        if let Some(event) = status_event {
+            self.shared.publish_workflow(event);
+        }
         self.shared.publish_session(session_event);
         Ok(request)
     }
@@ -2666,6 +2686,7 @@ impl Store {
         request.answer = Some(answer);
         request.resolved_at = Some(Utc::now());
         let mut run = self.get_workflow(request.workflow_id)?;
+        let previous_status = run.status;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let changed = transaction.execute(
@@ -2684,6 +2705,9 @@ impl Store {
             |row| row.get::<_, bool>(0),
         )?;
         run.attention_required = remaining;
+        if !remaining && run.status == WorkflowStatus::WaitingForUser {
+            run.status = WorkflowStatus::Running;
+        }
         run.updated_at = Utc::now();
         update_workflow_tx(&transaction, &run)?;
         if let Some(turn_id) = request.turn_id {
@@ -2697,6 +2721,19 @@ impl Store {
                 human_request_id: id,
             },
         )?;
+        let status_event = (run.status != previous_status)
+            .then(|| {
+                append_workflow_event_tx(
+                    &transaction,
+                    run.project_id,
+                    run.id,
+                    WorkflowEventPayload::WorkflowStatusChanged {
+                        status: run.status,
+                        reason: None,
+                    },
+                )
+            })
+            .transpose()?;
         let session_event = append_session_event_tx(
             &transaction,
             request.session_id,
@@ -2710,6 +2747,9 @@ impl Store {
         transaction.commit()?;
         drop(connection);
         self.shared.publish_workflow(run_event);
+        if let Some(event) = status_event {
+            self.shared.publish_workflow(event);
+        }
         self.shared.publish_session(session_event);
         Ok(request)
     }
@@ -2866,13 +2906,40 @@ impl Store {
         metadata: Value,
         bytes: &[u8],
     ) -> Result<Artifact, StoreError> {
+        self.create_artifact_with_id(
+            ArtifactId::new(),
+            project_id,
+            workflow_id,
+            session_id,
+            action_invocation_id,
+            kind,
+            name,
+            media_type,
+            metadata,
+            bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_artifact_with_id(
+        &self,
+        id: ArtifactId,
+        project_id: ProjectId,
+        workflow_id: WorkflowId,
+        session_id: Option<SessionId>,
+        action_invocation_id: Option<ActionInvocationId>,
+        kind: ArtifactKind,
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        metadata: Value,
+        bytes: &[u8],
+    ) -> Result<Artifact, StoreError> {
         let run = self.get_workflow(workflow_id)?;
         if run.project_id != project_id {
             return Err(StoreError::Invariant(
                 "artifact Project does not match Workflow".to_string(),
             ));
         }
-        let id = ArtifactId::new();
         let name = name.into();
         let stored = store_artifact_file(
             &self.shared.artifact_root,

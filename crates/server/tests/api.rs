@@ -43,7 +43,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 fn prepare_root(root: &Path) {
-    let builtins = ["interactive-agent", "parallel-discovery"];
+    let builtins = ["interactive-agent", "parallel-discovery", "project-summary"];
     for slug in builtins {
         let builtin = root.join("workflows/builtin").join(slug);
         std::fs::create_dir_all(&builtin).expect("builtin directory should be created");
@@ -284,6 +284,7 @@ async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
 }
 
 async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &str) -> Value {
+    let mut last_view = Value::Null;
     for _ in 0..400 {
         let view = get_workflow_view(app, workflow_id).await;
         if view["workflow"]["status"] == expected {
@@ -295,9 +296,10 @@ async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &st
         ) {
             panic!("Workflow terminated unexpectedly: {}", view["workflow"]);
         }
+        last_view = view;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("Workflow did not reach {expected}");
+    panic!("Workflow did not reach {expected}: {last_view}");
 }
 
 #[cfg(target_os = "macos")]
@@ -551,6 +553,87 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
             .and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn project_summary_publishes_a_sandboxed_html_progress_page() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (project, _origin) =
+        create_project_and_session(&app, directory.path(), "Summary project").await;
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "project-summary",
+                "objective": "Refresh the Project progress page now.",
+                "system_prompt": "Lead with verified progress and unresolved blockers.",
+                "input": {
+                    "interval_minutes": 0,
+                    "max_sessions": 50,
+                    "turns_per_session": 12,
+                    "max_artifacts": 50
+                },
+                "access": "model_only"
+            }),
+        ))
+        .await
+        .expect("summary Workflow request should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let workflow = response_json(response).await;
+    let workflow_id = workflow["id"]
+        .as_str()
+        .expect("summary Workflow id should exist");
+    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    assert_eq!(view["artifacts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(view["artifacts"][0]["metadata"]["role"], "project_summary");
+    assert_eq!(
+        view["artifacts"][0]["media_type"],
+        "text/html; charset=utf-8"
+    );
+
+    let artifact_id = view["artifacts"][0]["id"]
+        .as_str()
+        .expect("summary Artifact id should exist");
+    let response = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/artifacts/{artifact_id}/content"),
+        ))
+        .await
+        .expect("summary Artifact should load");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok()),
+        Some("sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:")
+    );
+    let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("summary HTML should load");
+    let html = String::from_utf8(bytes.to_vec()).expect("summary should be UTF-8 HTML");
+    assert!(html.to_ascii_lowercase().contains("<!doctype html>"));
+
+    let overview = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project overview should load");
+    let overview = response_json(overview).await;
+    assert!(overview["artifacts"].as_array().is_some_and(|artifacts| {
+        artifacts
+            .iter()
+            .any(|artifact| artifact["id"] == artifact_id)
+    }));
 }
 
 #[tokio::test]

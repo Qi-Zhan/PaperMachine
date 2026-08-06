@@ -428,6 +428,8 @@ export interface WorkflowFeatureSummary {
   timers: WorkflowTimerDeclaration[]
   human_checkpoints: number
   background_tasks: number
+  project_snapshots: number
+  artifacts: number
 }
 export interface WorkflowDiagnostic { severity: 'error' | 'warning'; message: string; line: number | null; column: number | null }
 export interface WorkflowValidation {
