@@ -84,6 +84,8 @@ RUNTIME_FILES = (
     "crates/session/src/lib.rs",
     "crates/store/src/database.rs",
     "python/papermachine/__init__.py",
+    "python/papermachine/_runner.py",
+    "python/papermachine/_validate.py",
     "workflows/builtin/evidence-loop/workflow.py",
     "workflows/builtin/single-agent-research/workflow.py",
     "workflows/builtin/report-grader/workflow.py",

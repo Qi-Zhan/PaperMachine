@@ -12,6 +12,7 @@ from papermachine import WorkflowContext, _Runtime, _effect, _set_runtime
 
 _protocol_stdout = sys.stdout
 sys.stdout = sys.stderr
+MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024
 
 
 class EffectClient:
@@ -22,6 +23,7 @@ class EffectClient:
         self.suspended: set[str] = set()
         self.suspend_requested = False
         self.write_lock = asyncio.Lock()
+        self.failure: Exception | None = None
 
     async def write(self, message: dict[str, Any]) -> None:
         async with self.write_lock:
@@ -31,6 +33,10 @@ class EffectClient:
             _protocol_stdout.flush()
 
     async def send(self, effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+        if self.failure is not None:
+            raise RuntimeError(
+                f"Rust workflow protocol reader already failed: {self.failure}"
+            ) from self.failure
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         if effect_id in self.pending:
             raise RuntimeError(f"effect is already pending: {effect_id}")
@@ -61,30 +67,45 @@ class EffectClient:
             )
 
     async def read_responses(self) -> None:
-        while True:
-            line = await self.reader.readline()
-            if not line:
-                raise RuntimeError("Rust workflow runtime closed the protocol stream")
-            response = json.loads(line)
-            effect_id = str(response["id"])
-            future = self.pending.get(effect_id)
-            if future is None or future.done():
-                continue
-            if response.get("suspended") is not None:
-                self.suspended.add(effect_id)
-                await self.request_suspension_if_quiescent()
-                continue
-            self.pending.pop(effect_id, None)
-            effect_kind = self.pending_kinds.pop(effect_id, "")
-            self.suspended.discard(effect_id)
-            if response.get("ok"):
-                future.set_result(response.get("result"))
-            else:
-                future.set_exception(
-                    RuntimeError(str(response.get("error", "effect failed")))
-                )
-            if effect_kind != "complete":
-                await self.request_suspension_if_quiescent()
+        try:
+            while True:
+                line = await self.reader.readline()
+                if not line:
+                    raise RuntimeError("Rust workflow runtime closed the protocol stream")
+                response = json.loads(line)
+                effect_id = str(response["id"])
+                future = self.pending.get(effect_id)
+                if future is None or future.done():
+                    continue
+                if response.get("suspended") is not None:
+                    self.suspended.add(effect_id)
+                    await self.request_suspension_if_quiescent()
+                    continue
+                self.pending.pop(effect_id, None)
+                effect_kind = self.pending_kinds.pop(effect_id, "")
+                self.suspended.discard(effect_id)
+                if response.get("ok"):
+                    future.set_result(response.get("result"))
+                else:
+                    future.set_exception(
+                        RuntimeError(str(response.get("error", "effect failed")))
+                    )
+                if effect_kind != "complete":
+                    await self.request_suspension_if_quiescent()
+        except Exception as error:
+            self.failure = error
+            for effect_id, future in tuple(self.pending.items()):
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError(
+                            "Rust workflow protocol reader failed while waiting for "
+                            f"{effect_id}: {error}"
+                        )
+                    )
+            self.pending.clear()
+            self.pending_kinds.clear()
+            self.suspended.clear()
+            raise
 
 
 def load_workflow(source_path: Path, entrypoint: str):
@@ -104,7 +125,7 @@ def load_workflow(source_path: Path, entrypoint: str):
 async def run() -> None:
     if len(sys.argv) != 3:
         raise RuntimeError("runner requires workflow.py and entrypoint arguments")
-    protocol_reader = asyncio.StreamReader()
+    protocol_reader = asyncio.StreamReader(limit=MAX_PROTOCOL_LINE_BYTES)
     protocol = asyncio.StreamReaderProtocol(protocol_reader)
     transport, _ = await asyncio.get_running_loop().connect_read_pipe(
         lambda: protocol,
