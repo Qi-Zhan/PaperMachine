@@ -600,30 +600,19 @@ def launch_run(
     model: str,
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
-    session = api.post(
-        f"/projects/{project_id}/sessions",
-        {
-            "title": f"LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
-            "system_prompt": "",
-            "model": model,
-            "access": "research",
-            "enabled_skills": [],
-        },
-    )
     run = api.post(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
             "objective": task["question"],
             "input": condition["input"],
-            "started_from_session_id": session["id"],
             "model": model,
             "access": "research",
             "enabled_skills": [],
+            "context_mode": "fresh",
         },
     )
     return {
-        "session_id": str(session["id"]),
         "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
@@ -642,16 +631,6 @@ def launch_grader_run(
     prediction = (job.get("research", {}).get("result") or {}).get("prediction")
     if prediction is None:
         raise ValueError("cannot launch semantic grader without a parsed prediction")
-    session = api.post(
-        f"/projects/{project_id}/sessions",
-        {
-            "title": f"Grade LiveDR {job['task_key']} {job['condition']} repeat {job['repeat']}",
-            "system_prompt": "",
-            "model": grader_model,
-            "access": "model_only",
-            "enabled_skills": [],
-        },
-    )
     run = api.post(
         f"/projects/{project_id}/workflows",
         {
@@ -664,14 +643,13 @@ def launch_grader_run(
                 "eval_info": misc.get("eval_info") or {},
                 "grader_model": grader_model,
             },
-            "started_from_session_id": session["id"],
             "model": grader_model,
             "access": "model_only",
             "enabled_skills": [],
+            "context_mode": "fresh",
         },
     )
     return {
-        "session_id": str(session["id"]),
         "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
@@ -1450,12 +1428,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-base", default="http://127.0.0.1:4310")
     parser.add_argument("--task-keys", default="0,20,22,23,40,47,66,83")
-    parser.add_argument("--conditions", default=",".join(CONDITIONS))
+    parser.add_argument(
+        "--conditions", default="single_agent,coverage_r1,coverage_r2"
+    )
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260806)
-    parser.add_argument("--model", default="gpt-5.6-sol")
-    parser.add_argument("--grader-model", default="gpt-5.6-sol")
-    parser.add_argument("--run-name", default="hosted-search-8x3x2-2026-08-06")
+    parser.add_argument("--model", default="deepseek-flash")
+    parser.add_argument("--grader-model", default="deepseek-flash")
+    parser.add_argument(
+        "--run-name", default="deepseek-baseline-8x3x2-2026-08-07"
+    )
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--max-parallel-runs", type=int, default=2)

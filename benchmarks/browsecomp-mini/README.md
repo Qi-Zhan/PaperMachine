@@ -20,6 +20,10 @@ Workflows:
 python3 benchmarks/browsecomp-mini/run_matrix.py
 ```
 
+Research and grader Workflows are Project-level launches with
+`context_mode=fresh`, so one encrypted task cannot inherit another task's
+research through Project context and no placeholder Session is required.
+
 Use `--prepare-only` to create the pinned matrix without calling the API. Ctrl-C
 requests cancellation for every in-flight run before exiting. The report keeps
 grader tokens separate from research cost and records raw tokens, effective

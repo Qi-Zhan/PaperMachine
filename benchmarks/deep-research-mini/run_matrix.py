@@ -299,24 +299,6 @@ def ensure_project(
     return str(created["id"])
 
 
-def create_origin_session(
-    api: PaperMachineApi,
-    project_id: str,
-    title: str,
-    model: str,
-) -> str:
-    session = api.post(
-        f"/projects/{project_id}/sessions",
-        {
-            "title": title,
-            "system_prompt": "",
-            "model": model,
-            "enabled_skills": [],
-        },
-    )
-    return str(session["id"])
-
-
 def launch_research_run(
     api: PaperMachineApi,
     project_id: str,
@@ -325,22 +307,19 @@ def launch_research_run(
     model: str,
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
-    title = f"T{job['task_id']} {job['condition']} repeat {job['repeat']}"
-    session_id = create_origin_session(api, project_id, title, model)
     run = api.post(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
             "objective": task["prompt"],
             "input": condition["input"],
-            "started_from_session_id": session_id,
             "model": model,
             "access": "research",
             "enabled_skills": [],
+            "context_mode": "fresh",
         },
     )
     return {
-        "session_id": session_id,
         "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
@@ -616,8 +595,6 @@ def launch_grader_run(
     report: str,
     model: str,
 ) -> dict[str, Any]:
-    title = f"Grade T{job['task_id']} {job['condition']} repeat {job['repeat']}"
-    session_id = create_origin_session(api, project_id, title, model)
     run = api.post(
         f"/projects/{project_id}/workflows",
         {
@@ -630,14 +607,13 @@ def launch_grader_run(
                 "language": task["language"],
                 "grader_model": model,
             },
-            "started_from_session_id": session_id,
             "model": model,
             "access": "model_only",
             "enabled_skills": [],
+            "context_mode": "fresh",
         },
     )
     return {
-        "session_id": session_id,
         "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
     }
@@ -1405,12 +1381,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-base", default="http://127.0.0.1:4310")
     parser.add_argument("--task-ids", default="19,59,66,68,69")
-    parser.add_argument("--conditions", default=",".join(CONDITIONS))
+    parser.add_argument(
+        "--conditions", default="single_agent,evidence_r1,evidence_r2"
+    )
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260805)
-    parser.add_argument("--model", default="gpt-5.6-sol")
-    parser.add_argument("--grader-model", default="gpt-5.6-sol")
-    parser.add_argument("--run-name", default="pilot-5x3x2-2026-08-05")
+    parser.add_argument("--model", default="deepseek-flash")
+    parser.add_argument("--grader-model", default="deepseek-flash")
+    parser.add_argument(
+        "--run-name", default="deepseek-baseline-5x3x2-2026-08-07"
+    )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--max-parallel-runs", type=int, default=2)

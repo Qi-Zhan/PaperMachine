@@ -48,14 +48,20 @@ returned every criterion exactly once. Research and grading usage are recorded
 separately, including cache reads, uncached input tokens, and failed or invalid
 attempts that incurred cost before a successful retry.
 
-The default experiment is five tasks, five conditions, and two repeats. Use
-`--conditions` to run a controlled subset such as the three-condition baseline
-or only the expensive difficulty tier:
+The default experiment is five tasks, the three controlled baseline conditions
+(`single_agent`, `evidence_r1`, and `evidence_r2`), and two repeats. Use
+`--conditions` to add only the expensive difficulty tiers deliberately:
 
 ```bash
 python3 benchmarks/deep-research-mini/run_matrix.py
-python3 benchmarks/deep-research-mini/run_matrix.py --conditions evidence_r4
+python3 benchmarks/deep-research-mini/run_matrix.py \
+  --conditions evidence_r3,evidence_r4 \
+  --run-name deepseek-difficulty-5x2x2-2026-08-07
 ```
+
+Each job starts its Workflow directly from the benchmark Project with
+`context_mode=fresh`; it does not create a placeholder Session, and prior jobs
+in the same Project cannot enter the prompt as launch context.
 
 The generated run directory contains a commit-pinned upstream snapshot,
 resumable state, raw reports, raw grader outputs, and a Markdown summary. The
