@@ -22,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +55,20 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowContextMode {
+    #[default]
+    Fresh,
+    ProjectSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct WorkflowLaunchContext {
+    pub mode: WorkflowContextMode,
+    pub snapshot: Option<Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Workflow {
     pub id: WorkflowId,
@@ -71,6 +86,15 @@ pub struct Workflow {
     pub access: crate::AgentAccessProfile,
     #[serde(default)]
     pub enabled_skills: Vec<String>,
+    /// Immutable Project state captured when this Workflow was launched. It is
+    /// automatically included in every Agent action and exposed as
+    /// `ctx.context` to the Python program.
+    #[serde(default)]
+    pub launch_context: WorkflowLaunchContext,
+    /// Per-run overrides keyed by Python Agent class name. The Workflow access
+    /// profile remains the hard upper bound.
+    #[serde(default)]
+    pub agent_access_overrides: BTreeMap<String, crate::AgentAccessProfile>,
     pub status: WorkflowStatus,
     pub input: Value,
     pub output: Option<Value>,

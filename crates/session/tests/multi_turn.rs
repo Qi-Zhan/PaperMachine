@@ -24,6 +24,7 @@ use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
 use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
+use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
 use papermachine_tools::ToolRegistry;
 use std::sync::Arc;
@@ -346,18 +347,20 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         ..Budget::default()
     };
     let run = store
-        .create_workflow(
-            research.id,
-            Some(origin.id),
-            workflow_snapshot(budget),
-            "Stay within budget",
-            "",
-            serde_json::json!({}),
-            None,
-            "test-model",
-            papermachine_protocol::AgentAccessProfile::Research,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: research.id,
+            started_from_session_id: Some(origin.id),
+            program: workflow_snapshot(budget),
+            objective: "Stay within budget".to_string(),
+            system_prompt: String::new(),
+            input: serde_json::json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: papermachine_protocol::AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("run should be created");
     store
         .set_workflow_status(run.id, WorkflowStatus::Running, None)

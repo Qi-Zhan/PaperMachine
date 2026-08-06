@@ -3,18 +3,19 @@
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
     AgentAccessProfile, Budget, HumanRequestStatus, ModelEvent, ModelInputItem, TokenUsage,
-    WorkflowEffectStatus, WorkflowProgramId, WorkflowProgramManifest, WorkflowProgramSnapshot,
-    WorkflowProgramSource, WorkflowStatus,
+    WorkflowContextMode, WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId,
+    WorkflowProgramManifest, WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
 };
 use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
-use papermachine_store::Store;
+use papermachine_store::{NewWorkflow, Store};
 use papermachine_tools::{AskHumanTool, ToolRegistry};
 use papermachine_workflow::{
     PythonWorkflowRuntime, StoreHumanRequestBroker, WorkflowExecution, WorkflowRuntime,
     WorkflowScheduler,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,6 +138,53 @@ async def main(ctx):
     return {"answer": answer}
 "#;
 
+const LAUNCH_CONTEXT_SOURCE: &str = r#"from papermachine import Agent, action, workflow
+
+
+class Conservative(Agent):
+    access = "research"
+
+    @action(max_steps=1)
+    async def inspect(self, question: str) -> str:
+        """Inspect the captured evidence conservatively."""
+
+
+class Elevated(Agent):
+    access = "model_only"
+
+    @action(max_steps=1)
+    async def compare(self, question: str) -> str:
+        """Compare evidence using the configured run access."""
+
+
+class Clamped(Agent):
+    access = "full_access"
+
+    @action(max_steps=1)
+    async def verify(self, question: str) -> str:
+        """Verify that the Workflow ceiling remains authoritative."""
+
+
+@workflow(
+    slug="launch-context-access",
+    name="Launch context and access",
+    description="Exercise immutable launch context and per-Agent access.",
+    input_schema={"type": "object", "additionalProperties": False},
+    output_schema={"type": "object"},
+)
+async def main(ctx):
+    conservative = Conservative(name="Conservative")
+    elevated = Elevated(name="Elevated")
+    clamped = Clamped(name="Clamped")
+    first = await conservative.inspect(ctx.context["project"]["description"])
+    second = await elevated.compare(ctx.context["project"]["description"])
+    third = await clamped.verify(ctx.context["project"]["description"])
+    return {
+        "context": ctx.context,
+        "answers": [first, second, third],
+    }
+"#;
+
 fn python() -> PathBuf {
     if let Some(value) = std::env::var_os("PAPERMACHINE_PYTHON") {
         let path = PathBuf::from(value);
@@ -228,6 +276,126 @@ fn completed_response(text: &str, input_tokens: u64, output_tokens: u64) -> Vec<
 }
 
 #[tokio::test]
+async fn launch_context_is_stable_and_agent_access_respects_run_configuration() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("artifacts"))
+            .expect("store should open in memory"),
+    );
+    let project = store
+        .create_project(
+            "Configured run",
+            "Captured evidence",
+            directory.path().join("project"),
+        )
+        .expect("Project should be created");
+    let launch_context = WorkflowLaunchContext {
+        mode: WorkflowContextMode::ProjectSnapshot,
+        snapshot: Some(json!({
+            "captured_at": "2026-08-07T00:00:00Z",
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+            },
+        })),
+    };
+    let workflow = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("launch-context-access", LAUNCH_CONTEXT_SOURCE),
+            objective: "Continue from captured Project evidence.".to_string(),
+            system_prompt: "Keep provenance visible.".to_string(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::Workspace,
+            enabled_skills: Vec::new(),
+            launch_context: launch_context.clone(),
+            agent_access_overrides: BTreeMap::from([
+                ("Conservative".to_string(), AgentAccessProfile::ReadOnly),
+                ("Elevated".to_string(), AgentAccessProfile::Workspace),
+            ]),
+        })
+        .expect("Workflow should be created");
+    store
+        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .expect("Workflow should be runnable");
+    let model = ScriptedModelClient::new([
+        completed_response("conservative answer", 20, 4),
+        completed_response("elevated answer", 20, 4),
+        completed_response("clamped answer", 20, 4),
+    ]);
+
+    let execution = runtime_with(
+        Arc::clone(&store),
+        &directory.path().join("runtime"),
+        Arc::new(model),
+        ToolRegistry::builder().build(),
+    )
+    .execute(workflow.id, CancellationToken::new())
+    .await
+    .expect("Workflow should execute");
+    let WorkflowExecution::Completed(output) = execution else {
+        panic!("Workflow should complete without suspension")
+    };
+    let Some(expected_context) = launch_context.snapshot.as_ref() else {
+        panic!("test launch context should contain a snapshot")
+    };
+    assert_eq!(&output["context"], expected_context);
+    assert_eq!(
+        output["answers"],
+        json!(["conservative answer", "elevated answer", "clamped answer"])
+    );
+    assert!(
+        store
+            .list_human_requests(workflow.id)
+            .expect("human requests should load")
+            .is_empty(),
+        "launch-time access choices at or below the ceiling are already authorized"
+    );
+
+    let participants = store
+        .list_participants(workflow.id)
+        .expect("participants should load");
+    let mut launch_layer_hashes = Vec::new();
+    for participant in participants {
+        let session = store
+            .get_session(participant.session_id)
+            .expect("participant Session should load");
+        let expected = match participant.class_name.as_str() {
+            "Conservative" => AgentAccessProfile::ReadOnly,
+            "Elevated" | "Clamped" => AgentAccessProfile::Workspace,
+            class_name => panic!("unexpected Agent class {class_name}"),
+        };
+        assert_eq!(session.access, expected);
+        let turn = store
+            .list_turns(session.id)
+            .expect("Agent Turns should load")
+            .into_iter()
+            .next()
+            .expect("each Agent should have one Turn");
+        let layer = turn
+            .prompt
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Workflow launch context")
+            .expect("every Agent Turn should include the launch context");
+        assert!(layer.content.contains("Captured evidence"));
+        assert!(layer.content.contains("untrusted research data"));
+        launch_layer_hashes.push(layer.sha256.clone());
+    }
+    assert_eq!(launch_layer_hashes.len(), 3);
+    assert!(
+        launch_layer_hashes
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "the immutable context layer must remain cache-stable across Agent Turns"
+    );
+}
+
+#[tokio::test]
 async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
@@ -238,18 +406,20 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
         .create_project("Durable replay", "", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            program_with_source("durable-replay", SOURCE),
-            "Prove replay semantics.",
-            "",
-            json!({}),
-            None,
-            "scripted",
-            AgentAccessProfile::Research,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("durable-replay", SOURCE),
+            objective: "Prove replay semantics.".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Workflow should be created");
     store
         .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
@@ -357,18 +527,20 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
         .create_project("Durable timer", "", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            program_with_source("durable-timer-replay", TIMER_SOURCE),
-            "Wait without retaining a Python process.",
-            "",
-            json!({}),
-            None,
-            "scripted",
-            AgentAccessProfile::ModelOnly,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("durable-timer-replay", TIMER_SOURCE),
+            objective: "Wait without retaining a Python process.".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::ModelOnly,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Workflow should be created");
     store
         .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
@@ -424,18 +596,20 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
         .create_project("Durable signal", "", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            program_with_source("durable-signal-replay", SIGNAL_SOURCE),
-            "Coordinate concurrent work.",
-            "",
-            json!({}),
-            None,
-            "scripted",
-            AgentAccessProfile::ModelOnly,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("durable-signal-replay", SIGNAL_SOURCE),
+            objective: "Coordinate concurrent work.".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::ModelOnly,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Workflow should be created");
     let executor = runtime(Arc::clone(&store), &directory.path().join("runtime"));
     let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(executor), 1);
@@ -477,18 +651,20 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
         .create_project("Timer plus human", "", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            program_with_source("background-timer-human", BACKGROUND_TIMER_SOURCE),
-            "Wait and summarize periodically.",
-            "",
-            json!({}),
-            None,
-            "scripted",
-            AgentAccessProfile::ModelOnly,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("background-timer-human", BACKGROUND_TIMER_SOURCE),
+            objective: "Wait and summarize periodically.".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::ModelOnly,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Workflow should be created");
     let executor = runtime(Arc::clone(&store), &directory.path().join("runtime"));
     let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(executor), 1);
@@ -548,18 +724,20 @@ async fn unfinished_agent_action_resumes_its_checkpointed_turn_once() {
         .create_project("Durable Agent action", "", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            program_with_source("durable-action-replay", ACTION_SOURCE),
-            "Investigate safely across a restart.",
-            "",
-            json!({}),
-            None,
-            "scripted",
-            AgentAccessProfile::Research,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: program_with_source("durable-action-replay", ACTION_SOURCE),
+            objective: "Investigate safely across a restart.".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "scripted".to_string(),
+            access: AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Workflow should be created");
     store
         .set_workflow_status(workflow.id, WorkflowStatus::Running, None)

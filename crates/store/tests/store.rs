@@ -11,16 +11,20 @@ use papermachine_protocol::Session;
 use papermachine_protocol::TaskScopeStatus;
 use papermachine_protocol::TimerPolicy;
 use papermachine_protocol::TimerStatus;
+use papermachine_protocol::WorkflowContextMode;
 use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowEventPayload;
+use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgram;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
 use papermachine_protocol::WorkflowStatus;
+use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
 use serde_json::json;
+use std::collections::BTreeMap;
 use tempfile::TempDir;
 use tempfile::tempdir;
 
@@ -94,18 +98,20 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
         .expect("original program should register");
 
     let workflow = store
-        .create_workflow(
-            project.id,
-            None,
-            original,
-            "Summarize the Project",
-            "",
-            json!({}),
-            None,
-            "test-model",
-            AgentAccessProfile::Research,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program: original,
+            objective: "Summarize the Project".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("Project-level Workflow should be created without a Session");
 
     let mut replacement = workflow.program.clone();
@@ -142,6 +148,105 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
     assert_eq!(registrations[0].sha256, "replacement-sha");
 }
 
+#[test]
+fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store =
+        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
+    let project = project(
+        &store,
+        &directory,
+        "Permission ceiling",
+        "Existing evidence",
+    );
+    let origin = store
+        .create_session_with_access(
+            project.id,
+            "Workspace origin",
+            "",
+            "test-model",
+            Vec::new(),
+            AgentAccessProfile::Workspace,
+        )
+        .expect("origin Session should be created");
+
+    let above_origin = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: Some(origin.id),
+            program: workflow(),
+            objective: "Attempt to exceed the origin".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect_err("a Workflow must not exceed its starting Session");
+    assert!(
+        above_origin
+            .to_string()
+            .contains("exceeds starting Session")
+    );
+
+    let above_workflow = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: Some(origin.id),
+            program: workflow(),
+            objective: "Attempt an Agent override above the ceiling".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: AgentAccessProfile::Workspace,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: BTreeMap::from([(
+                "Researcher".to_string(),
+                AgentAccessProfile::Research,
+            )]),
+        })
+        .expect_err("an Agent override must not exceed its Workflow");
+    assert!(
+        above_workflow
+            .to_string()
+            .contains("exceeds Workflow access")
+    );
+
+    let launch_context = WorkflowLaunchContext {
+        mode: WorkflowContextMode::ProjectSnapshot,
+        snapshot: Some(json!({"evidence": "captured once"})),
+    };
+    let created = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: Some(origin.id),
+            program: workflow(),
+            objective: "Use an admissible override".to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: AgentAccessProfile::Workspace,
+            enabled_skills: Vec::new(),
+            launch_context: launch_context.clone(),
+            agent_access_overrides: BTreeMap::from([(
+                "Researcher".to_string(),
+                AgentAccessProfile::ReadOnly,
+            )]),
+        })
+        .expect("an override below the Workflow ceiling should be accepted");
+    assert_eq!(created.launch_context, launch_context);
+    assert_eq!(
+        created.agent_access_overrides["Researcher"],
+        AgentAccessProfile::ReadOnly
+    );
+}
+
 fn workflow() -> WorkflowProgramSnapshot {
     WorkflowProgramSnapshot {
         project_id: None,
@@ -174,18 +279,20 @@ fn workflow_for_session(
     objective: &str,
 ) -> papermachine_protocol::Workflow {
     store
-        .create_workflow(
-            session.project_id,
-            Some(session.id),
-            workflow(),
-            objective,
-            "",
-            json!({}),
-            None,
-            "test-model",
-            AgentAccessProfile::Research,
-            Vec::new(),
-        )
+        .create_workflow(NewWorkflow {
+            project_id: session.project_id,
+            started_from_session_id: Some(session.id),
+            program: workflow(),
+            objective: objective.to_string(),
+            system_prompt: String::new(),
+            input: json!({}),
+            budget: None,
+            default_model: "test-model".to_string(),
+            access: AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
         .expect("workflow should be created")
 }
 

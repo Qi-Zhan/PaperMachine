@@ -26,6 +26,7 @@ pub struct LoadedWorkflowProgram {
     pub registration: WorkflowProgram,
     pub source_code: String,
     pub path: PathBuf,
+    pub validation: WorkflowValidation,
 }
 
 impl LoadedWorkflowProgram {
@@ -127,7 +128,7 @@ impl WorkflowProgramCatalog {
         if !validation.valid {
             return Err(WorkflowProgramCatalogError::Invalid(Box::new(validation)));
         }
-        let manifest = validation.manifest.ok_or_else(|| {
+        let manifest = validation.manifest.clone().ok_or_else(|| {
             WorkflowProgramCatalogError::Validator(
                 "valid source did not return a manifest".to_string(),
             )
@@ -156,6 +157,7 @@ impl WorkflowProgramCatalog {
             },
             source_code: source.to_string(),
             path,
+            validation,
         };
         store.register_workflow_program(&loaded.registration)?;
         self.entries.insert(key, loaded.clone());
@@ -195,7 +197,7 @@ impl WorkflowProgramCatalog {
                 validation: Box::new(validation),
             });
         }
-        let manifest = validation.manifest.ok_or_else(|| {
+        let manifest = validation.manifest.clone().ok_or_else(|| {
             WorkflowProgramCatalogError::Validator(
                 "valid source did not return a manifest".to_string(),
             )
@@ -226,6 +228,7 @@ impl WorkflowProgramCatalog {
             },
             source_code,
             path: path.to_path_buf(),
+            validation,
         })
     }
 

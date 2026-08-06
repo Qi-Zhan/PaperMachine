@@ -475,6 +475,7 @@ mod tests {
     use papermachine_protocol::WorkflowProgramManifest;
     use papermachine_protocol::WorkflowProgramSnapshot;
     use papermachine_protocol::WorkflowProgramSource;
+    use papermachine_store::NewWorkflow;
     use serde_json::json;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -580,18 +581,20 @@ mod tests {
 
     fn create_test_workflow(store: &Store, session: &Session, objective: &str) -> Workflow {
         store
-            .create_workflow(
-                session.project_id,
-                Some(session.id),
-                workflow(),
-                objective,
-                "",
-                json!({}),
-                None,
-                "test-model",
-                AgentAccessProfile::Research,
-                Vec::new(),
-            )
+            .create_workflow(NewWorkflow {
+                project_id: session.project_id,
+                started_from_session_id: Some(session.id),
+                program: workflow(),
+                objective: objective.to_string(),
+                system_prompt: String::new(),
+                input: json!({}),
+                budget: None,
+                default_model: "test-model".to_string(),
+                access: AgentAccessProfile::Research,
+                enabled_skills: Vec::new(),
+                launch_context: Default::default(),
+                agent_access_overrides: Default::default(),
+            })
             .expect("workflow should be created")
     }
 

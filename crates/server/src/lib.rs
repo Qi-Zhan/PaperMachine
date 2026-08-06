@@ -33,6 +33,7 @@ use papermachine_session::SessionRuntimeConfig;
 use papermachine_session::SessionRuntimeError;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_skills::SkillError;
+use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_tools::AskHumanTool;
@@ -41,6 +42,7 @@ use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
 use papermachine_tools::ToolRegistry;
 use papermachine_tools::WriteFileTool;
+use papermachine_workflow::ProjectSnapshotOptions;
 use papermachine_workflow::PythonWorkflowRuntime;
 use papermachine_workflow::StoreHumanRequestBroker;
 use papermachine_workflow::WorkflowGenerationRequest;
@@ -50,10 +52,12 @@ use papermachine_workflow::WorkflowProgramCatalogError;
 use papermachine_workflow::WorkflowRuntime;
 use papermachine_workflow::WorkflowScheduler;
 use papermachine_workflow::WorkflowSchedulerError;
+use papermachine_workflow::build_project_snapshot;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -660,6 +664,7 @@ async fn list_workflow_programs(
 struct WorkflowProgramSourceResponse {
     registration: WorkflowProgram,
     source: String,
+    validation: WorkflowValidation,
 }
 
 async fn get_workflow_program(
@@ -675,6 +680,7 @@ async fn get_workflow_program(
     Ok(Json(WorkflowProgramSourceResponse {
         registration: program.registration.clone(),
         source: program.source_code.clone(),
+        validation: program.validation.clone(),
     }))
 }
 
@@ -765,6 +771,10 @@ struct CreateWorkflowRequest {
     access: AgentAccessProfile,
     #[serde(default)]
     enabled_skills: Vec<String>,
+    #[serde(default)]
+    context_mode: WorkflowContextMode,
+    #[serde(default)]
+    agent_access_overrides: BTreeMap<String, AgentAccessProfile>,
 }
 
 fn empty_object() -> Value {
@@ -812,29 +822,68 @@ async fn create_workflow(
         request.model.trim()
     };
     validate_model_profile(&state, model)?;
-    let snapshot = {
+    let (snapshot, declared_agent_classes) = {
         let catalog = state.catalog.read().await;
-        catalog
+        let program = catalog
             .get(project_id, &request.program_slug)
-            .map(|program| program.snapshot())
             .ok_or_else(|| {
                 ApiError::not_found(format!("WorkflowProgram {}", request.program_slug))
-            })?
+            })?;
+        (
+            program.snapshot(),
+            program
+                .validation
+                .agents
+                .iter()
+                .map(|agent| agent.class_name.clone())
+                .collect::<std::collections::HashSet<_>>(),
+        )
     };
+    if let Some(unknown) = request
+        .agent_access_overrides
+        .keys()
+        .find(|class_name| !declared_agent_classes.contains(*class_name))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Agent access override references unknown class {unknown:?}"
+        )));
+    }
     validate_schema_value(&snapshot.manifest.input_schema, &request.input, "input")
         .map_err(ApiError::bad_request)?;
-    let workflow = state.store.create_workflow(
+    let launch_context = match request.context_mode {
+        WorkflowContextMode::Fresh => WorkflowLaunchContext::default(),
+        WorkflowContextMode::ProjectSnapshot => WorkflowLaunchContext {
+            mode: WorkflowContextMode::ProjectSnapshot,
+            snapshot: Some(build_project_snapshot(
+                &state.store,
+                project_id,
+                ProjectSnapshotOptions {
+                    focus_session_id: request.started_from_session_id,
+                    max_sessions: 20,
+                    max_turns_per_session: 8,
+                    max_workflows: 100,
+                    max_artifacts: 30,
+                    include_artifact_content: true,
+                    max_text_chars: 300_000,
+                    ..ProjectSnapshotOptions::default()
+                },
+            )?),
+        },
+    };
+    let workflow = state.store.create_workflow(NewWorkflow {
         project_id,
-        request.started_from_session_id,
-        snapshot,
-        request.objective.trim(),
-        request.system_prompt.trim(),
-        request.input,
-        None,
-        model,
-        request.access,
-        request.enabled_skills,
-    )?;
+        started_from_session_id: request.started_from_session_id,
+        program: snapshot,
+        objective: request.objective.trim().to_string(),
+        system_prompt: request.system_prompt.trim().to_string(),
+        input: request.input,
+        budget: None,
+        default_model: model.to_string(),
+        access: request.access,
+        enabled_skills: request.enabled_skills,
+        launch_context,
+        agent_access_overrides: request.agent_access_overrides,
+    })?;
     state.scheduler.start(workflow.id).await?;
     Ok((StatusCode::CREATED, Json(workflow)))
 }

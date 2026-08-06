@@ -79,6 +79,8 @@ pub struct WorkflowFeatureSummary {
     pub timers: Vec<WorkflowTimerDeclaration>,
     pub human_checkpoints: u32,
     pub background_tasks: u32,
+    pub project_snapshots: u32,
+    pub artifacts: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

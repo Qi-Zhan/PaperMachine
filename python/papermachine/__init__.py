@@ -11,7 +11,7 @@ import contextvars
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar, get_origin
 
 _runtime: _Runtime | None = None
@@ -875,14 +875,20 @@ class ProjectContext:
         *,
         max_sessions: int = 50,
         max_turns_per_session: int = 12,
+        max_workflows: int = 200,
         max_artifacts: int = 50,
+        include_artifact_content: bool = False,
+        max_text_chars: int = 500_000,
     ) -> dict[str, Any]:
         return await _effect(
             "project_snapshot",
             {
                 "max_sessions": max_sessions,
                 "max_turns_per_session": max_turns_per_session,
+                "max_workflows": max_workflows,
                 "max_artifacts": max_artifacts,
+                "include_artifact_content": include_artifact_content,
+                "max_text_chars": max_text_chars,
             },
         )
 
@@ -892,6 +898,7 @@ class WorkflowContext:
     objective: str
     input: dict[str, Any]
     workflow_id: str
+    context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def project(self) -> ProjectContext:

@@ -82,6 +82,7 @@ async def main(ctx):
             max_sessions=max_sessions,
             max_turns_per_session=turns_per_session,
             max_artifacts=max_artifacts,
+            include_artifact_content=True,
         )
         html = _normalize_html(await summarizer.render_progress_page(snapshot))
         refresh_count += 1

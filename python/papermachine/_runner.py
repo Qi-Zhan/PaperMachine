@@ -124,6 +124,7 @@ async def run() -> None:
             objective=str(initialization["objective"]),
             input=dict(initialization.get("input") or {}),
             workflow_id=str(initialization["workflow_id"]),
+            context=dict(initialization.get("context") or {}),
         )
         result = await function(context)
         await _effect("complete", {"output": result})

@@ -3,8 +3,16 @@
 mod artifact;
 mod database;
 
+use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::Budget;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
+use papermachine_protocol::SessionId;
 use papermachine_protocol::WorkflowEvent;
+use papermachine_protocol::WorkflowLaunchContext;
+use papermachine_protocol::WorkflowProgramSnapshot;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +20,22 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 pub use database::Store;
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflow {
+    pub project_id: ProjectId,
+    pub started_from_session_id: Option<SessionId>,
+    pub program: WorkflowProgramSnapshot,
+    pub objective: String,
+    pub system_prompt: String,
+    pub input: Value,
+    pub budget: Option<Budget>,
+    pub default_model: String,
+    pub access: AgentAccessProfile,
+    pub enabled_skills: Vec<String>,
+    pub launch_context: WorkflowLaunchContext,
+    pub agent_access_overrides: BTreeMap<String, AgentAccessProfile>,
+}
 
 #[derive(Debug, Error)]
 pub enum StoreError {

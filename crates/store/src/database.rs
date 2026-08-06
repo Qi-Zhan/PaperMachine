@@ -1,3 +1,4 @@
+use crate::NewWorkflow;
 use crate::StoreError;
 use crate::StoreShared;
 use crate::artifact::store_artifact_file;
@@ -895,38 +896,48 @@ impl Store {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_workflow(
-        &self,
-        project_id: ProjectId,
-        started_from_session_id: Option<SessionId>,
-        program: WorkflowProgramSnapshot,
-        objective: impl Into<String>,
-        system_prompt: impl Into<String>,
-        input: Value,
-        budget: Option<Budget>,
-        default_model: impl Into<String>,
-        access: AgentAccessProfile,
-        enabled_skills: Vec<String>,
-    ) -> Result<Workflow, StoreError> {
-        self.ensure_project(project_id)?;
-        if program.project_id.is_some_and(|owner| owner != project_id) {
+    pub fn create_workflow(&self, request: NewWorkflow) -> Result<Workflow, StoreError> {
+        self.ensure_project(request.project_id)?;
+        if request
+            .program
+            .project_id
+            .is_some_and(|owner| owner != request.project_id)
+        {
             return Err(StoreError::Invariant(
                 "WorkflowProgram belongs to a different Project".to_string(),
             ));
         }
-        let started_from = started_from_session_id
+        let started_from = request
+            .started_from_session_id
             .map(|session_id| self.get_session(session_id))
             .transpose()?;
         if started_from
             .as_ref()
-            .is_some_and(|session| session.project_id != project_id)
+            .is_some_and(|session| session.project_id != request.project_id)
         {
             return Err(StoreError::Invariant(
                 "starting Session belongs to a different Project".to_string(),
             ));
         }
-        let requested_model = default_model.into();
+        if let Some(session) = started_from.as_ref()
+            && request.access > session.access
+        {
+            return Err(StoreError::Invariant(format!(
+                "Workflow access {} exceeds starting Session access {}",
+                request.access, session.access
+            )));
+        }
+        if let Some((class_name, access)) = request
+            .agent_access_overrides
+            .iter()
+            .find(|(_, access)| **access > request.access)
+        {
+            return Err(StoreError::Invariant(format!(
+                "Agent override {class_name}={access} exceeds Workflow access {}",
+                request.access
+            )));
+        }
+        let requested_model = request.default_model;
         let default_model = if requested_model.trim().is_empty() {
             started_from
                 .as_ref()
@@ -939,33 +950,33 @@ impl Store {
         } else {
             requested_model
         };
-        let access = started_from
-            .as_ref()
-            .map_or(access, |session| std::cmp::min(access, session.access));
-        let enabled_skills = if enabled_skills.is_empty() {
+        let enabled_skills = if request.enabled_skills.is_empty() {
             started_from
                 .as_ref()
                 .map(|session| session.enabled_skills.clone())
                 .unwrap_or_default()
         } else {
-            enabled_skills
+            request.enabled_skills
         };
-        let system_prompt = system_prompt.into();
-        validate_system_prompt(&system_prompt)?;
+        validate_system_prompt(&request.system_prompt)?;
         let now = Utc::now();
         let workflow = Workflow {
             id: WorkflowId::new(),
-            project_id,
-            started_from_session_id,
-            budget: budget.unwrap_or_else(|| program.manifest.default_budget.clone()),
-            program,
-            objective: objective.into(),
-            system_prompt,
+            project_id: request.project_id,
+            started_from_session_id: request.started_from_session_id,
+            budget: request
+                .budget
+                .unwrap_or_else(|| request.program.manifest.default_budget.clone()),
+            program: request.program,
+            objective: request.objective,
+            system_prompt: request.system_prompt,
             default_model,
-            access,
+            access: request.access,
             enabled_skills,
+            launch_context: request.launch_context,
+            agent_access_overrides: request.agent_access_overrides,
             status: WorkflowStatus::Created,
-            input,
+            input: request.input,
             output: None,
             error: None,
             attention_required: false,

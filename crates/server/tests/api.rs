@@ -557,6 +557,154 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn workflow_launch_configuration_captures_context_and_enforces_access_bounds() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (project, origin) =
+        create_project_and_session(&app, directory.path(), "Configured launch").await;
+    let turn = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/sessions/{}/turns", origin.id),
+            json!({"input": "Reuse this prior evidence instead of restarting."}),
+        ))
+        .await
+        .expect("origin Turn request should complete");
+    assert_eq!(turn.status(), StatusCode::CREATED);
+
+    let unknown_agent = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "objective": "Reject an unknown Agent override.",
+                "agent_access_overrides": {"MissingAgent": "model_only"}
+            }),
+        ))
+        .await
+        .expect("unknown override request should complete");
+    assert_eq!(unknown_agent.status(), StatusCode::BAD_REQUEST);
+
+    let above_origin = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "objective": "Reject access above the origin Session.",
+                "started_from_session_id": origin.id,
+                "access": "full_access"
+            }),
+        ))
+        .await
+        .expect("origin ceiling request should complete");
+    assert_eq!(above_origin.status(), StatusCode::CONFLICT);
+
+    let above_workflow = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "objective": "Reject an Agent override above the Workflow.",
+                "started_from_session_id": origin.id,
+                "access": "model_only",
+                "agent_access_overrides": {"Researcher": "research"}
+            }),
+        ))
+        .await
+        .expect("Workflow ceiling request should complete");
+    assert_eq!(above_workflow.status(), StatusCode::CONFLICT);
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "objective": "Continue from the existing Project evidence.",
+                "input": {"perspectives": ["prior primary evidence"]},
+                "started_from_session_id": origin.id,
+                "context_mode": "project_snapshot",
+                "access": "research",
+                "agent_access_overrides": {
+                    "Researcher": "read_only",
+                    "Synthesizer": "model_only"
+                }
+            }),
+        ))
+        .await
+        .expect("configured launch should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let run = response_json(response).await;
+    assert_eq!(run["launch_context"]["mode"], "project_snapshot");
+    assert_eq!(
+        run["launch_context"]["snapshot"]["focus_session_id"],
+        origin.id.to_string()
+    );
+    assert!(
+        run["launch_context"]["snapshot"]["sessions"]
+            .as_array()
+            .is_some_and(|sessions| sessions.iter().any(|session| {
+                session["id"] == origin.id.to_string()
+                    && session["turns"].as_array().is_some_and(|turns| {
+                        turns.iter().any(|turn| {
+                            turn["input"] == "Reuse this prior evidence instead of restarting."
+                        })
+                    })
+            }))
+    );
+    assert_eq!(run["agent_access_overrides"]["Researcher"], "read_only");
+    let workflow_id = run["id"].as_str().expect("Workflow id should exist");
+
+    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    for participant in completed["participants"]
+        .as_array()
+        .expect("participants should be present")
+    {
+        let expected_access = match participant["class_name"].as_str() {
+            Some("Researcher") => "read_only",
+            Some("Synthesizer") => "model_only",
+            other => panic!("unexpected Agent class {other:?}"),
+        };
+        let session_id = &participant["session_id"];
+        let session = completed["sessions"]
+            .as_array()
+            .expect("participant Sessions should be present")
+            .iter()
+            .find(|session| session["id"] == *session_id)
+            .expect("participant Session should be present");
+        assert_eq!(session["access"], expected_access);
+    }
+
+    let participant_session_id = completed["participants"][0]["session_id"]
+        .as_str()
+        .expect("participant Session id should exist");
+    let participant = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{participant_session_id}"),
+        ))
+        .await
+        .expect("participant Session should load");
+    let participant = response_json(participant).await;
+    assert!(
+        participant["turns"][0]["prompt"]["layers"]
+            .as_array()
+            .is_some_and(|layers| layers
+                .iter()
+                .any(|layer| layer["name"] == "Workflow launch context"))
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn project_summary_publishes_a_sandboxed_html_progress_page() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
@@ -894,12 +1042,12 @@ async def main(ctx):
 async fn workflow_access_escalation_requires_a_human_grant() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
-    let (project, origin) = create_project_and_session(&app, directory.path(), "Escalation").await;
-    let source = r#"from papermachine import Agent, action, workflow
+    let (project, _origin) = create_project_and_session(&app, directory.path(), "Escalation").await;
+    let source = r#"from papermachine import Agent, Team, action, workflow
 
 
 class HostInspector(Agent):
-    access = "full_access"
+    access = "research"
     role = "host inspection"
 
     @action(max_steps=1)
@@ -916,6 +1064,9 @@ class HostInspector(Agent):
 )
 async def main(ctx):
     inspector = HostInspector(name="Host inspector")
+    team = Team("Host team", inspector)
+    await team.activate()
+    await inspector.set_access("full_access")
     answer = await inspector.inspect(ctx.objective)
     return {"answer": answer}
 "#;
@@ -938,7 +1089,7 @@ async def main(ctx):
                 "program_slug": "access-grant",
                 "objective": "Inspect the configured environment.",
                 "input": {},
-                "started_from_session_id": origin.id
+                "access": "full_access"
             }),
         ))
         .await

@@ -31,6 +31,9 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     "access": "model_only",
                 }
             if kind == "project_snapshot":
+                self.assertTrue(payload["include_artifact_content"])
+                self.assertEqual(payload["max_workflows"], 200)
+                self.assertEqual(payload["max_text_chars"], 500_000)
                 return {
                     "captured_at": "2026-08-06T12:00:00Z",
                     "project": {"name": "PaperMachine"},
