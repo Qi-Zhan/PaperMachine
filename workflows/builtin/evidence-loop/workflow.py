@@ -1,4 +1,14 @@
-from papermachine import Agent, Team, action, relate, scope, together, workflow
+from papermachine import (
+    Agent,
+    HumanMessage,
+    Team,
+    action,
+    ask_human,
+    relate,
+    scope,
+    together,
+    workflow,
+)
 
 
 DEFAULT_COVERAGE = [
@@ -104,6 +114,14 @@ class Writer(Agent):
     @action(max_steps=1, reasoning_effort="medium", max_output_tokens=32_768)
     async def revise(self, draft_audit: dict):
         """Revise the draft already present in this persistent Writer Session. Apply every audit repair instruction, preserve approved content, remove unapproved or synthetic candidates, and return only the corrected final deliverable in the exact requested format."""
+
+    @action(max_steps=1, reasoning_effort="high", max_output_tokens=32_768)
+    async def revise_from_human(
+        self,
+        guidance: HumanMessage,
+        draft_audit: dict,
+    ):
+        """Revise the immediately preceding draft using the human's direct guidance and the latest failed audit. Do not add unsupported evidence or change the requested output contract. Return only the complete corrected deliverable."""
 
 
 def _clean_text(value, fallback=""):
@@ -358,6 +376,38 @@ def _normalize_draft_audit(raw):
     return audit
 
 
+def _audit_policy(raw):
+    value = _clean_text(raw, "deliver_with_warning").casefold()
+    allowed = {"deliver_with_warning", "wait_for_human", "fail_run"}
+    return value if value in allowed else "deliver_with_warning"
+
+
+def _completion_reasons(evaluation, draft_audit):
+    reasons = []
+    if evaluation.get("pass") is not True:
+        reasons.append("evidence_evaluation_incomplete")
+    if evaluation.get("needs_human") is True:
+        reasons.append("evaluator_requested_human")
+    if draft_audit.get("pass") is not True:
+        reasons.append("draft_audit_failed")
+    return reasons
+
+
+def _audit_summary(audit):
+    details = []
+    for field in (
+        "format_errors",
+        "unsupported_outputs",
+        "omitted_approved_candidates",
+        "precision_errors",
+        "repair_instructions",
+    ):
+        values = audit.get(field) or []
+        if values:
+            details.append(field + ": " + "; ".join(str(value) for value in values))
+    return "\n".join(details) or "The evaluator did not provide detailed errors."
+
+
 async def _research_with_contract(
     researcher,
     question,
@@ -406,6 +456,10 @@ async def _research_with_contract(
             "extra_requirements": {"type": "array", "items": {"type": "string"}},
             "max_rounds": {"type": "integer", "minimum": 1, "maximum": 4},
             "max_followups_per_round": {"type": "integer", "minimum": 1, "maximum": 4},
+            "audit_policy": {
+                "type": "string",
+                "enum": ["deliver_with_warning", "wait_for_human", "fail_run"],
+            },
         },
         "additionalProperties": False,
     },
@@ -419,6 +473,7 @@ async def _research_with_contract(
             "rounds": {"type": "integer"},
             "evidence_ledger": {"type": "array"},
             "route_sessions_reused": {"type": "boolean"},
+            "completion": {"type": "object"},
         },
         "required": [
             "report",
@@ -428,6 +483,7 @@ async def _research_with_contract(
             "rounds",
             "evidence_ledger",
             "route_sessions_reused",
+            "completion",
         ],
     },
     budget={
@@ -456,6 +512,7 @@ async def main(ctx):
         for value in ctx.input.get("extra_requirements") or []
         if _clean_text(value)
     ]
+    audit_policy = _audit_policy(ctx.input.get("audit_policy"))
 
     planner = Planner(name="Planner")
     evaluator = Evaluator(name="Evaluator")
@@ -565,9 +622,50 @@ async def main(ctx):
             report,
         )
     )
+    audit_history = [initial_draft_audit]
     if initial_draft_audit["revision_required"]:
         report = await writer.revise(initial_draft_audit)
-        final_draft_audit = _normalize_draft_audit(
+        audit_history.append(
+            _normalize_draft_audit(
+                await evaluator.audit_draft(
+                    ctx.objective,
+                    plan,
+                    evaluation,
+                    report,
+                )
+            )
+        )
+
+    human_revision_count = 0
+    human_decision = None
+    reasons = _completion_reasons(evaluation, audit_history[-1])
+    if reasons and audit_policy == "fail_run":
+        raise ValueError(
+            "evidence-loop completion policy rejected the result: "
+            + ", ".join(reasons)
+        )
+
+    while reasons and audit_policy == "wait_for_human":
+        answer = await ask_human(
+            "The research Workflow reached its automated quality gate with unresolved "
+            "issues: "
+            + ", ".join(reasons)
+            + "\n\nLatest draft audit:\n"
+            + _audit_summary(audit_history[-1])
+            + "\n\nReply `/deliver` to accept the current report, `/fail` to fail the "
+            "Workflow, or type revision guidance for the Writer. Revision guidance becomes "
+            "a verified user Turn in the persistent Writer Session.",
+            agent=writer,
+        )
+        decision = str(answer).strip().casefold()
+        if decision == "/deliver":
+            human_decision = "deliver"
+            break
+        if decision == "/fail":
+            raise ValueError("human rejected the evidence-loop result at its quality gate")
+        report = await writer.revise_from_human(answer, audit_history[-1])
+        human_revision_count += 1
+        audit_history.append(
             await evaluator.audit_draft(
                 ctx.objective,
                 plan,
@@ -575,17 +673,32 @@ async def main(ctx):
                 report,
             )
         )
-        draft_audit = {
-            "pass": final_draft_audit["pass"],
-            "revision_performed": True,
-            "initial": initial_draft_audit,
-            "final": final_draft_audit,
-        }
+        audit_history[-1] = _normalize_draft_audit(audit_history[-1])
+        reasons = _completion_reasons(evaluation, audit_history[-1])
+
+    draft_audit = {
+        "pass": audit_history[-1]["pass"],
+        "revision_performed": len(audit_history) > 1,
+        "human_revision_count": human_revision_count,
+        "initial": audit_history[0],
+        "final": audit_history[-1],
+        "attempts": audit_history,
+    }
+    final_reasons = _completion_reasons(evaluation, audit_history[-1])
+    if not final_reasons:
+        completion_status = "passed"
+    elif human_decision == "deliver":
+        completion_status = "human_accepted"
     else:
-        draft_audit = {
-            **initial_draft_audit,
-            "revision_performed": False,
-        }
+        completion_status = "warning"
+    completion = {
+        "status": completion_status,
+        "policy": audit_policy,
+        "quality_gate_pass": not final_reasons,
+        "reasons": final_reasons,
+        "human_decision": human_decision,
+        "human_revision_count": human_revision_count,
+    }
     return {
         "report": report,
         "plan": plan,
@@ -594,4 +707,5 @@ async def main(ctx):
         "rounds": round_number,
         "evidence_ledger": ledger,
         "route_sessions_reused": reused_sessions,
+        "completion": completion,
     }

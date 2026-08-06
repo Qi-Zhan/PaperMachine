@@ -136,6 +136,12 @@ identity 不会变化。
 `search_context_size`（`low`、`medium` 或 `high`）控制每次 hosted search 附带
 多少检索上下文；范围明确的探索 route 应先用 `low`，只有确实需要更丰富页面
 上下文时再提高。
+`finalize="after_search"` 为必须交付最终结果的 action 建立显式完成边界：若第一次
+Turn 使用过 hosted search，同一个持久 Agent Session 会再收到一个
+`max_steps=1`、`max_search_calls=0` 的 Action Turn，把前面的研究结果或过程播报
+转换成真正的最终交付物。`finalize="always"` 即使第一次 Turn 没用 hosted tools
+也会执行该无工具 Turn。finalizer 是独立持久化、可见的 ActionInvocation/Turn，
+因此会被预算、恢复和检查，而不是隐藏的后处理。
 由于兼容 endpoint 对 Responses WebSocket beta 中的 `max_output_tokens` 支持并不
 一致，显式设置输出上限的 action 会走 HTTP SSE，并记录
 `max_output_tokens_requires_http`。输出上限适合单次采样的 planner、evaluator 和
@@ -177,6 +183,12 @@ Workflow budget usage。provider 对 incomplete sample 返回的 usage 会跨重
 消耗的 token 仍然计入该 run。若 output limit 或只有 reasoning 的 completion
 没有产生 message/tool call，有限重试会降低 reasoning effort，并明确要求按原始
 格式交付 final answer。
+
+Action 完成和整个 Workflow 的结果是否被接受是两层语义。例如内置
+`evidence-loop` 暴露 `audit_policy`：`deliver_with_warning` 返回带显式 warning
+的结果；`fail_run` 在 evidence/draft gate 失败时终止；`wait_for_human` 会持久等待
+用户输入 `/deliver`、`/fail` 或修订意见。自由文本修订意见会作为已核验的
+`HumanMessage` 传给持久 Writer Session，因此 UI 中是来源真实的 user Turn。
 
 ## 6. 并发
 

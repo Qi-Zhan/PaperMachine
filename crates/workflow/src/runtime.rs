@@ -810,16 +810,23 @@ impl RunEffectContext {
             };
             match result {
                 Ok(turn) => {
+                    let action_output = json!({
+                        "message": turn.output.clone().unwrap_or_default(),
+                        "turn_id": turn.id,
+                        "hosted_search_calls_used": turn.hosted_search_calls_used,
+                    });
                     self.store.finish_action(
                         invocation.id,
                         attempt.id,
                         ActionStatus::Completed,
-                        Some(json!({"message": turn.output.clone().unwrap_or_default(), "turn_id": turn.id})),
+                        Some(action_output),
                         None,
                     )?;
-                    return Ok(
-                        json!({"output": turn.output.unwrap_or_default(), "turn_id": turn.id}),
-                    );
+                    return Ok(json!({
+                        "output": turn.output.unwrap_or_default(),
+                        "turn_id": turn.id,
+                        "hosted_search_calls_used": turn.hosted_search_calls_used,
+                    }));
                 }
                 Err(SessionRuntimeError::Interrupted(reason)) => {
                     self.store.finish_action(
@@ -1643,6 +1650,10 @@ fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, Workf
     Ok(json!({
         "output": output.get("message").and_then(Value::as_str).unwrap_or_default(),
         "turn_id": output.get("turn_id").cloned().unwrap_or(Value::Null),
+        "hosted_search_calls_used": output
+            .get("hosted_search_calls_used")
+            .cloned()
+            .unwrap_or_else(|| json!(0)),
     }))
 }
 

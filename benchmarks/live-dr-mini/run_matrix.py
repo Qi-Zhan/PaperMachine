@@ -839,6 +839,7 @@ def capture_result(
         "plan",
         "evaluation",
         "draft_audit",
+        "completion",
     ):
         if key in output:
             result[key] = output[key]

@@ -539,6 +539,8 @@ def capture_research_result(
         result["internal_evaluation"] = output["evaluation"]
     if isinstance(output.get("draft_audit"), dict):
         result["draft_audit"] = output["draft_audit"]
+    if isinstance(output.get("completion"), dict):
+        result["completion"] = output["completion"]
     if isinstance(output.get("evidence_ledger"), list):
         result["evidence_packets"] = len(output["evidence_ledger"])
     return result

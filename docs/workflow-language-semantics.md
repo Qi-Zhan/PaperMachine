@@ -150,6 +150,14 @@ snapshotted on the Turn and shown in model-step input metadata.
 `search_context_size` (`low`, `medium`, or `high`) controls how much retrieved
 context each hosted search attaches; use `low` for bounded exploratory routes
 and increase it only when the task needs richer page context.
+`finalize="after_search"` gives a deliverable-producing action an explicit
+completion boundary. If its first Turn used hosted search, the same persistent
+Agent Session receives a second `max_steps=1`, `max_search_calls=0` Action Turn
+that must turn the preceding research/progress output into the actual final
+deliverable. `finalize="always"` performs that model-only Turn even when the
+first Turn used no hosted search. The finalizer is a separate durable
+ActionInvocation and visible Turn, so it is budgeted, recoverable, and
+inspectable rather than hidden post-processing.
 Because the Responses WebSocket beta is not consistent across compatible
 endpoints for `max_output_tokens`, an action with an explicit output ceiling
 uses HTTP SSE and records `max_output_tokens_requires_http`. Keep output ceilings
@@ -195,6 +203,14 @@ is persisted as failed and the consumed usage is still charged to the run.
 When an output limit or a reasoning-only completion produces no message or tool
 call, the bounded retry lowers reasoning effort and explicitly requests the
 original final-answer format.
+
+Completion of an Action is distinct from acceptance of a whole Workflow's
+result. For example, the built-in `evidence-loop` exposes `audit_policy`:
+`deliver_with_warning` returns an explicit warning result, `fail_run` rejects a
+failed evidence/draft gate, and `wait_for_human` durably asks for `/deliver`,
+`/fail`, or revision guidance. Free-form guidance is passed as a verified
+`HumanMessage` to the persistent Writer Session and is therefore rendered as a
+real user-origin Turn.
 
 ## 6. Concurrency
 

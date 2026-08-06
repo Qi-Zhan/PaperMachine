@@ -16,6 +16,8 @@ packet_contract_error = WORKFLOW["_packet_contract_error"]
 normalize_plan = WORKFLOW["_normalize_plan"]
 normalize_output_contract = WORKFLOW["_normalize_output_contract"]
 normalize_draft_audit = WORKFLOW["_normalize_draft_audit"]
+audit_policy = WORKFLOW["_audit_policy"]
+completion_reasons = WORKFLOW["_completion_reasons"]
 
 
 class EvidencePacketContractTests(unittest.TestCase):
@@ -142,6 +144,25 @@ class EvidencePlanContractTests(unittest.TestCase):
 
 
 class DraftAuditContractTests(unittest.TestCase):
+    def test_completion_reasons_cover_evidence_human_and_draft_gates(self) -> None:
+        reasons = completion_reasons(
+            {"pass": False, "needs_human": True},
+            {"pass": False},
+        )
+
+        self.assertEqual(
+            reasons,
+            [
+                "evidence_evaluation_incomplete",
+                "evaluator_requested_human",
+                "draft_audit_failed",
+            ],
+        )
+
+    def test_unknown_audit_policy_falls_back_to_warning(self) -> None:
+        self.assertEqual(audit_policy("FAIL_RUN"), "fail_run")
+        self.assertEqual(audit_policy("invented"), "deliver_with_warning")
+
     def test_clean_model_pass_remains_pass(self) -> None:
         audit = normalize_draft_audit(
             {

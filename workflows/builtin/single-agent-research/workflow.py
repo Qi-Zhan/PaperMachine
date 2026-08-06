@@ -10,6 +10,7 @@ class Researcher(Agent):
         max_search_calls=32,
         search_context_size="low",
         reasoning_effort="high",
+        finalize="after_search",
     )
     async def research(self, question: str):
         """Research the complete question with live web search and return only the requested final deliverable. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""

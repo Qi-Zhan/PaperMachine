@@ -41,6 +41,12 @@ class RouteResearcher(Agent):
         """Investigate one route."""
 
 
+class FinalizingResearcher(Agent):
+    @action(max_steps=8, max_search_calls=4, finalize="after_search")
+    async def research(self, question: str) -> str:
+        """Research and return the final answer."""
+
+
 class ConversationalAgent(Agent):
     @action(max_steps=8)
     async def respond(self, message: HumanMessage) -> str:
@@ -48,6 +54,55 @@ class ConversationalAgent(Agent):
 
 
 class ActionOptionsTest(unittest.TestCase):
+    def test_after_search_finalization_uses_same_session_without_tools(self) -> None:
+        effects: list[tuple[str, dict[str, Any]]] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            effects.append((kind, payload))
+            if kind == "create_agent":
+                return {"agent_instance_id": "agent", "session_id": "session"}
+            if payload["action_name"] == "research":
+                return {
+                    "output": "I finished searching and will now write the answer.",
+                    "hosted_search_calls_used": 3,
+                }
+            if payload["action_name"] == "research_finalize":
+                return {"output": "The complete final answer."}
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> str:
+            _set_runtime(_Runtime(send))
+            return await FinalizingResearcher().research("Question")
+
+        self.assertEqual(asyncio.run(invoke()), "The complete final answer.")
+        action_effects = [payload for kind, payload in effects if kind == "invoke_action"]
+        self.assertEqual(
+            [payload["action_name"] for payload in action_effects],
+            ["research", "research_finalize"],
+        )
+        self.assertEqual(action_effects[1]["max_steps"], 1)
+        self.assertEqual(action_effects[1]["max_search_calls"], 0)
+        self.assertEqual(action_effects[1]["agent_instance_id"], "agent")
+
+    def test_after_search_finalization_skips_search_free_result(self) -> None:
+        actions = 0
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            nonlocal actions
+            if kind == "create_agent":
+                return {"agent_instance_id": "agent", "session_id": "session"}
+            if kind == "invoke_action":
+                actions += 1
+                return {"output": "Already final.", "hosted_search_calls_used": 0}
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> str:
+            _set_runtime(_Runtime(send))
+            return await FinalizingResearcher().research("Question")
+
+        self.assertEqual(asyncio.run(invoke()), "Already final.")
+        self.assertEqual(actions, 1)
+
     def test_string_human_answer_preserves_provenance_for_a_user_turn(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
 
@@ -305,6 +360,14 @@ class ActionOptionsTest(unittest.TestCase):
 
             class Invalid(Agent):
                 @action(max_output_tokens=0)
+                async def run(self) -> str:
+                    """Invalid action."""
+
+    def test_finalize_policy_must_be_known(self) -> None:
+        with self.assertRaisesRegex(ValueError, "finalize must be one of"):
+
+            class Invalid(Agent):
+                @action(finalize="sometimes")
                 async def run(self) -> str:
                     """Invalid action."""
 

@@ -144,6 +144,13 @@ A user Turn or workflow action follows the same core path:
    instruction so a provider cannot repeatedly spend the completion on hidden
    reasoning without producing the action result.
 
+A deliverable-producing DSL action may opt into `finalize="after_search"`. Rust
+returns the durable Turn's hosted-search count to the Python DSL; after a
+tool-using Turn, Python schedules one separate model-only Action on the same
+Session. This preserves the full research history and cache affinity while
+preventing a provider's progress narration from being accepted as the final
+deliverable. The extra Action and Turn remain visible in the Session workbench.
+
 ## Providers and model profiles
 
 `papermachine.toml` is the authoritative model configuration. A provider owns

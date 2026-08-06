@@ -106,6 +106,7 @@ class _ActionDescriptor:
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
+        finalize: str | None = None,
     ) -> None:
         if max_steps is not None and (isinstance(max_steps, bool) or max_steps < 1):
             raise ValueError("action max_steps must be a positive integer")
@@ -133,6 +134,8 @@ class _ActionDescriptor:
             isinstance(max_output_tokens, bool) or max_output_tokens < 1
         ):
             raise ValueError("action max_output_tokens must be a positive integer")
+        if finalize not in {None, "always", "after_search"}:
+            raise ValueError("action finalize must be one of: always, after_search")
         self.function = function
         self.name = function.__name__
         self.prompt = (prompt or inspect.getdoc(function) or self.name).strip()
@@ -145,6 +148,7 @@ class _ActionDescriptor:
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.max_output_tokens = max_output_tokens
+        self.finalize = finalize
 
     def __get__(self, instance: Agent | None, owner: type[Agent]) -> Any:
         if instance is None:
@@ -193,6 +197,7 @@ class _ActionDescriptor:
                 self.search_context_size,
                 self.reasoning_effort,
                 self.max_output_tokens,
+                self.finalize,
                 self.human_message_parameter,
                 human_message.request_id if human_message is not None else None,
             )
@@ -208,6 +213,7 @@ def action(
     search_context_size: str | None = None,
     reasoning_effort: str | None = None,
     max_output_tokens: int | None = None,
+    finalize: str | None = None,
 ) -> Any:
     if callable(argument):
         return _ActionDescriptor(
@@ -217,6 +223,7 @@ def action(
             search_context_size=search_context_size,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
+            finalize=finalize,
         )
     if argument is not None and not isinstance(argument, str):
         raise TypeError("action prompt must be a string")
@@ -230,6 +237,7 @@ def action(
             search_context_size,
             reasoning_effort,
             max_output_tokens,
+            finalize,
         )
 
     return decorate
@@ -361,6 +369,7 @@ class _ActionCall(Awaitable[Any]):
         search_context_size: str | None,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
+        finalize: str | None,
         human_message_parameter: str | None,
         human_request_id: str | None,
     ) -> None:
@@ -375,6 +384,7 @@ class _ActionCall(Awaitable[Any]):
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.max_output_tokens = max_output_tokens
+        self.finalize = finalize
         self.human_message_parameter = human_message_parameter
         self.human_request_id = human_request_id
 
@@ -384,6 +394,36 @@ class _ActionCall(Awaitable[Any]):
     async def _run(self) -> Any:
         remote = await self.agent._ensure_remote()
         result = await self._invoke(remote, use_human_message=True)
+        try:
+            hosted_search_calls = int(result.get("hosted_search_calls_used", 0))
+        except (TypeError, ValueError):
+            hosted_search_calls = 0
+        should_finalize = self.finalize == "always" or (
+            self.finalize == "after_search" and hosted_search_calls > 0
+        )
+        if should_finalize:
+            result = await self._invoke(
+                remote,
+                action_name=f"{self.name}_finalize",
+                prompt=(
+                    "Turn the immediately preceding action result into the actual final "
+                    "deliverable requested by that action. The preceding result may be "
+                    "research notes or progress narration rather than an answer. Do not do "
+                    "new research or call tools. Return only the complete, self-contained "
+                    "deliverable in the original requested format; preserve verified evidence, "
+                    "source URLs, exact values, and material limitations."
+                ),
+                arguments={
+                    "original_action": self.name,
+                    "finalization_policy": self.finalize,
+                },
+                max_steps=1,
+                max_search_calls=0,
+                search_context_size=None,
+                reasoning_effort=self.reasoning_effort,
+                max_output_tokens=max(self.max_output_tokens or 0, 32_768),
+                use_human_message=False,
+            )
         output = str(result.get("output", ""))
         if self.return_kind is None:
             return output
