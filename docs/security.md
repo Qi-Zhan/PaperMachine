@@ -106,9 +106,9 @@ memory but is not copied into `papermachine.toml`, SQLite, workflow source,
 artifacts, or logs. Configuration debug output omits/redacts credentials, and
 child workflow or tool processes receive a cleared environment.
 
-Codex credential reuse is retained only as an opt-in fallback importer through
-`--codex-home` when no PaperMachine provider config is loaded. It is not the
-primary credential or provider registry.
+Outside explicit demo mode, startup fails unless a valid PaperMachine provider
+configuration is present and every provider's named credential variable is
+non-empty.
 
 Use an HTTPS provider endpoint. With an explicitly configured plain HTTP base
 URL, the bearer credential, prompts, tool results, and research outputs cross

@@ -116,6 +116,13 @@ impl ConfiguredModels {
                     ))
                 })?;
             let endpoint = super::openai::responses_endpoint(&provider.base_url)?;
+            if endpoint.scheme() != "https" {
+                tracing::warn!(
+                    provider = provider_id,
+                    endpoint = %endpoint,
+                    "model endpoint is not protected by HTTPS"
+                );
+            }
             let request_timeout = positive_duration(
                 "request_timeout_seconds",
                 provider.request_timeout_seconds,
@@ -311,14 +318,9 @@ enum ProviderKind {
     OpenAiResponses,
 }
 
-fn default_provider_kind() -> ProviderKind {
-    ProviderKind::OpenAiResponses
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderConfigFile {
-    #[serde(default = "default_provider_kind")]
     kind: ProviderKind,
     base_url: String,
     api_key_env: String,
@@ -430,6 +432,7 @@ responses_websockets = false
 prompt_cache_mode = "implicit"
 
 [providers.openai]
+kind = "open_ai_responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
@@ -464,6 +467,7 @@ context_window = 1000000
         let source = r#"
 default_model = "main"
 [providers.deepseek]
+kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 [models.main]
@@ -474,6 +478,24 @@ context_window = 1000000
         let error = ConfiguredModels::from_toml_with_key_lookup(source, |_| None)
             .expect_err("missing key should fail");
         assert!(error.to_string().contains("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn provider_kind_is_required() {
+        let source = r#"
+default_model = "main"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+[models.main]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+context_window = 1000000
+"#;
+        let error =
+            ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
+                .expect_err("provider kind should be explicit");
+        assert!(error.to_string().contains("missing field `kind`"));
     }
 
     #[tokio::test]

@@ -22,11 +22,10 @@ use axum::routing::get;
 use axum::routing::post;
 use axum::routing::put;
 use papermachine_model::ConfiguredModels;
+use papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW;
 use papermachine_model::ModelClient;
 use papermachine_model::ModelProfile;
 use papermachine_model::ModelProviderInfo;
-use papermachine_model::OpenAiResponsesClient;
-use papermachine_model::OpenAiResponsesConfig;
 use papermachine_protocol::*;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
@@ -77,13 +76,15 @@ use tower_http::trace::TraceLayer;
 pub use demo_model::DemoModelClient;
 
 #[derive(Clone, Debug)]
+pub enum ServerModelConfig {
+    Demo,
+    Providers(ConfiguredModels),
+}
+
+#[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub root: PathBuf,
-    pub default_model: String,
-    pub demo: bool,
-    pub configured_models: Option<ConfiguredModels>,
-    pub openai_config: Option<OpenAiResponsesConfig>,
-    pub model_context_window: usize,
+    pub models: ServerModelConfig,
     pub max_concurrent_runs: usize,
     pub max_parallel_actions: usize,
 }
@@ -114,10 +115,6 @@ impl AppState {
 }
 
 pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
-    anyhow::ensure!(
-        config.model_context_window >= 4_096,
-        "model context window must be at least 4096 tokens"
-    );
     let state_root = config.root.join(".papermachine");
     let durable_state_root = state_root.join("state");
     let store = Arc::new(
@@ -144,54 +141,37 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
             .with_context(|| format!("failed to load workflows for Project {}", project.id))?;
     }
 
-    let (model, mode, model_profiles, model_providers): (
+    let (model, default_model, model_context_window, mode, model_profiles, model_providers): (
         Arc<dyn ModelClient>,
+        String,
+        usize,
         &'static str,
         Vec<ModelProfile>,
         Vec<ModelProviderInfo>,
-    ) = if config.demo {
-        (Arc::new(DemoModelClient), "demo", Vec::new(), Vec::new())
-    } else if let Some(configured) = config.configured_models.as_ref() {
-        let model: Arc<dyn ModelClient> = Arc::new(configured.router.clone());
-        (
-            model,
-            "providers",
-            configured.profiles.clone(),
-            configured.providers.clone(),
-        )
-    } else {
-        let openai_config = config
-            .openai_config
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(OpenAiResponsesConfig::from_env)
-            .context("failed to configure OpenAI model")?;
-        if openai_config.endpoint.scheme() != "https" {
-            tracing::warn!(
-                endpoint = %openai_config.endpoint,
-                "model endpoint is not protected by HTTPS"
-            );
+    ) = match &config.models {
+        ServerModelConfig::Demo => (
+            Arc::new(DemoModelClient),
+            "demo-model".to_string(),
+            DEFAULT_MODEL_CONTEXT_WINDOW,
+            "demo",
+            Vec::new(),
+            Vec::new(),
+        ),
+        ServerModelConfig::Providers(configured) => {
+            let model_context_window = configured
+                .router
+                .model_context_window(&configured.default_model)
+                .context("configured default model has no context window")?;
+            let model: Arc<dyn ModelClient> = Arc::new(configured.router.clone());
+            (
+                model,
+                configured.default_model.clone(),
+                model_context_window,
+                "providers",
+                configured.profiles.clone(),
+                configured.providers.clone(),
+            )
         }
-        let profile = ModelProfile {
-            id: config.default_model.clone(),
-            provider: openai_config.provider_id.clone(),
-            model: config.default_model.clone(),
-            context_window: config.model_context_window,
-        };
-        let provider = ModelProviderInfo {
-            id: openai_config.provider_id.clone(),
-            kind: "openai_responses".to_string(),
-            endpoint: openai_config.endpoint.to_string(),
-            max_request_retries: openai_config.max_request_retries,
-            request_timeout_seconds: openai_config.request_timeout.as_secs(),
-            stream_idle_timeout_seconds: openai_config.stream_idle_timeout.as_secs(),
-            responses_websockets: openai_config.responses_websockets,
-            prompt_cache_mode: format!("{:?}", openai_config.prompt_cache_mode)
-                .to_ascii_lowercase(),
-        };
-        let model = OpenAiResponsesClient::new(openai_config)
-            .context("failed to create OpenAI model client")?;
-        (Arc::new(model), "openai", vec![profile], vec![provider])
     };
 
     let human_broker = Arc::new(StoreHumanRequestBroker::new(Arc::clone(&store)));
@@ -214,8 +194,8 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         tools,
         Arc::clone(&skills),
         SessionRuntimeConfig {
-            default_model: config.default_model.clone(),
-            model_context_window: config.model_context_window,
+            default_model: default_model.clone(),
+            model_context_window,
             max_concurrent_turns: config
                 .max_concurrent_runs
                 .saturating_mul(config.max_parallel_actions)
@@ -246,9 +226,9 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         scheduler,
         sessions,
         skills,
-        generator: WorkflowGenerator::new(Arc::clone(&model), &config.default_model),
-        default_model: config.default_model.clone(),
-        model_context_window: config.model_context_window,
+        generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
+        default_model,
+        model_context_window,
         model_profiles,
         model_providers,
         mode,

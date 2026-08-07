@@ -180,10 +180,10 @@ providers. The current provider client implements the OpenAI Responses wire
 shape, including compatible implementations such as DeepSeek's Responses
 endpoint. Provider formats are an adapter boundary, not a Workflow DSL concern.
 
-`--codex-home` is only an opt-in single-provider importer used when a
-PaperMachine config is absent. Codex configuration is not the model registry.
+Outside explicit demo mode, the server must load a valid `papermachine.toml`
+(or `--config` file), and all Session/Agent model selection uses its profile IDs.
 
-History is stored locally, so `disable_response_storage=true` is supported.
+History is stored locally, so providers may set `store_responses = false`.
 Before every model sample the agent estimates instruction, tool-schema, output,
 and history tokens. At 90% of the available history capacity, it runs a no-tool
 semantic compaction sample and replaces early model-visible history with a
@@ -205,8 +205,8 @@ Prompt-cache mode is provider-aware. In `auto` mode the client performs one
 small capability probe per model. Providers that accept GPT-5.6 explicit cache
 breakpoints receive `prompt_cache_options.mode=explicit` and a breakpoint at
 the end of the stable developer instructions. Providers that reject that field
-use ordinary implicit caching instead. `PAPERMACHINE_PROMPT_CACHE_MODE` may pin
-`implicit` or `explicit` when provider behavior is already known.
+use ordinary implicit caching instead. A provider's `prompt_cache_mode` setting
+may pin `implicit` or `explicit` when provider behavior is already known.
 
 The final model sample no longer rewrites instructions or removes tool
 definitions. It appends a final-answer message and sets `tool_choice=none`, so

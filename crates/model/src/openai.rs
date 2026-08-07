@@ -30,9 +30,6 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
-use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -53,7 +50,6 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::header::USER_AGENT as WEBSOCKET_USER_AGENT;
 use url::Url;
 
-const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 pub const DEFAULT_MODEL_CONTEXT_WINDOW: usize = 128_000;
 pub const DEFAULT_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const DEFAULT_MODEL_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -101,24 +97,6 @@ impl OpenAiReasoningEffort {
     }
 }
 
-impl FromStr for OpenAiReasoningEffort {
-    type Err = ModelError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "none" => Ok(Self::None),
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "xhigh" => Ok(Self::Xhigh),
-            "max" => Ok(Self::Max),
-            other => Err(ModelError::Configuration(format!(
-                "unsupported reasoning effort {other:?}"
-            ))),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenAiPromptCacheMode {
@@ -126,21 +104,6 @@ pub enum OpenAiPromptCacheMode {
     Auto,
     Implicit,
     Explicit,
-}
-
-impl FromStr for OpenAiPromptCacheMode {
-    type Err = ModelError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "implicit" => Ok(Self::Implicit),
-            "explicit" => Ok(Self::Explicit),
-            other => Err(ModelError::Configuration(format!(
-                "unsupported prompt cache mode {other:?}"
-            ))),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -179,153 +142,6 @@ impl fmt::Debug for OpenAiResponsesConfig {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct CodexOpenAiSettings {
-    pub client: OpenAiResponsesConfig,
-    pub model: String,
-    pub model_context_window: usize,
-}
-
-impl OpenAiResponsesConfig {
-    pub fn from_env() -> Result<Self, ModelError> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| ModelError::Configuration("OPENAI_API_KEY is not set".to_string()))?;
-        let endpoint = match std::env::var("OPENAI_RESPONSES_ENDPOINT") {
-            Ok(endpoint) => parse_endpoint(&endpoint)?,
-            Err(_) => match std::env::var("OPENAI_BASE_URL") {
-                Ok(base_url) => responses_endpoint(&base_url)?,
-                Err(_) => parse_endpoint(DEFAULT_ENDPOINT)?,
-            },
-        };
-        let reasoning_effort = std::env::var("OPENAI_REASONING_EFFORT")
-            .ok()
-            .map(|value| value.parse())
-            .transpose()?;
-        let store_responses = std::env::var("OPENAI_STORE_RESPONSES")
-            .ok()
-            .map(|value| parse_bool("OPENAI_STORE_RESPONSES", &value))
-            .transpose()?
-            .unwrap_or(false);
-        let responses_websockets = responses_websockets_from_env()?;
-        let prompt_cache_mode = prompt_cache_mode_from_env()?.unwrap_or_default();
-
-        Ok(Self {
-            provider_id: "openai".to_string(),
-            endpoint,
-            api_key,
-            organization: std::env::var("OPENAI_ORG_ID").ok(),
-            project: std::env::var("OPENAI_PROJECT_ID").ok(),
-            max_request_retries: 2,
-            request_timeout: timeout_from_env(
-                "OPENAI_REQUEST_TIMEOUT_SECONDS",
-                DEFAULT_MODEL_REQUEST_TIMEOUT,
-            )?,
-            stream_idle_timeout: timeout_from_env(
-                "OPENAI_STREAM_IDLE_TIMEOUT_SECONDS",
-                DEFAULT_MODEL_STREAM_IDLE_TIMEOUT,
-            )?,
-            reasoning_effort,
-            store_responses,
-            responses_websockets,
-            prompt_cache_mode,
-        })
-    }
-
-    pub fn from_codex_home(codex_home: &Path) -> Result<CodexOpenAiSettings, ModelError> {
-        let config_path = codex_home.join("config.toml");
-        let auth_path = codex_home.join("auth.json");
-        let config_text = fs::read_to_string(&config_path).map_err(|error| {
-            ModelError::Configuration(format!("failed to read {}: {error}", config_path.display()))
-        })?;
-        let config: CodexConfigFile = toml::from_str(&config_text).map_err(|error| {
-            ModelError::Configuration(format!(
-                "failed to parse {}: {error}",
-                config_path.display()
-            ))
-        })?;
-        if config.model_provider.as_deref().unwrap_or("openai") != "openai" {
-            return Err(ModelError::Configuration(
-                "Codex model_provider must be openai".to_string(),
-            ));
-        }
-        let auth_text = fs::read_to_string(&auth_path).map_err(|error| {
-            ModelError::Configuration(format!("failed to read {}: {error}", auth_path.display()))
-        })?;
-        let auth: CodexAuthFile = serde_json::from_str(&auth_text).map_err(|error| {
-            ModelError::Configuration(format!("failed to parse {}: {error}", auth_path.display()))
-        })?;
-        let api_key = auth
-            .openai_api_key
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| {
-                ModelError::Configuration(format!(
-                    "{} does not contain a non-empty OPENAI_API_KEY",
-                    auth_path.display()
-                ))
-            })?;
-        let endpoint = match config.openai_base_url {
-            Some(base_url) => responses_endpoint(&base_url)?,
-            None => parse_endpoint(DEFAULT_ENDPOINT)?,
-        };
-        let model = config
-            .model
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or_else(|| "gpt-5.2".to_string());
-        let model_context_window = config
-            .model_context_window
-            .unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW);
-        if model_context_window < 4_096 {
-            return Err(ModelError::Configuration(
-                "model_context_window must be at least 4096".to_string(),
-            ));
-        }
-
-        Ok(CodexOpenAiSettings {
-            client: Self {
-                provider_id: "codex-openai".to_string(),
-                endpoint,
-                api_key,
-                organization: None,
-                project: None,
-                max_request_retries: 2,
-                request_timeout: timeout_from_env(
-                    "OPENAI_REQUEST_TIMEOUT_SECONDS",
-                    DEFAULT_MODEL_REQUEST_TIMEOUT,
-                )?,
-                stream_idle_timeout: timeout_from_env(
-                    "OPENAI_STREAM_IDLE_TIMEOUT_SECONDS",
-                    DEFAULT_MODEL_STREAM_IDLE_TIMEOUT,
-                )?,
-                reasoning_effort: config.model_reasoning_effort,
-                store_responses: !config.disable_response_storage.unwrap_or(true),
-                responses_websockets: responses_websockets_from_env()?,
-                prompt_cache_mode: prompt_cache_mode_from_env()?
-                    .or(config.prompt_cache_mode)
-                    .unwrap_or_default(),
-            },
-            model,
-            model_context_window,
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexConfigFile {
-    model_provider: Option<String>,
-    openai_base_url: Option<String>,
-    model: Option<String>,
-    model_reasoning_effort: Option<OpenAiReasoningEffort>,
-    disable_response_storage: Option<bool>,
-    model_context_window: Option<usize>,
-    prompt_cache_mode: Option<OpenAiPromptCacheMode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexAuthFile {
-    #[serde(rename = "OPENAI_API_KEY")]
-    openai_api_key: Option<String>,
-}
-
 fn parse_endpoint(value: &str) -> Result<Url, ModelError> {
     value
         .parse::<Url>()
@@ -343,48 +159,6 @@ pub(crate) fn responses_endpoint(base_url: &str) -> Result<Url, ModelError> {
     directory
         .join("responses")
         .map_err(|error| ModelError::Configuration(format!("invalid OpenAI base URL: {error}")))
-}
-
-fn parse_bool(name: &str, value: &str) -> Result<bool, ModelError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(ModelError::Configuration(format!(
-            "{name} must be true or false"
-        ))),
-    }
-}
-
-fn responses_websockets_from_env() -> Result<bool, ModelError> {
-    std::env::var("PAPERMACHINE_RESPONSES_WEBSOCKETS")
-        .ok()
-        .map(|value| parse_bool("PAPERMACHINE_RESPONSES_WEBSOCKETS", &value))
-        .transpose()
-        .map(|value| value.unwrap_or(true))
-}
-
-fn prompt_cache_mode_from_env() -> Result<Option<OpenAiPromptCacheMode>, ModelError> {
-    std::env::var("PAPERMACHINE_PROMPT_CACHE_MODE")
-        .ok()
-        .map(|value| value.parse())
-        .transpose()
-}
-
-fn timeout_from_env(name: &str, default: Duration) -> Result<Duration, ModelError> {
-    let Some(value) = std::env::var(name).ok() else {
-        return Ok(default);
-    };
-    let seconds = value.trim().parse::<u64>().map_err(|_| {
-        ModelError::Configuration(format!(
-            "{name} must be a positive integer number of seconds"
-        ))
-    })?;
-    if seconds == 0 {
-        return Err(ModelError::Configuration(format!(
-            "{name} must be greater than zero"
-        )));
-    }
-    Ok(Duration::from_secs(seconds))
 }
 
 #[derive(Clone)]
@@ -1452,14 +1226,14 @@ mod tests {
     use papermachine_protocol::ModelResponseFormat;
     use papermachine_protocol::ToolDefinition;
     use std::convert::Infallible;
-    use tempfile::tempdir;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
     fn test_config() -> OpenAiResponsesConfig {
         OpenAiResponsesConfig {
             provider_id: "test-openai".to_string(),
-            endpoint: Url::parse(DEFAULT_ENDPOINT).expect("default endpoint should parse"),
+            endpoint: Url::parse("https://api.openai.com/v1/responses")
+                .expect("test endpoint should parse"),
             api_key: "test-key".to_string(),
             organization: None,
             project: None,
@@ -2108,43 +1882,5 @@ mod tests {
                 }
             }
         })
-    }
-
-    #[test]
-    fn codex_settings_resolve_base_url_model_and_redact_key() {
-        let directory = tempdir().expect("temporary Codex home should be created");
-        fs::write(
-            directory.path().join("config.toml"),
-            r#"model_provider = "openai"
-openai_base_url = "http://127.0.0.1:9876/api"
-model = "gpt-test"
-model_reasoning_effort = "medium"
-disable_response_storage = true
-model_context_window = 1000000
-"#,
-        )
-        .expect("Codex config should be written");
-        fs::write(
-            directory.path().join("auth.json"),
-            r#"{"OPENAI_API_KEY":"secret-test-key"}"#,
-        )
-        .expect("Codex auth should be written");
-
-        let settings = OpenAiResponsesConfig::from_codex_home(directory.path())
-            .expect("Codex settings should load");
-        assert_eq!(
-            settings.client.endpoint.as_str(),
-            "http://127.0.0.1:9876/api/responses"
-        );
-        assert_eq!(settings.model, "gpt-test");
-        assert_eq!(settings.model_context_window, 1_000_000);
-        assert_eq!(
-            settings.client.reasoning_effort,
-            Some(OpenAiReasoningEffort::Medium)
-        );
-        assert!(!settings.client.store_responses);
-        let debug = format!("{:?}", settings.client);
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("secret-test-key"));
     }
 }

@@ -393,7 +393,7 @@ export interface SessionEvent {
 
 export interface Health {
   status: string
-  model_mode: 'demo' | 'openai' | 'providers'
+  model_mode: 'demo' | 'providers'
   default_model: string
   model_context_window: number
   model_profiles: ModelProfile[]

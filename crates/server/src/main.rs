@@ -1,9 +1,8 @@
 use anyhow::Context;
 use clap::Parser;
 use papermachine_model::ConfiguredModels;
-use papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW;
-use papermachine_model::OpenAiResponsesConfig;
 use papermachine_server::ServerConfig;
+use papermachine_server::ServerModelConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -24,16 +23,10 @@ struct Args {
     host: String,
     #[arg(long, env = "PAPERMACHINE_PORT", default_value_t = 4310)]
     port: u16,
-    #[arg(long, env = "PAPERMACHINE_MODEL")]
-    model: Option<String>,
-    #[arg(long, env = "PAPERMACHINE_CODEX_HOME")]
-    codex_home: Option<PathBuf>,
-    /// PaperMachine-owned provider and model-profile configuration. When
-    /// omitted, <root>/papermachine.toml is loaded if it exists.
+    /// PaperMachine-owned provider and model-profile configuration. Defaults
+    /// to <root>/papermachine.toml outside explicit demo mode.
     #[arg(long, env = "PAPERMACHINE_CONFIG")]
     config: Option<PathBuf>,
-    #[arg(long, env = "PAPERMACHINE_MODEL_CONTEXT_WINDOW")]
-    model_context_window: Option<usize>,
     #[arg(long, env = "PAPERMACHINE_DEMO")]
     demo: bool,
     #[arg(long, default_value_t = 4)]
@@ -54,70 +47,19 @@ async fn main() -> anyhow::Result<()> {
         .root
         .canonicalize()
         .with_context(|| format!("workspace root does not exist: {}", args.root.display()))?;
-    let config_path = args.config.clone().or_else(|| {
-        root.join("papermachine.toml")
-            .is_file()
-            .then(|| root.join("papermachine.toml"))
-    });
-    let configured_models = if args.demo {
-        None
+    let models = if args.demo {
+        ServerModelConfig::Demo
     } else {
-        config_path
-            .as_deref()
-            .map(ConfiguredModels::from_file)
-            .transpose()
-            .context("failed to load PaperMachine provider configuration")?
+        let config_path = args
+            .config
+            .unwrap_or_else(|| root.join("papermachine.toml"));
+        let configured = ConfiguredModels::from_file(&config_path)
+            .context("failed to load PaperMachine provider configuration")?;
+        ServerModelConfig::Providers(configured)
     };
-    let codex_settings = if args.demo || configured_models.is_some() {
-        None
-    } else {
-        args.codex_home
-            .as_deref()
-            .map(OpenAiResponsesConfig::from_codex_home)
-            .transpose()
-            .context("failed to load Codex OpenAI settings")?
-    };
-    let default_model = args
-        .model
-        .or_else(|| {
-            configured_models
-                .as_ref()
-                .map(|settings| settings.default_model.clone())
-        })
-        .or_else(|| {
-            codex_settings
-                .as_ref()
-                .map(|settings| settings.model.clone())
-        })
-        .unwrap_or_else(|| "gpt-5.2".to_string());
-    let model_context_window = args
-        .model_context_window
-        .or_else(|| {
-            configured_models.as_ref().and_then(|settings| {
-                settings
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.id == default_model)
-                    .map(|profile| profile.context_window)
-            })
-        })
-        .or_else(|| {
-            codex_settings
-                .as_ref()
-                .map(|settings| settings.model_context_window)
-        })
-        .unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW);
-    let demo = args.demo
-        || (configured_models.is_none()
-            && codex_settings.is_none()
-            && std::env::var_os("OPENAI_API_KEY").is_none());
     let config = ServerConfig {
         root: root.clone(),
-        default_model,
-        demo,
-        configured_models,
-        openai_config: codex_settings.map(|settings| settings.client),
-        model_context_window,
+        models,
         max_concurrent_runs: args.max_concurrent_runs,
         max_parallel_actions: args.max_parallel_actions,
     };

@@ -14,6 +14,7 @@ use papermachine_protocol::Session;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_server::ServerConfig;
+use papermachine_server::ServerModelConfig;
 use papermachine_server::initialize;
 use papermachine_server::router;
 use serde_json::Value;
@@ -71,11 +72,7 @@ async fn test_app(directory: &TempDir) -> Router {
     prepare_root(directory.path());
     let state = initialize(&ServerConfig {
         root: directory.path().to_path_buf(),
-        default_model: "demo-model".to_string(),
-        demo: true,
-        configured_models: None,
-        openai_config: None,
-        model_context_window: 128_000,
+        models: ServerModelConfig::Demo,
         max_concurrent_runs: 2,
         max_parallel_actions: 4,
     })
@@ -115,11 +112,7 @@ async fn test_app_with_model_profiles(
     };
     let state = initialize(&ServerConfig {
         root: directory.path().to_path_buf(),
-        default_model: "research-model".to_string(),
-        demo: false,
-        configured_models: Some(configured_models),
-        openai_config: None,
-        model_context_window: 128_000,
+        models: ServerModelConfig::Providers(configured_models),
         max_concurrent_runs: 2,
         max_parallel_actions: 4,
     })
@@ -469,7 +462,7 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
         .oneshot(json_request(
             "POST",
             &format!("/api/projects/{}/sessions", project.id),
-            json!({"title": "Legacy standalone Session"}),
+            json!({"title": "Removed standalone Session"}),
         ))
         .await
         .expect("removed endpoint should return a response");

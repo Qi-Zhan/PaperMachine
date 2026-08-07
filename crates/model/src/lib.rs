@@ -11,7 +11,6 @@ use papermachine_protocol::ModelRequest;
 use papermachine_protocol::TokenUsage;
 use thiserror::Error;
 
-pub use openai::CodexOpenAiSettings;
 pub use openai::DEFAULT_MODEL_CONTEXT_WINDOW;
 pub use openai::DEFAULT_MODEL_REQUEST_TIMEOUT;
 pub use openai::DEFAULT_MODEL_STREAM_IDLE_TIMEOUT;

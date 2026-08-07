@@ -163,6 +163,8 @@ default_model = "deepseek-flash"
 kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+request_timeout_seconds = 900
+stream_idle_timeout_seconds = 300
 responses_websockets = false
 prompt_cache_mode = "implicit"
 
@@ -188,47 +190,22 @@ selected profile, provider, and concrete upstream model. The current transport
 adapter supports providers that implement the OpenAI Responses shape; additional
 wire protocols can be added behind the same router.
 
-Reusing an existing Codex OpenAI configuration remains an explicit fallback
-import path when no PaperMachine config file is present:
+Real-model mode requires a PaperMachine provider file; demo mode must be
+selected explicitly. Only the credential variable named by each provider's
+`api_key_env` is read from the environment.
 
-```sh
-cargo run -p papermachine-server -- \
-  --root . \
-  --codex-home /path/to/.codex
-```
-
-The importer reads `model`, `openai_base_url`, `model_reasoning_effort`,
-`disable_response_storage`, `model_context_window`, optional
-`prompt_cache_mode`, and `OPENAI_API_KEY`.
-`network_access` and `review_model` are intentionally not imported: PaperMachine
-owns its tool policy and has no special review-model path.
-
-Legacy single-provider environment configuration is also supported when no
-PaperMachine config file is present:
-
-```sh
-OPENAI_API_KEY=... \
-OPENAI_BASE_URL=https://api.openai.com/v1 \
-OPENAI_REASONING_EFFORT=medium \
-PAPERMACHINE_MODEL=gpt-5.6-sol \
-PAPERMACHINE_MODEL_CONTEXT_WINDOW=1000000 \
-  cargo run -p papermachine-server -- --root .
-```
-
-`OPENAI_RESPONSES_ENDPOINT` takes precedence over `OPENAI_BASE_URL`; otherwise
-`/responses` is appended. Provider request and stream-idle deadlines default to
-15 and 5 minutes and can be changed with
-`OPENAI_REQUEST_TIMEOUT_SECONDS` and `OPENAI_STREAM_IDLE_TIMEOUT_SECONDS`.
-`PAPERMACHINE_PROMPT_CACHE_MODE` accepts `auto` (default), `implicit`, or
+Provider request deadlines, stream-idle deadlines, cache mode, response
+storage, reasoning defaults, and transport policy belong in that provider's
+TOML table. `prompt_cache_mode` accepts `auto` (default), `implicit`, or
 `explicit`. Auto mode probes explicit-breakpoint support once per model and
-falls back to provider-managed implicit caching when an OpenAI-compatible
-endpoint rejects the breakpoint field.
+uses provider-managed implicit caching when an OpenAI-compatible endpoint
+rejects the breakpoint field.
 PaperMachine first attempts Responses WebSocket mode for each model-backed
 Session. If
 the configured provider rejects the handshake, that server process falls back
 to ordinary HTTP SSE for that Session while prompt caching remains enabled.
-Set `PAPERMACHINE_RESPONSES_WEBSOCKETS=false` when a compatible provider is
-known not to implement Responses WebSocket mode.
+Set `responses_websockets = false` in the provider table when a compatible
+provider is known not to implement Responses WebSocket mode.
 
 ## Verification
 
