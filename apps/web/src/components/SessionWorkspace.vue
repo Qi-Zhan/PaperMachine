@@ -327,7 +327,7 @@
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflow.objective }}</strong>
+                <strong>{{ workflow.request }}</strong>
                 <small>{{ formatDateTime(workflow.updated_at) }}</small>
               </span>
               <span class="status-pin" :data-status="workflow.status" />

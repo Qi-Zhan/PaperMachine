@@ -26,21 +26,21 @@
         </select>
         <p v-if="selectedWorkflow" class="field-note">{{ selectedWorkflow.manifest.description }}</p>
 
-        <label class="field-label" for="workflow-objective">{{ t('dialog.objective') }}</label>
+        <label class="field-label" for="workflow-request">{{ t('dialog.request') }}</label>
         <textarea
-          id="workflow-objective"
-          ref="objectiveInput"
-          v-model="objective"
+          id="workflow-request"
+          ref="requestInput"
+          v-model="requestText"
           class="text-area text-area--small"
           required
         />
 
-        <label class="field-label" for="workflow-system-prompt">{{ t('dialog.workflowSystemPrompt') }}</label>
+        <label class="field-label" for="workflow-instructions">{{ t('dialog.workflowInstructions') }}</label>
         <textarea
-          id="workflow-system-prompt"
-          v-model="systemPrompt"
+          id="workflow-instructions"
+          v-model="instructions"
           class="text-area text-area--small"
-          :placeholder="t('dialog.workflowSystemPromptPlaceholder')"
+          :placeholder="t('dialog.workflowInstructionsPlaceholder')"
         />
         <p class="field-note workflow-prompt-note">
           {{ t(session ? 'dialog.workflowPromptStackFromSession' : 'dialog.workflowPromptStack') }}
@@ -49,8 +49,8 @@
         <section v-if="schemaFields.length" class="workflow-launch-section">
           <header class="workflow-launch-section-heading">
             <div>
-              <h3>{{ t('workflow.inputs') }}</h3>
-              <p>{{ t('dialog.workflowInputsDescription') }}</p>
+              <h3>{{ t('workflow.params') }}</h3>
+              <p>{{ t('dialog.workflowParamsDescription') }}</p>
             </div>
           </header>
           <div class="schema-fields">
@@ -77,6 +77,18 @@
                     <Plus :size="14" />
                   </button>
                 </div>
+                <select
+                  v-else-if="field.modelProfile && modelProfiles.length"
+                  :id="`workflow-field-${field.key}`"
+                  :value="String(formValues[field.key] ?? '')"
+                  class="select-input schema-control"
+                  @change="setTextValue(field.key, $event)"
+                >
+                  <option value="">{{ t('dialog.inheritRunModel') }}</option>
+                  <option v-for="profile in modelProfiles" :key="profile.id" :value="profile.id">
+                    {{ profile.id }} · {{ profile.provider }}/{{ profile.model }}
+                  </option>
+                </select>
                 <textarea
                   v-else-if="field.multiline || field.type === 'object' || field.type === 'array'"
                   :id="`workflow-field-${field.key}`"
@@ -293,9 +305,9 @@ const emit = defineEmits<{
   close: []
   submit: [input: {
     workflow: WorkflowProgram
-    objective: string
-    systemPrompt: string
-    input: Record<string, unknown>
+    request: string
+    instructions: string
+    params: Record<string, unknown>
     contextMode: WorkflowContextMode
     model: string
     access: AgentAccessProfile
@@ -313,6 +325,7 @@ interface SchemaProperty {
   minimum?: number
   maximum?: number
   enum?: string[]
+  format?: string
   'x-ui-order'?: number
 }
 interface SchemaField {
@@ -324,6 +337,7 @@ interface SchemaField {
   maximum?: number
   defaultValue?: unknown
   options?: string[]
+  modelProfile: boolean
   multiline: boolean
   advanced: boolean
   order: number
@@ -331,15 +345,15 @@ interface SchemaField {
 
 const workflowKey = ref('')
 const { t } = useAppI18n()
-const objective = ref('')
-const systemPrompt = ref('')
+const requestText = ref('')
+const instructions = ref('')
 const formValues = ref<Record<string, FormValue>>({})
 const advancedVisible = ref(false)
 const localError = ref('')
 const programError = ref('')
 const programLoading = ref(false)
 const validation = ref<WorkflowValidation | null>(null)
-const objectiveInput = ref<HTMLTextAreaElement | null>(null)
+const requestInput = ref<HTMLTextAreaElement | null>(null)
 const contextMode = ref<WorkflowContextMode>('project_snapshot')
 const model = ref('')
 const access = ref<AgentAccessProfile>('research')
@@ -365,7 +379,7 @@ const unknownSelectedModel = computed(
   () => Boolean(model.value && !props.modelProfiles.some((profile) => profile.id === model.value)),
 )
 const schemaFields = computed<SchemaField[]>(() => {
-  const properties = (selectedWorkflow.value?.manifest.input_schema as { properties?: unknown } | undefined)?.properties
+  const properties = (selectedWorkflow.value?.manifest.params_schema as { properties?: unknown } | undefined)?.properties
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return []
   return Object.entries(properties as Record<string, unknown>)
     .map(([key, raw]) => {
@@ -379,8 +393,9 @@ const schemaFields = computed<SchemaField[]>(() => {
         maximum: property.maximum,
         defaultValue: property.default,
         options: property.enum,
+        modelProfile: property.format === 'model-profile',
         multiline: key.includes('claim') || key.includes('result') || key.includes('description'),
-        advanced: key === 'model',
+        advanced: property.format === 'model-profile' || key === 'model',
         order: property['x-ui-order'] ?? Number.MAX_SAFE_INTEGER,
       }
     })
@@ -388,7 +403,7 @@ const schemaFields = computed<SchemaField[]>(() => {
 })
 const advancedFields = computed(() => schemaFields.value.filter((field) => field.advanced))
 const visibleFields = computed(() => schemaFields.value.filter((field) => !field.advanced || advancedVisible.value))
-const canSubmit = computed(() => Boolean(props.project && selectedWorkflow.value && objective.value.trim() && !programLoading.value && !programError.value))
+const canSubmit = computed(() => Boolean(props.project && selectedWorkflow.value && requestText.value.trim() && !programLoading.value && !programError.value))
 const displayError = computed(() => localError.value || programError.value || props.error)
 
 watch(
@@ -396,8 +411,8 @@ watch(
   async (open) => {
     if (!open) return
     workflowKey.value = props.workflows[0] ? keyOf(props.workflows[0]) : ''
-    objective.value = ''
-    systemPrompt.value = ''
+    requestText.value = ''
+    instructions.value = ''
     advancedVisible.value = false
     localError.value = ''
     programError.value = ''
@@ -409,7 +424,7 @@ watch(
     resetAgentOverrides()
     await loadSelectedProgram()
     await nextTick()
-    objectiveInput.value?.focus()
+    requestInput.value?.focus()
   },
 )
 watch(workflowKey, async () => {
@@ -470,19 +485,19 @@ function resetAgentOverrides() {
 }
 
 function submit() {
-  if (!selectedWorkflow.value || !objective.value.trim() || props.busy || !canSubmit.value) return
-  const input: Record<string, unknown> = {}
+  if (!selectedWorkflow.value || !requestText.value.trim() || props.busy || !canSubmit.value) return
+  const params: Record<string, unknown> = {}
   for (const field of schemaFields.value) {
     const value = formValues.value[field.key]
     if (value === '' || value === undefined || value === null) continue
     if (field.type === 'object' || field.type === 'array') {
       try {
-        input[field.key] = typeof value === 'string' ? JSON.parse(value) : value
+        params[field.key] = typeof value === 'string' ? JSON.parse(value) : value
       } catch {
         localError.value = t('dialog.invalidJson', { field: field.label })
         return
       }
-    } else input[field.key] = value
+    } else params[field.key] = value
   }
   if (access.value === 'full_access' && !window.confirm(t('dialog.workflowFullAccessConfirm'))) return
   const agentAccessOverrides = Object.fromEntries(
@@ -491,9 +506,9 @@ function submit() {
   localError.value = ''
   emit('submit', {
     workflow: selectedWorkflow.value,
-    objective: objective.value.trim(),
-    systemPrompt: systemPrompt.value.trim(),
-    input,
+    request: requestText.value.trim(),
+    instructions: instructions.value.trim(),
+    params,
     contextMode: contextMode.value,
     model: model.value.trim(),
     access: access.value,

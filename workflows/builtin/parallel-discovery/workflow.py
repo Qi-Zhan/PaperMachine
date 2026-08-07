@@ -29,14 +29,26 @@ class Synthesizer(Agent):
     slug="parallel-discovery",
     name="Parallel discovery",
     description="Run bounded independent research Sessions concurrently, then synthesize their evidence in a dedicated Session.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "perspectives": {
                 "type": "array",
                 "items": {"type": "string"},
                 "default": ["primary evidence", "counterevidence and limitations"],
-            }
+            },
+            "research_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Research model",
+                "description": "Optional model profile for every Researcher; empty inherits the Run model.",
+            },
+            "synthesis_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Synthesis model",
+                "description": "Optional model profile for the Synthesizer; empty inherits the Run model.",
+            },
         },
         "additionalProperties": False,
     },
@@ -56,16 +68,22 @@ class Synthesizer(Agent):
     },
 )
 async def main(ctx):
-    perspectives = ctx.input.get("perspectives") or [
+    perspectives = ctx.params.get("perspectives") or [
         "primary evidence",
         "counterevidence and limitations",
     ]
+    research_model = str(ctx.params.get("research_model") or "")
+    synthesis_model = str(ctx.params.get("synthesis_model") or "")
     researchers = [
-        Researcher(name=f"Route {index + 1}", role=perspective)
+        Researcher(
+            name=f"Route {index + 1}",
+            role=perspective,
+            model=research_model,
+        )
         for index, perspective in enumerate(perspectives)
     ]
     team = Team("Discovery routes", *researchers)
-    synthesizer = Synthesizer(name="Synthesis")
+    synthesizer = Synthesizer(name="Synthesis", model=synthesis_model)
     await team.activate()
     for researcher in researchers:
         await relate(
@@ -75,13 +93,13 @@ async def main(ctx):
             instructions="Send evidence and uncertainty to the synthesis Session.",
         )
 
-    async with scope("Independent discovery", ctx.objective):
+    async with scope("Independent discovery", ctx.request):
         findings = await together(
             *(
-                researcher.investigate(ctx.objective, perspective)
+                researcher.investigate(ctx.request, perspective)
                 for researcher, perspective in zip(researchers, perspectives)
             )
         )
 
-    summary = await synthesizer.synthesize(ctx.objective, list(findings))
+    summary = await synthesizer.synthesize(ctx.request, list(findings))
     return {"summary": summary}

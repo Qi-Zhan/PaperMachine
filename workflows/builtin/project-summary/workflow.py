@@ -14,8 +14,8 @@ class ProjectSummaryAgent(Agent):
 @workflow(
     slug="project-summary",
     name="Project summary",
-    description="Generate the Project Page progress report once or refresh it on a durable timer. The Workflow system prompt is the user's summary policy.",
-    input_schema={
+    description="Generate the Project Page progress report once or refresh it on a durable timer. Optional Run instructions are the user's summary policy.",
+    params_schema={
         "type": "object",
         "properties": {
             "interval_minutes": {
@@ -69,10 +69,10 @@ class ProjectSummaryAgent(Agent):
     },
 )
 async def main(ctx):
-    interval_minutes = float(ctx.input.get("interval_minutes", 60))
-    max_sessions = int(ctx.input.get("max_sessions", 50))
-    turns_per_session = int(ctx.input.get("turns_per_session", 12))
-    max_artifacts = int(ctx.input.get("max_artifacts", 50))
+    interval_minutes = float(ctx.params.get("interval_minutes", 60))
+    max_sessions = int(ctx.params.get("max_sessions", 50))
+    turns_per_session = int(ctx.params.get("turns_per_session", 12))
+    max_artifacts = int(ctx.params.get("max_artifacts", 50))
     summarizer = ProjectSummaryAgent(name="Project summary")
     refresh_count = 0
     artifact_id = ""

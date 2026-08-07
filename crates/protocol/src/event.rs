@@ -45,7 +45,7 @@ pub struct WorkflowEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowEventPayload {
     WorkflowCreated {
-        objective: String,
+        request: String,
         program_slug: String,
         source_sha256: String,
     },

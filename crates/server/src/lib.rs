@@ -758,11 +758,11 @@ async fn list_project_workflows(
 #[serde(deny_unknown_fields)]
 struct CreateWorkflowRequest {
     program_slug: String,
-    objective: String,
+    request: String,
     #[serde(default)]
-    system_prompt: String,
+    instructions: String,
     #[serde(default = "empty_object")]
-    input: Value,
+    params: Value,
     #[serde(default)]
     started_from_session_id: Option<SessionId>,
     #[serde(default)]
@@ -801,15 +801,43 @@ fn validate_model_profile(state: &AppState, model: &str) -> ApiResult<()> {
     Ok(())
 }
 
+fn validate_model_profile_params(state: &AppState, schema: &Value, value: &Value) -> ApiResult<()> {
+    if schema.get("format").and_then(Value::as_str) == Some("model-profile") {
+        if let Some(model) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            validate_model_profile(state, model)?;
+        }
+    }
+
+    if let (Some(properties), Some(values)) = (
+        schema.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) {
+        for (name, child_schema) in properties {
+            if let Some(child_value) = values.get(name) {
+                validate_model_profile_params(state, child_schema, child_value)?;
+            }
+        }
+    }
+
+    if let (Some(item_schema), Some(items)) = (schema.get("items"), value.as_array()) {
+        for item in items {
+            validate_model_profile_params(state, item_schema, item)?;
+        }
+    }
+    Ok(())
+}
+
 async fn create_workflow(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Json(request): Json<CreateWorkflowRequest>,
 ) -> ApiResult<(StatusCode, Json<Workflow>)> {
-    if request.objective.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "Workflow objective must not be empty",
-        ));
+    if request.request.trim().is_empty() {
+        return Err(ApiError::bad_request("Workflow request must not be empty"));
     }
     let project_id = parse_id(&project_id, "Project")?;
     state.store.get_project(project_id)?;
@@ -848,8 +876,9 @@ async fn create_workflow(
             "Agent access override references unknown class {unknown:?}"
         )));
     }
-    validate_schema_value(&snapshot.manifest.input_schema, &request.input, "input")
+    validate_schema_value(&snapshot.manifest.params_schema, &request.params, "params")
         .map_err(ApiError::bad_request)?;
+    validate_model_profile_params(&state, &snapshot.manifest.params_schema, &request.params)?;
     let launch_context = match request.context_mode {
         WorkflowContextMode::Fresh => WorkflowLaunchContext::default(),
         WorkflowContextMode::ProjectSnapshot => WorkflowLaunchContext {
@@ -874,9 +903,19 @@ async fn create_workflow(
         project_id,
         started_from_session_id: request.started_from_session_id,
         program: snapshot,
-        objective: request.objective.trim().to_string(),
-        system_prompt: request.system_prompt.trim().to_string(),
-        input: request.input,
+        request: request.request.trim().to_string(),
+        instructions: request.instructions.trim().to_string(),
+        trigger: WorkflowTrigger {
+            kind: if request.started_from_session_id.is_some() {
+                WorkflowTriggerKind::User
+            } else {
+                WorkflowTriggerKind::Manual
+            },
+            source_workflow_id: None,
+            source_session_id: request.started_from_session_id,
+            source_timer_id: None,
+        },
+        params: request.params,
         budget: None,
         default_model: model.to_string(),
         access: request.access,

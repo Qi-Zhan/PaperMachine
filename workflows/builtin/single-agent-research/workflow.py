@@ -20,7 +20,7 @@ class Researcher(Agent):
     slug="single-agent-research",
     name="Single-agent research",
     description="Let one persistent research Session use bounded hosted web search, reason, and produce the exact requested deliverable without evaluator or writer handoffs, with a run-level step budget sized for the full search allowance.",
-    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    params_schema={"type": "object", "properties": {}, "additionalProperties": False},
     output_schema={
         "type": "object",
         "properties": {"report": {"type": "string"}},
@@ -38,5 +38,5 @@ class Researcher(Agent):
 )
 async def main(ctx):
     researcher = Researcher(name="Single researcher")
-    report = await researcher.research(ctx.objective)
+    report = await researcher.research(ctx.request)
     return {"report": report}

@@ -958,7 +958,7 @@ impl Store {
         } else {
             request.enabled_skills
         };
-        validate_system_prompt(&request.system_prompt)?;
+        validate_workflow_instructions(&request.instructions)?;
         let now = Utc::now();
         let workflow = Workflow {
             id: WorkflowId::new(),
@@ -968,15 +968,16 @@ impl Store {
                 .budget
                 .unwrap_or_else(|| request.program.manifest.default_budget.clone()),
             program: request.program,
-            objective: request.objective,
-            system_prompt: request.system_prompt,
+            request: request.request,
+            instructions: request.instructions,
+            trigger: request.trigger,
             default_model,
             access: request.access,
             enabled_skills,
             launch_context: request.launch_context,
             agent_access_overrides: request.agent_access_overrides,
             status: WorkflowStatus::Created,
-            input: request.input,
+            params: request.params,
             output: None,
             error: None,
             attention_required: false,
@@ -1004,7 +1005,7 @@ impl Store {
             workflow.project_id,
             workflow.id,
             WorkflowEventPayload::WorkflowCreated {
-                objective: workflow.objective.clone(),
+                request: workflow.request.clone(),
                 program_slug: workflow.program.manifest.slug.clone(),
                 source_sha256: workflow.program.sha256.clone(),
             },
@@ -1557,7 +1558,7 @@ impl Store {
         scope_id: Option<TaskScopeId>,
         agent_id: AgentInstanceId,
         action_name: impl Into<String>,
-        objective: impl Into<String>,
+        contract: impl Into<String>,
         arguments: Value,
     ) -> Result<ActionInvocation, StoreError> {
         self.create_action_invocation_with_id(
@@ -1566,7 +1567,7 @@ impl Store {
             scope_id,
             agent_id,
             action_name,
-            objective,
+            contract,
             arguments,
             None,
         )
@@ -1580,7 +1581,7 @@ impl Store {
         scope_id: Option<TaskScopeId>,
         agent_id: AgentInstanceId,
         action_name: impl Into<String>,
-        objective: impl Into<String>,
+        contract: impl Into<String>,
         arguments: Value,
         source_human_request_id: Option<HumanRequestId>,
     ) -> Result<ActionInvocation, StoreError> {
@@ -1600,7 +1601,7 @@ impl Store {
             agent_instance_id: agent_id,
             session_id: participant.session_id,
             action_name: action_name.into(),
-            objective: objective.into(),
+            contract: contract.into(),
             arguments,
             source_human_request_id,
             status: ActionStatus::Scheduled,
@@ -3261,6 +3262,15 @@ fn validate_system_prompt(content: &str) -> Result<(), StoreError> {
     if content.len() > MAX_SYSTEM_PROMPT_BYTES {
         return Err(StoreError::Invariant(format!(
             "system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_workflow_instructions(content: &str) -> Result<(), StoreError> {
+    if content.len() > MAX_SYSTEM_PROMPT_BYTES {
+        return Err(StoreError::Invariant(format!(
+            "Workflow instructions exceed the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
         )));
     }
     Ok(())

@@ -49,6 +49,15 @@ ACCESS_PROFILES = {
     "research",
     "full_access",
 }
+WORKFLOW_METADATA_KEYS = {
+    "slug",
+    "name",
+    "description",
+    "params_schema",
+    "output_schema",
+    "budget",
+    "entrypoint",
+}
 
 
 class Validator(ast.NodeVisitor):
@@ -285,11 +294,22 @@ def validate(source: str) -> dict[str, Any]:
     slug = str(metadata.get("slug", ""))
     name = str(metadata.get("name", ""))
     description = str(metadata.get("description", ""))
+    unknown_metadata = sorted(set(metadata) - WORKFLOW_METADATA_KEYS)
+    if unknown_metadata:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "message": "unknown workflow metadata: "
+                + ", ".join(unknown_metadata),
+                "line": getattr(node, "lineno", None),
+                "column": getattr(node, "col_offset", None),
+            }
+        )
     for condition, message in [
         (not SLUG.fullmatch(slug), "workflow slug must use lowercase kebab-case"),
         (not name.strip(), "workflow name is required"),
         (not description.strip(), "workflow description is required"),
-        (not isinstance(metadata.get("input_schema", {}), dict), "input_schema must be a literal dict"),
+        (not isinstance(metadata.get("params_schema", {}), dict), "params_schema must be a literal dict"),
         (not isinstance(metadata.get("output_schema", {}), dict), "output_schema must be a literal dict"),
     ]:
         if condition:
@@ -322,7 +342,7 @@ def validate(source: str) -> dict[str, Any]:
         "name": name,
         "description": description,
         "entrypoint": entrypoint,
-        "input_schema": metadata.get("input_schema", {"type": "object"}),
+        "params_schema": metadata.get("params_schema", {"type": "object"}),
         "output_schema": metadata.get("output_schema", {}),
         "default_budget": default_budget,
     }

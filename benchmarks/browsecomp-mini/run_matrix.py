@@ -24,11 +24,11 @@ from typing import Any, Callable
 CONDITIONS = {
     "single_agent": {
         "program_slug": "single-agent-research",
-        "input": {},
+        "params": {},
     },
     "coverage_r1": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 2,
             "max_rounds": 1,
             "max_followups_per_round": 2,
@@ -36,7 +36,7 @@ CONDITIONS = {
     },
     "coverage_r2": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 2,
             "max_rounds": 2,
             "max_followups_per_round": 2,
@@ -44,7 +44,7 @@ CONDITIONS = {
     },
     "coverage_r3": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 3,
             "minimum_route_count": 3,
             "max_rounds": 3,
@@ -53,7 +53,7 @@ CONDITIONS = {
     },
     "coverage_r4": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 4,
             "minimum_route_count": 4,
             "max_rounds": 4,
@@ -243,8 +243,8 @@ def launch_research_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
-            "objective": research_prompt(question),
-            "input": condition["input"],
+            "request": research_prompt(question),
+            "params": condition["params"],
             "model": model,
             "access": "research",
             "enabled_skills": [],
@@ -270,8 +270,8 @@ def launch_grader_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": "short-answer-grader",
-            "objective": "Blindly judge the submitted response against the supplied reference answer.",
-            "input": {
+            "request": "Blindly judge the submitted response against the supplied reference answer.",
+            "params": {
                 "question": question,
                 "correct_answer": correct_answer,
                 "response": response,

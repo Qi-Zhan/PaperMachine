@@ -34,7 +34,7 @@ class Observer(Agent):
     slug="durable-replay",
     name="Durable replay",
     description="Exercise replay across an abrupt Python process loss.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"decision": {"type": "string"}}},
 )
 async def main(ctx):
@@ -64,12 +64,12 @@ class Researcher(Agent):
     slug="durable-action-replay",
     name="Durable action replay",
     description="Resume one Agent Turn after an abrupt runtime loss.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
 )
 async def main(ctx):
     researcher = Researcher(name="Researcher")
-    answer = await researcher.investigate(ctx.objective)
+    answer = await researcher.investigate(ctx.request)
     return {"answer": answer}
 "#;
 
@@ -80,7 +80,7 @@ const TIMER_SOURCE: &str = r#"from papermachine import wait, workflow
     slug="durable-timer-replay",
     name="Durable timer replay",
     description="Suspend a Python process until its durable timer is due.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"fire_count": {"type": "integer"}}},
 )
 async def main(ctx):
@@ -104,7 +104,7 @@ async def publish(channel):
     slug="durable-signal-replay",
     name="Durable signal replay",
     description="Synchronize concurrent branches through a durable Channel.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object"},
 )
 async def main(ctx):
@@ -129,7 +129,7 @@ async def summarize_on_timer():
     slug="background-timer-human",
     name="Background timer and human",
     description="Keep a durable timer active while the main flow waits for a human.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object"},
 )
 async def main(ctx):
@@ -169,7 +169,7 @@ class Clamped(Agent):
     slug="launch-context-access",
     name="Launch context and access",
     description="Exercise immutable launch context and per-Agent access.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object"},
 )
 async def main(ctx):
@@ -212,7 +212,7 @@ fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot
             name: "Durable replay".to_string(),
             description: "Runtime recovery test".to_string(),
             entrypoint: "main".to_string(),
-            input_schema: json!({"type": "object"}),
+            params_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             default_budget: Budget::default(),
         },
@@ -305,9 +305,10 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("launch-context-access", LAUNCH_CONTEXT_SOURCE),
-            objective: "Continue from captured Project evidence.".to_string(),
-            system_prompt: "Keep provenance visible.".to_string(),
-            input: json!({}),
+            request: "Continue from captured Project evidence.".to_string(),
+            instructions: "Keep provenance visible.".to_string(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Workspace,
@@ -359,7 +360,6 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
     let participants = store
         .list_participants(workflow.id)
         .expect("participants should load");
-    let mut launch_layer_hashes = Vec::new();
     for participant in participants {
         let session = store
             .get_session(participant.session_id)
@@ -376,23 +376,18 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             .into_iter()
             .next()
             .expect("each Agent should have one Turn");
-        let layer = turn
-            .prompt
-            .layers
-            .iter()
-            .find(|layer| layer.name == "Workflow launch context")
-            .expect("every Agent Turn should include the launch context");
-        assert!(layer.content.contains("Captured evidence"));
-        assert!(layer.content.contains("untrusted research data"));
-        launch_layer_hashes.push(layer.sha256.clone());
+        assert!(
+            turn.prompt
+                .layers
+                .iter()
+                .all(|layer| layer.name != "Workflow launch context"),
+            "launch context must not be injected as instructions"
+        );
+        assert!(
+            turn.input.contains("Captured evidence"),
+            "the Workflow explicitly passed ctx.context as Action Turn data"
+        );
     }
-    assert_eq!(launch_layer_hashes.len(), 3);
-    assert!(
-        launch_layer_hashes
-            .windows(2)
-            .all(|pair| pair[0] == pair[1]),
-        "the immutable context layer must remain cache-stable across Agent Turns"
-    );
 }
 
 #[tokio::test]
@@ -410,9 +405,10 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("durable-replay", SOURCE),
-            objective: "Prove replay semantics.".to_string(),
-            system_prompt: String::new(),
-            input: json!({}),
+            request: "Prove replay semantics.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Research,
@@ -531,9 +527,10 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("durable-timer-replay", TIMER_SOURCE),
-            objective: "Wait without retaining a Python process.".to_string(),
-            system_prompt: String::new(),
-            input: json!({}),
+            request: "Wait without retaining a Python process.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
@@ -600,9 +597,10 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("durable-signal-replay", SIGNAL_SOURCE),
-            objective: "Coordinate concurrent work.".to_string(),
-            system_prompt: String::new(),
-            input: json!({}),
+            request: "Coordinate concurrent work.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
@@ -655,9 +653,10 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("background-timer-human", BACKGROUND_TIMER_SOURCE),
-            objective: "Wait and summarize periodically.".to_string(),
-            system_prompt: String::new(),
-            input: json!({}),
+            request: "Wait and summarize periodically.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
@@ -728,9 +727,10 @@ async fn unfinished_agent_action_resumes_its_checkpointed_turn_once() {
             project_id: project.id,
             started_from_session_id: None,
             program: program_with_source("durable-action-replay", ACTION_SOURCE),
-            objective: "Investigate safely across a restart.".to_string(),
-            system_prompt: String::new(),
-            input: json!({}),
+            request: "Investigate safely across a restart.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
             budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Research,

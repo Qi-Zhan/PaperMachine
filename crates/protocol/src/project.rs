@@ -69,6 +69,28 @@ pub struct WorkflowLaunchContext {
     pub snapshot: Option<Value>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTriggerKind {
+    /// A person launched the Run from an existing Session.
+    User,
+    /// Another durable Workflow launched this Run.
+    Workflow,
+    /// A scheduler launched this Run rather than merely waking an existing Run.
+    Timer,
+    /// A person or API client launched the Run directly from a Project.
+    #[default]
+    Manual,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct WorkflowTrigger {
+    pub kind: WorkflowTriggerKind,
+    pub source_workflow_id: Option<WorkflowId>,
+    pub source_session_id: Option<SessionId>,
+    pub source_timer_id: Option<TimerId>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Workflow {
     pub id: WorkflowId,
@@ -77,18 +99,22 @@ pub struct Workflow {
     /// and built-in background Workflows do not need one.
     pub started_from_session_id: Option<SessionId>,
     pub program: WorkflowProgramSnapshot,
-    pub objective: String,
-    /// Optional Workflow-wide system prompt supplied when this durable
-    /// execution is created.
-    pub system_prompt: String,
+    /// Immutable per-Run request. The Workflow program decides which Agents
+    /// receive it; the runtime never promotes it into system instructions.
+    pub request: String,
+    /// Optional high-priority instructions for this Run. This is not the user
+    /// request and should remain stable across its Agent Sessions.
+    pub instructions: String,
+    /// Durable provenance for why and from where this Run was launched.
+    pub trigger: WorkflowTrigger,
     pub default_model: String,
     #[serde(default)]
     pub access: crate::AgentAccessProfile,
     #[serde(default)]
     pub enabled_skills: Vec<String>,
     /// Immutable Project state captured when this Workflow was launched. It is
-    /// automatically included in every Agent action and exposed as
-    /// `ctx.context` to the Python program.
+    /// exposed as `ctx.context`; the Workflow must explicitly pass any relevant
+    /// data to an Agent Action.
     #[serde(default)]
     pub launch_context: WorkflowLaunchContext,
     /// Per-run overrides keyed by Python Agent class name. The Workflow access
@@ -96,7 +122,7 @@ pub struct Workflow {
     #[serde(default)]
     pub agent_access_overrides: BTreeMap<String, crate::AgentAccessProfile>,
     pub status: WorkflowStatus,
-    pub input: Value,
+    pub params: Value,
     pub output: Option<Value>,
     pub error: Option<String>,
     pub attention_required: bool,
@@ -249,7 +275,10 @@ pub struct ActionInvocation {
     pub agent_instance_id: AgentInstanceId,
     pub session_id: SessionId,
     pub action_name: String,
-    pub objective: String,
+    /// Stable Action method contract (normally its Python docstring/prompt).
+    /// Concrete arguments remain separate and become the Workflow-origin Turn
+    /// data only when the program invokes this Action.
+    pub contract: String,
     pub arguments: Value,
     /// Direct HumanRequest whose answered string became this Action Turn's
     /// user message. `None` means the Turn was dispatched as workflow work.

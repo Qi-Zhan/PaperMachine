@@ -16,7 +16,7 @@ pub struct WorkflowProgramManifest {
     pub name: String,
     pub description: String,
     pub entrypoint: String,
-    pub input_schema: Value,
+    pub params_schema: Value,
     pub output_schema: Value,
     pub default_budget: Budget,
 }

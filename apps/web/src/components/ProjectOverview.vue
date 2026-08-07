@@ -99,11 +99,11 @@
             </span>
           </label>
           <label class="summary-prompt-field">
-            <span>{{ t('project.summaryPrompt') }}</span>
+            <span>{{ t('project.summaryInstructions') }}</span>
             <textarea
-              v-model="summaryPromptDraft"
+              v-model="summaryInstructionsDraft"
               class="text-area"
-              :placeholder="t('project.summaryPromptPlaceholder')"
+              :placeholder="t('project.summaryInstructionsPlaceholder')"
             />
           </label>
         </div>
@@ -167,7 +167,7 @@
             <GitBranch :size="14" />
             <span>
               <strong>{{ group.workflow.program.manifest.name }}</strong>
-              <small>{{ group.workflow.objective }}</small>
+              <small>{{ group.workflow.request }}</small>
             </span>
             <StatusBadge :status="group.workflow.status" />
           </div>
@@ -212,7 +212,7 @@
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflow.objective }}</strong>
+                <strong>{{ workflow.request }}</strong>
                 <small>{{ workflow.program.manifest.name }} · {{ formatDate(workflow.updated_at) }}</small>
               </span>
               <StatusBadge :status="workflow.status" />
@@ -347,11 +347,11 @@ const emit = defineEmits<{
   'open-artifact': [artifact: Artifact]
   'update-system-prompt': [systemPrompt: string]
   'run-workflow': []
-  'run-summary': [input: { systemPrompt: string; intervalMinutes: number; replaceWorkflowId?: string }]
+  'run-summary': [input: { instructions: string; intervalMinutes: number; replaceWorkflowId?: string }]
   'stop-summary': [workflowId: string]
 }>()
 
-const defaultSummaryPrompt =
+const defaultSummaryInstructions =
   'Summarize the current research state for a project collaborator. Prioritize evidence-backed conclusions, active work, blockers, unresolved questions, and concrete next steps. Keep provenance visible and do not hide failed or inconclusive routes.'
 
 const projectPromptDraft = ref(props.overview.system_prompt.content)
@@ -365,18 +365,20 @@ const activeSummaryWorkflow = computed(() =>
   summaryWorkflows.value.find(
     (workflow) =>
       !['completed', 'failed', 'cancelled'].includes(workflow.status) &&
-      Number(workflow.input.interval_minutes ?? 0) > 0,
+      Number(workflow.params.interval_minutes ?? 0) > 0,
   ),
 )
-const summaryPromptWorkflow = computed(() => activeSummaryWorkflow.value ?? summaryWorkflows.value[0])
+const summaryInstructionsWorkflow = computed(() => activeSummaryWorkflow.value ?? summaryWorkflows.value[0])
 const scheduledSummaryWorkflow = computed(
   () =>
     activeSummaryWorkflow.value ??
-    summaryWorkflows.value.find((workflow) => Number(workflow.input.interval_minutes ?? 0) > 0),
+    summaryWorkflows.value.find((workflow) => Number(workflow.params.interval_minutes ?? 0) > 0),
 )
-const summaryPromptDraft = ref(summaryPromptWorkflow.value?.system_prompt || defaultSummaryPrompt)
+const summaryInstructionsDraft = ref(
+  summaryInstructionsWorkflow.value?.instructions || defaultSummaryInstructions,
+)
 const summaryIntervalDraft = ref(
-  Number(scheduledSummaryWorkflow.value?.input.interval_minutes ?? 60),
+  Number(scheduledSummaryWorkflow.value?.params.interval_minutes ?? 60),
 )
 const latestSummaryArtifact = computed(() =>
   props.overview.artifacts.find((artifact) => artifact.metadata.role === 'project_summary'),
@@ -395,11 +397,12 @@ watch(
 watch(
   () => [
     props.overview.project.id,
-    summaryPromptWorkflow.value?.id,
-    summaryPromptWorkflow.value?.system_prompt,
+    summaryInstructionsWorkflow.value?.id,
+    summaryInstructionsWorkflow.value?.instructions,
   ] as const,
   () => {
-    summaryPromptDraft.value = summaryPromptWorkflow.value?.system_prompt || defaultSummaryPrompt
+    summaryInstructionsDraft.value =
+      summaryInstructionsWorkflow.value?.instructions || defaultSummaryInstructions
   },
 )
 
@@ -407,11 +410,11 @@ watch(
   () => [
     props.overview.project.id,
     scheduledSummaryWorkflow.value?.id,
-    scheduledSummaryWorkflow.value?.input.interval_minutes,
+    scheduledSummaryWorkflow.value?.params.interval_minutes,
   ] as const,
   () => {
     summaryIntervalDraft.value = Number(
-      scheduledSummaryWorkflow.value?.input.interval_minutes ?? 60,
+      scheduledSummaryWorkflow.value?.params.interval_minutes ?? 60,
     )
   },
 )
@@ -451,7 +454,7 @@ function openWorkflowSession(workflow: Workflow) {
 
 function runSummary(intervalMinutes: number) {
   emit('run-summary', {
-    systemPrompt: summaryPromptDraft.value,
+    instructions: summaryInstructionsDraft.value,
     intervalMinutes,
     replaceWorkflowId:
       intervalMinutes > 0 ? activeSummaryWorkflow.value?.id : undefined,

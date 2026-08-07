@@ -135,14 +135,19 @@ def _grading_contract_errors(grading, criteria):
     slug="report-grader",
     name="Report grader",
     description="Blindly grade one completed report against a full external rubric in a separate no-tool Session, with deterministic contract validation and bounded in-Session repair.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "question": {"type": "string"},
             "report": {"type": "string"},
             "criteria": {"type": "object"},
             "language": {"type": "string"},
-            "grader_model": {"type": "string"},
+            "grader_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Grader model",
+                "description": "Optional model profile for the Grader; empty inherits the Run model.",
+            },
         },
         "required": ["question", "report", "criteria", "language"],
         "additionalProperties": False,
@@ -163,21 +168,21 @@ def _grading_contract_errors(grading, criteria):
     },
 )
 async def main(ctx):
-    criteria = dict(ctx.input["criteria"])
+    criteria = dict(ctx.params["criteria"])
     required_counts = {
         dimension: len(items) if isinstance(items, list) else 0
         for dimension, items in criteria.items()
     }
     grader = Grader(
         name="Independent grader",
-        model=str(ctx.input.get("grader_model") or ""),
+        model=str(ctx.params.get("grader_model") or ""),
     )
     grading = await grader.grade(
-        str(ctx.input["question"]),
-        str(ctx.input["report"]),
+        str(ctx.params["question"]),
+        str(ctx.params["report"]),
         criteria,
         required_counts,
-        str(ctx.input["language"]),
+        str(ctx.params["language"]),
     )
     alternate_shape_normalized = _uses_alternate_shape(grading, criteria)
     grading = _normalize_grading(grading, criteria)
@@ -190,7 +195,7 @@ async def main(ctx):
             errors,
             criteria,
             required_counts,
-            str(ctx.input["language"]),
+            str(ctx.params["language"]),
         )
         alternate_shape_normalized = alternate_shape_normalized or _uses_alternate_shape(
             grading, criteria

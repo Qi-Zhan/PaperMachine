@@ -32,11 +32,11 @@ from urllib.parse import urlsplit, urlunsplit
 CONDITIONS = {
     "single_agent": {
         "program_slug": "single-agent-research",
-        "input": {},
+        "params": {},
     },
     "coverage_r1": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 2,
             "max_rounds": 1,
             "max_followups_per_round": 2,
@@ -44,7 +44,7 @@ CONDITIONS = {
     },
     "coverage_r2": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 2,
             "max_rounds": 2,
             "max_followups_per_round": 2,
@@ -52,7 +52,7 @@ CONDITIONS = {
     },
     "coverage_r3": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 3,
             "minimum_route_count": 3,
             "max_rounds": 3,
@@ -61,7 +61,7 @@ CONDITIONS = {
     },
     "coverage_r4": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 4,
             "minimum_route_count": 4,
             "max_rounds": 4,
@@ -622,8 +622,8 @@ def launch_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
-            "objective": task["question"],
-            "input": condition["input"],
+            "request": task["question"],
+            "params": condition["params"],
             "model": model,
             "access": "research",
             "enabled_skills": [],
@@ -653,8 +653,8 @@ def launch_grader_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": "live-dr-grader",
-            "objective": "Blindly apply the pinned upstream LiveDRBench claim-matching rubric.",
-            "input": {
+            "request": "Blindly apply the pinned upstream LiveDRBench claim-matching rubric.",
+            "params": {
                 "category": task["category"],
                 "ground_truth": ground_truths[0],
                 "prediction": prediction,

@@ -20,13 +20,18 @@ class Grader(Agent):
     slug="short-answer-grader",
     name="Short-answer grader",
     description="Blindly judge one final short answer against a supplied reference answer in a separate no-tool Session.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "question": {"type": "string"},
             "correct_answer": {"type": "string"},
             "response": {"type": "string"},
-            "grader_model": {"type": "string"},
+            "grader_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Grader model",
+                "description": "Optional model profile for the Grader; empty inherits the Run model.",
+            },
         },
         "required": ["question", "correct_answer", "response"],
         "additionalProperties": False,
@@ -49,11 +54,11 @@ class Grader(Agent):
 async def main(ctx):
     grader = Grader(
         name="Independent short-answer grader",
-        model=str(ctx.input.get("grader_model") or ""),
+        model=str(ctx.params.get("grader_model") or ""),
     )
     grading = await grader.grade(
-        str(ctx.input["question"]),
-        str(ctx.input["correct_answer"]),
-        str(ctx.input["response"]),
+        str(ctx.params["question"]),
+        str(ctx.params["correct_answer"]),
+        str(ctx.params["response"]),
     )
     return {"grading": grading}

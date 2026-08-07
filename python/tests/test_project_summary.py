@@ -63,8 +63,8 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         output = asyncio.run(
             WORKFLOW["main"](
                 WorkflowContext(
-                    objective="Refresh progress.",
-                    input={"interval_minutes": 0},
+                    request="Refresh progress.",
+                    params={"interval_minutes": 0},
                     workflow_id="workflow-summary",
                 )
             )

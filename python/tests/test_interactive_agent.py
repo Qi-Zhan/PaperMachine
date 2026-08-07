@@ -52,8 +52,8 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
             _set_runtime(_Runtime(send))
             return await main(
                 WorkflowContext(
-                    objective="Persistent interactive work",
-                    input={"session_title": "Cache investigation"},
+                    request="Persistent interactive work",
+                    params={"session_title": "Cache investigation"},
                     workflow_id="workflow-1",
                 )
             )

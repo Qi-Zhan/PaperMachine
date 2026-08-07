@@ -472,7 +472,7 @@ function projectPollDelay(overview: ProjectOverviewType): number | null {
   if (active.some((workflow) => ['created', 'running'].includes(workflow.status))) return 900
   const timerIntervals = active
     .filter((workflow) => workflow.status === 'waiting_for_timer')
-    .map((workflow) => Number(workflow.input.interval_minutes ?? 0))
+    .map((workflow) => Number(workflow.params.interval_minutes ?? 0))
     .filter((minutes) => Number.isFinite(minutes) && minutes > 0)
   if (timerIntervals.length) {
     const shortestIntervalMs = Math.min(...timerIntervals) * 60_000
@@ -636,9 +636,9 @@ async function createSession(input: CreateSessionInput) {
     const title = input.title.trim() || t('dialog.newSessionPlaceholder')
     const workflow = await api.createWorkflow(project.id, {
       program_slug: 'interactive-agent',
-      objective: 'Maintain a persistent interactive project conversation.',
-      system_prompt: '',
-      input: {
+      request: 'Maintain a persistent interactive project conversation.',
+      instructions: '',
+      params: {
         session_title: title,
         agent_system_prompt: input.system_prompt.trim(),
         agent_access: input.access,
@@ -784,7 +784,7 @@ async function updateProjectSystemPrompt(systemPrompt: string) {
 }
 
 async function runProjectSummary(input: {
-  systemPrompt: string
+  instructions: string
   intervalMinutes: number
   replaceWorkflowId?: string
 }) {
@@ -795,12 +795,12 @@ async function runProjectSummary(input: {
   try {
     const workflow = await api.createWorkflow(overview.project.id, {
       program_slug: 'project-summary',
-      objective:
+      request:
         input.intervalMinutes > 0
           ? `Refresh the Project progress page every ${input.intervalMinutes} minutes.`
           : 'Refresh the Project progress page now.',
-      system_prompt: input.systemPrompt.trim(),
-      input: {
+      instructions: input.instructions.trim(),
+      params: {
         interval_minutes: input.intervalMinutes,
         max_sessions: 50,
         turns_per_session: 12,
@@ -875,9 +875,9 @@ async function createSkill(input: { slug: string; name: string; description: str
 
 async function createWorkflow(input: {
   workflow: WorkflowProgram
-  objective: string
-  systemPrompt: string
-  input: Record<string, unknown>
+  request: string
+  instructions: string
+  params: Record<string, unknown>
   contextMode: WorkflowContextMode
   model: string
   access: AgentAccessProfile
@@ -892,9 +892,9 @@ async function createWorkflow(input: {
   try {
     const workflow = await api.createWorkflow(project.id, {
       program_slug: input.workflow.manifest.slug,
-      objective: input.objective,
-      system_prompt: input.systemPrompt,
-      input: input.input,
+      request: input.request,
+      instructions: input.instructions,
+      params: input.params,
       ...(origin ? { started_from_session_id: origin.id } : {}),
       model: input.model,
       access: input.access,

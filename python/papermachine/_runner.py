@@ -142,9 +142,10 @@ async def run() -> None:
     try:
         function = load_workflow(Path(sys.argv[1]), sys.argv[2])
         context = WorkflowContext(
-            objective=str(initialization["objective"]),
-            input=dict(initialization.get("input") or {}),
+            request=str(initialization["request"]),
+            params=dict(initialization.get("params") or {}),
             workflow_id=str(initialization["workflow_id"]),
+            trigger=dict(initialization.get("trigger") or {}),
             context=dict(initialization.get("context") or {}),
         )
         result = await function(context)

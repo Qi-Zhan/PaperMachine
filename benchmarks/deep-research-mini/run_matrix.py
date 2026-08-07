@@ -34,19 +34,19 @@ DIMENSIONS = (
 CONDITIONS = {
     "single_agent": {
         "program_slug": "single-agent-research",
-        "input": {},
+        "params": {},
     },
     "evidence_r1": {
         "program_slug": "evidence-loop",
-        "input": {"route_count": 2, "max_rounds": 1, "max_followups_per_round": 2},
+        "params": {"route_count": 2, "max_rounds": 1, "max_followups_per_round": 2},
     },
     "evidence_r2": {
         "program_slug": "evidence-loop",
-        "input": {"route_count": 2, "max_rounds": 2, "max_followups_per_round": 2},
+        "params": {"route_count": 2, "max_rounds": 2, "max_followups_per_round": 2},
     },
     "evidence_r3": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 3,
             "minimum_route_count": 3,
             "max_rounds": 3,
@@ -55,7 +55,7 @@ CONDITIONS = {
     },
     "evidence_r4": {
         "program_slug": "evidence-loop",
-        "input": {
+        "params": {
             "route_count": 4,
             "minimum_route_count": 4,
             "max_rounds": 4,
@@ -330,8 +330,8 @@ def launch_research_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
-            "objective": task["prompt"],
-            "input": condition["input"],
+            "request": task["prompt"],
+            "params": condition["params"],
             "model": model,
             "access": "research",
             "enabled_skills": [],
@@ -676,8 +676,8 @@ def launch_grader_run(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": "report-grader",
-            "objective": "Blindly grade the supplied final report against the full external rubric.",
-            "input": {
+            "request": "Blindly grade the supplied final report against the full external rubric.",
+            "params": {
                 "question": task["prompt"],
                 "report": report,
                 "criteria": visible_criteria(task["rubric"]),

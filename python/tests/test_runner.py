@@ -29,7 +29,12 @@ class RunnerProtocolTest(unittest.TestCase):
                 "from papermachine import workflow\n"
                 "@workflow(slug='test', name='Test', description='Runner test')\n"
                 "async def main(ctx):\n"
-                "    return {'ok': True}\n",
+                "    return {\n"
+                "        'request': ctx.request,\n"
+                "        'params': ctx.params,\n"
+                "        'trigger': ctx.trigger,\n"
+                "        'context': ctx.context,\n"
+                "    }\n",
                 encoding="utf-8",
             )
             environment = os.environ.copy()
@@ -63,7 +68,16 @@ class RunnerProtocolTest(unittest.TestCase):
             assert process.stdout is not None
             process.stdin.write(
                 json.dumps(
-                    {"workflow_id": "test-workflow", "objective": "test", "input": {}}
+                    {
+                        "workflow_id": "test-workflow",
+                        "request": "concrete user task",
+                        "params": {"route_count": 2},
+                        "trigger": {
+                            "kind": "user",
+                            "source_session_id": "origin-session",
+                        },
+                        "context": {"project": {"name": "Context project"}},
+                    }
                 )
                 + "\n"
             )
@@ -72,7 +86,18 @@ class RunnerProtocolTest(unittest.TestCase):
             request = self.read_request(process)
             self.assertEqual(request["id"], "root/effect:0/complete")
             self.assertEqual(request["kind"], "complete")
-            self.assertEqual(request["payload"]["output"], {"ok": True})
+            self.assertEqual(
+                request["payload"]["output"],
+                {
+                    "request": "concrete user task",
+                    "params": {"route_count": 2},
+                    "trigger": {
+                        "kind": "user",
+                        "source_session_id": "origin-session",
+                    },
+                    "context": {"project": {"name": "Context project"}},
+                },
+            )
             process.stdin.write(
                 json.dumps(
                     {"id": request["id"], "ok": True, "result": None, "error": None}
@@ -127,7 +152,12 @@ class RunnerProtocolTest(unittest.TestCase):
             assert process.stderr is not None
             process.stdin.write(
                 json.dumps(
-                    {"workflow_id": "test-workflow", "objective": "test", "input": {}}
+                    {
+                        "workflow_id": "test-workflow",
+                        "request": "test",
+                        "params": {},
+                        "trigger": {"kind": "manual"},
+                    }
                 )
                 + "\n"
             )
@@ -202,7 +232,12 @@ class RunnerProtocolTest(unittest.TestCase):
             assert process.stderr is not None
             process.stdin.write(
                 json.dumps(
-                    {"workflow_id": "test-workflow", "objective": "test", "input": {}}
+                    {
+                        "workflow_id": "test-workflow",
+                        "request": "test",
+                        "params": {},
+                        "trigger": {"kind": "manual"},
+                    }
                 )
                 + "\n"
             )

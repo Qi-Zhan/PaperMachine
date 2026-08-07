@@ -145,7 +145,7 @@ export interface WorkflowProgramManifest {
   name: string
   description: string
   entrypoint: string
-  input_schema: Record<string, unknown>
+  params_schema: Record<string, unknown>
   output_schema: Record<string, unknown>
   default_budget: Budget
 }
@@ -168,20 +168,30 @@ export interface WorkflowLaunchContext {
   snapshot: Record<string, unknown> | null
 }
 
+export type WorkflowTriggerKind = 'user' | 'workflow' | 'timer' | 'manual'
+
+export interface WorkflowTrigger {
+  kind: WorkflowTriggerKind
+  source_workflow_id: Id | null
+  source_session_id: Id | null
+  source_timer_id: Id | null
+}
+
 export interface Workflow {
   id: Id
   project_id: Id
   started_from_session_id: Id | null
   program: WorkflowProgramSnapshot
-  objective: string
-  system_prompt: string
+  request: string
+  instructions: string
+  trigger: WorkflowTrigger
   default_model: string
   access: AgentAccessProfile
   enabled_skills: string[]
   launch_context: WorkflowLaunchContext
   agent_access_overrides: Record<string, AgentAccessProfile>
   status: WorkflowStatus
-  input: Record<string, unknown>
+  params: Record<string, unknown>
   output: unknown | null
   error: string | null
   attention_required: boolean
@@ -237,7 +247,7 @@ export interface ActionInvocation {
   agent_instance_id: Id
   session_id: Id
   action_name: string
-  objective: string
+  contract: string
   arguments: unknown
   source_human_request_id: Id | null
   status: ActionStatus
@@ -462,9 +472,9 @@ export interface CreateSessionInput {
 }
 export interface CreateWorkflowInput {
   program_slug: string
-  objective: string
-  system_prompt: string
-  input: Record<string, unknown>
+  request: string
+  instructions: string
+  params: Record<string, unknown>
   started_from_session_id?: Id
   model: string
   access: AgentAccessProfile

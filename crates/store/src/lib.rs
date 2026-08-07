@@ -11,6 +11,7 @@ use papermachine_protocol::SessionId;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgramSnapshot;
+use papermachine_protocol::WorkflowTrigger;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,9 +27,10 @@ pub struct NewWorkflow {
     pub project_id: ProjectId,
     pub started_from_session_id: Option<SessionId>,
     pub program: WorkflowProgramSnapshot,
-    pub objective: String,
-    pub system_prompt: String,
-    pub input: Value,
+    pub request: String,
+    pub instructions: String,
+    pub trigger: WorkflowTrigger,
+    pub params: Value,
     pub budget: Option<Budget>,
     pub default_model: String,
     pub access: AgentAccessProfile,

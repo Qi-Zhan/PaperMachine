@@ -96,7 +96,7 @@ class Reviewer(Agent):
     slug={requested_slug:?},
     name={requested_name:?},
     description="Run two independent evidence routes and synthesize their disagreements.",
-    input_schema={{"type": "object", "additionalProperties": False}},
+    params_schema={{"type": "object", "additionalProperties": False}},
     output_schema={{"type": "object", "properties": {{"summary": {{"type": "string"}}}}}},
 )
 async def main(ctx):
@@ -105,12 +105,12 @@ async def main(ctx):
     reviewer = Reviewer(name="Review")
     await relate(primary, reviewer, kind="reports_to")
     await relate(challenge, reviewer, kind="challenges")
-    async with scope("Independent evidence", ctx.objective):
+    async with scope("Independent evidence", ctx.request):
         findings = await together(
-            primary.investigate(ctx.objective, "primary evidence"),
-            challenge.investigate(ctx.objective, "counterevidence and boundary cases"),
+            primary.investigate(ctx.request, "primary evidence"),
+            challenge.investigate(ctx.request, "counterevidence and boundary cases"),
         )
-    summary = await reviewer.review(ctx.objective, list(findings))
+    summary = await reviewer.review(ctx.request, list(findings))
     return {{"summary": summary}}
 "#
     )

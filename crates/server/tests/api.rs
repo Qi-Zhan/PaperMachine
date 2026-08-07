@@ -3,16 +3,25 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
+use papermachine_model::ConfiguredModels;
+use papermachine_model::ModelClient;
+use papermachine_model::ModelProfile;
+use papermachine_model::ModelRouter;
+use papermachine_model::ScriptedModelClient;
+use papermachine_protocol::ModelEvent;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
+use papermachine_protocol::TokenUsage;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_server::ServerConfig;
 use papermachine_server::initialize;
 use papermachine_server::router;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tempfile::tempdir;
@@ -75,7 +84,67 @@ async fn test_app(directory: &TempDir) -> Router {
     router(state, directory.path().join("dist"))
 }
 
-async fn create_project_and_session(app: &Router, base: &Path, name: &str) -> (Project, Session) {
+async fn test_app_with_model_profiles(
+    directory: &TempDir,
+    scripted: ScriptedModelClient,
+) -> Router {
+    prepare_root(directory.path());
+    let profiles = vec![
+        ModelProfile {
+            id: "research-model".to_string(),
+            provider: "scripted".to_string(),
+            model: "research-upstream".to_string(),
+            context_window: 128_000,
+        },
+        ModelProfile {
+            id: "review-model".to_string(),
+            provider: "scripted".to_string(),
+            model: "review-upstream".to_string(),
+            context_window: 128_000,
+        },
+    ];
+    let providers = HashMap::from([(
+        "scripted".to_string(),
+        Arc::new(scripted) as Arc<dyn ModelClient>,
+    )]);
+    let configured_models = ConfiguredModels {
+        default_model: "research-model".to_string(),
+        profiles: profiles.clone(),
+        providers: Vec::new(),
+        router: ModelRouter::new(profiles, providers).expect("model router should be valid"),
+    };
+    let state = initialize(&ServerConfig {
+        root: directory.path().to_path_buf(),
+        default_model: "research-model".to_string(),
+        demo: false,
+        configured_models: Some(configured_models),
+        openai_config: None,
+        model_context_window: 128_000,
+        max_concurrent_runs: 2,
+        max_parallel_actions: 4,
+    })
+    .await
+    .expect("server should initialize with model profiles");
+    router(state, directory.path().join("dist"))
+}
+
+fn scripted_text(text: &str) -> Vec<ModelEvent> {
+    vec![
+        ModelEvent::OutputTextDelta {
+            delta: text.to_string(),
+        },
+        ModelEvent::Completed {
+            usage: TokenUsage {
+                input_tokens: 20,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+            },
+        },
+    ]
+}
+
+async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
     let directory_name = name
         .chars()
         .map(|character| {
@@ -101,9 +170,11 @@ async fn create_project_and_session(app: &Router, base: &Path, name: &str) -> (P
         .await
         .expect("project request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
-    let project: Project =
-        serde_json::from_value(response_json(response).await).expect("project should deserialize");
+    serde_json::from_value(response_json(response).await).expect("project should deserialize")
+}
 
+async fn create_project_and_session(app: &Router, base: &Path, name: &str) -> (Project, Session) {
+    let project = create_project(app, base, name).await;
     let session = start_interactive_session(app, project.id, "Origin Session", "research").await;
     (project, session)
 }
@@ -121,8 +192,8 @@ async fn start_interactive_session(
             &format!("/api/projects/{project_id}/workflows"),
             json!({
                 "program_slug": "interactive-agent",
-                "objective": format!("Persistent interactive Session: {title}"),
-                "input": {
+                "request": format!("Persistent interactive Session: {title}"),
+                "params": {
                     "session_title": title,
                     "agent_system_prompt": "",
                     "agent_access": access,
@@ -423,6 +494,21 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Parallel project").await;
+    let removed_fields = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "objective": "This removed field must not be accepted.",
+                "input": {}
+            }),
+        ))
+        .await
+        .expect("removed Workflow fields should return a response");
+    assert_eq!(removed_fields.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
     let turn = app
         .clone()
         .oneshot(json_request(
@@ -441,9 +527,9 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "objective": "Compare two implementation approaches.",
-                "system_prompt": "Prefer directly comparable implementation evidence.",
-                "input": {"perspectives": ["primary evidence", "failure modes"]},
+                "request": "Compare two implementation approaches.",
+                "instructions": "Prefer directly comparable implementation evidence.",
+                "params": {"perspectives": ["primary evidence", "failure modes"]},
                 "started_from_session_id": origin.id
             }),
         ))
@@ -455,7 +541,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
     let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
     assert_eq!(
-        view["workflow"]["system_prompt"],
+        view["workflow"]["instructions"],
         "Prefer directly comparable implementation evidence."
     );
     assert_eq!(view["participants"].as_array().map(Vec::len), Some(3));
@@ -465,6 +551,15 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     assert_eq!(view["teams"].as_array().map(Vec::len), Some(1));
     assert_eq!(view["relations"].as_array().map(Vec::len), Some(2));
     assert_eq!(view["task_scopes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        view["workflow"]["request"],
+        "Compare two implementation approaches."
+    );
+    assert_eq!(view["workflow"]["trigger"]["kind"], "user");
+    assert_eq!(
+        view["workflow"]["trigger"]["source_session_id"],
+        origin.id.to_string()
+    );
     assert!(
         view["workflow"]["output"]["summary"]
             .as_str()
@@ -504,7 +599,13 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
         Some(4)
     );
 
-    let participant_session_id = view["participants"][0]["session_id"]
+    let research_participant = view["participants"]
+        .as_array()
+        .expect("participants should exist")
+        .iter()
+        .find(|participant| participant["class_name"] == "Researcher")
+        .expect("a Researcher participant should exist");
+    let participant_session_id = research_participant["session_id"]
         .as_str()
         .expect("participant Session id should exist");
     let participant_view = app
@@ -519,15 +620,58 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     assert_eq!(participant_view["session"]["origin"], "workflow_agent");
     assert_eq!(participant_view["turns"].as_array().map(Vec::len), Some(1));
     assert_eq!(participant_view["turns"][0]["origin"], "workflow");
-    let prompt_kinds = participant_view["turns"][0]["prompt"]["layers"]
+    let layers = participant_view["turns"][0]["prompt"]["layers"]
         .as_array()
-        .expect("Workflow Turn prompt layers should exist")
+        .expect("Workflow Turn prompt layers should exist");
+    let prompt_kinds = layers
         .iter()
         .filter_map(|layer| layer["kind"].as_str())
         .collect::<Vec<_>>();
     assert!(prompt_kinds.contains(&"runtime"));
     assert!(prompt_kinds.contains(&"workflow"));
     assert!(prompt_kinds.contains(&"agent"));
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer["name"] == "Workflow run instructions")
+    );
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer["name"] == "Action contract")
+    );
+    assert!(layers.iter().all(|layer| {
+        layer["name"] != "Workflow objective"
+            && layer["name"] != "Workflow launch context"
+            && !layer["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Compare two implementation approaches."))
+    }));
+    let turn_input = participant_view["turns"][0]["input"]
+        .as_str()
+        .expect("Action Turn input should be text");
+    assert!(turn_input.starts_with("Action arguments (Workflow-provided data):"));
+    assert_eq!(
+        turn_input
+            .matches("Compare two implementation approaches.")
+            .count(),
+        1
+    );
+    let research_action = view["actions"]
+        .as_array()
+        .expect("actions should exist")
+        .iter()
+        .find(|action| action["agent_instance_id"] == research_participant["id"])
+        .expect("Researcher Action should exist");
+    assert!(
+        research_action["contract"]
+            .as_str()
+            .is_some_and(|contract| contract.contains("Investigate the question"))
+    );
+    assert_eq!(
+        research_action["arguments"]["question"],
+        "Compare two implementation approaches."
+    );
     assert_eq!(
         participant_view["workflow_memberships"]
             .as_array()
@@ -557,6 +701,97 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let scripted = ScriptedModelClient::new([
+        scripted_text("first route"),
+        scripted_text("second route"),
+        scripted_text("combined result"),
+    ]);
+    let app = test_app_with_model_profiles(&directory, scripted.clone()).await;
+    let project = create_project(&app, directory.path(), "Per-Agent models").await;
+
+    let unknown_model = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "request": "Reject an unknown per-Agent model profile.",
+                "params": {"research_model": "missing-model-profile"}
+            }),
+        ))
+        .await
+        .expect("unknown model parameter request should complete");
+    assert_eq!(unknown_model.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "request": "Research in parallel and review with another model.",
+                "params": {
+                    "perspectives": ["first route", "second route"],
+                    "research_model": "research-model",
+                    "synthesis_model": "review-model"
+                },
+                "model": "research-model"
+            }),
+        ))
+        .await
+        .expect("multi-model Workflow request should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let workflow = response_json(response).await;
+    let workflow_id = workflow["id"].as_str().expect("Workflow id should exist");
+    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+
+    for participant in view["participants"]
+        .as_array()
+        .expect("participants should exist")
+    {
+        let session_id = &participant["session_id"];
+        let session = view["sessions"]
+            .as_array()
+            .expect("participant Sessions should exist")
+            .iter()
+            .find(|session| session["id"] == *session_id)
+            .expect("participant Session should exist");
+        let expected = match participant["class_name"].as_str() {
+            Some("Researcher") => "research-model",
+            Some("Synthesizer") => "review-model",
+            other => panic!("unexpected Agent class {other:?}"),
+        };
+        assert_eq!(session["model"], expected);
+    }
+
+    let upstream_models = scripted
+        .requests()
+        .expect("scripted requests should load")
+        .into_iter()
+        .map(|request| request.model)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        upstream_models
+            .iter()
+            .filter(|model| model.as_str() == "research-upstream")
+            .count(),
+        2
+    );
+    assert_eq!(
+        upstream_models
+            .iter()
+            .filter(|model| model.as_str() == "review-upstream")
+            .count(),
+        1
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn workflow_launch_configuration_captures_context_and_enforces_access_bounds() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
@@ -580,7 +815,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "objective": "Reject an unknown Agent override.",
+                "request": "Reject an unknown Agent override.",
                 "agent_access_overrides": {"MissingAgent": "model_only"}
             }),
         ))
@@ -595,7 +830,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "objective": "Reject access above the origin Session.",
+                "request": "Reject access above the origin Session.",
                 "started_from_session_id": origin.id,
                 "access": "full_access"
             }),
@@ -611,7 +846,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "objective": "Reject an Agent override above the Workflow.",
+                "request": "Reject an Agent override above the Workflow.",
                 "started_from_session_id": origin.id,
                 "access": "model_only",
                 "agent_access_overrides": {"Researcher": "research"}
@@ -628,8 +863,8 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "objective": "Continue from the existing Project evidence.",
-                "input": {"perspectives": ["prior primary evidence"]},
+                "request": "Continue from the existing Project evidence.",
+                "params": {"perspectives": ["prior primary evidence"]},
                 "started_from_session_id": origin.id,
                 "context_mode": "project_snapshot",
                 "access": "research",
@@ -694,12 +929,20 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         .await
         .expect("participant Session should load");
     let participant = response_json(participant).await;
+    let layers = participant["turns"][0]["prompt"]["layers"]
+        .as_array()
+        .expect("Workflow Turn prompt layers should exist");
     assert!(
-        participant["turns"][0]["prompt"]["layers"]
-            .as_array()
-            .is_some_and(|layers| layers
-                .iter()
-                .any(|layer| layer["name"] == "Workflow launch context"))
+        layers
+            .iter()
+            .all(|layer| layer["name"] != "Workflow launch context"),
+        "launch context is data and must only enter a Turn when the Workflow passes it"
+    );
+    assert!(
+        participant["turns"][0]["input"].as_str().is_some_and(
+            |input| !input.contains("Reuse this prior evidence instead of restarting.")
+        ),
+        "capturing ctx.context does not implicitly pass it into an Agent Turn"
     );
 }
 
@@ -718,9 +961,9 @@ async fn project_summary_publishes_a_sandboxed_html_progress_page() {
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "project-summary",
-                "objective": "Refresh the Project progress page now.",
-                "system_prompt": "Lead with verified progress and unresolved blockers.",
-                "input": {
+                "request": "Refresh the Project progress page now.",
+                "instructions": "Lead with verified progress and unresolved blockers.",
+                "params": {
                     "interval_minutes": 0,
                     "max_sessions": 50,
                     "turns_per_session": 12,
@@ -930,7 +1173,7 @@ async fn workflow_can_pause_request_human_input_and_resume() {
     slug="human-decision",
     name="Human decision",
     description="Wait for a human decision before completing.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"decision": {"type": "string"}}},
 )
 async def main(ctx):
@@ -957,8 +1200,8 @@ async def main(ctx):
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "human-decision",
-                "objective": "Choose a project direction.",
-                "input": {},
+                "request": "Choose a project direction.",
+                "params": {},
                 "started_from_session_id": origin.id
             }),
         ))
@@ -1059,7 +1302,7 @@ class HostInspector(Agent):
     slug="access-grant",
     name="Access grant",
     description="Require a human grant before creating a full-access Agent Session.",
-    input_schema={"type": "object", "additionalProperties": False},
+    params_schema={"type": "object", "additionalProperties": False},
     output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
 )
 async def main(ctx):
@@ -1067,7 +1310,7 @@ async def main(ctx):
     team = Team("Host team", inspector)
     await team.activate()
     await inspector.set_access("full_access")
-    answer = await inspector.inspect(ctx.objective)
+    answer = await inspector.inspect(ctx.request)
     return {"answer": answer}
 "#;
     let publish = app
@@ -1087,8 +1330,8 @@ async def main(ctx):
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "access-grant",
-                "objective": "Inspect the configured environment.",
-                "input": {},
+                "request": "Inspect the configured environment.",
+                "params": {},
                 "access": "full_access"
             }),
         ))

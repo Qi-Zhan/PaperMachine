@@ -15,7 +15,7 @@ class InteractiveAgent(Agent):
     slug="interactive-agent",
     name="Interactive agent",
     description="Run one persistent Agent Session that waits for a human message before every Turn. The normal New Session action uses this built-in Workflow.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "session_title": {
@@ -67,9 +67,9 @@ class InteractiveAgent(Agent):
     },
 )
 async def main(ctx):
-    title = str(ctx.input.get("session_title") or "New project Session").strip()
-    custom_prompt = str(ctx.input.get("agent_system_prompt") or "").strip()
-    access = str(ctx.input.get("agent_access") or "research")
+    title = str(ctx.params.get("session_title") or "New project Session").strip()
+    custom_prompt = str(ctx.params.get("agent_system_prompt") or "").strip()
+    access = str(ctx.params.get("agent_access") or "research")
     system_prompt = InteractiveAgent.system_prompt
     if custom_prompt:
         system_prompt = f"{system_prompt}\n\nUser-configured Session instructions:\n{custom_prompt}"

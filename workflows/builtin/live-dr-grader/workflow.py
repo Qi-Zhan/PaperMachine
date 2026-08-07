@@ -233,14 +233,19 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
     slug="live-dr-grader",
     name="LiveDRBench grader",
     description="Blindly apply the upstream LiveDRBench semantic claim-matching rubric, then compute precision, recall, and F1 deterministically.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "category": {"type": "string"},
             "ground_truth": {},
             "prediction": {},
             "eval_info": {"type": "object"},
-            "grader_model": {"type": "string"},
+            "grader_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Grader model",
+                "description": "Optional model profile for the Judge; empty inherits the Run model.",
+            },
         },
         "required": ["category", "ground_truth", "prediction", "eval_info"],
         "additionalProperties": False,
@@ -261,13 +266,13 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
     },
 )
 async def main(ctx):
-    category = str(ctx.input["category"])
-    ground_truth = ctx.input["ground_truth"]
-    prediction = ctx.input["prediction"]
-    eval_info = dict(ctx.input.get("eval_info") or {})
+    category = str(ctx.params["category"])
+    ground_truth = ctx.params["ground_truth"]
+    prediction = ctx.params["prediction"]
+    eval_info = dict(ctx.params.get("eval_info") or {})
     judge = LiveDRJudge(
         name="Blind claim judge",
-        model=str(ctx.input.get("grader_model") or ""),
+        model=str(ctx.params.get("grader_model") or ""),
     )
     judgment = await judge.judge(category, ground_truth, prediction, eval_info)
     metrics = _grade(category, ground_truth, prediction, eval_info, judgment)

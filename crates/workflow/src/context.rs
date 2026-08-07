@@ -120,7 +120,7 @@ pub fn build_project_snapshot(
         })
         .take(max_workflows)
         .map(|workflow| {
-            let (objective, objective_truncated) = text.take(&workflow.objective, 12_000);
+            let (request, request_truncated) = text.take(&workflow.request, 12_000);
             let output = workflow.output.as_ref().map(|value| {
                 let serialized = serde_json::to_string(value).unwrap_or_default();
                 let (content, truncated) = text.take(&serialized, 48_000);
@@ -135,8 +135,8 @@ pub fn build_project_snapshot(
                 "id": workflow.id,
                 "program": workflow.program.manifest.name,
                 "program_slug": workflow.program.manifest.slug,
-                "objective": objective,
-                "objective_truncated": objective_truncated,
+                "request": request,
+                "request_truncated": request_truncated,
                 "status": workflow.status,
                 "attention_required": workflow.attention_required,
                 "output": output,
@@ -276,7 +276,7 @@ mod tests {
                 name: "Context test".to_string(),
                 description: "Capture prior Project state".to_string(),
                 entrypoint: "main".to_string(),
-                input_schema: json!({"type": "object"}),
+                params_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 default_budget: Budget::default(),
             },
@@ -323,9 +323,10 @@ mod tests {
                 project_id: project.id,
                 started_from_session_id: Some(older.id),
                 program: program(),
-                objective: "Produce durable evidence".to_string(),
-                system_prompt: String::new(),
-                input: json!({}),
+                request: "Produce durable evidence".to_string(),
+                instructions: String::new(),
+                trigger: Default::default(),
+                params: json!({}),
                 budget: None,
                 default_model: "test-model".to_string(),
                 access: AgentAccessProfile::Research,

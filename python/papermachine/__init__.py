@@ -935,9 +935,10 @@ class ProjectContext:
 
 @dataclass(frozen=True)
 class WorkflowContext:
-    objective: str
-    input: dict[str, Any]
+    request: str
+    params: dict[str, Any]
     workflow_id: str
+    trigger: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
 
     @property

@@ -448,7 +448,7 @@ async def _research_with_contract(
     slug="evidence-loop",
     name="Evidence loop",
     description="Freeze a question-specific coverage contract, run bounded independent parallel evidence routes, and reuse one continuation-stable action in each persistent route Session for evaluator-directed follow-up.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "route_count": {"type": "integer", "minimum": 2, "maximum": 4},
@@ -459,6 +459,30 @@ async def _research_with_contract(
             "audit_policy": {
                 "type": "string",
                 "enum": ["deliver_with_warning", "wait_for_human", "fail_run"],
+            },
+            "planner_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Planner model",
+                "description": "Optional model profile for the Planner; empty inherits the Run model.",
+            },
+            "research_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Research model",
+                "description": "Optional model profile for every Researcher; empty inherits the Run model.",
+            },
+            "evaluator_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Evaluator model",
+                "description": "Optional model profile for the Evaluator; empty inherits the Run model.",
+            },
+            "writer_model": {
+                "type": "string",
+                "format": "model-profile",
+                "title": "Writer model",
+                "description": "Optional model profile for the Writer; empty inherits the Run model.",
             },
         },
         "additionalProperties": False,
@@ -497,43 +521,51 @@ async def _research_with_contract(
     },
 )
 async def main(ctx):
-    route_count = max(2, min(int(ctx.input.get("route_count", 2)), 4))
+    route_count = max(2, min(int(ctx.params.get("route_count", 2)), 4))
     minimum_route_count = max(
         2,
-        min(int(ctx.input.get("minimum_route_count", 2)), route_count),
+        min(int(ctx.params.get("minimum_route_count", 2)), route_count),
     )
-    max_rounds = max(1, min(int(ctx.input.get("max_rounds", 2)), 4))
+    max_rounds = max(1, min(int(ctx.params.get("max_rounds", 2)), 4))
     max_followups = max(
         1,
-        min(int(ctx.input.get("max_followups_per_round", 2)), 4),
+        min(int(ctx.params.get("max_followups_per_round", 2)), 4),
     )
     extra_requirements = [
         _clean_text(value)
-        for value in ctx.input.get("extra_requirements") or []
+        for value in ctx.params.get("extra_requirements") or []
         if _clean_text(value)
     ]
-    audit_policy = _audit_policy(ctx.input.get("audit_policy"))
+    audit_policy = _audit_policy(ctx.params.get("audit_policy"))
+    planner_model = str(ctx.params.get("planner_model") or "")
+    research_model = str(ctx.params.get("research_model") or "")
+    evaluator_model = str(ctx.params.get("evaluator_model") or "")
+    writer_model = str(ctx.params.get("writer_model") or "")
 
-    planner = Planner(name="Planner")
-    evaluator = Evaluator(name="Evaluator")
-    writer = Writer(name="Writer")
+    planner = Planner(name="Planner", model=planner_model)
+    evaluator = Evaluator(name="Evaluator", model=evaluator_model)
+    writer = Writer(name="Writer", model=writer_model)
 
     raw_plan = await planner.plan(
-        ctx.objective,
+        ctx.request,
         minimum_route_count,
         route_count,
         extra_requirements,
     )
     plan = _normalize_plan(
         raw_plan,
-        ctx.objective,
+        ctx.request,
         minimum_route_count,
         route_count,
         extra_requirements,
     )
     routes = plan["routes"]
     researchers = [
-        Researcher(name=route["name"], role=route["objective"])
+        Researcher(
+            name=route["name"],
+            role=route["objective"],
+            model=research_model,
+        )
         for route in routes
     ]
     team = Team("Evidence routes", *researchers)
@@ -564,7 +596,7 @@ async def main(ctx):
             *(
                 _research_with_contract(
                     researcher,
-                    ctx.objective,
+                    ctx.request,
                     route["objective"],
                     plan["coverage_items"],
                     route["coverage_ids"],
@@ -578,7 +610,7 @@ async def main(ctx):
         ledger.extend(initial)
 
     round_number = 1
-    evaluation = await evaluator.assess(ctx.objective, plan, ledger, round_number)
+    evaluation = await evaluator.assess(ctx.request, plan, ledger, round_number)
     reused_sessions = False
 
     while evaluation.get("pass") is not True and round_number < max_rounds:
@@ -599,7 +631,7 @@ async def main(ctx):
                 *(
                     _research_with_contract(
                         researchers[item["route_index"]],
-                        ctx.objective,
+                        ctx.request,
                         "\n".join(item["objectives"]),
                         plan["coverage_items"],
                         item["coverage_ids"],
@@ -611,12 +643,12 @@ async def main(ctx):
                 )
             )
             ledger.extend(follow_up_packets)
-        evaluation = await evaluator.assess(ctx.objective, plan, ledger, round_number)
+        evaluation = await evaluator.assess(ctx.request, plan, ledger, round_number)
 
-    report = await writer.compose(ctx.objective, plan, ledger, evaluation)
+    report = await writer.compose(ctx.request, plan, ledger, evaluation)
     initial_draft_audit = _normalize_draft_audit(
         await evaluator.audit_draft(
-            ctx.objective,
+            ctx.request,
             plan,
             evaluation,
             report,
@@ -628,7 +660,7 @@ async def main(ctx):
         audit_history.append(
             _normalize_draft_audit(
                 await evaluator.audit_draft(
-                    ctx.objective,
+                    ctx.request,
                     plan,
                     evaluation,
                     report,
@@ -667,7 +699,7 @@ async def main(ctx):
         human_revision_count += 1
         audit_history.append(
             await evaluator.audit_draft(
-                ctx.objective,
+                ctx.request,
                 plan,
                 evaluation,
                 report,
