@@ -64,8 +64,8 @@ Every Session selects one of five access profiles. `model_only` has no resource
 tools; `read_only` can only read its Session workspace; `workspace` adds
 workspace writes and sandboxed commands; `research` adds hosted web search and
 controlled URL fetching; `full_access` allows host files and unrestricted
-commands/network after explicit human grant. `ask_human` remains available as a
-control primitive in every profile.
+commands/network after explicit human grant. `ask_human` is not a model-visible
+tool and is available only as an explicit Workflow DSL effect.
 
 Run creation applies access bounds before Python starts. The Workflow profile
 is a hard ceiling; a Session-origin Workflow cannot choose a profile above the

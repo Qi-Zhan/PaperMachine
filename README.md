@@ -122,7 +122,7 @@ one Project.
 - Generate a Project progress webpage manually or with the built-in scheduled
   `project-summary` Workflow, with an explicit user-editable Workflow prompt.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
-  interrupt an attempt; or let workflow/model code request typed human input.
+  interrupt an attempt; or let explicit Workflow code request typed human input.
 - Recover every non-terminal Workflow after a server restart by replaying its
   immutable Python source against deterministic effect IDs and a durable result
   journal; unfinished Agent actions resume the same checkpointed Turn.

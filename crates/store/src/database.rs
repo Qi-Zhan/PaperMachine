@@ -349,7 +349,7 @@ impl Store {
     fn session_has_active_turn(&self, session_id: SessionId) -> Result<bool, StoreError> {
         Ok(self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
-             AND status IN ('queued', 'running', 'waiting_for_human', 'paused'))",
+             AND status IN ('queued', 'running', 'paused'))",
             [session_id.to_string()],
             |row| row.get::<_, bool>(0),
         )?)
@@ -447,8 +447,6 @@ impl Store {
                     let request = self.get_human_request(request_id)?;
                     request.workflow_id == invocation.workflow_id
                         && request.session_id == session_id
-                        && request.action_invocation_id.is_none()
-                        && request.turn_id.is_none()
                         && request.status == HumanRequestStatus::Answered
                         && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
                 }
@@ -466,7 +464,7 @@ impl Store {
         }
         let active = self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
-             AND status IN ('queued', 'running', 'waiting_for_human', 'paused'))",
+             AND status IN ('queued', 'running', 'paused'))",
             [session_id.to_string()],
             |row| row.get::<_, bool>(0),
         )?;
@@ -681,7 +679,6 @@ impl Store {
         let mut session = self.get_session(turn.session_id)?;
         session.status = match status {
             TurnStatus::Queued | TurnStatus::Running => SessionStatus::Running,
-            TurnStatus::WaitingForHuman => SessionStatus::WaitingForHuman,
             TurnStatus::Paused => SessionStatus::Paused,
             TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
                 SessionStatus::Ready
@@ -2428,38 +2425,11 @@ impl Store {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_human_request(
-        &self,
-        workflow_id: WorkflowId,
-        invocation_id: Option<ActionInvocationId>,
-        attempt_id: Option<ActionAttemptId>,
-        session_id: SessionId,
-        turn_id: Option<TurnId>,
-        question: impl Into<String>,
-        response_schema: Value,
-    ) -> Result<HumanRequest, StoreError> {
-        self.create_human_request_with_id(
-            HumanRequestId::new(),
-            workflow_id,
-            invocation_id,
-            attempt_id,
-            session_id,
-            turn_id,
-            question,
-            response_schema,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn create_human_request_with_id(
         &self,
         request_id: HumanRequestId,
         workflow_id: WorkflowId,
-        invocation_id: Option<ActionInvocationId>,
-        attempt_id: Option<ActionAttemptId>,
         session_id: SessionId,
-        turn_id: Option<TurnId>,
         question: impl Into<String>,
         response_schema: Value,
     ) -> Result<HumanRequest, StoreError> {
@@ -2473,10 +2443,7 @@ impl Store {
         let request = HumanRequest {
             id: request_id,
             workflow_id,
-            action_invocation_id: invocation_id,
-            action_attempt_id: attempt_id,
             session_id,
-            turn_id,
             question: question.into(),
             response_schema,
             status: HumanRequestStatus::Open,
@@ -2507,9 +2474,6 @@ impl Store {
             ],
         )?;
         update_workflow_tx(&transaction, &run)?;
-        if let Some(turn_id) = turn_id {
-            set_turn_status_tx(&transaction, turn_id, TurnStatus::WaitingForHuman, None)?;
-        }
         let run_event = append_workflow_event_tx(
             &transaction,
             run.project_id,
@@ -2536,7 +2500,7 @@ impl Store {
         let session_event = append_session_event_tx(
             &transaction,
             session_id,
-            turn_id,
+            None,
             None,
             SessionEventPayload::HumanRequestOpened {
                 workflow_id,
@@ -2566,100 +2530,6 @@ impl Store {
             "SELECT document_json FROM human_requests WHERE workflow_id = ?1 ORDER BY created_at ASC",
             [workflow_id.to_string()],
         )
-    }
-
-    /// Cancels human requests whose in-memory tool waiter disappeared with the
-    /// previous server process. The resumed Turn receives a synthetic tool
-    /// interruption result and may issue a fresh request if it still needs one.
-    pub fn cancel_open_human_requests_for_recovery(
-        &self,
-        turn_id: TurnId,
-    ) -> Result<Vec<HumanRequest>, StoreError> {
-        let candidates: Vec<HumanRequest> = self.query_documents(
-            "SELECT document_json FROM human_requests
-             WHERE status = 'open' AND json_extract(document_json, '$.turn_id') = ?1
-             ORDER BY created_at ASC",
-            [turn_id.to_string()],
-        )?;
-        let Some(first) = candidates.first() else {
-            return Ok(Vec::new());
-        };
-        if candidates
-            .iter()
-            .any(|request| request.workflow_id != first.workflow_id)
-        {
-            return Err(StoreError::Invariant(
-                "one Turn cannot own human requests from multiple Workflows".to_string(),
-            ));
-        }
-        let workflow_id = first.workflow_id;
-
-        let now = Utc::now();
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let workflow_document = transaction.query_row(
-            "SELECT document_json FROM workflows WHERE id = ?1",
-            [workflow_id.to_string()],
-            |row| row.get::<_, String>(0),
-        )?;
-        let mut run: Workflow = serde_json::from_str(&workflow_document)?;
-        let mut cancelled = Vec::new();
-        let mut workflow_events = Vec::new();
-        let mut session_events = Vec::new();
-        for mut request in candidates {
-            request.status = HumanRequestStatus::Cancelled;
-            request.resolved_at = Some(now);
-            let changed = transaction.execute(
-                "UPDATE human_requests SET status = ?1, document_json = ?2
-                 WHERE id = ?3 AND status = 'open'",
-                params![
-                    enum_string(request.status)?,
-                    serde_json::to_string(&request)?,
-                    request.id.to_string(),
-                ],
-            )?;
-            if changed == 0 {
-                continue;
-            }
-            workflow_events.push(append_workflow_event_tx(
-                &transaction,
-                run.project_id,
-                request.workflow_id,
-                WorkflowEventPayload::HumanRequestResolved {
-                    human_request_id: request.id,
-                },
-            )?);
-            session_events.push(append_session_event_tx(
-                &transaction,
-                request.session_id,
-                request.turn_id,
-                None,
-                SessionEventPayload::HumanRequestResolved {
-                    workflow_id: request.workflow_id,
-                    human_request_id: request.id,
-                },
-            )?);
-            cancelled.push(request);
-        }
-        if !cancelled.is_empty() {
-            run.attention_required = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM human_requests
-                 WHERE workflow_id = ?1 AND status = 'open')",
-                [workflow_id.to_string()],
-                |row| row.get::<_, bool>(0),
-            )?;
-            run.updated_at = now;
-            update_workflow_tx(&transaction, &run)?;
-        }
-        transaction.commit()?;
-        drop(connection);
-        for event in workflow_events {
-            self.shared.publish_workflow(event);
-        }
-        for event in session_events {
-            self.shared.publish_session(event);
-        }
-        Ok(cancelled)
     }
 
     pub fn answer_human_request(
@@ -2701,9 +2571,6 @@ impl Store {
         }
         run.updated_at = Utc::now();
         update_workflow_tx(&transaction, &run)?;
-        if let Some(turn_id) = request.turn_id {
-            set_turn_status_tx(&transaction, turn_id, TurnStatus::Running, None)?;
-        }
         let run_event = append_workflow_event_tx(
             &transaction,
             run.project_id,
@@ -2728,7 +2595,7 @@ impl Store {
         let session_event = append_session_event_tx(
             &transaction,
             request.session_id,
-            request.turn_id,
+            None,
             None,
             SessionEventPayload::HumanRequestResolved {
                 workflow_id: run.id,
@@ -3657,47 +3524,6 @@ fn update_workflow_tx(transaction: &Transaction<'_>, run: &Workflow) -> Result<(
         ],
     )?;
     ensure_one(changed, "workflows")
-}
-
-fn set_turn_status_tx(
-    transaction: &Transaction<'_>,
-    turn_id: TurnId,
-    status: TurnStatus,
-    error: Option<String>,
-) -> Result<(), StoreError> {
-    let document = transaction.query_row(
-        "SELECT document_json FROM turns WHERE id = ?1",
-        [turn_id.to_string()],
-        |row| row.get::<_, String>(0),
-    )?;
-    let mut turn: Turn = serde_json::from_str(&document)?;
-    turn.status = status;
-    turn.error = error;
-    turn.updated_at = Utc::now();
-    update_status_document_tx(transaction, "turns", &turn_id.to_string(), status, &turn)?;
-    let session_document = transaction.query_row(
-        "SELECT document_json FROM sessions WHERE id = ?1",
-        [turn.session_id.to_string()],
-        |row| row.get::<_, String>(0),
-    )?;
-    let mut session: Session = serde_json::from_str(&session_document)?;
-    session.status = match status {
-        TurnStatus::WaitingForHuman => SessionStatus::WaitingForHuman,
-        TurnStatus::Paused => SessionStatus::Paused,
-        TurnStatus::Failed => SessionStatus::Failed,
-        TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
-            SessionStatus::Ready
-        }
-        TurnStatus::Queued | TurnStatus::Running => SessionStatus::Running,
-    };
-    session.updated_at = turn.updated_at;
-    update_status_document_tx(
-        transaction,
-        "sessions",
-        &session.id.to_string(),
-        session.status,
-        &session,
-    )
 }
 
 fn update_status_document_tx<T: Serialize, S: Serialize>(

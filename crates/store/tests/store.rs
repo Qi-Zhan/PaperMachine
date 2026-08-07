@@ -3,6 +3,7 @@ use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::ArtifactKind;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
+use papermachine_protocol::HumanRequestId;
 use papermachine_protocol::HumanRequestStatus;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
@@ -594,12 +595,10 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         .set_workflow_status(run.id, WorkflowStatus::Running, None)
         .expect("run should start");
     let request = store
-        .create_human_request(
+        .create_human_request_with_id(
+            HumanRequestId::new(),
             run.id,
-            None,
-            None,
             origin.id,
-            None,
             "Continue?",
             json!({"type": "string"}),
         )
@@ -652,65 +651,6 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
                 "Too late",
             )
             .is_err()
-    );
-}
-
-#[test]
-fn recovery_cancels_orphaned_turn_human_requests_idempotently() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
-    let project = project(&store, &directory, "Human recovery", "");
-    let session = store
-        .create_session(project.id, "Agent", "", "test-model", Vec::new())
-        .expect("Session should be created");
-    let workflow = workflow_for_session(&store, &session, "Recover the Agent");
-    store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
-        .expect("Workflow should be running");
-    let turn = store
-        .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::Workflow,
-            "Ask before proceeding",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
-            None,
-            None,
-            Vec::new(),
-        )
-        .expect("Turn should be created");
-    store.start_turn(turn.id).expect("Turn should start");
-    let request = store
-        .create_human_request(
-            workflow.id,
-            None,
-            None,
-            session.id,
-            Some(turn.id),
-            "Continue?",
-            json!({"type": "boolean"}),
-        )
-        .expect("human request should open");
-
-    let cancelled = store
-        .cancel_open_human_requests_for_recovery(turn.id)
-        .expect("orphaned request should be cancelled");
-    assert_eq!(cancelled.len(), 1);
-    assert_eq!(cancelled[0].id, request.id);
-    assert_eq!(cancelled[0].status, HumanRequestStatus::Cancelled);
-    assert!(
-        !store
-            .get_workflow(workflow.id)
-            .expect("Workflow should load")
-            .attention_required
-    );
-    assert!(
-        store
-            .cancel_open_human_requests_for_recovery(turn.id)
-            .expect("recovery cancellation should replay")
-            .is_empty()
     );
 }
 
@@ -808,12 +748,10 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
         )
         .expect("participant should be created");
     let request = store
-        .create_human_request(
+        .create_human_request_with_id(
+            HumanRequestId::new(),
             workflow.id,
-            None,
-            None,
             participant.session_id,
-            None,
             "Next message",
             json!({"type": "string"}),
         )

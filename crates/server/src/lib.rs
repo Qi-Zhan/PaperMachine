@@ -35,7 +35,6 @@ use papermachine_skills::SkillError;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
-use papermachine_tools::AskHumanTool;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
@@ -43,7 +42,6 @@ use papermachine_tools::ToolRegistry;
 use papermachine_tools::WriteFileTool;
 use papermachine_workflow::ProjectSnapshotOptions;
 use papermachine_workflow::PythonWorkflowRuntime;
-use papermachine_workflow::StoreHumanRequestBroker;
 use papermachine_workflow::WorkflowGenerationRequest;
 use papermachine_workflow::WorkflowGenerator;
 use papermachine_workflow::WorkflowProgramCatalog;
@@ -88,6 +86,15 @@ pub struct ServerConfig {
     pub max_concurrent_runs: usize,
     pub max_parallel_actions: usize,
 }
+
+type InitializedModels = (
+    Arc<dyn ModelClient>,
+    String,
+    usize,
+    &'static str,
+    Vec<ModelProfile>,
+    Vec<ModelProviderInfo>,
+);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -141,14 +148,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
             .with_context(|| format!("failed to load workflows for Project {}", project.id))?;
     }
 
-    let (model, default_model, model_context_window, mode, model_profiles, model_providers): (
-        Arc<dyn ModelClient>,
-        String,
-        usize,
-        &'static str,
-        Vec<ModelProfile>,
-        Vec<ModelProviderInfo>,
-    ) = match &config.models {
+    let (model, default_model, model_context_window, mode, model_profiles, model_providers): InitializedModels = match &config.models {
         ServerModelConfig::Demo => (
             Arc::new(DemoModelClient),
             "demo-model".to_string(),
@@ -174,7 +174,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         }
     };
 
-    let human_broker = Arc::new(StoreHumanRequestBroker::new(Arc::clone(&store)));
     let tools = ToolRegistry::builder()
         .register(ReadFileTool)
         .context("failed to register read_file")?
@@ -184,8 +183,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         .context("failed to register fetch_url")?
         .register(ExecCommandTool)
         .context("failed to register exec_command")?
-        .register(AskHumanTool::new(human_broker))
-        .context("failed to register ask_human")?
         .build();
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     let sessions = SessionRuntime::new(

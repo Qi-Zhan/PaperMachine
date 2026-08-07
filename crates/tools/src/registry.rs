@@ -67,7 +67,7 @@ impl ToolRegistry {
 }
 
 fn tool_is_allowed(access: AgentAccessProfile, name: &str) -> bool {
-    if access.is_unrestricted() || name == "ask_human" {
+    if access.is_unrestricted() {
         return true;
     }
     match name {

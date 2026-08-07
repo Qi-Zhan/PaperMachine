@@ -173,7 +173,6 @@ pub struct WorkflowUsage {
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantStatus {
     Active,
-    WaitingForHuman,
     Retired,
     Failed,
 }
@@ -220,7 +219,6 @@ pub struct TaskScope {
 pub enum ActionStatus {
     Scheduled,
     Running,
-    WaitingForHuman,
     Completed,
     Failed,
     Interrupted,
@@ -362,10 +360,7 @@ pub enum HumanRequestStatus {
 pub struct HumanRequest {
     pub id: HumanRequestId,
     pub workflow_id: WorkflowId,
-    pub action_invocation_id: Option<ActionInvocationId>,
-    pub action_attempt_id: Option<ActionAttemptId>,
     pub session_id: SessionId,
-    pub turn_id: Option<TurnId>,
     pub question: String,
     pub response_schema: Value,
     pub status: HumanRequestStatus,

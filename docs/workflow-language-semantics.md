@@ -23,7 +23,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | `TaskScope` | `TaskScopeId` | Durable nested grouping for related action invocations. |
 | `WorkflowTimer` | `TimerId` | Periodic trigger state: interval, policy, status, fire count, and deadlines. |
 | `Channel` / `Signal` | `ChannelId` / `SignalId` | Named stream and ordered durable values. |
-| `HumanRequest` | `HumanRequestId` | Typed question whose answer resumes a suspended workflow or tool call. |
+| `HumanRequest` | `HumanRequestId` | Typed question created by Workflow control flow; its answer resumes the suspended workflow. |
 | `ControlMessage` | `ControlMessageId` | Pending `guide`, `finish`, or `interrupt` targeted at a Session/action boundary. |
 
 ## 2. Ownership and identity invariants
@@ -97,10 +97,10 @@ capabilities:
 
 | Profile | Files | Commands | Project network | Model-visible resource tools |
 |---|---|---|---|---|
-| `model_only` | None | None | None | `ask_human` only. |
-| `read_only` | Read Session workspace | None | None | `read_file`, `ask_human`. |
-| `workspace` | Read/write Session workspace | Sandboxed, network denied | None | `read_file`, `write_file`, `exec_command`, `ask_human`. |
-| `research` | Read/write Session workspace | Sandboxed, network denied | Hosted web search and controlled public-HTTPS fetch | Workspace tools, `fetch_url`, hosted web search, `ask_human`. |
+| `model_only` | None | None | None | None. |
+| `read_only` | Read Session workspace | None | None | `read_file`. |
+| `workspace` | Read/write Session workspace | Sandboxed, network denied | None | `read_file`, `write_file`, `exec_command`. |
+| `research` | Read/write Session workspace | Sandboxed, network denied | Hosted web search and controlled public-HTTPS fetch | Workspace tools, `fetch_url`, hosted web search. |
 | `full_access` | Read/write host filesystem | Unrestricted | Unrestricted | All registered tools and hosted web search. |
 
 The profile is declared with `access = "research"` on an Agent class or with an
@@ -127,7 +127,6 @@ not Agent research-network access.
 | Participant status | Meaning | Future actions allowed |
 |---|---|---|
 | `active` | Session exists and Agent may be scheduled. | Yes. |
-| `waiting_for_human` | Reserved participant-level attention state. | Runtime-dependent. |
 | `retired` | Workflow deliberately removed the Agent. | No. |
 | `failed` | Agent cannot continue. | No. |
 
@@ -195,7 +194,6 @@ snapshot. Interruption/retry guidance belongs to the control layer. See
 |---|---|
 | `scheduled` | Durable invocation exists but does not hold execution permits. |
 | `running` | Attempt and Turn are executing. |
-| `waiting_for_human` | Model tool call is suspended for an answer. |
 | `completed` | Turn output was stored and returned to Python. |
 | `interrupted` | This attempt ended; runtime starts another attempt for the same invocation. |
 | `failed` | Runtime/model/tool failure ended the invocation. |
@@ -263,12 +261,12 @@ cancel actions by itself.
 
 ## 9. Human interaction and controls
 
-There are two request paths:
-
-| Path | Suspension point | Session/Turn behavior |
-|---|---|---|
-| DSL `await ask_human(...)` | Workflow coroutine | Request belongs to the specified Agent Session or origin Session; no Turn is required. |
-| model tool `ask_human` | Tool call inside an action Turn | Turn and Session become `waiting_for_human`; answer is the tool output. |
+`await ask_human(...)` is a Workflow control-flow effect. It suspends the
+Workflow coroutine and creates a request belonging to the specified Agent
+Session or origin Session; no Action Turn is required. Models never receive an
+`ask_human` tool definition. An Action may return a typed recommendation such
+as `needs_human`, but only Workflow code can turn that recommendation into a
+HumanRequest.
 
 A string DSL answer carries its durable HumanRequest ID as `HumanMessage`.
 Passing that value into a correspondingly annotated action is the only workflow
@@ -395,9 +393,8 @@ and attached Turn. The Turn checkpoint stores model history, cumulative usage,
 completed-model-step and hosted-search cursors, plus any terminal candidate
 message. Each local Tool Step also stores its provider call ID. Recovery reuses
 the exact output of a completed Tool Step; a Step still running when the process
-disappeared becomes an explicit execution-unknown restart output. It also
-cancels a stale open human-tool request and resumes at the next sample. A direct
-workflow-level `ask_human` effect is itself journaled and continues waiting on
+disappeared becomes an explicit execution-unknown restart output. A
+Workflow-level `ask_human` effect is itself journaled and continues waiting on
 its deterministic HumanRequest.
 
 Human, timer, and signal waits additionally support process-free suspension.

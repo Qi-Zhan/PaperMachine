@@ -421,7 +421,7 @@ watch(
 
 const activeSessions = computed(
   () => props.overview.sessions.filter((session) =>
-    ['running', 'waiting_for_human', 'paused'].includes(session.status),
+    ['running', 'paused'].includes(session.status),
   ).length,
 )
 const standaloneSessions = computed(() =>

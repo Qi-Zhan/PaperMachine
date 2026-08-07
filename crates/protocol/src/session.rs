@@ -20,7 +20,6 @@ use serde_json::Value;
 pub enum SessionStatus {
     Ready,
     Running,
-    WaitingForHuman,
     Paused,
     Failed,
     Archived,
@@ -118,7 +117,6 @@ pub struct Session {
 pub enum TurnStatus {
     Queued,
     Running,
-    WaitingForHuman,
     Paused,
     Completed,
     Failed,

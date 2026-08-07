@@ -15,7 +15,6 @@ papermachine-model = { path = "../model" }
 papermachine-protocol = { path = "../protocol" }
 papermachine-session = { path = "../session" }
 papermachine-store = { path = "../store" }
-papermachine-tools = { path = "../tools" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -26,6 +25,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 papermachine-skills = { path = "../skills" }
+papermachine-tools = { path = "../tools" }
 tempfile = "3.20"
 
 [lints]

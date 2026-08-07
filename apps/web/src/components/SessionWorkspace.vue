@@ -114,12 +114,11 @@
 
               <details
                 class="execution-details"
-                :open="['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status) && activityStepsFor(turn.id).length === 0"
+                :open="['queued', 'running', 'paused'].includes(turn.status) && activityStepsFor(turn.id).length === 0"
               >
                 <summary>
                   <span class="turn-state-icon" :data-status="turn.status">
                     <LoaderCircle v-if="turn.status === 'queued' || turn.status === 'running'" class="spin" :size="15" />
-                    <CircleHelp v-else-if="turn.status === 'waiting_for_human'" :size="15" />
                     <Pause v-else-if="turn.status === 'paused'" :size="15" />
                     <CircleCheck v-else-if="turn.status === 'completed'" :size="15" />
                     <CircleX v-else :size="15" />
@@ -682,7 +681,7 @@ const accessProfiles = computed(() => [
 ])
 
 const activeTurn = computed(() =>
-  props.view.turns.find((turn) => ['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status)),
+  props.view.turns.find((turn) => ['queued', 'running', 'paused'].includes(turn.status)),
 )
 const composerHumanRequest = computed(() =>
   props.view.human_requests.find(

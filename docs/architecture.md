@@ -246,10 +246,11 @@ item for the running action. `interrupt` terminates the current ActionAttempt;
 the workflow runtime starts a new attempt for the same ActionInvocation with the
 interruption text in an inspectable `control` prompt layer.
 
-Both workflow code and the model-visible `ask_human` tool can create a typed
-HumanRequest. The request marks the run as requiring attention; an action-level
-request also moves its Turn and Session to `waiting_for_human`. The validated
-answer is returned to the suspended call as its result.
+Only explicit Workflow code can create a typed HumanRequest through the
+`ask_human` DSL effect. Models do not receive an `ask_human` tool. An Action may
+recommend escalation in its typed result, but the Workflow decides whether to
+open a request. The request marks the run as requiring attention, and the
+validated answer is returned to the suspended Workflow call.
 
 Workflow-level human, timer, and signal waits are durable suspension points.
 Once all Python branches are waiting on replayable effects, the isolated Python
@@ -289,9 +290,9 @@ deterministic resource IDs.
 Action Turns checkpoint model history, usage, completed-model-step and hosted
 search cursors, and a terminal candidate message. Recovery keeps the same
 ActionInvocation, ActionAttempt, and Turn, cancels only orphaned in-flight
-Steps/human-tool waiters, reconstructs a completed local-tool result from the
-Step's durable call ID, gives an execution-unknown tool an explicit restart
-result, and resumes at the next model sample. This avoids repeating a
+Steps, reconstructs a completed local-tool result from the Step's durable call
+ID, gives an execution-unknown tool an explicit restart result, and resumes at
+the next model sample. This avoids repeating a
 checkpointed completed sample or counting the Action start twice. The
 effect journal is returned in Workflow views and is visible in the Session
 inspector.

@@ -2,17 +2,16 @@
 
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
-    AgentAccessProfile, HumanRequestStatus, ModelEvent, ModelInputItem, TokenUsage,
-    WorkflowContextMode, WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId,
-    WorkflowProgramManifest, WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
+    AgentAccessProfile, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowContextMode,
+    WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId, WorkflowProgramManifest,
+    WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
 };
 use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::{NewWorkflow, Store};
-use papermachine_tools::{AskHumanTool, ToolRegistry};
+use papermachine_tools::ToolRegistry;
 use papermachine_workflow::{
-    PythonWorkflowRuntime, StoreHumanRequestBroker, WorkflowExecution, WorkflowRuntime,
-    WorkflowScheduler,
+    PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -46,31 +45,6 @@ async def main(ctx):
         response_schema={"type": "string"},
     )
     return {"decision": decision}
-"#;
-
-const ACTION_SOURCE: &str = r#"from papermachine import Agent, action, workflow
-
-
-class Researcher(Agent):
-    access = "research"
-    role = "recovery researcher"
-
-    @action
-    async def investigate(self, question: str) -> str:
-        """Investigate the question, requesting human guidance when needed."""
-
-
-@workflow(
-    slug="durable-action-replay",
-    name="Durable action replay",
-    description="Resume one Agent Turn after an abrupt runtime loss.",
-    params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
-)
-async def main(ctx):
-    researcher = Researcher(name="Researcher")
-    answer = await researcher.investigate(ctx.request)
-    return {"answer": answer}
 "#;
 
 const TIMER_SOURCE: &str = r#"from papermachine import wait, workflow
@@ -704,167 +678,4 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
         .expect("Workflow should remain scheduled")
         .expect("Workflow should complete");
     assert_eq!(output, json!({"answer": "Proceed."}));
-}
-
-#[tokio::test]
-async fn unfinished_agent_action_resumes_its_checkpointed_turn_once() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts"))
-            .expect("store should open in memory"),
-    );
-    let project = store
-        .create_project("Durable Agent action", "", directory.path().join("project"))
-        .expect("project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
-            project_id: project.id,
-            started_from_session_id: None,
-            program: program_with_source("durable-action-replay", ACTION_SOURCE),
-            request: "Investigate safely across a restart.".to_string(),
-            instructions: String::new(),
-            trigger: Default::default(),
-            params: json!({}),
-            default_model: "scripted".to_string(),
-            access: AgentAccessProfile::Research,
-            enabled_skills: Vec::new(),
-            launch_context: Default::default(),
-            agent_access_overrides: Default::default(),
-        })
-        .expect("Workflow should be created");
-    store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
-        .expect("Workflow should be running");
-
-    let model = ScriptedModelClient::new([
-        vec![
-            ModelEvent::ResponseItemCompleted {
-                item: json!({
-                    "type": "function_call",
-                    "call_id": "call-human-before-restart",
-                    "name": "ask_human",
-                    "arguments": "{\"question\":\"Which source should I prioritize?\",\"response_schema\":{\"type\":\"string\"}}"
-                }),
-            },
-            ModelEvent::Completed {
-                usage: TokenUsage {
-                    input_tokens: 17,
-                    output_tokens: 4,
-                    cached_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                },
-            },
-        ],
-        completed_response("Recovered without replaying the first sample.", 23, 7),
-    ]);
-    let model_handle = model.clone();
-    let tools = ToolRegistry::builder()
-        .register(AskHumanTool::new(Arc::new(StoreHumanRequestBroker::new(
-            Arc::clone(&store),
-        ))))
-        .expect("ask_human should register")
-        .build();
-    let first_runtime = runtime_with(
-        Arc::clone(&store),
-        &directory.path().join("runtime"),
-        Arc::new(model.clone()),
-        tools.clone(),
-    );
-    let workflow_id = workflow.id;
-    let first_execution = tokio::spawn(async move {
-        first_runtime
-            .execute(workflow_id, CancellationToken::new())
-            .await
-    });
-
-    let first_request = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(request) = store
-                .list_human_requests(workflow.id)
-                .expect("human requests should load")
-                .into_iter()
-                .find(|request| request.status == HumanRequestStatus::Open)
-            {
-                break request;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("Agent should reach its human tool call");
-    let turn_id = first_request
-        .turn_id
-        .expect("tool request should belong to a Turn");
-    let checkpoint = store
-        .get_turn(turn_id)
-        .expect("checkpointed Turn should load");
-    assert_eq!(checkpoint.completed_model_steps, 1);
-    assert!(checkpoint.history.iter().any(|item| {
-        matches!(item, ModelInputItem::ResponseItem { item }
-            if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call"))
-    }));
-
-    first_execution.abort();
-    assert!(
-        first_execution
-            .await
-            .expect_err("aborted runtime task should not complete")
-            .is_cancelled()
-    );
-    store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
-        .expect("recovery should make the Workflow runnable before replay");
-    let output = runtime_with(
-        Arc::clone(&store),
-        &directory.path().join("runtime"),
-        Arc::new(model),
-        tools,
-    )
-    .execute(workflow.id, CancellationToken::new())
-    .await
-    .expect("unfinished Agent action should resume");
-
-    assert_eq!(
-        output,
-        WorkflowExecution::Completed(
-            json!({"answer": "Recovered without replaying the first sample."})
-        )
-    );
-    let requests = model_handle.requests().expect("model requests should load");
-    assert_eq!(
-        requests.len(),
-        2,
-        "the first model sample must not be replayed"
-    );
-    assert!(requests[1].input.iter().any(|item| {
-        matches!(item, ModelInputItem::FunctionCallOutput { call_id, output }
-            if call_id == "call-human-before-restart"
-                && output.get("recovered").and_then(serde_json::Value::as_bool) == Some(true))
-    }));
-    assert_eq!(
-        store
-            .get_human_request(first_request.id)
-            .expect("orphaned human request should load")
-            .status,
-        HumanRequestStatus::Cancelled
-    );
-    assert_eq!(
-        store
-            .list_action_invocations(workflow.id)
-            .expect("Actions should load")
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .get_workflow(workflow.id)
-            .expect("Workflow usage should load")
-            .usage
-            .actions_started,
-        1
-    );
-    let turn = store.get_turn(turn_id).expect("resumed Turn should load");
-    assert_eq!(turn.completed_model_steps, 2);
-    assert_eq!(turn.usage.input_tokens, 40);
-    assert_eq!(turn.usage.output_tokens, 11);
 }

@@ -2,14 +2,13 @@ export type Id = string
 
 export const AGENT_ACCESS_PROFILES = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
 export type AgentAccessProfile = (typeof AGENT_ACCESS_PROFILES)[number]
-export type SessionStatus = 'ready' | 'running' | 'waiting_for_human' | 'paused' | 'failed' | 'archived'
+export type SessionStatus = 'ready' | 'running' | 'paused' | 'failed' | 'archived'
 export type SessionOrigin = 'user' | 'workflow_agent'
 export type TurnOrigin = 'user' | 'workflow'
 export type PromptLayerKind = 'runtime' | 'project' | 'workflow' | 'agent' | 'session' | 'skills' | 'control'
 export type TurnStatus =
   | 'queued'
   | 'running'
-  | 'waiting_for_human'
   | 'paused'
   | 'completed'
   | 'failed'
@@ -28,8 +27,8 @@ export type WorkflowStatus =
   | 'failed'
   | 'cancelled'
 export type WorkflowContextMode = 'fresh' | 'project_snapshot'
-export type ParticipantStatus = 'active' | 'waiting_for_human' | 'retired' | 'failed'
-export type ActionStatus = 'scheduled' | 'running' | 'waiting_for_human' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
+export type ParticipantStatus = 'active' | 'retired' | 'failed'
+export type ActionStatus = 'scheduled' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
 export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
 
@@ -294,10 +293,7 @@ export interface WorkflowSignal { id: Id; workflow_id: Id; channel_id: Id; sende
 export interface HumanRequest {
   id: Id
   workflow_id: Id
-  action_invocation_id: Id | null
-  action_attempt_id: Id | null
   session_id: Id
-  turn_id: Id | null
   question: string
   response_schema: Record<string, unknown>
   status: HumanRequestStatus

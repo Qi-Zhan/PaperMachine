@@ -6,7 +6,6 @@ describe('format helpers', () => {
   it('formats canonical session labels', () => {
     setLocale('en')
     expect(shortId('019fcaaa-0000-7000-8000-000000000001')).toBe('00000001')
-    expect(statusLabel('waiting_for_human')).toBe('Waiting for human')
     expect(
       sessionEventTitle({
         id: 'event',
@@ -22,7 +21,6 @@ describe('format helpers', () => {
 
   it('formats canonical session labels in Chinese', () => {
     setLocale('zh-CN')
-    expect(statusLabel('waiting_for_human')).toBe('等待人工输入')
     expect(
       sessionEventTitle({
         id: 'event',

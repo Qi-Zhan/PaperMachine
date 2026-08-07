@@ -3,6 +3,7 @@
 //! The `ToolExecutor` shape is adapted from OpenAI Codex's `codex-tools`
 //! crate. PaperMachine removes deferred discovery, code mode, MCP, plugins,
 //! approvals, and telemetry while retaining a spec/runtime pair.
+//! Human interaction is a durable Workflow effect, never a model-visible tool.
 
 mod builtins;
 mod fetch;
@@ -23,7 +24,6 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-pub use builtins::AskHumanTool;
 pub use builtins::ExecCommandTool;
 pub use builtins::ReadFileTool;
 pub use builtins::WriteFileTool;
@@ -77,16 +77,6 @@ pub enum ToolError {
     IsolationUnavailable(String),
     #[error("tool registry lock poisoned")]
     RegistryPoisoned,
-}
-
-#[async_trait]
-pub trait HumanRequestBroker: Send + Sync {
-    async fn ask(
-        &self,
-        context: ToolContext,
-        question: String,
-        response_schema: Value,
-    ) -> Result<Value, ToolError>;
 }
 
 #[async_trait]

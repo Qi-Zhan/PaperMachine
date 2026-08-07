@@ -411,9 +411,7 @@ pre {
   background: var(--red);
 }
 
-.status-pin[data-status="waiting_for_human"],
 .status-pin[data-status="paused"],
-.status-dot[data-status="waiting_for_human"],
 .status-dot[data-status="paused"] {
   background: var(--blue);
 }
@@ -595,7 +593,6 @@ pre {
   background: var(--red-soft);
 }
 
-.status-badge[data-status="waiting_for_human"],
 .status-badge[data-status="paused"] {
   border-color: #c9ddeb;
   color: #2c638a;

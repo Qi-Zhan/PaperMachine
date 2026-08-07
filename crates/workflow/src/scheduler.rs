@@ -355,9 +355,7 @@ async fn wait_until_runnable(
                     .list_human_requests(workflow_id)
                     .map_err(|error| error.to_string())?
                     .into_iter()
-                    .any(|request| {
-                        request.status == HumanRequestStatus::Open && request.turn_id.is_none()
-                    });
+                    .any(|request| request.status == HumanRequestStatus::Open);
                 let next_timer = store
                     .list_timers(workflow_id)
                     .map_err(|error| error.to_string())?

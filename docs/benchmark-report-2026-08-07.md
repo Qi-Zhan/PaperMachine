@@ -304,9 +304,9 @@ runtime primitive 做以下工作：
 4. **Action 级 checkpoint 与预算。** 原生保存每次结构校验、repair 原因和 token；失败从
    最近 Action 恢复。预算同时约束 uncached input、output、search call、wall time 和动态
    Agent 数，并让 evaluator 看见剩余预算。
-5. **可校准的人类介入。** `ask_human` 已能暂停并保留来源；还需要让 Evaluator 生成一个
-   具体问题、解释为什么不能自动解决，并在 UI 中把 warning、等待和用户修订展示为普通
-   Workflow/Session 事件。
+5. **可校准的人类介入。** `ask_human` 已能暂停并保留来源；Evaluator 应结构化返回一个
+   具体问题及无法自动解决的理由，由 Workflow policy 决定是否调用 `ask_human`。UI 将
+   warning、等待和用户修订展示为普通 Workflow/Session 事件。
 6. **继续做对照实验。** 下一组比较应是“强 single”对“single + 条件式 evaluator”以及
    “条件式 evaluator + 动态新增路线”，而不是固定 r5/r6。至少扩到更多任务、增加重复，
    并用不同模型家族的 grader 或上游 RACE/FACT 降低同模型 judge bias。

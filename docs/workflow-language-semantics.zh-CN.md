@@ -23,7 +23,7 @@
 | `TaskScope` | `TaskScopeId` | 对相关 action invocation 的持久、可嵌套分组。 |
 | `WorkflowTimer` | `TimerId` | 定时触发状态：interval、policy、status、fire count 与 deadline。 |
 | `Channel` / `Signal` | `ChannelId` / `SignalId` | 具名数据流及其中有序、持久的值。 |
-| `HumanRequest` | `HumanRequestId` | 带类型的问题；回答后恢复暂停的 workflow 或 tool call。 |
+| `HumanRequest` | `HumanRequestId` | 由 Workflow 控制流创建的带类型问题；回答后恢复暂停的 workflow。 |
 | `ControlMessage` | `ControlMessageId` | 发往某个 Session/action 边界的待处理 `guide`、`finish` 或 `interrupt`。 |
 
 ## 2. 所有权与标识不变量
@@ -89,10 +89,10 @@ run 的输出就是 Python entrypoint 的返回值，runner 通过 `complete` ef
 
 | 档位 | 文件 | 命令 | Project 网络 | Model 可见的资源工具 |
 |---|---|---|---|---|
-| `model_only` | 无 | 无 | 无 | 只有 `ask_human`。 |
-| `read_only` | 只读 Session workspace | 无 | 无 | `read_file`、`ask_human`。 |
-| `workspace` | 读写 Session workspace | 沙箱执行，禁止网络 | 无 | `read_file`、`write_file`、`exec_command`、`ask_human`。 |
-| `research` | 读写 Session workspace | 沙箱执行，禁止网络 | 托管 web search 与受控的公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search、`ask_human`。 |
+| `model_only` | 无 | 无 | 无 | 无。 |
+| `read_only` | 只读 Session workspace | 无 | 无 | `read_file`。 |
+| `workspace` | 读写 Session workspace | 沙箱执行，禁止网络 | 无 | `read_file`、`write_file`、`exec_command`。 |
+| `research` | 读写 Session workspace | 沙箱执行，禁止网络 | 托管 web search 与受控的公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search。 |
 | `full_access` | 读写宿主机文件系统 | 不受限 | 不受限 | 所有已注册工具与托管 web search。 |
 
 Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
@@ -115,7 +115,6 @@ Model sample 前会过滤 tool definitions，但这不是唯一安全边界。re
 | Participant 状态 | 含义 | 可否继续执行 action |
 |---|---|---|
 | `active` | Session 已存在，Agent 可以被调度。 | 可以。 |
-| `waiting_for_human` | 预留的 participant 级注意力状态。 | 由 runtime 决定。 |
 | `retired` | workflow 主动移除了该 Agent。 | 不可以。 |
 | `failed` | Agent 无法继续。 | 不可以。 |
 
@@ -173,7 +172,6 @@ run request 或启动上下文快照；interrupt/retry guidance 属于 control l
 |---|---|
 | `scheduled` | invocation 已持久化，但尚未获得执行许可。 |
 | `running` | Attempt 与 Turn 正在执行。 |
-| `waiting_for_human` | 模型发起的 tool call 正等待人工回答。 |
 | `completed` | Turn 输出已保存并返回 Python。 |
 | `interrupted` | 当前 attempt 结束；runtime 会为同一个 invocation 创建新 attempt。 |
 | `failed` | runtime/model/tool 失败终止了 invocation。 |
@@ -233,12 +231,10 @@ Workflow 处于 active 状态时可以动态创建 Agent 和修改 Team。把 Ag
 
 ## 9. 人工交互与控制
 
-存在两条人工请求路径：
-
-| 路径 | 暂停位置 | Session/Turn 行为 |
-|---|---|---|
-| DSL `await ask_human(...)` | workflow coroutine | request 属于指定 Agent Session 或 origin Session；不要求存在 Turn。 |
-| 模型工具 `ask_human` | action Turn 内的 tool call | Turn 和 Session 变为 `waiting_for_human`；回答作为 tool output 返回。 |
+`await ask_human(...)` 是 Workflow 控制流 effect。它挂起 Workflow coroutine，
+创建属于指定 Agent Session 或 origin Session 的 request，不要求存在 Action Turn。
+模型永远不会收到 `ask_human` tool definition。Action 可以返回 `needs_human`
+之类的结构化建议，但只有 Workflow 代码能把建议转成 HumanRequest。
 
 DSL 的字符串回答会以 `HumanMessage` 携带持久 HumanRequest ID。只有把该值传给
 对应类型标注的 action，workflow 才能创建显示为人类消息的 `user` Turn；其他
@@ -351,9 +347,8 @@ effect 仍是 started，runtime 会用 `(WorkflowId, effect path, resource kind)
 Turn checkpoint 保存 model history、累计 usage、已完成 model-step 与 hosted-search
 游标，以及可能已经得到的终态候选消息。每个本地 Tool Step 还会保存 provider
 call ID；恢复会复用 completed Tool Step 的真实输出，而进程消失时仍是 running 的
-Step 会得到明确的 execution-unknown restart 结果。runtime 还会取消已经失去
-waiter 的 open human-tool request，然后从下一次 model sample 继续。workflow 级
-`ask_human` 本身是 journaled effect，因此会继续等待同一个确定性 HumanRequest。
+Step 会得到明确的 execution-unknown restart 结果。workflow 级 `ask_human` 本身是
+journaled effect，因此会继续等待同一个确定性 HumanRequest。
 
 human、timer 与 signal wait 还支持不保留进程的挂起。Python effect client 会跟踪
 所有 pending future；只有全部 pending effect 都是可 replay wait 时才请求 runtime

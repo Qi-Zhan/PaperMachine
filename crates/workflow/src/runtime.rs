@@ -6,9 +6,6 @@ use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeError;
 use papermachine_session::WorkflowTurnContext;
 use papermachine_store::Store;
-use papermachine_tools::HumanRequestBroker;
-use papermachine_tools::ToolContext;
-use papermachine_tools::ToolError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -538,10 +535,7 @@ impl RunEffectContext {
                 self.store.create_human_request_with_id(
                     request_id,
                     self.workflow_id,
-                    None,
-                    None,
                     participant.session_id,
-                    None,
                     format!(
                         "Workflow Agent {} requests an access change from {current} to {requested}. Grant this access?",
                         participant.name
@@ -653,10 +647,7 @@ impl RunEffectContext {
                         .unwrap_or_else(|| "previous Action attempt failed".to_string()),
                 ));
             }
-            ActionStatus::Scheduled
-            | ActionStatus::Running
-            | ActionStatus::WaitingForHuman
-            | ActionStatus::Interrupted => {}
+            ActionStatus::Scheduled | ActionStatus::Running | ActionStatus::Interrupted => {}
         }
         let gate = {
             let mut gates = self.agent_gates.lock().await;
@@ -693,10 +684,7 @@ impl RunEffectContext {
                 let turn = self.store.get_turn(turn_id)?;
                 match turn.status {
                     TurnStatus::Completed => Ok(turn),
-                    TurnStatus::Queued
-                    | TurnStatus::Running
-                    | TurnStatus::WaitingForHuman
-                    | TurnStatus::Paused => {
+                    TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {
                         self.sessions
                             .resume_workflow_action(
                                 turn.id,
@@ -1126,10 +1114,7 @@ impl RunEffectContext {
                 self.store.create_human_request_with_id(
                     request_id,
                     self.workflow_id,
-                    None,
-                    None,
                     session_id,
-                    None,
                     payload.question,
                     payload.response_schema,
                 )?
@@ -1259,49 +1244,6 @@ impl RunEffectContext {
     }
 }
 
-#[derive(Clone)]
-pub struct StoreHumanRequestBroker {
-    store: Arc<Store>,
-}
-
-impl StoreHumanRequestBroker {
-    pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl HumanRequestBroker for StoreHumanRequestBroker {
-    async fn ask(
-        &self,
-        context: ToolContext,
-        question: String,
-        response_schema: Value,
-    ) -> Result<Value, ToolError> {
-        let workflow_id = context.workflow_id.ok_or_else(|| {
-            ToolError::Execution("ask_human is available only inside a Workflow action".to_string())
-        })?;
-        let request = self
-            .store
-            .create_human_request(
-                workflow_id,
-                context.action_invocation_id,
-                context.action_attempt_id,
-                context.session_id,
-                Some(context.turn_id),
-                question,
-                response_schema,
-            )
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
-        wait_for_human(&self.store, request.id, &context.cancellation)
-            .await
-            .map_err(|error| match error {
-                WorkflowRuntimeError::Cancelled => ToolError::Cancelled,
-                other => ToolError::Execution(other.to_string()),
-            })
-    }
-}
-
 fn human_answer_or_suspend(
     store: &Store,
     request_id: HumanRequestId,
@@ -1314,26 +1256,6 @@ fn human_answer_or_suspend(
             WorkflowStatus::WaitingForUser,
             None,
         ))),
-    }
-}
-
-async fn wait_for_human(
-    store: &Store,
-    request_id: HumanRequestId,
-    cancellation: &CancellationToken,
-) -> Result<Value, WorkflowRuntimeError> {
-    loop {
-        let request = store.get_human_request(request_id)?;
-        match request.status {
-            HumanRequestStatus::Answered => return Ok(request.answer.unwrap_or(Value::Null)),
-            HumanRequestStatus::Cancelled => return Err(WorkflowRuntimeError::Cancelled),
-            HumanRequestStatus::Open => {}
-        }
-        let mut events = store.subscribe();
-        tokio::select! {
-            _ = cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
-            _ = events.recv() => {},
-        }
     }
 }
 
@@ -1582,8 +1504,6 @@ fn resolve_human_turn_source(
     let request = store.get_human_request(request_id)?;
     if request.workflow_id != workflow_id
         || request.session_id != session_id
-        || request.action_invocation_id.is_some()
-        || request.turn_id.is_some()
         || request.status != HumanRequestStatus::Answered
     {
         return Err(WorkflowRuntimeError::Protocol(

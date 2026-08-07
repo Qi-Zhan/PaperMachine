@@ -230,9 +230,6 @@ impl SessionRuntime {
         context: WorkflowTurnContext,
         cancellation: CancellationToken,
     ) -> Result<Turn, SessionRuntimeError> {
-        self.inner
-            .store
-            .cancel_open_human_requests_for_recovery(turn_id)?;
         let cancelled_steps = self.inner.store.cancel_running_steps_for_recovery(
             turn_id,
             "server process restarted while this Step was running",
@@ -384,10 +381,7 @@ impl SessionRuntime {
         let turn = self.inner.store.get_turn(turn_id)?;
         if matches!(
             turn.status,
-            TurnStatus::Queued
-                | TurnStatus::Running
-                | TurnStatus::WaitingForHuman
-                | TurnStatus::Paused
+            TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused
         ) {
             self.inner.store.cancel_turn(turn_id)?;
             return Ok(());

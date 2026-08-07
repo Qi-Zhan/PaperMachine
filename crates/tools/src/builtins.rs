@@ -1,4 +1,3 @@
-use crate::HumanRequestBroker;
 use crate::ToolContext;
 use crate::ToolError;
 use crate::ToolExecutor;
@@ -14,76 +13,10 @@ use papermachine_protocol::ToolDefinition;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_READ_BYTES: usize = 1024 * 1024;
-
-#[derive(Clone)]
-pub struct AskHumanTool {
-    broker: Arc<dyn HumanRequestBroker>,
-}
-
-impl AskHumanTool {
-    pub fn new(broker: Arc<dyn HumanRequestBroker>) -> Self {
-        Self { broker }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AskHumanArgs {
-    question: String,
-    #[serde(default = "default_response_schema")]
-    response_schema: Value,
-}
-
-fn default_response_schema() -> Value {
-    json!({"type": "string"})
-}
-
-#[async_trait]
-impl ToolExecutor for AskHumanTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "ask_human".to_string(),
-            description: "Pause this Turn and ask the human for information or a decision that is required before continuing.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "minLength": 1},
-                    "response_schema": {"type": "object"}
-                },
-                "required": ["question"],
-                "additionalProperties": false
-            }),
-            supports_parallel: false,
-        }
-    }
-
-    async fn execute(
-        &self,
-        context: ToolContext,
-        arguments: Value,
-    ) -> Result<ToolOutput, ToolError> {
-        let args: AskHumanArgs = parse_arguments("ask_human", arguments)?;
-        if args.question.trim().is_empty() {
-            return Err(ToolError::InvalidArguments {
-                tool: "ask_human".to_string(),
-                message: "question must not be empty".to_string(),
-            });
-        }
-        let answer = self
-            .broker
-            .ask(context, args.question, args.response_schema)
-            .await?;
-        Ok(ToolOutput {
-            value: json!({"answer": answer}),
-            summary: "human response received".to_string(),
-        })
-    }
-}
 
 #[derive(Clone, Copy, Default)]
 pub struct ReadFileTool;
