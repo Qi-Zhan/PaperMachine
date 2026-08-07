@@ -44,8 +44,46 @@ Project
     Teams, relations, scopes, timers, channels, human requests
 ```
 
-Application state lives in the platform user-data directory; every Project is
-anchored to its own absolute directory and owns a `.papermachine/` directory.
+PaperMachine separates shipped resources, the global Project library, and each
+research directory. The repository is never used as an implicit data store.
+
+## Storage model
+
+`resource_root` is read-only application material: web assets, the Python DSL
+runtime, and built-in Workflows. `data_dir` contains only application-global
+state:
+
+| Platform | Default `data_dir` |
+| --- | --- |
+| macOS | `~/Library/Application Support/PaperMachine` |
+| Linux | `$XDG_DATA_HOME/papermachine`, or `~/.local/share/papermachine` |
+| Windows | `%LOCALAPPDATA%\PaperMachine` |
+
+`<data_dir>/library.db` is a small library of Project identities, display
+metadata, and absolute directory references. The default provider configuration
+is `<data_dir>/config.toml`; `--config` selects another file without changing
+where the library lives.
+
+Every Project is anchored to a user-selected absolute `project_root` and owns
+its research state:
+
+```text
+<project_root>/.papermachine/
+  project.toml
+  state/project.db
+  artifacts/
+  workflow-runtime/
+  prompts/
+  workflows/
+  skills/
+```
+
+Creating a Project initializes this directory. Opening an existing Project
+registers it in the global library. Relocating verifies the Project identity at
+the new path, while removing a Project from the library never deletes its
+files. An unavailable path remains visible as a missing library entry until it
+is relocated or removed. The web client loads only the selected Project's full
+overview.
 
 ## Codex relationship
 
@@ -136,11 +174,13 @@ Rust is pinned by `rust-toolchain.toml`; Node.js and pnpm are required.
 ```sh
 pnpm install
 pnpm --dir apps/web build
-cargo run -p papermachine-server -- --resource-root . --demo
+pnpm server:demo
 ```
 
 Open <http://127.0.0.1:4310>. Demo mode exercises the full runtime and UI but
-does not perform substantive research.
+does not perform substantive research. The development launcher uses the
+platform `data_dir` above with a dedicated `dev` suffix, so it cannot populate
+the normal Project library.
 
 For real models, PaperMachine loads `config.toml` from its platform user-data
 directory by default, or the file passed to `--config`. The committed
@@ -148,9 +188,13 @@ development config uses DeepSeek V4 Flash and resolves its credential only from
 the environment:
 
 ```sh
-DEEPSEEK_API_KEY=... cargo run -p papermachine-server -- \
-  --resource-root . --config ./papermachine.toml
+DEEPSEEK_API_KEY=... pnpm server:dev
 ```
+
+`pnpm server:dev --config /absolute/path/config.toml` selects a different
+development provider file. A packaged or direct server invocation may omit
+`--data-dir` to use the normal platform location; development and benchmark
+commands always provide an isolated directory explicitly.
 
 The configuration shape supports several providers and model profiles in one
 server process:

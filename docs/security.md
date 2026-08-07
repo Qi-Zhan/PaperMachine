@@ -102,7 +102,7 @@ sandboxes. They require ordinary host network access.
 
 PaperMachine provider configuration stores only an `api_key_env` name. The
 credential must be present in the server process environment; it is read into
-memory but is not copied into `papermachine.toml`, SQLite, workflow source,
+memory but is not copied into the provider configuration, SQLite, workflow source,
 artifacts, or logs. Configuration debug output omits/redacts credentials, and
 child workflow or tool processes receive a cleared environment.
 

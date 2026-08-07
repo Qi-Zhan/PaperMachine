@@ -74,6 +74,53 @@ become a Workflow prompt layer. Ordinary workflow-dispatched actions retain a
 `workflow` Turn: the Action contract is an instruction layer and the bound
 arguments are shown explicitly as Turn input data.
 
+## Storage topology and Project lifecycle
+
+PaperMachine has three independent path roles:
+
+```text
+resource_root/                  read-only shipped resources
+  apps/web/dist/
+  python/
+  workflows/builtin/
+
+data_dir/                       application-global state
+  config.toml                   default provider configuration
+  library.db                    Project references and display metadata only
+
+project_root/.papermachine/     one research effort's owned state
+  project.toml
+  state/project.db
+  artifacts/
+  workflow-runtime/
+  prompts/
+  workflows/
+  skills/
+```
+
+The platform default `data_dir` is
+`~/Library/Application Support/PaperMachine` on macOS,
+`$XDG_DATA_HOME/papermachine` (or `~/.local/share/papermachine`) on Linux, and
+`%LOCALAPPDATA%\PaperMachine` on Windows. `--data-dir` selects another global
+library, and `--config` selects a provider file independently. No path is
+derived from the selected Project, and application data is never inferred from
+the current repository.
+
+Creating a Project writes its identity and complete research state under its
+own `.papermachine` directory, then registers a reference in `library.db`.
+Opening an existing Project requires both `project.toml` and `state/project.db`
+and verifies that the local database contains exactly that Project. Relocation
+updates the global reference only after the same identity is found at the new
+absolute path. Removing a reference never removes Project files. Relocation or
+removal is rejected while that Project has resumable work.
+
+At startup the server lists every global reference and marks a Project missing
+when its local database is unavailable. The web client renders this lightweight
+library first and requests a full overview only for the selected available
+Project. Each available Project has its own Store, catalog, Session runtime,
+and Workflow scheduler; process-wide semaphores still bound concurrent work
+across Projects.
+
 ## Workflow launch
 
 The Project page and Session header open the same Run Workflow surface. The
@@ -126,7 +173,7 @@ PaperMachine server ------------+
                  |                         |
                  +-> execution sandbox     +-> SessionRuntime actions
                                |
-                 SQLite store + events + artifacts + Project directories
+                 global Project library + per-Project Store/artifacts
 ```
 
 The Python runner loads the snapshotted `workflow.py`, executes its async
@@ -166,7 +213,9 @@ deliverable. The extra Action and Turn remain visible in the Session workbench.
 
 ## Providers and model profiles
 
-`papermachine.toml` is the authoritative model configuration. A provider owns
+The selected PaperMachine provider configuration is authoritative. By default
+it is `<data_dir>/config.toml`; development may pass the repository's
+`papermachine.toml` explicitly. A provider owns
 the endpoint, credential environment-variable name, transport policy, cache
 mode, and default reasoning policy. A model profile maps a stable user-facing
 ID to one provider's concrete model ID and context window. Sessions and workflow
@@ -180,8 +229,8 @@ providers. The current provider client implements the OpenAI Responses wire
 shape, including compatible implementations such as DeepSeek's Responses
 endpoint. Provider formats are an adapter boundary, not a Workflow DSL concern.
 
-Outside explicit demo mode, the server must load a valid `papermachine.toml`
-(or `--config` file), and all Session/Agent model selection uses its profile IDs.
+Outside explicit demo mode, the server must load a valid provider configuration,
+and all Session/Agent model selection uses its profile IDs.
 
 History is stored locally, so providers may set `store_responses = false`.
 Before every model sample the agent estimates instruction, tool-schema, output,
@@ -274,10 +323,13 @@ the UI separately confirms `full_access`.
 
 ## Persistence and recovery
 
-SQLite stores JSON documents plus indexed ownership/status columns and ordered
-append-only Session and Workflow event streams. Artifacts are stored on disk
-under content-hashed metadata records. The web client uses SSE for live deltas
-and refreshes durable views for lifecycle changes.
+Each Project's SQLite database stores its JSON documents, indexed
+ownership/status columns, and ordered append-only Session and Workflow event
+streams. Its Artifacts are stored under that same Project's `.papermachine`
+directory using content-hashed metadata records. The separate global SQLite
+library stores no Session, Turn, Workflow, prompt, skill, or Artifact content.
+The web client uses SSE for live deltas and refreshes durable views for
+lifecycle changes.
 
 Unfinished standalone Session Turns and every non-terminal Workflow are
 recovered at startup. A recovered Workflow reruns its immutable Python source
