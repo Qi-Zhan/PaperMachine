@@ -1609,6 +1609,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--max-parallel-runs", type=int, default=2)
+    parser.add_argument(
+        "--exploratory",
+        action="store_true",
+        help="allow a one-off sample with fewer than four tasks or two repeats",
+    )
     parser.add_argument("--refresh-upstream", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--retry-terminal-failures", action="store_true")
@@ -1617,8 +1622,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.repeats < 2:
-        raise ValueError("repeats must be at least 2")
+    if args.repeats < (1 if args.exploratory else 2):
+        raise ValueError(
+            "repeats must be at least 1 for exploratory runs and at least 2 otherwise"
+        )
     if args.max_attempts < 1 or args.max_parallel_runs < 1:
         raise ValueError("max-attempts and max-parallel-runs must be positive")
     task_ids = [
@@ -1632,7 +1639,7 @@ def main() -> int:
         raise ValueError(
             f"conditions must be non-empty and known; unknown={unknown_conditions}"
         )
-    if len(task_ids) < 4:
+    if len(task_ids) < 4 and not args.exploratory:
         raise ValueError("the matrix must contain more than three tasks")
 
     benchmark_root = Path(__file__).resolve().parent
