@@ -2,6 +2,7 @@
 
 mod artifact;
 mod database;
+mod library;
 
 use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::ProjectId;
@@ -20,6 +21,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 pub use database::Store;
+pub use library::ProjectLibrary;
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflow {

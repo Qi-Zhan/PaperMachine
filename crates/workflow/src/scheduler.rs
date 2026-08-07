@@ -76,11 +76,20 @@ impl WorkflowScheduler {
         executor: Arc<dyn WorkflowRuntime>,
         max_concurrent_runs: usize,
     ) -> Self {
+        let permits = Arc::new(Semaphore::new(max_concurrent_runs.max(1)));
+        Self::new_with_permits(store, executor, permits)
+    }
+
+    pub fn new_with_permits(
+        store: Arc<Store>,
+        executor: Arc<dyn WorkflowRuntime>,
+        permits: Arc<Semaphore>,
+    ) -> Self {
         Self {
             inner: Arc::new(SchedulerInner {
                 store,
                 executor,
-                permits: Arc::new(Semaphore::new(max_concurrent_runs.max(1))),
+                permits,
                 handles: Mutex::new(HashMap::new()),
             }),
         }

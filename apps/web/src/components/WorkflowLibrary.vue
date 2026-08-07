@@ -291,7 +291,7 @@ async function generate() {
   busyAction.value = 'generate'
   clearStatus()
   try {
-    const generated = await api.generateWorkflow({
+    const generated = await api.generateWorkflow(props.projectId, {
       description: generation.description.trim(),
       ...(generation.name?.trim() ? { name: generation.name.trim() } : {}),
       ...(generation.slug?.trim() ? { slug: generation.slug.trim() } : {}),
@@ -316,7 +316,7 @@ async function validate() {
   busyAction.value = 'validate'
   clearStatus()
   try {
-    const result = await api.validateWorkflow(sourceText.value)
+    const result = await api.validateWorkflow(props.projectId, sourceText.value)
     validation.value = result
     setValidationStatus(result, t('workflow.valid'))
   } catch (error) {
@@ -331,7 +331,7 @@ async function save() {
   busyAction.value = 'save'
   clearStatus()
   try {
-    const result = await api.validateWorkflow(sourceText.value)
+    const result = await api.validateWorkflow(props.projectId, sourceText.value)
     validation.value = result
     if (!result.valid) {
       setValidationStatus(result, '')

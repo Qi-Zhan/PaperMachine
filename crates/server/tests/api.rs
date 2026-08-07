@@ -52,6 +52,59 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("response should contain JSON")
 }
 
+#[tokio::test]
+async fn project_library_and_research_state_use_separate_roots() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let project_root = directory.path().join("research/portable-paper");
+    let app = test_app(&directory).await;
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/api/projects",
+            json!({
+                "name": "Portable paper",
+                "description": "Project-owned research state",
+                "root_path": project_root,
+            }),
+        ))
+        .await
+        .expect("Project request should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let project = response_json(response).await;
+
+    assert!(directory.path().join("app-data/library.db").is_file());
+    assert!(
+        project_root
+            .join(".papermachine/state/project.db")
+            .is_file()
+    );
+    assert!(project_root.join(".papermachine/artifacts").is_dir());
+    assert!(project_root.join(".papermachine/workflow-runtime").is_dir());
+    assert!(!directory.path().join(".papermachine").exists());
+
+    let restarted = test_app(&directory).await;
+    let projects = restarted
+        .clone()
+        .oneshot(empty_request("GET", "/api/projects"))
+        .await
+        .expect("Project library should load after restart");
+    let projects = response_json(projects).await;
+    assert_eq!(projects.as_array().map(Vec::len), Some(1));
+    assert_eq!(projects[0]["id"], project["id"]);
+
+    let overview = restarted
+        .oneshot(empty_request(
+            "GET",
+            &format!(
+                "/api/projects/{}",
+                project["id"].as_str().unwrap_or_default()
+            ),
+        ))
+        .await
+        .expect("Project state should reopen after restart");
+    assert_eq!(overview.status(), StatusCode::OK);
+}
+
 fn prepare_root(root: &Path) {
     let builtins = ["interactive-agent", "parallel-discovery", "project-summary"];
     for slug in builtins {
@@ -1007,7 +1060,7 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflow-programs/generate",
+            &format!("/api/projects/{}/workflow-programs/generate", project.id),
             json!({
                 "name": "Claim challenge",
                 "slug": "claim-challenge",
@@ -1039,7 +1092,7 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflow-programs/validate",
+            &format!("/api/projects/{}/workflow-programs/validate", project.id),
             json!({"source": invalid_access}),
         ))
         .await
@@ -1063,7 +1116,7 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .clone()
         .oneshot(json_request(
             "POST",
-            "/api/workflow-programs/validate",
+            &format!("/api/projects/{}/workflow-programs/validate", project.id),
             json!({"source": source}),
         ))
         .await

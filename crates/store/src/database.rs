@@ -3087,7 +3087,14 @@ fn initialize_project_directory(project: &Project) -> Result<(), StoreError> {
             config_path.display()
         )));
     }
-    for directory in ["prompts", "workflows", "skills", "state"] {
+    for directory in [
+        "prompts",
+        "workflows",
+        "skills",
+        "state",
+        "artifacts",
+        "workflow-runtime",
+    ] {
         std::fs::create_dir_all(metadata_root.join(directory))
             .map_err(|error| StoreError::Io(error.to_string()))?;
     }

@@ -93,10 +93,10 @@ export const api = {
   listWorkflowPrograms: (projectId: string) => request<WorkflowProgram[]>(`/projects/${projectId}/workflow-programs`),
   getWorkflowProgram: (projectId: string, slug: string) =>
     request<WorkflowProgramSource>(`/projects/${projectId}/workflow-programs/${encodeURIComponent(slug)}`),
-  generateWorkflow: (input: WorkflowGenerationInput) =>
-    request<GeneratedWorkflow>('/workflow-programs/generate', { method: 'POST', body: JSON.stringify(input) }),
-  validateWorkflow: (source: string) =>
-    request<WorkflowValidation>('/workflow-programs/validate', { method: 'POST', body: JSON.stringify({ source }) }),
+  generateWorkflow: (projectId: string, input: WorkflowGenerationInput) =>
+    request<GeneratedWorkflow>(`/projects/${projectId}/workflow-programs/generate`, { method: 'POST', body: JSON.stringify(input) }),
+  validateWorkflow: (projectId: string, source: string) =>
+    request<WorkflowValidation>(`/projects/${projectId}/workflow-programs/validate`, { method: 'POST', body: JSON.stringify({ source }) }),
   saveWorkflowProgram: (projectId: string, source: string) =>
     request<WorkflowProgram>(`/projects/${projectId}/workflow-programs`, { method: 'POST', body: JSON.stringify({ source }) }),
   artifactUrl: (artifact: Artifact) => `${API_ROOT}/artifacts/${artifact.id}/content`,

@@ -117,6 +117,18 @@ impl SessionRuntime {
         skills: Arc<ProjectSkillCatalog>,
         config: SessionRuntimeConfig,
     ) -> Self {
+        let permits = Arc::new(Semaphore::new(config.max_concurrent_turns.max(1)));
+        Self::new_with_permits(store, model, tools, skills, config, permits)
+    }
+
+    pub fn new_with_permits(
+        store: Arc<Store>,
+        model: Arc<dyn ModelClient>,
+        tools: ToolRegistry,
+        skills: Arc<ProjectSkillCatalog>,
+        config: SessionRuntimeConfig,
+        permits: Arc<Semaphore>,
+    ) -> Self {
         Self {
             inner: Arc::new(SessionRuntimeInner {
                 store,
@@ -125,7 +137,7 @@ impl SessionRuntime {
                 skills,
                 default_model: config.default_model,
                 model_context_window: config.model_context_window,
-                permits: Arc::new(Semaphore::new(config.max_concurrent_turns.max(1))),
+                permits,
                 active: Mutex::new(HashMap::new()),
             }),
         }
