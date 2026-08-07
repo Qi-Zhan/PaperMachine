@@ -1242,13 +1242,19 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
         conditions, key=lambda condition: aggregates[condition]["score_mean"]
     )
     baseline = conditions[0]
+    observed_result = (
+        f"`{best_condition}` mean post-write score: "
+        f"{aggregates[best_condition]['score_mean']:.2f}."
+        if len(conditions) == 1
+        else f"`{best_condition}` had the highest mean post-write score "
+        f"({aggregates[best_condition]['score_mean']:.2f}) among the selected conditions."
+    )
     lines.extend(
         [
             "",
             "## Observed result",
             "",
-            f"- `{best_condition}` had the highest mean post-write score "
-            f"({aggregates[best_condition]['score_mean']:.2f}) among the selected conditions.",
+            f"- {observed_result}",
         ]
     )
     for condition in conditions[1:]:
@@ -1265,7 +1271,7 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
             "## Validity limits",
             "",
             f"- {len(tasks)} tasks and {state['experiment']['repeats']} repeats are an experiment, not a definitive benchmark ranking.",
-            "- The point-wise grader is independent by Session and prompt, but currently uses the same model family as the research runs.",
+            "- The point-wise grader is independent by Session and prompt, but remains a model-based judge and can introduce model-specific bias.",
             "- This experiment does not run the upstream reference-relative RACE judge or FACT citation scraper, so its absolute scores are not official DeepResearch Bench scores.",
             "- Prompt cache keys are stable routing-affinity keys scoped to one Session and model. They remain stable across that Session's turns, tools, schemas, and compaction, while provider cache reuse still requires a matching prompt prefix; cache telemetry is reported separately from Responses continuation hits.",
             "- Token and wall-time comparisons use operational totals, including failed or invalid attempts before a successful retry. Wall time is the greater of runtime-recorded execution and Workflow creation-to-terminal elapsed time, so process restarts cannot silently erase user-visible waiting time.",

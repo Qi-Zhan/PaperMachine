@@ -1440,7 +1440,7 @@ def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> st
             "## Validity limits",
             "",
             f"- The development slice contains {len(tasks)} tasks and is for workflow diagnosis, not leaderboard comparison.",
-            "- The semantic judge uses the same model family as the researchers, so judge-model bias remains possible; the Session is isolated and has no tools.",
+            "- The semantic judge is isolated and has no tools, but remains a model-based judge and can introduce model-specific bias.",
             "- The grader ports the upstream rubric to Responses and batches each task into one judgment action, so it is rubric-faithful but not byte-for-byte execution of the upstream Chat Completions script.",
             "- Research or grading failures count as zero in aggregate means; grader tokens are reported separately.",
             "- Hosted search results and indexed web content can change over time.",

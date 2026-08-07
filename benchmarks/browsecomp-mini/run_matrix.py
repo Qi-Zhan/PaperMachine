@@ -929,7 +929,7 @@ def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> st
             "## Validity limits",
             "",
             "- The six questions are a deterministic sample from the 1,266-task test set and are too small for leaderboard comparison.",
-            "- The independent grader uses the same model family as the researchers, so judge-model bias remains possible.",
+            "- The independent grader is isolated from the researchers, but remains a model-based judge and can introduce model-specific bias.",
             "- Accuracy treats research or grading failures as incorrect; grader tokens are shown separately from research cost.",
             "- Hosted search results and indexed web content can change over time.",
             "- Dataset rows remain encrypted in tasks.json; plaintext questions and answers exist only in memory and local run records needed for execution/grading.",
