@@ -4,8 +4,8 @@
 
 1. **Project is the ownership root.** It owns every Session, Workflow,
    Project skill, artifact, and human request in that research effort.
-2. **There is no separate Research entity.** Project is the only ownership
-   concept and there is no compatibility alias.
+2. **Project is the research entity.** It is the sole ownership concept for a
+   research effort.
 3. **Session is the main workbench.** It is a durable multi-turn conversation;
    its Turns may be verified human messages or workflow-dispatched work.
 4. **Turn is the model-execution boundary.** Model samples and tool calls are
@@ -331,12 +331,8 @@ split expresses ownership and review status, not extra privileges.
 See [prompt model](prompt-model.md) for exact layering, editing, provenance,
 message-origin, and cache semantics.
 
-## Explicit non-goals
+## Deployment model
 
-- Codex app-server, CLI, TUI, rollout, wire-protocol, or IDE compatibility.
-- Treating the Codex CLI as a subprocess or library kernel.
-- MCP, plugins, apps, connectors, approvals compatibility, or a marketplace.
-- A second workflow engine based on a separate graph or node abstraction.
-- A browser Python IDE. The Workflow page is a catalog, generator, structural
-  inspector, validator, and saver with an advanced source escape hatch.
-- A distributed, authenticated multi-tenant scheduler in the local-first release.
+PaperMachine is a local-first, single-user application. It uses one Python
+workflow engine and exposes a catalog, generator, structural inspector,
+validator, and source editor in the Workflow page.

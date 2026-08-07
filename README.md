@@ -44,8 +44,8 @@ Project
     Teams, relations, scopes, timers, channels, human requests
 ```
 
-There is no legacy compatibility layer. Server state lives under
-`.papermachine/state/`; every Project is anchored to its own absolute directory.
+Server state lives under `.papermachine/state/`; every Project is anchored to
+its own absolute directory.
 
 ## Codex relationship
 
@@ -58,18 +58,15 @@ code for:
 - process-group lifecycle and fail-closed sandbox execution;
 - a conversation-first UI with execution details folded under each Turn.
 
-Codex is source material, not PaperMachine's runtime dependency. PaperMachine
-does not launch or embed the Codex CLI. It deliberately omits Codex app-server,
-CLI/TUI protocols, approvals compatibility, MCP, plugins, apps, connectors,
-telemetry, and the global skill marketplace. Skills are small packages owned by
-one Project.
+Codex is source material, not PaperMachine's runtime dependency. Skills are
+small packages owned by one Project.
 
 ## Repository layout
 
 - `crates/protocol`: canonical IDs, entities, events, and API data types.
 - `crates/model`: provider profiles, model routing, Responses API streaming,
   and deterministic model clients.
-- `crates/tools`: model-visible file, shell, fetch, and human-input tools.
+- `crates/tools`: model-visible file, shell, and fetch tools.
 - `crates/execution`: process lifecycle and OS sandbox enforcement.
 - `crates/agent`: sampling, tool execution, retry, control checkpoints, context.
 - `crates/session`: durable multi-turn Session and workflow-action runtime.

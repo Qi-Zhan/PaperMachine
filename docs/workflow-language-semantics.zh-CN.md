@@ -133,7 +133,6 @@ Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 的�
 之后 Agent 执行与 Codex 相同的主循环：采样模型、执行模型请求的工具、追加工具输出，
 再继续采样。模型返回不带 tool call 的 terminal assistant message、用户执行
 finish/interrupt/cancel，或 runtime/provider 基础设施失败时，Action 才结束。
-这里没有 Action step 数或 hosted-search 次数额度。
 `reasoning_effort`（`none`、`low`、`medium`、`high`、`xhigh` 或 `max`）可覆盖
 该 action 的服务端默认推理强度；这个值会固化到 Turn，并出现在 model step 的
 输入元数据里。
@@ -316,13 +315,10 @@ callback 中的 action 每次都会创建新 Turn。workflow 完成时，active 
 | `failed` | Python、action、protocol、sandbox、model 或 provider 失败。 | 不接受。 |
 | `cancelled` | 用户/runtime 取消。 | 不接受。 |
 
-Workflow 执行没有 Agent 数、Action step、hosted-search、token、wall-time 或 cost
-额度。这些量是观测数据，不参与控制流：Agent/action/step/timer/search 数、provider
-token 与 cache usage、wall-clock time 都会持久化并供 UI 检查。runtime 仍会执行
-权限、sandbox、Session 串行化、用户显式 pause/finish/interrupt/cancel、provider
-request/stream-idle timeout、context-window 安全与服务端全局并发限制。因此无人看管的
-Workflow 可能长时间运行并消耗大量 provider 资源；未来如果加入 quota policy，也应
-与描述协作逻辑的 Workflow 正交。
+Agent/action/step/timer/search 数、provider token/cache usage 和 wall-clock time 是供检查
+的持久化观测数据。Action 会在模型给出终态输出、用户显式控制、provider/runtime 失败或
+context-window 到达边界时停止。runtime 还会强制权限、sandbox 边界、Session 串行化、
+provider request/stream-idle timeout 和服务端全局并发限制。
 
 未捕获的 Python exception 会让 runner 退出，并以有长度限制的 stderr 使 run
 失败。action failure 会作为 effect exception 返回 Python；workflow 若不捕获，

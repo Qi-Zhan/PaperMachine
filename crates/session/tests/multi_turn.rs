@@ -421,7 +421,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .expect("turn should complete without a token quota");
+        .expect("turn should complete");
     assert_eq!(turn.status, TurnStatus::Completed);
     let updated = store
         .get_workflow(run.id)

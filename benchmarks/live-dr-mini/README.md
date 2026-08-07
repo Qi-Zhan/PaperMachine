@@ -29,8 +29,7 @@ python3 benchmarks/live-dr-mini/run_matrix.py
 ```
 
 Each research and grader job starts directly from the Project with a fresh
-launch context. This keeps tasks isolated without relying on the removed
-standalone Session-creation API or importing prior benchmark results.
+launch context, keeping tasks isolated from prior benchmark results.
 
 Ctrl-C asks every in-flight Workflow to cancel before the runner exits. The
 runner records model tokens, cached input, hosted web-search actions,

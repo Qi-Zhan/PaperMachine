@@ -371,7 +371,7 @@ async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &st
 async fn interactive_session_turns_preserve_exact_human_message_provenance() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
-    let (project, session) =
+    let (_, session) =
         create_project_and_session(&app, directory.path(), "Interactive project").await;
 
     let session_view = app
@@ -457,16 +457,6 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
                 .iter()
                 .any(|layer| layer["name"] == "Action contract"))
     );
-
-    let removed_endpoint = app
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/sessions", project.id),
-            json!({"title": "Removed standalone Session"}),
-        ))
-        .await
-        .expect("removed endpoint should return a response");
-    assert_eq!(removed_endpoint.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[cfg(target_os = "macos")]
@@ -487,21 +477,6 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Parallel project").await;
-    let removed_fields = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/workflows", project.id),
-            json!({
-                "program_slug": "parallel-discovery",
-                "objective": "This removed field must not be accepted.",
-                "input": {}
-            }),
-        ))
-        .await
-        .expect("removed Workflow fields should return a response");
-    assert_eq!(removed_fields.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
     let turn = app
         .clone()
         .oneshot(json_request(

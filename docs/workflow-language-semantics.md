@@ -147,7 +147,7 @@ value requests `invoke_action`. The Agent then follows the Codex-like loop:
 sample the model, execute requested tools, append their outputs, and sample
 again. The Action ends when the model returns a terminal assistant message,
 the user finishes/interrupts/cancels it, or runtime/provider infrastructure
-fails. There is no Action step count or hosted-search-call quota.
+fails.
 `reasoning_effort` (`none`, `low`, `medium`,
 `high`, `xhigh`, or `max`) overrides the server default for that action. The
 value is snapshotted on the Turn and shown in model-step input metadata.
@@ -354,15 +354,12 @@ marked completed when the workflow completes.
 | `failed` | Python, action, protocol, sandbox, model, or provider failure. | No. |
 | `cancelled` | User/runtime cancellation. | No. |
 
-Workflow execution has no Agent, Action-step, hosted-search, token, wall-time,
-or cost quota. Those quantities are observations, not control-flow conditions:
 Agent/action/step/timer/search counts, provider token and cache usage, and
-wall-clock time are persisted and exposed for inspection. The runtime still
-enforces permissions, sandbox boundaries, Session serialization, explicit user
-pause/finish/interrupt/cancel, provider request/stream-idle timeouts, context
-window safety, and server-wide concurrency. An unattended Workflow can
-therefore run for a long time or consume substantial provider resources; a
-future quota policy should remain orthogonal to Workflow collaboration logic.
+wall-clock time are observational telemetry persisted for inspection. Actions
+stop on terminal model output, explicit user control, provider or infrastructure
+failure, or context-window limits. The runtime also enforces permissions,
+sandbox boundaries, Session serialization, provider request/stream-idle
+timeouts, and server-wide concurrency.
 
 An uncaught Python exception exits the runner and fails the run with bounded
 stderr. An action failure is returned to Python as an effect exception; if the

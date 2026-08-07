@@ -133,12 +133,10 @@ not silently rewrite the endpoint.
   can only report execution as unknown: it cannot prove whether an external side
   effect happened before the process disappeared. Workflow authors should make
   destructive or non-idempotent tool operations require an explicit checkpoint.
-- Workflow execution currently has no step, hosted-search, token, wall-time, or
-  cost quota. An Action continues until the model returns a terminal answer,
-  the user finishes/interrupts/cancels it, or an infrastructure/provider error
-  occurs. Provider request and stream-idle timeouts still protect broken
-  connections, and server-wide concurrency limits protect the process, but
-  users should treat an unattended research Workflow as potentially unbounded.
-  Token/cache/search/time usage remains persisted for inspection.
+- An Action continues until the model returns a terminal answer, the user
+  finishes/interrupts/cancels it, or an infrastructure/provider error occurs.
+  Provider request and stream-idle timeouts protect broken connections, and
+  server-wide concurrency limits protect the process. Token/cache/search/time
+  usage is persisted for inspection.
 - Generated protocols and model output can still be wrong. Inspectability and
   provenance do not establish factual correctness.

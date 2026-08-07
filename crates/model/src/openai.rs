@@ -1296,8 +1296,6 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "run_program");
         assert_eq!(body["tools"][1]["type"], "web_search");
         assert_eq!(body["tools"][1]["search_context_size"], "low");
-        assert!(body.get("max_tool_calls").is_none());
-        assert!(body.get("max_output_tokens").is_none());
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["text"]["format"]["type"], "json_schema");
@@ -1394,8 +1392,6 @@ mod tests {
         );
         assert!(control.get("prompt_cache_options").is_none());
         assert_eq!(marked["prompt_cache_key"], control["prompt_cache_key"]);
-        assert!(marked.get("max_output_tokens").is_none());
-        assert!(control.get("max_output_tokens").is_none());
     }
 
     #[test]

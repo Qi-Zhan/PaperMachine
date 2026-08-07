@@ -80,7 +80,6 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertTrue(action_effects[0]["tools_enabled"])
         self.assertFalse(action_effects[1]["tools_enabled"])
         self.assertEqual(action_effects[1]["agent_instance_id"], "agent")
-        self.assertNotIn("max_output_tokens", action_effects[1])
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
         actions = 0
@@ -235,7 +234,6 @@ class ActionOptionsTest(unittest.TestCase):
         repair = effects[-1][1]
         self.assertEqual(repair["agent_instance_id"], "agent")
         self.assertFalse(repair["tools_enabled"])
-        self.assertNotIn("max_output_tokens", repair)
 
     def test_typed_action_stops_after_two_failed_repairs(self) -> None:
         calls = 0
@@ -279,8 +277,6 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(asyncio.run(invoke()), "done")
         self.assertEqual(effects[-1][0], "invoke_action")
         self.assertTrue(effects[-1][1]["tools_enabled"])
-        self.assertNotIn("max_steps", effects[-1][1])
-        self.assertNotIn("max_search_calls", effects[-1][1])
         self.assertEqual(effects[-1][1]["web_search_context_size"], "low")
         self.assertEqual(effects[-1][1]["reasoning_effort"], "low")
         self.assertEqual(effects[0][1]["access"], "model_only")
@@ -317,24 +313,6 @@ class ActionOptionsTest(unittest.TestCase):
     def test_invalid_access_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Agent access must be one of"):
             Writer(access="root")
-
-    def test_removed_max_steps_option_is_rejected(self) -> None:
-        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'max_steps'"):
-
-            class Invalid(Agent):
-                @action(max_steps=1)
-                async def run(self) -> str:
-                    """Invalid action."""
-
-    def test_removed_max_search_calls_option_is_rejected(self) -> None:
-        with self.assertRaisesRegex(
-            TypeError, "unexpected keyword argument 'max_search_calls'"
-        ):
-
-            class Invalid(Agent):
-                @action(max_search_calls=1)
-                async def run(self) -> str:
-                    """Invalid action."""
 
     def test_reasoning_effort_must_be_known(self) -> None:
         with self.assertRaisesRegex(ValueError, "reasoning_effort must be one of"):

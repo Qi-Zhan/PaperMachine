@@ -1,10 +1,5 @@
 # PaperMachine auto-research 工程评估（2026-08-07）
 
-> 实现更新：本报告记录的是额度机制仍存在时的实验与故障历史。当前 runtime 已删除
-> Workflow/Action 的 step、search、token、wall-time、cost 额度，以及 provider
-> `max_tool_calls` 探测与 fallback；文中相关描述不代表现行 API。usage/cache/search/time
-> 指标仍继续记录。
-
 ## 结论先行
 
 当前框架已经可以真实运行由多个持久 Session 组成的 Python Workflow，并且能够在
@@ -29,7 +24,7 @@ Agent 会创建多个相互隔离的 Session，每条路线都要建立自己的
 更合理的产品方向是：默认给强单 Agent 一个明确的完成契约；当问题的覆盖风险、证据
 冲突或用户指定的 Workflow 需要时，再自适应地增加路线、Evaluator 和追查轮次。框架
 的核心价值应是让用户舒服地表达这种协作结构，并提供持久化、权限、并发、定时、人类
-介入、预算、缓存可观测性和可恢复执行，而不是内置一个永远正确的多 Agent 拓扑。
+介入、usage/cache 可观测性和可恢复执行，而不是内置一个永远正确的多 Agent 拓扑。
 
 ## 两轮实验到底测了什么
 
@@ -209,30 +204,27 @@ Session，能复用该路线历史，而不是重建新 Agent。
 
 1. **Project 目录可被旧数据库记录复用但磁盘目录已不存在。** 三个 benchmark runner
    现在都会在复用 Project 前重建 root；提交 `f2123eb`。
-2. **历史问题：兼容 provider 接受 `max_tool_calls` 却不执行。** 当时加入过实际响应
-   violation 检测与 runtime fallback（提交 `aced188`）；该额度机制现已整体删除，
-   不再属于当前 provider 路径。
-3. **Python Workflow 大 effect response 卡死。** 约 64 KiB 以上 JSONL response 超过
+2. **Python Workflow 大 effect response 卡死。** 约 64 KiB 以上 JSONL response 超过
    asyncio 默认 StreamReader limit，三个 Workflow 在 action 已完成后永久等待。协议
    limit 已提升到 16 MiB，reader failure 会传播给所有 pending Future，不再静默挂起；
    提交 `8c0fab9`。
-4. **服务重启丢失 wall time。** scheduler 的 runtime usage 只累计一次 process execution
+3. **服务重启丢失 wall time。** scheduler 的 runtime usage 只累计一次 process execution
    返回的时间，恢复前已等待的时间没有进入 usage。三个 runner 现在同时保留
    `runtime_wall_time_seconds` 和端到端 `wall_time_seconds`，并能回填旧 state；提交
    `2158d02`。
-5. **结构化 action 失败会重跑整个 Workflow。** Task 69 的一个 r1 job 因
+4. **结构化 action 失败会重跑整个 Workflow。** Task 69 的一个 r1 job 因
    `findings must be an array` 完整重试两次，浪费约 260k operational uncached input。
    evidence-loop 现在先在原 Researcher Session 内执行局部语义 repair，当前复验没有整条
    Workflow retry；但原生 checkpoint/retry 粒度最终仍应降到 ActionAttempt，并在 provider
    支持时使用 schema-constrained output。Workflow replay 只应作为 crash recovery。
-6. **Draft audit 失败后没有统一的完成政策。** r1 有 2 次、r2 有 4 次最终 audit 仍为
+5. **Draft audit 失败后没有统一的完成政策。** r1 有 2 次、r2 有 4 次最终 audit 仍为
    false。现在 Workflow 必须明确选择 `deliver_with_warning`、`wait_for_human` 或
    `fail_run`；等待人类时支持 `/deliver`、`/fail` 或把自由文本作为带来源的 Writer
    revision Turn，提交 `f311284`。
-7. **工具循环可能把 progress narration 当最终报告。** 通用 Action DSL 新增
+6. **工具循环可能把 progress narration 当最终报告。** 通用 Action DSL 新增
    `finalize="after_search"`，若首个 Action 使用过 hosted search，就在同一 Agent Session
    上追加无工具 finalization Turn；当前 8/8 single-agent 报告均正常，提交 `f311284`。
-8. **只统计整条 Workflow retry 会漏掉内部修复。** runner 现在同时统计 Action 名称、
+7. **只统计整条 Workflow retry 会漏掉内部修复。** runner 现在同时统计 Action 名称、
    research phase、初始 contract repair、follow-up、同一 Action 的 attempt retry 与
    completion status，并可从 durable journal 回填旧 state，提交 `adf7f15`。
 
@@ -246,16 +238,15 @@ r1 0.387、r2 0.411；uncached input 分别为 36,794、140,658、237,418。Task
 coverage/evaluator graph 可能把强单 Agent 已经找到的精确答案在 handoff 或筛选阶段
 损坏，而不是稳定增强它。
 
-它运行于本轮大响应、provider limit 和 wall-time 修复之前，因此只作为诊断证据，不能
+它运行于本轮大响应和 wall-time 修复之前，因此只作为诊断证据，不能
 和主表直接合并。
 
 ### BrowseComp mini（失败诊断，不能报准确率）
 
 旧 6 题矩阵的 36 个 job 中只有 23 个 research 完成，且没有形成可用的完整 grade
 矩阵；报告里“0% accuracy”主要反映运行失败，不是模型质量。后续 Task 788 单点 probe
-成功找到 UFC 219 并通过独立 grader，cache read 90.3%；第二次 probe 曾因当时的
-provider 工具调用额度路径触发 runtime 失败。它是已删除机制的历史诊断证据，不能当作
-benchmark 分数。
+成功找到 UFC 219 并通过独立 grader，cache read 90.3%。这组不完整矩阵只用于定位
+运行可靠性问题，不能当作 benchmark 分数。
 
 ### 较早 DeepResearch 5×3×2
 
@@ -277,7 +268,7 @@ research 内核”。用户表达的是长期协作结构；runtime 负责解释
 - evaluator 产生窄 follow-up，再路由回指定 Session；
 - durable timer、signal、channel、`ask_human` 和每轮 `wait_for_human`；
 - Project/Workflow/Agent 三层权限上限，以及每 Turn 不可变快照；
-- Agent/action 级预算、重试、停止策略和可观察的成本；
+- Agent/action 级重试、停止策略和可观察的 usage；
 - Project snapshot、artifact 和后续 Workflow 对已有结果的显式消费。
 
 `interactive-agent` 和 `project-summary` 都继续作为 built-in Workflow，而不是特殊旁路。
@@ -294,16 +285,15 @@ runtime primitive 做以下工作：
 
 1. **自适应 escalation。** built-in research 从一个强 Researcher 开始；Evaluator 只在
    能指出可搜索、可路由、预期收益足够高的具体 gap 时请求额外路线。DSL 需要支持运行中
-   `spawn`/激活 Agent、给既有 Session 派发 follow-up，以及预算化的 stop policy。
+   `spawn`/激活 Agent、给既有 Session 派发 follow-up，以及显式 stop policy。
 2. **一等 completion contract。** `finalize="after_search"` 已解决最明显 failure mode；
    下一步把交付物验证器、repair 次数、失败/等待人类策略做成所有 Action 都可组合的
    primitive，而不是每个 Workflow 手写。
 3. **保真 evidence handoff。** evidence packet 应成为带来源、claim、coverage ID 和稳定
    artifact 引用的结构，而不是把大量搜索结果再次塞进 Writer prompt；grader 应测 citation
    coverage/正确性，不能只计算 URL 数。
-4. **Action 级 checkpoint 与预算。** 原生保存每次结构校验、repair 原因和 token；失败从
-   最近 Action 恢复。预算同时约束 uncached input、output、search call、wall time 和动态
-   Agent 数，并让 evaluator 看见剩余预算。
+4. **Action 级 checkpoint 与局部恢复。** 原生保存每次结构校验、repair 原因和 token
+   telemetry；失败从最近 Action 恢复，避免重复执行已经完成的研究工作。
 5. **可校准的人类介入。** `ask_human` 已能暂停并保留来源；Evaluator 应结构化返回一个
    具体问题及无法自动解决的理由，由 Workflow policy 决定是否调用 `ask_human`。UI 将
    warning、等待和用户修订展示为普通 Workflow/Session 事件。

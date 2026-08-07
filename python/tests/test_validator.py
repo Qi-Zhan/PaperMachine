@@ -5,78 +5,70 @@ import unittest
 from papermachine._validate import validate
 
 
-class WorkflowMetadataValidationTests(unittest.TestCase):
-    def test_removed_input_schema_is_rejected_instead_of_silently_ignored(self) -> None:
+class WorkflowValidationTests(unittest.TestCase):
+    def test_extracts_current_manifest_agents_and_human_checkpoint(self) -> None:
         result = validate(
             '''
-from papermachine import workflow
+from papermachine import Agent, action, ask_human, workflow
+
+class Reviewer(Agent):
+    access = "model_only"
+
+    @action
+    async def assess(self, report: str) -> dict:
+        """Assess the report."""
 
 @workflow(
-    slug="removed-field",
-    name="Removed field",
-    description="Old metadata must fail closed.",
-    input_schema={"type": "object"},
-)
-async def main(ctx):
-    return {}
-'''
-        )
-
-        self.assertFalse(result["valid"])
-        self.assertTrue(
-            any(
-                item["severity"] == "error"
-                and "unknown workflow metadata: input_schema" in item["message"]
-                for item in result["diagnostics"]
-            )
-        )
-
-    def test_removed_budget_metadata_is_rejected(self) -> None:
-        result = validate(
-            '''
-from papermachine import workflow
-
-@workflow(
-    slug="removed-budget",
-    name="Removed budget",
-    description="Removed execution quotas must fail closed.",
-    params_schema={"type": "object"},
-    output_schema={"type": "object"},
-    budget={"max_action_steps": 8, "max_hosted_search_calls": 32},
-)
-async def main(ctx):
-    return {}
-'''
-        )
-
-        self.assertFalse(result["valid"])
-        self.assertTrue(
-            any(
-                item["severity"] == "error"
-                and "unknown workflow metadata: budget" in item["message"]
-                for item in result["diagnostics"]
-            )
-        )
-
-    def test_manifest_has_no_default_budget(self) -> None:
-        result = validate(
-            '''
-from papermachine import workflow
-
-@workflow(
-    slug="plain-workflow",
-    name="Plain workflow",
-    description="Workflow metadata describes behavior, not quotas.",
+    slug="review-report",
+    name="Review report",
+    description="Review a report and request an explicit decision.",
     params_schema={"type": "object"},
     output_schema={"type": "object"},
 )
 async def main(ctx):
-    return {}
+    reviewer = Reviewer(name="Reviewer")
+    assessment = await reviewer.assess(ctx.request)
+    decision = await ask_human("Accept the assessment?", agent=reviewer)
+    return {"assessment": assessment, "decision": decision}
 '''
         )
 
         self.assertTrue(result["valid"])
-        self.assertNotIn("default_budget", result["manifest"])
+        self.assertEqual(result["manifest"]["slug"], "review-report")
+        self.assertEqual(
+            result["agents"],
+            [
+                {
+                    "class_name": "Reviewer",
+                    "actions": ["assess"],
+                    "access": "model_only",
+                }
+            ],
+        )
+        self.assertEqual(result["features"]["human_checkpoints"], 1)
+
+    def test_rejects_forbidden_imports(self) -> None:
+        result = validate(
+            '''
+import os
+from papermachine import workflow
+
+@workflow(
+    slug="unsafe-workflow",
+    name="Unsafe workflow",
+    description="Attempt forbidden host access.",
+    params_schema={"type": "object"},
+    output_schema={"type": "object"},
+)
+async def main(ctx):
+    return {"cwd": os.getcwd()}
+'''
+        )
+
+        self.assertFalse(result["valid"])
+        messages = [item["message"] for item in result["diagnostics"]]
+        self.assertTrue(any("arbitrary imports are disabled" in item for item in messages))
+        self.assertTrue(any("access through `os` is disabled" in item for item in messages))
 
 
 if __name__ == "__main__":
