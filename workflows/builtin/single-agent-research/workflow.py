@@ -30,7 +30,7 @@ class Researcher(Agent):
         "max_agents": 1,
         "max_concurrent_actions": 1,
         "max_action_steps": 128,
-        "max_total_tokens": 1200000,
+        "max_total_tokens": 4000000,
         "max_uncached_tokens": 300000,
         "max_hosted_search_calls": 32,
         "max_wall_time_seconds": 7200,
