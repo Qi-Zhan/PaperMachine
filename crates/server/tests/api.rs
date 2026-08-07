@@ -693,6 +693,93 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (project, session) =
+        create_project_and_session(&app, directory.path(), "Closable Session").await;
+    let session_view = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{}", session.id),
+        ))
+        .await
+        .expect("Session view should complete");
+    let session_view = response_json(session_view).await;
+    let workflow_id = session_view["workflows"][0]["id"]
+        .as_str()
+        .expect("interactive Workflow should exist")
+        .to_string();
+
+    let direct_cancel = app
+        .clone()
+        .oneshot(empty_request(
+            "POST",
+            &format!("/api/workflows/{workflow_id}/cancel"),
+        ))
+        .await
+        .expect("interactive Workflow cancellation should be validated");
+    assert_eq!(direct_cancel.status(), StatusCode::BAD_REQUEST);
+
+    let close = app
+        .clone()
+        .oneshot(empty_request(
+            "DELETE",
+            &format!("/api/sessions/{}", session.id),
+        ))
+        .await
+        .expect("Session close should complete");
+    assert_eq!(close.status(), StatusCode::NO_CONTENT);
+
+    let archived = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{}", session.id),
+        ))
+        .await
+        .expect("archived Session should remain inspectable");
+    assert_eq!(
+        response_json(archived).await["session"]["status"],
+        "archived"
+    );
+
+    let overview = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project overview should complete");
+    assert!(
+        response_json(overview).await["sessions"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+
+    let workflow = get_workflow_view(&app, &workflow_id).await;
+    assert_eq!(workflow["workflow"]["status"], "cancelled");
+    assert!(
+        workflow["human_requests"]
+            .as_array()
+            .is_some_and(|requests| requests.iter().all(|request| request["status"] != "open"))
+    );
+
+    let rejected_turn = app
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/sessions/{}/turns", session.id),
+            json!({"input": "This Session is closed."}),
+        ))
+        .await
+        .expect("closed Session Turn should be rejected");
+    assert_eq!(rejected_turn.status(), StatusCode::CONFLICT);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn api_runs_python_workflow_as_project_owned_sessions() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;

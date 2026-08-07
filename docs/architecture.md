@@ -29,7 +29,9 @@
     later edits affect only later Turns.
 12. **New Session is a built-in Workflow.** The UI starts
     `interactive-agent`; its persistent Agent Session waits for a verified human
-    message before each Turn. No privileged standalone creation route exists.
+    message before each Turn and has no chat command that ends the loop. Closing
+    the Session archives it and cancels this Workflow. No privileged standalone
+    creation route exists.
 13. **A Workflow launch is explicit and immutable.** The run snapshots its
     concrete request, validated params, optional run instructions, trigger,
     default model, skills, permission ceiling, per-Agent class overrides, and

@@ -75,6 +75,55 @@ fn project_creation_initializes_owned_directory_and_rejects_reuse() {
 }
 
 #[test]
+fn archived_session_stays_hidden_when_its_active_turn_finishes() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let research = project(&store, &directory, "Archived Session", "");
+    let session = store
+        .create_session(research.id, "Conversation", "", "test-model", Vec::new())
+        .expect("session should be created");
+    let turn = store
+        .create_turn(
+            session.id,
+            papermachine_protocol::TurnOrigin::User,
+            "Long-running task",
+            "test-model",
+            papermachine_protocol::PromptSnapshot::default(),
+            None,
+            true,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("turn should be created");
+
+    store
+        .set_session_status(
+            session.id,
+            papermachine_protocol::SessionStatus::Archived,
+            Some("closed by user".to_string()),
+        )
+        .expect("session should archive");
+    store
+        .cancel_turn(turn.id)
+        .expect("active turn should cancel");
+
+    assert_eq!(
+        store
+            .get_session(session.id)
+            .expect("archived session should remain")
+            .status,
+        papermachine_protocol::SessionStatus::Archived
+    );
+    assert!(
+        store
+            .list_sessions(research.id)
+            .expect("visible sessions should load")
+            .is_empty()
+    );
+}
+
+#[test]
 fn project_level_workflow_keeps_program_snapshot_after_program_update() {
     let directory = tempdir().expect("temporary directory should be created");
     let store =

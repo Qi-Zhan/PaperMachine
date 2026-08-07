@@ -82,6 +82,13 @@ Workflow Action 或 HumanRequest 占用下一个 Turn，用户就可以从普通
 cache 状态，创建普通的 `origin=user` Turn，但不会恢复或修改已经结束的 Workflow。
 如果要继续多 Agent 编排，应从 Project 或 Session 启动一个新的 Workflow。
 
+关闭 Session 是独立且显式的生命周期操作：它会取消仍在运行的
+`interactive-agent` 和独立 active Turn，把 Session 记为 `archived`，并从普通 Project
+列表隐藏，但不会删除 Turn 或 provenance。若 Session 仍由其他 active Workflow
+拥有，必须先完成或取消该 Workflow，才能关闭 Session。
+通用 Workflow cancel 接口不会取消 `interactive-agent`；Session close 是它唯一的正常
+生命周期终止操作。
+
 ## 4. Agent 语义
 
 `Agent(...)` 构造函数只在 Python 本地同步执行，不会立刻创建 Session。

@@ -63,6 +63,7 @@ export const api = {
     input: { slug: string; name: string; description: string; instructions: string },
   ) => request<ProjectSkill>(`/projects/${projectId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
   getSession: (sessionId: string) => request<SessionView>(`/sessions/${sessionId}`),
+  closeSession: (sessionId: string) => request<void>(`/sessions/${sessionId}`, { method: 'DELETE' }),
   createTurn: (sessionId: string, input: string) =>
     request<Turn>(`/sessions/${sessionId}/turns`, { method: 'POST', body: JSON.stringify({ input }) }),
   cancelTurn: (turnId: string) => request<void>(`/turns/${turnId}/cancel`, { method: 'POST' }),

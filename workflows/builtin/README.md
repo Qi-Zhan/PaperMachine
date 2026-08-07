@@ -9,7 +9,8 @@ evidence use `model_only`.
 
 - `parallel-discovery`: independent routes followed by one synthesis Session.
 - `interactive-agent`: one persistent Session that waits for a human message
-  before every conversational Turn; this powers the normal New Session action.
+  before every conversational Turn until the user closes the Session; this
+  powers the normal New Session action.
 - `project-summary`: renders the latest Project progress as a sandboxed HTML
   Artifact once or on a durable refresh timer.
 - `evidence-loop`: parallel evidence collection, fixed evaluation, dynamic

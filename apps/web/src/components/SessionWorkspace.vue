@@ -31,6 +31,7 @@
         </span>
         <StatusBadge :status="view.session.status" />
         <button
+          v-if="!sessionIsArchived"
           class="icon-button"
           type="button"
           :title="t('session.startWorkflow')"
@@ -38,6 +39,16 @@
           @click="$emit('open-workflow')"
         >
           <GitBranch :size="16" />
+        </button>
+        <button
+          v-if="!sessionIsArchived"
+          class="icon-button"
+          type="button"
+          :title="t('session.close')"
+          :aria-label="t('session.close')"
+          @click="$emit('close-session')"
+        >
+          <Archive :size="16" />
         </button>
         <button
           class="icon-button inspector-toggle"
@@ -291,7 +302,7 @@
           <select
             class="select-input"
             :value="view.session.access"
-            :disabled="Boolean(activeTurn) || accessBusy"
+            :disabled="sessionIsArchived || Boolean(activeTurn) || accessBusy"
             @change="requestAccessChange"
           >
             <option v-for="profile in accessProfiles" :key="profile.value" :value="profile.value">
@@ -318,7 +329,7 @@
               type="button"
               :title="t('common.save')"
               :aria-label="t('common.save')"
-              :disabled="Boolean(activeTurn) || promptBusy || !sessionPromptChanged"
+              :disabled="sessionIsArchived || Boolean(activeTurn) || promptBusy || !sessionPromptChanged"
               @click="saveSystemPrompt"
             >
               <LoaderCircle v-if="promptBusy" class="spin" :size="14" />
@@ -329,7 +340,7 @@
             v-model="systemPromptDraft"
             class="text-area session-system-prompt-input"
             :placeholder="t('prompt.sessionPlaceholder')"
-            :disabled="Boolean(activeTurn) || promptBusy"
+            :disabled="sessionIsArchived || Boolean(activeTurn) || promptBusy"
           />
           <p>{{ t('prompt.futureTurns') }}</p>
         </section>
@@ -345,7 +356,7 @@
                 v-model="enabledSkills"
                 type="checkbox"
                 :value="skill.slug"
-                :disabled="Boolean(activeTurn) || skillsBusy"
+                :disabled="sessionIsArchived || Boolean(activeTurn) || skillsBusy"
                 @change="saveSkills"
               />
               <span>
@@ -414,7 +425,7 @@
                   <Play :size="12" fill="currentColor" />
                 </button>
               <button
-                v-if="workflowIsActive"
+                v-if="workflowIsActive && workflowView.workflow.program.manifest.slug !== 'interactive-agent'"
                 class="icon-button danger-hover"
                 type="button"
                 :title="t('session.cancelWorkflow')"
@@ -567,6 +578,7 @@
 <script setup lang="ts">
 import {
   Activity,
+  Archive,
   AlarmClock,
   ArrowLeft,
   ArrowUp,
@@ -648,6 +660,7 @@ const emit = defineEmits<{
   'open-sidebar': []
   'select-project': [projectId: string]
   'select-session': [sessionId: string]
+  'close-session': []
   send: [input: string]
   'cancel-turn': [turnId: string]
   'open-workflow': []
@@ -685,6 +698,7 @@ const accessProfiles = computed(() => [
 const activeTurn = computed(() =>
   props.view.turns.find((turn) => ['queued', 'running', 'paused'].includes(turn.status)),
 )
+const sessionIsArchived = computed(() => props.view.session.status === 'archived')
 const composerHumanRequest = computed(() =>
   props.view.human_requests.find(
     (request) =>
@@ -703,9 +717,10 @@ const interactiveComposerLocked = computed(
   () => Boolean(interactiveWorkflow.value && !workflowIsTerminal(interactiveWorkflow.value)) && !composerHumanRequest.value,
 )
 const composerDisabled = computed(
-  () => Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
+  () => sessionIsArchived.value || Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
 )
 const composerPlaceholder = computed(() => {
+  if (sessionIsArchived.value) return t('session.closed')
   if (composerHumanRequest.value) return composerHumanRequest.value.question
   if (interactiveComposerLocked.value) return t('session.preparingNextTurn')
   return activeTurn.value ? t('session.running') : t('session.message')
@@ -917,7 +932,7 @@ function saveSkills() {
   emit('update-skills', [...enabledSkills.value])
 }
 function saveSystemPrompt() {
-  if (!sessionPromptChanged.value || activeTurn.value || props.promptBusy) return
+  if (sessionIsArchived.value || !sessionPromptChanged.value || activeTurn.value || props.promptBusy) return
   emit('update-system-prompt', systemPromptDraft.value)
 }
 </script>

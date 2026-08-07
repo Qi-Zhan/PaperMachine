@@ -22,12 +22,8 @@ main = WORKFLOW["main"]
 class InteractiveAgentWorkflowTests(unittest.TestCase):
     def test_each_agent_turn_is_preceded_by_a_durable_human_answer(self) -> None:
         effects: list[tuple[str, str, dict[str, Any]]] = []
-        answers = iter(
-            [
-                ("human-1", "Investigate the cache miss."),
-                ("human-2", "/finish"),
-            ]
-        )
+        waiting_for_next_message = asyncio.Event()
+        human_requests = 0
 
         async def send(
             effect_id: str,
@@ -42,26 +38,36 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
                     "access": payload["access"],
                 }
             if kind == "ask_human":
-                request_id, answer = next(answers)
-                return {"human_request_id": request_id, "answer": answer}
+                nonlocal human_requests
+                human_requests += 1
+                if human_requests == 1:
+                    return {
+                        "human_request_id": "human-1",
+                        "answer": "Investigate the cache miss.",
+                    }
+                waiting_for_next_message.set()
+                await asyncio.Future()
             if kind == "invoke_action":
                 return {"output": "The prefix changed.", "turn_id": "turn-1"}
             raise AssertionError(f"unexpected effect: {kind}")
 
-        async def run() -> dict[str, Any]:
+        async def run() -> None:
             _set_runtime(_Runtime(send))
-            return await main(
-                WorkflowContext(
-                    request="",
-                    params={"session_title": "Cache investigation"},
-                    workflow_id="workflow-1",
+            task = asyncio.create_task(
+                main(
+                    WorkflowContext(
+                        request="",
+                        params={"session_title": "Cache investigation"},
+                        workflow_id="workflow-1",
+                    )
                 )
             )
+            await waiting_for_next_message.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
-        self.assertEqual(
-            asyncio.run(run()),
-            {"last_response": "The prefix changed.", "turn_count": 1},
-        )
+        asyncio.run(run())
         self.assertEqual(
             [kind for _, kind, _ in effects],
             ["create_agent", "ask_human", "invoke_action", "ask_human"],

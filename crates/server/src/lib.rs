@@ -359,7 +359,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             get(get_project_skill),
         )
         .route("/projects/{project_id}/sessions", get(list_sessions))
-        .route("/sessions/{session_id}", get(get_session_view))
+        .route(
+            "/sessions/{session_id}",
+            get(get_session_view).delete(close_session),
+        )
         .route("/sessions/{session_id}/turns", post(create_turn))
         .route("/sessions/{session_id}/skills", put(update_session_skills))
         .route(
@@ -849,6 +852,62 @@ async fn get_session_view(
         workflow_memberships: memberships,
         human_requests: requests,
     }))
+}
+
+async fn close_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let session_id: SessionId = parse_id(&session_id, "Session")?;
+    let (runtime, session) = state
+        .locate("session", &session_id.to_string(), |store| {
+            store.get_session(session_id)
+        })
+        .await?;
+    if session.status == SessionStatus::Archived {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let mut interactive_workflows = Vec::new();
+    for workflow in runtime.store.list_session_workflows(session_id)? {
+        let owns_session = runtime
+            .store
+            .list_participants(workflow.id)?
+            .into_iter()
+            .any(|participant| participant.session_id == session_id);
+        if !owns_session || workflow.status.is_terminal() {
+            continue;
+        }
+        if workflow.program.manifest.slug != "interactive-agent" {
+            return Err(ApiError::bad_request(format!(
+                "Session is still owned by active Workflow {:?}; finish or cancel it first",
+                workflow.program.manifest.name
+            )));
+        }
+        interactive_workflows.push(workflow.id);
+    }
+
+    for workflow_id in interactive_workflows {
+        match runtime.scheduler.cancel(workflow_id).await {
+            Ok(()) | Err(WorkflowSchedulerError::TerminalWorkflow { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for turn in runtime.store.list_turns(session_id)? {
+        if turn.status.is_terminal() {
+            continue;
+        }
+        match runtime.sessions.cancel(turn.id).await {
+            Ok(()) | Err(SessionRuntimeError::TerminalTurn(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    runtime.store.set_session_status(
+        session_id,
+        SessionStatus::Archived,
+        Some("closed by user".to_string()),
+    )?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1365,11 +1424,16 @@ async fn cancel_workflow(
     Path(workflow_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
+    let (runtime, workflow) = state
         .locate("workflow", &workflow_id.to_string(), |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
+    if workflow.program.manifest.slug == "interactive-agent" {
+        return Err(ApiError::bad_request(
+            "Close the Session to stop its interactive Workflow",
+        ));
+    }
     runtime.scheduler.cancel(workflow_id).await?;
     Ok(StatusCode::ACCEPTED)
 }

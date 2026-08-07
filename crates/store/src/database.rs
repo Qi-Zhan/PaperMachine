@@ -278,6 +278,7 @@ impl Store {
     pub fn list_sessions(&self, project_id: ProjectId) -> Result<Vec<Session>, StoreError> {
         self.query_documents(
             "SELECT document_json FROM sessions WHERE project_id = ?1
+             AND status != 'archived'
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
         )
@@ -320,6 +321,11 @@ impl Store {
         enabled_skills: Vec<String>,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
+        if session.status == SessionStatus::Archived {
+            return Err(StoreError::Invariant(
+                "cannot change skills on an archived Session".to_string(),
+            ));
+        }
         if self.session_has_active_turn(session_id)? {
             return Err(StoreError::Invariant(
                 "cannot change skills while a Session has an active Turn".to_string(),
@@ -342,6 +348,11 @@ impl Store {
         system_prompt: impl Into<String>,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
+        if session.status == SessionStatus::Archived {
+            return Err(StoreError::Invariant(
+                "cannot change the system prompt on an archived Session".to_string(),
+            ));
+        }
         if self.session_has_active_turn(session_id)? {
             return Err(StoreError::Invariant(
                 "cannot change the system prompt while a Session has an active Turn".to_string(),
@@ -366,6 +377,11 @@ impl Store {
         access: AgentAccessProfile,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
+        if session.status == SessionStatus::Archived {
+            return Err(StoreError::Invariant(
+                "cannot change access on an archived Session".to_string(),
+            ));
+        }
         if session.access == access {
             return Ok(session);
         }
@@ -716,14 +732,16 @@ impl Store {
         turn.error = error.clone();
         turn.updated_at = Utc::now();
         let mut session = self.get_session(turn.session_id)?;
-        session.status = match status {
-            TurnStatus::Queued | TurnStatus::Running => SessionStatus::Running,
-            TurnStatus::Paused => SessionStatus::Paused,
-            TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
-                SessionStatus::Ready
-            }
-            TurnStatus::Failed => SessionStatus::Failed,
-        };
+        if session.status != SessionStatus::Archived {
+            session.status = match status {
+                TurnStatus::Queued | TurnStatus::Running => SessionStatus::Running,
+                TurnStatus::Paused => SessionStatus::Paused,
+                TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
+                    SessionStatus::Ready
+                }
+                TurnStatus::Failed => SessionStatus::Failed,
+            };
+        }
         session.updated_at = turn.updated_at;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -941,6 +959,14 @@ impl Store {
         {
             return Err(StoreError::Invariant(
                 "starting Session belongs to a different Project".to_string(),
+            ));
+        }
+        if started_from
+            .as_ref()
+            .is_some_and(|session| session.status == SessionStatus::Archived)
+        {
+            return Err(StoreError::Invariant(
+                "cannot start a Workflow from an archived Session".to_string(),
             ));
         }
         if let Some(session) = started_from.as_ref()

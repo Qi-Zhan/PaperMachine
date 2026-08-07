@@ -23,8 +23,9 @@ either into system instructions.
 
 The ordinary **New Session** command starts the reviewed `interactive-agent`
 Workflow. That program creates one persistent Agent Session, waits for a human
-message before every Turn, and can be inspected, cancelled, or continued like
-any other Workflow. There is no separate standalone-Session creation path.
+message before every Turn, and normally remains `waiting_for_user` for the
+Session's lifetime. Closing the Session archives its history and cancels that
+interactive Workflow. There is no separate standalone-Session creation path.
 
 The **Project Page** can run the reviewed `project-summary` Workflow once or on
 a configurable durable timer. Its summary Agent reads a bounded snapshot of

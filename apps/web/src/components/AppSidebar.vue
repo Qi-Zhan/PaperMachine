@@ -194,7 +194,9 @@ const filteredProjects = computed(() => {
 })
 
 function visibleSessions(projectId: string): Session[] {
-  const sessions = props.sessionsByProject[projectId] ?? []
+  const sessions = (props.sessionsByProject[projectId] ?? []).filter(
+    (session) => session.status !== 'archived',
+  )
   if (!normalizedQuery.value) return sessions
   return sessions.filter((session) =>
     session.title.toLocaleLowerCase().includes(normalizedQuery.value),

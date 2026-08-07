@@ -81,6 +81,7 @@
         @open-sidebar="mobileSidebarOpen = true"
         @select-project="selectProject"
         @select-session="selectSession"
+        @close-session="closeSession"
         @send="createTurn"
         @cancel-turn="cancelTurn"
         @open-workflow="openSessionWorkflowDialog"
@@ -799,6 +800,21 @@ async function createTurn(input: string) {
       sessionView.value = { ...sessionView.value, turns: [...sessionView.value.turns, turn] }
       syncPoll()
     }
+  } catch (error) {
+    globalError.value = messageOf(error)
+  }
+}
+
+async function closeSession() {
+  const view = sessionView.value
+  if (!view || !window.confirm(t('session.closeConfirm', { title: view.session.title }))) return
+  try {
+    await api.closeSession(view.session.id)
+    const projectId = view.session.project_id
+    sessionsByProject[projectId] = (sessionsByProject[projectId] ?? []).filter(
+      (session) => session.id !== view.session.id,
+    )
+    await selectProject(projectId)
   } catch (error) {
     globalError.value = messageOf(error)
   }

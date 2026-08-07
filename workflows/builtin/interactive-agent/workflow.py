@@ -50,11 +50,7 @@ class InteractiveAgent(Agent):
     },
     output_schema={
         "type": "object",
-        "properties": {
-            "last_response": {"type": "string"},
-            "turn_count": {"type": "integer"},
-        },
-        "required": ["last_response", "turn_count"],
+        "additionalProperties": False,
     },
 )
 async def main(ctx):
@@ -69,15 +65,9 @@ async def main(ctx):
         system_prompt=system_prompt,
         access=access,
     )
-    last_response = ""
-    turn_count = 0
-
     while True:
         message = await ask_human(
-            "Send a message to this agent. Type /finish to close the interactive Workflow.",
+            "Send a message to this agent.",
             agent=agent,
         )
-        if message.strip().casefold() == "/finish":
-            return {"last_response": last_response, "turn_count": turn_count}
-        last_response = await agent.respond(message)
-        turn_count += 1
+        await agent.respond(message)

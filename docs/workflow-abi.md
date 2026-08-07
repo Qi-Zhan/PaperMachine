@@ -171,7 +171,9 @@ profile is the outer run ceiling.
 The built-in `interactive-agent` is the reference conversational program. It
 uses an ordinary `while` loop: `ask_human(..., agent=agent)`, then
 `await agent.respond(message)`. The New Session UI starts this Workflow through
-the same Project Workflow API used for every other program.
+the same Project Workflow API used for every other program. The loop normally
+remains `waiting_for_user` for the lifetime of its Agent Session; closing that
+Session is the explicit operation that archives it and cancels the Workflow.
 
 The built-in `project-summary` is the reference background program. It reads
 `ctx.project.snapshot()`, asks one persistent summary Agent to render a

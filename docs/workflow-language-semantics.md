@@ -90,6 +90,14 @@ prompt, skills, access, and cache state; it does not resume or mutate the
 terminal Workflow. Continuing multi-Agent orchestration requires starting a new
 Workflow from the Project or Session.
 
+Closing a Session is a separate, explicit lifecycle operation. It cancels an
+active `interactive-agent`, cancels any standalone active Turn, records the
+Session as `archived`, and removes it from normal Project listings without
+deleting its Turns or provenance. A Session owned by another active Workflow
+must finish or cancel that Workflow before it can be closed.
+The generic Workflow-cancel endpoint does not cancel `interactive-agent`;
+Session close is its sole normal lifecycle control.
+
 ## 4. Agent semantics
 
 An `Agent(...)` constructor is local and synchronous. It does not create a
