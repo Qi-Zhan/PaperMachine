@@ -71,7 +71,8 @@ fn prepare_root(root: &Path) {
 async fn test_app(directory: &TempDir) -> Router {
     prepare_root(directory.path());
     let state = initialize(&ServerConfig {
-        root: directory.path().to_path_buf(),
+        resource_root: directory.path().to_path_buf(),
+        data_dir: directory.path().join("app-data"),
         models: ServerModelConfig::Demo,
         max_concurrent_runs: 2,
         max_parallel_actions: 4,
@@ -111,7 +112,8 @@ async fn test_app_with_model_profiles(
         router: ModelRouter::new(profiles, providers).expect("model router should be valid"),
     };
     let state = initialize(&ServerConfig {
-        root: directory.path().to_path_buf(),
+        resource_root: directory.path().to_path_buf(),
+        data_dir: directory.path().join("app-data"),
         models: ServerModelConfig::Providers(configured_models),
         max_concurrent_runs: 2,
         max_parallel_actions: 4,

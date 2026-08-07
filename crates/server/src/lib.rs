@@ -1,6 +1,7 @@
 //! HTTP and realtime API for PaperMachine.
 
 mod demo_model;
+pub mod paths;
 
 use anyhow::Context;
 use axum::Json;
@@ -81,7 +82,8 @@ pub enum ServerModelConfig {
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
-    pub root: PathBuf,
+    pub resource_root: PathBuf,
+    pub data_dir: PathBuf,
     pub models: ServerModelConfig,
     pub max_concurrent_runs: usize,
     pub max_parallel_actions: usize,
@@ -122,8 +124,7 @@ impl AppState {
 }
 
 pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
-    let state_root = config.root.join(".papermachine");
-    let durable_state_root = state_root.join("state");
+    let durable_state_root = config.data_dir.join("state");
     let store = Arc::new(
         Store::open(
             durable_state_root.join("papermachine.db"),
@@ -132,14 +133,14 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         .context("failed to open PaperMachine store")?,
     );
     let python_runtime_root = {
-        let local = config.root.join("python");
+        let local = config.resource_root.join("python");
         if local.is_dir() {
             local
         } else {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python")
         }
     };
-    let workflows_root = config.root.join("workflows");
+    let workflows_root = config.resource_root.join("workflows");
     let mut catalog = WorkflowProgramCatalog::scan(&workflows_root, &python_runtime_root, &store)
         .context("failed to load Python workflow catalog")?;
     for project in store.list_projects()? {

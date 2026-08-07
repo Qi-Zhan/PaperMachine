@@ -44,8 +44,8 @@ Project
     Teams, relations, scopes, timers, channels, human requests
 ```
 
-Server state lives under `.papermachine/state/`; every Project is anchored to
-its own absolute directory.
+Application state lives in the platform user-data directory; every Project is
+anchored to its own absolute directory and owns a `.papermachine/` directory.
 
 ## Codex relationship
 
@@ -136,18 +136,20 @@ Rust is pinned by `rust-toolchain.toml`; Node.js and pnpm are required.
 ```sh
 pnpm install
 pnpm --dir apps/web build
-cargo run -p papermachine-server -- --root . --demo
+cargo run -p papermachine-server -- --resource-root . --demo
 ```
 
 Open <http://127.0.0.1:4310>. Demo mode exercises the full runtime and UI but
 does not perform substantive research.
 
-For real models, PaperMachine loads `papermachine.toml` from the workspace root
-by default (or the file passed to `--config`). The committed development config
-uses DeepSeek V4 Flash and resolves its credential only from the environment:
+For real models, PaperMachine loads `config.toml` from its platform user-data
+directory by default, or the file passed to `--config`. The committed
+development config uses DeepSeek V4 Flash and resolves its credential only from
+the environment:
 
 ```sh
-DEEPSEEK_API_KEY=... cargo run -p papermachine-server -- --root .
+DEEPSEEK_API_KEY=... cargo run -p papermachine-server -- \
+  --resource-root . --config ./papermachine.toml
 ```
 
 The configuration shape supports several providers and model profiles in one
