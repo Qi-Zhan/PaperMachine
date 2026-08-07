@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel, workflowTitle } from './format'
+import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel, workflowIsTerminal, workflowTitle } from './format'
 import { setLocale } from './i18n'
 import type { Workflow } from './types'
 
@@ -62,5 +62,12 @@ describe('format helpers', () => {
       program: { manifest: { name: 'Interactive agent' } },
     } as Workflow
     expect(workflowTitle(workflow)).toBe('Interactive agent')
+  })
+
+  it('releases a Session composer when its Workflow reaches a terminal state', () => {
+    expect(workflowIsTerminal({ status: 'running' } as Workflow)).toBe(false)
+    expect(workflowIsTerminal({ status: 'completed' } as Workflow)).toBe(true)
+    expect(workflowIsTerminal({ status: 'failed' } as Workflow)).toBe(true)
+    expect(workflowIsTerminal({ status: 'cancelled' } as Workflow)).toBe(true)
   })
 })

@@ -9,6 +9,10 @@ export function workflowTitle(workflow: Workflow): string {
   return workflow.request.trim() || workflow.program.manifest.name
 }
 
+export function workflowIsTerminal(workflow: Workflow): boolean {
+  return ['completed', 'failed', 'cancelled'].includes(workflow.status)
+}
+
 export function formatDate(value: string): string {
   const date = new Date(value)
   const today = new Date()

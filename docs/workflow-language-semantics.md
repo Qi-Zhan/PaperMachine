@@ -82,6 +82,14 @@ a new Workflow or change its trigger.
 The run's output is the value returned by the Python entrypoint and sent through
 the `complete` effect.
 
+A terminal Workflow does not terminate, archive, or make its Agent Sessions
+read-only. Once no Workflow Action or HumanRequest owns the next Turn, the user
+may continue any of those Sessions from the normal composer. That creates an
+ordinary `origin=user` Turn with the Session's existing history, model, system
+prompt, skills, access, and cache state; it does not resume or mutate the
+terminal Workflow. Continuing multi-Agent orchestration requires starting a new
+Workflow from the Project or Session.
+
 ## 4. Agent semantics
 
 An `Agent(...)` constructor is local and synchronous. It does not create a

@@ -76,6 +76,12 @@ context 传给哪个 Agent Action；`request_mode="none"` 的程序得到空的
 timer-backed run 不会创建新 Workflow，也不会改变它的 trigger。
 run 的输出就是 Python entrypoint 的返回值，runner 通过 `complete` effect 把它交给 Rust。
 
+Workflow 进入终态并不会终止、归档或把其 Agent Sessions 变成只读。只要没有
+Workflow Action 或 HumanRequest 占用下一个 Turn，用户就可以从普通输入框继续其中
+任意 Session。这会沿用该 Session 的历史、model、system prompt、skills、权限和
+cache 状态，创建普通的 `origin=user` Turn，但不会恢复或修改已经结束的 Workflow。
+如果要继续多 Agent 编排，应从 Project 或 Session 启动一个新的 Workflow。
+
 ## 4. Agent 语义
 
 `Agent(...)` 构造函数只在 Python 本地同步执行，不会立刻创建 Session。

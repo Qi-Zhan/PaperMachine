@@ -611,6 +611,7 @@ import {
   primaryActionText,
   shortId,
   statusLabel,
+  workflowIsTerminal,
   workflowTitle,
 } from '../format'
 import { useAppI18n } from '../i18n'
@@ -699,18 +700,14 @@ const interactiveWorkflow = computed(() => {
   )
 })
 const interactiveComposerLocked = computed(
-  () => Boolean(interactiveWorkflow.value) && !composerHumanRequest.value,
+  () => Boolean(interactiveWorkflow.value && !workflowIsTerminal(interactiveWorkflow.value)) && !composerHumanRequest.value,
 )
 const composerDisabled = computed(
   () => Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
 )
 const composerPlaceholder = computed(() => {
   if (composerHumanRequest.value) return composerHumanRequest.value.question
-  if (interactiveComposerLocked.value) {
-    return interactiveWorkflow.value?.status === 'running'
-      ? t('session.preparingNextTurn')
-      : t('session.interactiveEnded')
-  }
+  if (interactiveComposerLocked.value) return t('session.preparingNextTurn')
   return activeTurn.value ? t('session.running') : t('session.message')
 })
 const workflowIsActive = computed(() =>
