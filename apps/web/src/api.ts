@@ -7,7 +7,7 @@ import type {
   GeneratedWorkflow,
   Health,
   HumanRequest,
-  Project,
+  ProjectLibraryEntry,
   ProjectOverview,
   ProjectSystemPrompt,
   ProjectSkill,
@@ -43,9 +43,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<Health>('/health'),
-  listProjects: () => request<Project[]>('/projects'),
+  listProjects: () => request<ProjectLibraryEntry[]>('/projects'),
   createProject: (name: string, description: string, rootPath: string) =>
-    request<Project>('/projects', { method: 'POST', body: JSON.stringify({ name, description, root_path: rootPath }) }),
+    request<ProjectLibraryEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, root_path: rootPath }) }),
+  openProject: (rootPath: string) =>
+    request<ProjectLibraryEntry>('/projects/open', { method: 'POST', body: JSON.stringify({ root_path: rootPath }) }),
+  relocateProject: (projectId: string, rootPath: string) =>
+    request<ProjectLibraryEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ root_path: rootPath }) }),
+  removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
   updateProjectSystemPrompt: (projectId: string, systemPrompt: string) =>
     request<ProjectSystemPrompt>(`/projects/${projectId}/system-prompt`, {

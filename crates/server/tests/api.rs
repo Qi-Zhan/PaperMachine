@@ -105,6 +105,89 @@ async fn project_library_and_research_state_use_separate_roots() {
     assert_eq!(overview.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn project_library_relocates_removes_and_reopens_owned_state() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let original_root = directory.path().join("research/original");
+    let relocated_root = directory.path().join("research/relocated");
+    let app = test_app(&directory).await;
+    let created = app
+        .oneshot(json_request(
+            "POST",
+            "/api/projects",
+            json!({
+                "name": "Movable project",
+                "description": "",
+                "root_path": original_root,
+            }),
+        ))
+        .await
+        .expect("Project request should complete");
+    let project = response_json(created).await;
+    let project_id = project["id"].as_str().expect("Project id should exist");
+    assert_eq!(project["available"], true);
+
+    std::fs::rename(&original_root, &relocated_root)
+        .expect("Project directory should move while the server is stopped");
+    let restarted = test_app(&directory).await;
+    let projects = restarted
+        .clone()
+        .oneshot(empty_request("GET", "/api/projects"))
+        .await
+        .expect("Project library should load");
+    let projects = response_json(projects).await;
+    assert_eq!(projects[0]["available"], false);
+
+    let relocated = restarted
+        .clone()
+        .oneshot(json_request(
+            "PUT",
+            &format!("/api/projects/{project_id}"),
+            json!({"root_path": relocated_root}),
+        ))
+        .await
+        .expect("Project relocation should complete");
+    assert_eq!(relocated.status(), StatusCode::OK);
+    let relocated = response_json(relocated).await;
+    assert_eq!(relocated["available"], true);
+    assert_eq!(
+        relocated["root_path"],
+        relocated_root
+            .canonicalize()
+            .expect("relocated root should resolve")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let removed = restarted
+        .clone()
+        .oneshot(empty_request(
+            "DELETE",
+            &format!("/api/projects/{project_id}"),
+        ))
+        .await
+        .expect("Project removal should complete");
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(
+        relocated_root
+            .join(".papermachine/state/project.db")
+            .is_file()
+    );
+
+    let reopened = restarted
+        .oneshot(json_request(
+            "POST",
+            "/api/projects/open",
+            json!({"root_path": relocated_root}),
+        ))
+        .await
+        .expect("Project open should complete");
+    assert_eq!(reopened.status(), StatusCode::CREATED);
+    let reopened = response_json(reopened).await;
+    assert_eq!(reopened["id"], project_id);
+    assert_eq!(reopened["available"], true);
+}
+
 fn prepare_root(root: &Path) {
     let builtins = ["interactive-agent", "parallel-discovery", "project-summary"];
     for slug in builtins {

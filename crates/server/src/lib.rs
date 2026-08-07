@@ -333,7 +333,13 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/{project_id}", get(get_project_overview))
+        .route("/projects/open", post(open_project))
+        .route(
+            "/projects/{project_id}",
+            get(get_project_overview)
+                .put(relocate_project)
+                .delete(remove_project),
+        )
         .route(
             "/projects/{project_id}/system-prompt",
             get(get_project_system_prompt).put(update_project_system_prompt),
@@ -440,8 +446,32 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Project>>> {
-    Ok(Json(state.library.list()?))
+#[derive(Serialize)]
+struct ProjectLibraryEntry {
+    #[serde(flatten)]
+    project: Project,
+    available: bool,
+}
+
+async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<ProjectLibraryEntry>>> {
+    let available = state
+        .projects
+        .read()
+        .await
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    Ok(Json(
+        state
+            .library
+            .list()?
+            .into_iter()
+            .map(|project| ProjectLibraryEntry {
+                available: available.contains(&project.id),
+                project,
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -456,7 +486,7 @@ struct CreateProjectRequest {
 async fn create_project(
     State(state): State<AppState>,
     Json(request): Json<CreateProjectRequest>,
-) -> ApiResult<(StatusCode, Json<Project>)> {
+) -> ApiResult<(StatusCode, Json<ProjectLibraryEntry>)> {
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("Project name must not be empty"));
     }
@@ -496,7 +526,139 @@ async fn create_project(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     state.projects.write().await.insert(project.id, runtime);
-    Ok((StatusCode::CREATED, Json(project)))
+    Ok((
+        StatusCode::CREATED,
+        Json(ProjectLibraryEntry {
+            project,
+            available: true,
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectPathRequest {
+    root_path: String,
+}
+
+async fn open_project(
+    State(state): State<AppState>,
+    Json(request): Json<ProjectPathRequest>,
+) -> ApiResult<(StatusCode, Json<ProjectLibraryEntry>)> {
+    let root = canonical_project_root(&request.root_path)?;
+    let (project, store) = load_project_store(&root, None)?;
+    if state.projects.read().await.contains_key(&project.id) {
+        return Ok((
+            StatusCode::OK,
+            Json(ProjectLibraryEntry {
+                project,
+                available: true,
+            }),
+        ));
+    }
+    state.library.register(&project)?;
+    let runtime = state
+        .runtime_factory
+        .build(&project, store)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state.projects.write().await.insert(project.id, runtime);
+    Ok((
+        StatusCode::CREATED,
+        Json(ProjectLibraryEntry {
+            project,
+            available: true,
+        }),
+    ))
+}
+
+async fn relocate_project(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<ProjectPathRequest>,
+) -> ApiResult<Json<ProjectLibraryEntry>> {
+    let project_id = parse_id(&project_id, "Project")?;
+    state.library.get(project_id)?;
+    if let Some(runtime) = state.projects.read().await.get(&project_id).cloned() {
+        ensure_project_can_detach(&runtime)?;
+    }
+    let root = canonical_project_root(&request.root_path)?;
+    let (project, store) = load_project_store(&root, Some(project_id))?;
+    state.library.register(&project)?;
+    let runtime = state
+        .runtime_factory
+        .build(&project, store)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    state.projects.write().await.insert(project.id, runtime);
+    Ok(Json(ProjectLibraryEntry {
+        project,
+        available: true,
+    }))
+}
+
+async fn remove_project(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let project_id = parse_id(&project_id, "Project")?;
+    if let Some(runtime) = state.projects.read().await.get(&project_id).cloned() {
+        ensure_project_can_detach(&runtime)?;
+    }
+    state.library.remove(project_id)?;
+    state.projects.write().await.remove(&project_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn canonical_project_root(value: &str) -> ApiResult<PathBuf> {
+    let root = PathBuf::from(value.trim());
+    if !root.is_absolute() {
+        return Err(ApiError::bad_request("Project root path must be absolute"));
+    }
+    root.canonicalize().map_err(|error| {
+        ApiError::bad_request(format!("Project directory is unavailable: {error}"))
+    })
+}
+
+fn load_project_store(
+    root: &std::path::Path,
+    expected_id: Option<ProjectId>,
+) -> ApiResult<(Project, Arc<Store>)> {
+    let metadata_root = root.join(".papermachine");
+    let database = metadata_root.join("state/project.db");
+    if !database.is_file() || !metadata_root.join("project.toml").is_file() {
+        return Err(ApiError::bad_request(
+            "Selected directory is not a PaperMachine Project",
+        ));
+    }
+    let store = Arc::new(Store::open(database, metadata_root.join("artifacts"))?);
+    let projects = store.list_projects()?;
+    if projects.len() != 1 {
+        return Err(StoreError::Invariant(
+            "Project database must contain exactly one Project".to_string(),
+        )
+        .into());
+    }
+    let project = store.relocate_project(projects[0].id, root)?;
+    if expected_id.is_some_and(|expected_id| expected_id != project.id) {
+        return Err(ApiError::bad_request(
+            "Selected directory belongs to a different Project",
+        ));
+    }
+    Ok((project, store))
+}
+
+fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {
+    if !runtime.store.list_recoverable_workflows()?.is_empty()
+        || !runtime.store.list_resumable_standalone_turns()?.is_empty()
+    {
+        return Err(StoreError::Invariant(
+            "Project has active work; finish or cancel it before changing its library entry"
+                .to_string(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

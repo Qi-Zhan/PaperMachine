@@ -13,7 +13,10 @@
         @home="showHome"
         @close-sidebar="mobileSidebarOpen = false"
         @new-project="projectDialogOpen = true"
+        @open-project="openExistingProjectDialog"
         @new-session="openSessionDialog"
+        @relocate-project="openRelocateProjectDialog"
+        @remove-project="removeProject"
         @open-workflows="openWorkflowLibrary"
         @select-project="selectProject"
         @select-session="selectSession"
@@ -34,7 +37,7 @@
         @saved="workflowSaved"
       />
 
-      <div v-else-if="projects.length === 0" class="zero-state">
+      <div v-else-if="projects.length === 0 || projects.every((project) => !project.available)" class="zero-state">
         <header class="zero-state-header">
           <button
             class="icon-button mobile-only"
@@ -55,6 +58,10 @@
           <button class="primary-button" type="button" @click="projectDialogOpen = true">
             <FolderPlus :size="16" />
             {{ t('sidebar.newProject') }}
+          </button>
+          <button class="secondary-button" type="button" @click="openExistingProjectDialog">
+            <FolderOpen :size="16" />
+            {{ t('sidebar.openProject') }}
           </button>
         </div>
       </div>
@@ -125,6 +132,16 @@
       @close="closeDialogs"
       @submit="createProject"
     />
+    <ProjectPathDialog
+      :open="projectPathDialogOpen"
+      :busy="dialogBusy"
+      :error="dialogError"
+      :mode="projectPathDialogMode"
+      :project-name="projectPathDialogProject?.name"
+      :initial-path="projectPathDialogProject?.root_path"
+      @close="closeProjectPathDialog"
+      @submit="submitProjectPath"
+    />
     <NewSessionDialog
       :open="sessionDialogOpen"
       :busy="dialogBusy"
@@ -165,6 +182,7 @@
 <script setup lang="ts">
 import {
   AlertCircle,
+  FolderOpen,
   FolderPlus,
   FolderSearch2,
   LoaderCircle,
@@ -178,6 +196,7 @@ import { useAppI18n } from './i18n'
 import AppSidebar from './components/AppSidebar.vue'
 import ArtifactDialog from './components/ArtifactDialog.vue'
 import NewProjectDialog from './components/NewProjectDialog.vue'
+import ProjectPathDialog from './components/ProjectPathDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import NewSkillDialog from './components/NewSkillDialog.vue'
 import ProjectOverview from './components/ProjectOverview.vue'
@@ -190,7 +209,7 @@ import type {
   Artifact,
   CreateSessionInput,
   Health,
-  Project,
+  ProjectLibraryEntry,
   ProjectOverview as ProjectOverviewType,
   ProjectSkill,
   Session,
@@ -202,7 +221,7 @@ import type {
   WorkflowView,
 } from './types'
 
-const projects = ref<Project[]>([])
+const projects = ref<ProjectLibraryEntry[]>([])
 const { t } = useAppI18n()
 const workflowPrograms = ref<WorkflowProgram[]>([])
 const sessionsByProject = reactive<Record<string, Session[]>>({})
@@ -226,6 +245,9 @@ const accessBusy = ref(false)
 const promptBusy = ref(false)
 const summaryBusy = ref(false)
 const projectDialogOpen = ref(false)
+const projectPathDialogOpen = ref(false)
+const projectPathDialogMode = ref<'open' | 'relocate'>('open')
+const projectPathDialogProjectId = ref<string | null>(null)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
 const workflowDialogOpen = ref(false)
@@ -259,6 +281,9 @@ const workflowDialogProject = computed(
 const workflowDialogSkills = computed(() =>
   workflowDialogProjectId.value ? (skillsByProject[workflowDialogProjectId.value] ?? []) : [],
 )
+const projectPathDialogProject = computed(() =>
+  projects.value.find((project) => project.id === projectPathDialogProjectId.value) ?? null,
+)
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
@@ -270,13 +295,13 @@ onMounted(async () => {
     health.value = healthResult
     online.value = true
     projects.value = projectResult
-    await Promise.all(projectResult.map((project) => refreshProjectIndex(project.id)))
     const initialRoute = readRoute()
     let restored = false
     if (initialRoute?.kind === 'session') restored = await selectSession(initialRoute.id)
     else if (initialRoute?.kind === 'project') restored = await selectProject(initialRoute.id)
     else if (initialRoute?.kind === 'workflows') restored = await openWorkflowLibrary(initialRoute.id)
-    if (!restored && projectResult[0]) await selectProject(projectResult[0].id)
+    const firstAvailable = projectResult.find((project) => project.available)
+    if (!restored && firstAvailable) await selectProject(firstAvailable.id)
   } catch (error) {
     online.value = false
     globalError.value = messageOf(error)
@@ -295,7 +320,7 @@ async function refreshProjectIndex(projectId: string) {
   const overview = await api.getProject(projectId)
   sessionsByProject[projectId] = overview.sessions
   const index = projects.value.findIndex((project) => project.id === projectId)
-  if (index >= 0) projects.value[index] = overview.project
+  if (index >= 0) projects.value[index] = { ...overview.project, available: true }
   if (selectedProjectId.value === projectId && !selectedSessionId.value) projectOverview.value = overview
   return overview
 }
@@ -308,6 +333,11 @@ async function ensureProjectSkills(projectId: string, refresh = false) {
 }
 
 async function selectProject(projectId: string): Promise<boolean> {
+  const libraryEntry = projects.value.find((project) => project.id === projectId)
+  if (!libraryEntry?.available) {
+    openRelocateProjectDialog(projectId)
+    return false
+  }
   closeSessionStream()
   clearPoll()
   selectedProjectId.value = projectId
@@ -506,10 +536,13 @@ function clearTimers() {
 function showHome() {
   workflowLibraryOpen.value = false
   if (selectedProjectId.value) void selectProject(selectedProjectId.value)
-  else if (projects.value[0]) void selectProject(projects.value[0].id)
+  else {
+    const firstAvailable = projects.value.find((project) => project.available)
+    if (firstAvailable) void selectProject(firstAvailable.id)
+  }
 }
 
-async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projects.value[0]?.id): Promise<boolean> {
+async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projects.value.find((project) => project.available)?.id): Promise<boolean> {
   if (!projectId) return false
   selectedProjectId.value = projectId
   try {
@@ -624,6 +657,69 @@ async function createProject(input: { name: string; description: string; rootPat
     dialogError.value = messageOf(error)
   } finally {
     dialogBusy.value = false
+  }
+}
+
+function openExistingProjectDialog() {
+  projectPathDialogMode.value = 'open'
+  projectPathDialogProjectId.value = null
+  projectPathDialogOpen.value = true
+  dialogError.value = ''
+}
+
+function openRelocateProjectDialog(projectId: string) {
+  projectPathDialogMode.value = 'relocate'
+  projectPathDialogProjectId.value = projectId
+  projectPathDialogOpen.value = true
+  dialogError.value = ''
+}
+
+function closeProjectPathDialog() {
+  if (dialogBusy.value) return
+  projectPathDialogOpen.value = false
+  projectPathDialogProjectId.value = null
+  dialogError.value = ''
+}
+
+async function submitProjectPath(rootPath: string) {
+  dialogBusy.value = true
+  dialogError.value = ''
+  try {
+    const entry = projectPathDialogMode.value === 'open'
+      ? await api.openProject(rootPath)
+      : await api.relocateProject(projectPathDialogProjectId.value ?? '', rootPath)
+    const existing = projects.value.findIndex((project) => project.id === entry.id)
+    if (existing >= 0) projects.value[existing] = entry
+    else projects.value = [entry, ...projects.value]
+    projectPathDialogOpen.value = false
+    projectPathDialogProjectId.value = null
+    await selectProject(entry.id)
+  } catch (error) {
+    dialogError.value = messageOf(error)
+  } finally {
+    dialogBusy.value = false
+  }
+}
+
+async function removeProject(projectId: string) {
+  const project = projects.value.find((item) => item.id === projectId)
+  if (!project || !window.confirm(t('project.removeConfirm', { name: project.name }))) return
+  try {
+    await api.removeProject(projectId)
+    projects.value = projects.value.filter((item) => item.id !== projectId)
+    delete sessionsByProject[projectId]
+    delete skillsByProject[projectId]
+    if (selectedProjectId.value === projectId) {
+      selectedProjectId.value = null
+      selectedSessionId.value = null
+      projectOverview.value = null
+      sessionView.value = null
+      window.history.replaceState(null, '', window.location.pathname)
+      const next = projects.value.find((item) => item.available)
+      if (next) await selectProject(next.id)
+    }
+  } catch (error) {
+    globalError.value = messageOf(error)
   }
 }
 

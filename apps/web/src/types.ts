@@ -41,6 +41,10 @@ export interface Project {
   updated_at: string
 }
 
+export interface ProjectLibraryEntry extends Project {
+  available: boolean
+}
+
 export interface Session {
   id: Id
   project_id: Id

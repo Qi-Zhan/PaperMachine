@@ -18,6 +18,15 @@
         <button
           class="icon-button"
           type="button"
+          :title="t('sidebar.openProject')"
+          :aria-label="t('sidebar.openProject')"
+          @click="$emit('open-project')"
+        >
+          <FolderOpen :size="16" />
+        </button>
+        <button
+          class="icon-button"
+          type="button"
           :title="t('sidebar.newProject')"
           :aria-label="t('sidebar.newProject')"
           @click="$emit('new-project')"
@@ -58,13 +67,22 @@
         <div
           class="project-row"
           :data-active="project.id === selectedProjectId && !selectedSessionId"
+          :data-available="project.available"
         >
-          <button class="project-select" type="button" @click="$emit('select-project', project.id)">
+          <button
+            class="project-select"
+            type="button"
+            :disabled="!project.available"
+            :title="project.available ? project.root_path : t('sidebar.projectMissing')"
+            @click="$emit('select-project', project.id)"
+          >
             <ChevronDown :size="14" />
-            <Folder :size="15" />
+            <Folder v-if="project.available" :size="15" />
+            <AlertTriangle v-else :size="15" />
             <span>{{ project.name }}</span>
           </button>
           <button
+            v-if="project.available"
             class="row-icon-button"
             type="button"
             :title="t('sidebar.newSession')"
@@ -73,6 +91,31 @@
           >
             <Plus :size="14" />
           </button>
+          <button
+            v-else
+            class="row-icon-button"
+            type="button"
+            :title="t('sidebar.relocateProject')"
+            :aria-label="t('sidebar.relocateProject')"
+            @click="$emit('relocate-project', project.id)"
+          >
+            <MapPin :size="14" />
+          </button>
+          <details class="project-menu">
+            <summary class="row-icon-button" :title="t('sidebar.projectActions')" :aria-label="t('sidebar.projectActions')">
+              <MoreHorizontal :size="14" />
+            </summary>
+            <div class="project-menu-popover">
+              <button type="button" @click="$emit('relocate-project', project.id)">
+                <MapPin :size="13" />
+                <span>{{ t('sidebar.relocateProject') }}</span>
+              </button>
+              <button class="danger-hover" type="button" @click="$emit('remove-project', project.id)">
+                <Trash2 :size="13" />
+                <span>{{ t('sidebar.removeProject') }}</span>
+              </button>
+            </div>
+          </details>
         </div>
         <div class="session-list">
           <button
@@ -107,14 +150,14 @@
 </template>
 
 <script setup lang="ts">
-import { ChevronDown, Folder, FolderPlus, GitBranch, Plus, ScanSearch, Search, X } from '@lucide/vue'
+import { AlertTriangle, ChevronDown, Folder, FolderOpen, FolderPlus, GitBranch, MapPin, MoreHorizontal, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { formatDate } from '../format'
 import { useAppI18n } from '../i18n'
-import type { Project, Session } from '../types'
+import type { ProjectLibraryEntry, Session } from '../types'
 
 const props = defineProps<{
-  projects: Project[]
+  projects: ProjectLibraryEntry[]
   sessionsByProject: Record<string, Session[]>
   selectedProjectId: string | null
   selectedSessionId: string | null
@@ -127,7 +170,10 @@ defineEmits<{
   home: []
   'close-sidebar': []
   'new-project': []
+  'open-project': []
   'new-session': [projectId: string]
+  'relocate-project': [projectId: string]
+  'remove-project': [projectId: string]
   'open-workflows': []
   'select-project': [projectId: string]
   'select-session': [sessionId: string]

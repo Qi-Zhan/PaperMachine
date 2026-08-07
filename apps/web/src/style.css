@@ -284,10 +284,15 @@ pre {
 
 .project-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 26px;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
   align-items: center;
   min-height: 34px;
   border-radius: 6px;
+}
+
+.project-row[data-available="false"] .project-select {
+  color: var(--faint);
+  cursor: default;
 }
 
 .project-row:hover,
@@ -321,6 +326,57 @@ pre {
   width: 24px;
   height: 24px;
   border-radius: 5px;
+}
+
+.project-menu {
+  position: relative;
+}
+
+.project-menu > summary {
+  list-style: none;
+}
+
+.project-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-menu-popover {
+  position: absolute;
+  z-index: 20;
+  top: 28px;
+  right: 0;
+  width: 172px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(25, 30, 28, 0.15);
+}
+
+.project-menu-popover button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 31px;
+  padding: 0 8px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  text-align: left;
+}
+
+.project-menu-popover button:hover {
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.project-path-intro {
+  margin-bottom: 4px;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .session-list {

@@ -9,6 +9,7 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -125,6 +126,44 @@ impl Store {
 
     pub fn get_project(&self, id: ProjectId) -> Result<Project, StoreError> {
         self.query_document_by_id("projects", id.to_string(), "project")
+    }
+
+    pub fn relocate_project(
+        &self,
+        id: ProjectId,
+        root_path: impl Into<PathBuf>,
+    ) -> Result<Project, StoreError> {
+        let requested_root = root_path.into();
+        if !requested_root.is_absolute() {
+            return Err(StoreError::Invariant(
+                "Project root must be an absolute path".to_string(),
+            ));
+        }
+        let root_path = requested_root
+            .canonicalize()
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        let config_path = root_path.join(".papermachine/project.toml");
+        let config: StoredProjectConfig = toml::from_str(
+            &std::fs::read_to_string(&config_path)
+                .map_err(|error| StoreError::Io(error.to_string()))?,
+        )
+        .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        if config.id != id.to_string() {
+            return Err(StoreError::Invariant(format!(
+                "Project identity mismatch in {}",
+                config_path.display()
+            )));
+        }
+        let mut project = self.get_project(id)?;
+        project.root_path = root_path.to_string_lossy().into_owned();
+        project.updated_at = Utc::now();
+        self.update_document(
+            "projects",
+            &project.id.to_string(),
+            project.updated_at,
+            &project,
+        )?;
+        Ok(project)
     }
 
     pub fn get_project_system_prompt(
@@ -3076,6 +3115,11 @@ struct ProjectConfig<'a> {
     id: String,
     name: &'a str,
     description: &'a str,
+}
+
+#[derive(Deserialize)]
+struct StoredProjectConfig {
+    id: String,
 }
 
 fn initialize_project_directory(project: &Project) -> Result<(), StoreError> {
