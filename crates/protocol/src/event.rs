@@ -2,7 +2,6 @@ use crate::ActionAttemptId;
 use crate::ActionInvocationId;
 use crate::ActionStatus;
 use crate::AgentInstanceId;
-use crate::BudgetUsage;
 use crate::ChannelId;
 use crate::ControlMessageId;
 use crate::ControlMessageKind;
@@ -23,6 +22,7 @@ use crate::TurnOrigin;
 use crate::TurnStatus;
 use crate::WorkflowId;
 use crate::WorkflowStatus;
+use crate::WorkflowUsage;
 use chrono::DateTime;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -113,8 +113,8 @@ pub enum WorkflowEventPayload {
     ControlMessageApplied {
         control_message_id: ControlMessageId,
     },
-    BudgetUpdated {
-        usage: BudgetUsage,
+    UsageUpdated {
+        usage: WorkflowUsage,
     },
     WorkflowCompleted {
         output: Value,

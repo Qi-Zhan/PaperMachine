@@ -381,7 +381,6 @@ const fn prompt_cache_mode_name(mode: OpenAiPromptCacheMode) -> &'static str {
 mod tests {
     use super::*;
     use futures::TryStreamExt;
-    use papermachine_protocol::MaxToolCallsMode;
     use papermachine_protocol::ModelRequestMetadata;
     use papermachine_protocol::ModelToolChoice;
     use papermachine_protocol::ModelTransport;
@@ -409,7 +408,6 @@ mod tests {
                     prompt_cache_mode: PromptCacheMode::Implicit,
                     prompt_cache_key: None,
                     prompt_cache_breakpoint: false,
-                    max_tool_calls_mode: MaxToolCallsMode::NotRequested,
                     used_previous_response_id: false,
                     continuation_miss_reason: Some("test".to_string()),
                     websocket_fallback_reason: None,
@@ -505,7 +503,6 @@ context_window = 1000000
             web_search_context_size: None,
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::None,
-            max_tool_calls: None,
             response_format: None,
         };
 

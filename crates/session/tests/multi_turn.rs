@@ -5,7 +5,6 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_model::ModelStream;
 use papermachine_model::ScriptedModelClient;
-use papermachine_protocol::Budget;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
@@ -31,22 +30,21 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-fn workflow_snapshot(budget: Budget) -> WorkflowProgramSnapshot {
+fn workflow_snapshot() -> WorkflowProgramSnapshot {
     WorkflowProgramSnapshot {
         project_id: None,
         manifest: WorkflowProgramManifest {
             id: WorkflowProgramId::new(),
-            slug: "budget-test".to_string(),
-            name: "Budget test".to_string(),
+            slug: "usage-test".to_string(),
+            name: "Usage test".to_string(),
             description: "Exercise per-step token accounting.".to_string(),
             entrypoint: "main".to_string(),
             params_schema: serde_json::json!({"type": "object"}),
             output_schema: serde_json::json!({"type": "object"}),
-            default_budget: budget,
         },
         source: WorkflowProgramSource::Builtin,
-        definition_path: "builtin/budget-test/workflow.py".to_string(),
-        sha256: "budget-test".to_string(),
+        definition_path: "builtin/usage-test/workflow.py".to_string(),
+        sha256: "usage-test".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }
@@ -331,31 +329,26 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
 }
 
 #[tokio::test]
-async fn workflow_token_budget_is_charged_at_each_model_step() {
+async fn workflow_token_usage_is_recorded_at_each_model_step() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_project("Budget", "", directory.path().join("project"))
+        .create_project("Usage", "", directory.path().join("project"))
         .expect("research should be created");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
         .expect("origin session should be created");
-    let budget = Budget {
-        max_total_tokens: Some(5),
-        ..Budget::default()
-    };
     let run = store
         .create_workflow(NewWorkflow {
             project_id: research.id,
             started_from_session_id: Some(origin.id),
-            program: workflow_snapshot(budget),
-            request: "Stay within budget".to_string(),
+            program: workflow_snapshot(),
+            request: "Record usage".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
             params: serde_json::json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: papermachine_protocol::AgentAccessProfile::Research,
             enabled_skills: Vec::new(),
@@ -392,7 +385,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         .start_action_attempt(invocation.id)
         .expect("attempt should start");
 
-    let model = ScriptedModelClient::new([response("This response exceeds the budget.")]);
+    let model = ScriptedModelClient::new([response("Usage was recorded.")]);
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
         .ensure_project(research.id)
@@ -409,7 +402,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
         },
     );
 
-    let error = runtime
+    let turn = runtime
         .execute_workflow_action(
             participant.session_id,
             papermachine_protocol::TurnOrigin::Workflow,
@@ -417,8 +410,7 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             None,
             Vec::new(),
             None,
-            1,
-            None,
+            true,
             None,
             None,
             WorkflowTurnContext {
@@ -429,11 +421,11 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .expect_err("turn should stop after exceeding the token budget");
-    assert!(error.to_string().contains("token budget exceeded"));
+        .expect("turn should complete without a token quota");
+    assert_eq!(turn.status, TurnStatus::Completed);
     let updated = store
         .get_workflow(run.id)
-        .expect("run should load after budget failure");
+        .expect("run should load after the model step");
     assert_eq!(updated.usage.tokens.input_tokens, 10);
     assert_eq!(updated.usage.tokens.output_tokens, 3);
 }

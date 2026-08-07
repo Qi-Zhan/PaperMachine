@@ -2,7 +2,7 @@
 
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
-    AgentAccessProfile, Budget, HumanRequestStatus, ModelEvent, ModelInputItem, TokenUsage,
+    AgentAccessProfile, HumanRequestStatus, ModelEvent, ModelInputItem, TokenUsage,
     WorkflowContextMode, WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId,
     WorkflowProgramManifest, WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
 };
@@ -55,7 +55,7 @@ class Researcher(Agent):
     access = "research"
     role = "recovery researcher"
 
-    @action(max_steps=2)
+    @action
     async def investigate(self, question: str) -> str:
         """Investigate the question, requesting human guidance when needed."""
 
@@ -144,7 +144,7 @@ const LAUNCH_CONTEXT_SOURCE: &str = r#"from papermachine import Agent, action, w
 class Conservative(Agent):
     access = "research"
 
-    @action(max_steps=1)
+    @action
     async def inspect(self, question: str) -> str:
         """Inspect the captured evidence conservatively."""
 
@@ -152,7 +152,7 @@ class Conservative(Agent):
 class Elevated(Agent):
     access = "model_only"
 
-    @action(max_steps=1)
+    @action
     async def compare(self, question: str) -> str:
         """Compare evidence using the configured run access."""
 
@@ -160,7 +160,7 @@ class Elevated(Agent):
 class Clamped(Agent):
     access = "full_access"
 
-    @action(max_steps=1)
+    @action
     async def verify(self, question: str) -> str:
         """Verify that the Workflow ceiling remains authoritative."""
 
@@ -214,7 +214,6 @@ fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot
             entrypoint: "main".to_string(),
             params_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
-            default_budget: Budget::default(),
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: format!("builtin/{slug}/workflow.py"),
@@ -309,7 +308,6 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             instructions: "Keep provenance visible.".to_string(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Workspace,
             enabled_skills: Vec::new(),
@@ -409,7 +407,6 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Research,
             enabled_skills: Vec::new(),
@@ -531,7 +528,6 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
             enabled_skills: Vec::new(),
@@ -601,7 +597,6 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
             enabled_skills: Vec::new(),
@@ -657,7 +652,6 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::ModelOnly,
             enabled_skills: Vec::new(),
@@ -731,7 +725,6 @@ async fn unfinished_agent_action_resumes_its_checkpointed_turn_once() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "scripted".to_string(),
             access: AgentAccessProfile::Research,
             enabled_skills: Vec::new(),

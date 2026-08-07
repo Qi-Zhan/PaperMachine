@@ -492,8 +492,6 @@ def record_failed_attempt(attempt: dict[str, Any], run: dict[str, Any]) -> None:
 def is_retryable_error(error: str) -> bool:
     lowered = error.casefold()
     deterministic = (
-        "budget exceeded",
-        "budget exhausted",
         "context window",
         "invalid grader",
         "invalid output",

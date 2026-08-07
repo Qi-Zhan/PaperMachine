@@ -99,7 +99,6 @@
                 <dl>
                   <div><dt>{{ t('workflow.entrypoint') }}</dt><dd>{{ manifest.entrypoint }}</dd></div>
                   <div><dt>{{ t('workflow.params') }}</dt><dd>{{ schemaKeys(manifest.params_schema) }}</dd></div>
-                  <div><dt>{{ t('workflow.agentLimit') }}</dt><dd>{{ manifest.default_budget.max_agents }}</dd></div>
                 </dl>
               </section>
 

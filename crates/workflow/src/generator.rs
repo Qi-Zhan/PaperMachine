@@ -41,9 +41,9 @@ impl WorkflowGenerator {
 
 Available API:
 - Agent base class; class attributes: role, system_prompt, model, skills, access.
-- @action, @action("prompt"), or @action(max_steps=N, max_search_calls=M, search_context_size="low", reasoning_effort="high", finalize="after_search") on async Agent methods. The method body is declarative; its docstring/prompt and arguments become a Codex-like Session Turn. Use max_steps=1 for evaluators and synthesizers that must reason only over supplied evidence without calling tools. Give every research action a finite max_search_calls allowance and normally use low search context for bounded parallel routes. Use finalize="after_search" when an action itself must return a user-facing deliverable: after a hosted-search Turn, the same Session gets one separate model-only finalization Turn, so provider progress narration cannot silently become the deliverable. Reserve higher reasoning effort for evidence judgment and final synthesis.
+- @action, @action("prompt"), or @action(search_context_size="low", reasoning_effort="high", finalize="after_search") on async Agent methods. The method body is declarative; its docstring/prompt and arguments become a Codex-like Session Turn. An Action continues its model/tool loop until the model returns a terminal answer, the user interrupts it, or runtime infrastructure fails. Use a model_only Agent for evaluators and synthesizers that must reason only over supplied evidence without calling tools. Use finalize="after_search" when an action itself must return a user-facing deliverable: after a hosted-search Turn, the same Session gets one separate model-only finalization Turn, so provider progress narration cannot silently become the deliverable. Reserve higher reasoning effort for evidence judgment and final synthesis.
 - Annotate an action with -> dict, -> list, -> bool, -> int, or -> float when workflow control flow needs parsed JSON rather than raw text.
-- @workflow(slug=..., name=..., description=..., params_schema={...}, output_schema={...}, budget={...}) on exactly one async main(ctx).
+- @workflow(slug=..., name=..., description=..., params_schema={...}, output_schema={...}) on exactly one async main(ctx).
 - ctx.request, ctx.params, ctx.trigger, ctx.context, ctx.workflow_id, and await ctx.project.snapshot(max_sessions=..., max_turns_per_session=..., max_artifacts=...) for a bounded view of existing Project research.
 - await together(a.action(...), b.action(...)) for explicit concurrency. Never put two actions from the same Agent in one together().
 - Team(name, *agents), await team.add(agent), await team.remove(agent), await agent.retire().
@@ -80,7 +80,6 @@ Use ordinary Python if/for/while for long-running control logic. Human, timer, a
             web_search_context_size: None,
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::Auto,
-            max_tool_calls: None,
             response_format: None,
         };
         let mut stream = tokio::select! {

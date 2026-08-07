@@ -113,7 +113,6 @@ async fn agent_executes_a_tool_then_follows_up() {
         "Write the evidence file.",
     );
     request.workflow_id = Some(WorkflowId::new());
-    request.max_steps = 2;
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -134,10 +133,7 @@ async fn agent_executes_a_tool_then_follows_up() {
     assert_eq!(requests[0].tools, requests[1].tools);
     assert_eq!(requests[0].instructions, requests[1].instructions);
     assert_eq!(requests[0].tool_choice, ModelToolChoice::Auto);
-    assert_eq!(requests[1].tool_choice, ModelToolChoice::None);
-    assert!(requests[1].input.iter().any(|item| {
-        matches!(item, ModelInputItem::Message { role: MessageRole::User, content } if content.contains("final model sample"))
-    }));
+    assert_eq!(requests[1].tool_choice, ModelToolChoice::Auto);
     assert!(requests[1]
         .input
         .iter()
@@ -168,7 +164,7 @@ async fn agent_executes_a_tool_then_follows_up() {
 }
 
 #[tokio::test]
-async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
+async fn hosted_search_usage_is_observed_across_a_turn() {
     let model = ScriptedModelClient::new([
         vec![
             ModelEvent::ResponseItemCompleted {
@@ -176,7 +172,7 @@ async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
                     "type": "web_search_call",
                     "id": "search-1",
                     "status": "completed",
-                    "action": {"type": "search", "query": "bounded research"}
+                    "action": {"type": "search", "query": "research evidence"}
                 }),
             },
             ModelEvent::ResponseItemCompleted {
@@ -193,7 +189,7 @@ async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
         ],
         vec![
             ModelEvent::OutputTextDelta {
-                delta: "Done with bounded search.".to_string(),
+                delta: "Done with search.".to_string(),
             },
             ModelEvent::Completed {
                 usage: TokenUsage::default(),
@@ -209,30 +205,26 @@ async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
     let directory = tempdir().expect("temporary workspace should be created");
     std::fs::write(directory.path().join("evidence.txt"), "evidence")
         .expect("fixture should be written");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
         "test-model",
-        "Research within the limit.",
+        "Research carefully.",
         "Read the evidence.",
     );
-    request.max_steps = 4;
-    request.max_search_calls = Some(1);
 
     let result = runtime
         .run(request, CancellationToken::new())
         .await
         .expect("agent should finish");
-    assert_eq!(result.final_message, "Done with bounded search.");
+    assert_eq!(result.final_message, "Done with search.");
 
     let requests = model.requests().expect("requests should be recorded");
-    assert_eq!(requests[0].max_tool_calls, Some(1));
     assert_eq!(requests[0].hosted_tools.len(), 1);
-    assert_eq!(requests[1].max_tool_calls, None);
     assert_eq!(requests[1].hosted_tools.len(), 1);
-    assert_eq!(requests[1].tool_choice, ModelToolChoice::None);
+    assert_eq!(requests[1].tool_choice, ModelToolChoice::Auto);
     assert_eq!(
         events
             .events()
@@ -245,7 +237,7 @@ async fn hosted_search_limit_is_forwarded_and_exhausted_across_a_turn() {
 }
 
 #[tokio::test]
-async fn hosted_search_uses_a_stable_per_response_batch_limit() {
+async fn tools_enabled_false_omits_local_and_hosted_tools() {
     let model = ScriptedModelClient::new([vec![
         ModelEvent::OutputTextDelta {
             delta: "Enough evidence.".to_string(),
@@ -257,7 +249,10 @@ async fn hosted_search_uses_a_stable_per_response_batch_limit() {
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        ToolRegistry::default(),
+        ToolRegistry::builder()
+            .register(ReadFileTool)
+            .expect("read tool should register")
+            .build(),
         Arc::new(events),
     );
     let directory = tempdir().expect("temporary workspace should be created");
@@ -270,8 +265,7 @@ async fn hosted_search_uses_a_stable_per_response_batch_limit() {
         "Research carefully.",
         "Find the answer.",
     );
-    request.max_steps = 2;
-    request.max_search_calls = Some(12);
+    request.tools_enabled = false;
 
     runtime
         .run(request, CancellationToken::new())
@@ -279,19 +273,15 @@ async fn hosted_search_uses_a_stable_per_response_batch_limit() {
         .expect("agent should finish");
 
     let requests = model.requests().expect("requests should be recorded");
-    assert_eq!(requests[0].max_tool_calls, Some(4));
-    assert!(
-        requests[0]
-            .instructions
-            .contains("at most 4 provider-hosted web search calls")
-    );
+    assert!(requests[0].tools.is_empty());
+    assert!(requests[0].hosted_tools.is_empty());
 }
 
 #[tokio::test]
 async fn finish_control_forces_the_next_sample_to_disable_tools() {
     let model = ScriptedModelClient::new([vec![
         ModelEvent::OutputTextDelta {
-            delta: "Final bounded answer.".to_string(),
+            delta: "Final answer.".to_string(),
         },
         ModelEvent::Completed {
             usage: TokenUsage {
@@ -312,7 +302,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
     )
     .with_control(Arc::new(FinishNowControl));
     let directory = tempdir().expect("temporary workspace should be created");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
@@ -321,13 +311,12 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
         "Research carefully.",
         "Continue researching.",
     );
-    request.max_steps = 4;
 
     let result = runtime
         .run(request, CancellationToken::new())
         .await
         .expect("finish control should produce a final response");
-    assert_eq!(result.final_message, "Final bounded answer.");
+    assert_eq!(result.final_message, "Final answer.");
 
     let requests = model.requests().expect("requests should be recorded");
     assert_eq!(requests.len(), 1);
@@ -339,7 +328,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
         matches!(item, ModelInputItem::Message { role: MessageRole::User, content } if content.contains("finish now"))
     }));
     assert!(requests[0].input.iter().any(|item| {
-        matches!(item, ModelInputItem::Message { role: MessageRole::User, content } if content.contains("final model sample"))
+        matches!(item, ModelInputItem::Message { role: MessageRole::User, content } if content.contains("Do not call tools"))
     }));
 }
 
@@ -374,7 +363,6 @@ async fn model_only_access_omits_local_and_hosted_tools() {
         "Answer directly.",
     );
     request.access = AgentAccessProfile::ModelOnly;
-    request.max_steps = 4;
 
     runtime
         .run(request, CancellationToken::new())
@@ -444,7 +432,6 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         },
     ];
     request.model_context_window = 4_096;
-    request.max_steps = 1;
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -589,7 +576,6 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
         "Plan the research routes.",
     );
     request.reasoning_effort = Some(ReasoningEffort::High);
-    request.max_steps = 1;
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -627,7 +613,7 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
         Arc::new(events.clone()),
     );
     let directory = tempdir().expect("temporary workspace should be created");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
@@ -636,7 +622,6 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
         "Return valid JSON.",
         "Plan the research routes.",
     );
-    request.max_steps = 1;
 
     let error = runtime
         .run(request, CancellationToken::new())

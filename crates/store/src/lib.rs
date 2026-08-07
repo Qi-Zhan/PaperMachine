@@ -4,7 +4,6 @@ mod artifact;
 mod database;
 
 use papermachine_protocol::AgentAccessProfile;
-use papermachine_protocol::Budget;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionId;
@@ -31,7 +30,6 @@ pub struct NewWorkflow {
     pub instructions: String,
     pub trigger: WorkflowTrigger,
     pub params: Value,
-    pub budget: Option<Budget>,
     pub default_model: String,
     pub access: AgentAccessProfile,
     pub enabled_skills: Vec<String>,

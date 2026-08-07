@@ -7,7 +7,6 @@ class Researcher(Agent):
     system_prompt = "Gather concrete evidence, preserve provenance, and state uncertainty."
 
     @action(
-        max_search_calls=16,
         search_context_size="low",
         reasoning_effort="high",
     )
@@ -20,7 +19,7 @@ class Synthesizer(Agent):
     role = "research synthesis"
     system_prompt = "Compare independent findings and keep conclusions bounded by the evidence."
 
-    @action(max_steps=1, reasoning_effort="high")
+    @action(reasoning_effort="high")
     async def synthesize(self, question: str, findings: list[str]):
         """Synthesize the findings into a concise answer. Identify agreements, conflicts, missing evidence, and the strongest defensible conclusion."""
 
@@ -28,7 +27,7 @@ class Synthesizer(Agent):
 @workflow(
     slug="parallel-discovery",
     name="Parallel discovery",
-    description="Run bounded independent research Sessions concurrently, then synthesize their evidence in a dedicated Session.",
+    description="Run independent research Sessions concurrently, then synthesize their evidence in a dedicated Session.",
     params_schema={
         "type": "object",
         "properties": {
@@ -56,15 +55,6 @@ class Synthesizer(Agent):
         "type": "object",
         "properties": {"summary": {"type": "string"}},
         "required": ["summary"],
-    },
-    budget={
-        "max_agents": 8,
-        "max_concurrent_actions": 4,
-        "max_action_steps": 24,
-        "max_total_tokens": 1500000,
-        "max_uncached_tokens": 400000,
-        "max_hosted_search_calls": 64,
-        "max_wall_time_seconds": 7200,
     },
 )
 async def main(ctx):

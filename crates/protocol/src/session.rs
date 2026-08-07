@@ -159,11 +159,10 @@ pub struct Turn {
     /// Access snapshot captured when this Turn is created.
     #[serde(default)]
     pub access: AgentAccessProfile,
-    pub max_steps: u32,
-    /// Per-Turn limit for provider-hosted web search calls. `None` leaves the
-    /// provider limit unset; zero disables hosted search for this Turn.
-    #[serde(default)]
-    pub max_search_calls: Option<u32>,
+    /// Internal Action policy used by finalization and JSON-repair Turns.
+    /// Ordinary user and Workflow Turns enable tools according to `access`.
+    #[serde(default = "default_tools_enabled")]
+    pub tools_enabled: bool,
     /// Hosted web-search retrieval size for this Turn. `None` inherits the
     /// provider default.
     #[serde(default)]
@@ -190,6 +189,10 @@ pub struct Turn {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+const fn default_tools_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

@@ -52,9 +52,8 @@ const AUTO_COMPACT_PERCENT: usize = 90;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 const COMPACTION_PROMPT: &str = "You are performing a context checkpoint compaction. Create a concise handoff summary for the model that will continue this research session. Include current progress and decisions, important constraints and user guidance, verified evidence with source URLs, unresolved questions, and concrete next steps. Preserve exact identifiers, quantities, and caveats that matter. Do not continue the research or call tools; return only the handoff summary.";
 const SUMMARY_PREFIX: &str = "Another model worked on this research session and produced the following checkpoint. Use it to continue without repeating completed work:";
-const FINAL_SAMPLE_PROMPT: &str = "This is the final model sample allowed for this Turn. Do not call tools. Synthesize the best self-contained answer supported by the evidence already gathered, and state any remaining limitations.";
+const CONTROL_FINISH_PROMPT: &str = "Do not call tools. Synthesize the best self-contained answer supported by the evidence already gathered, follow the control-plane instruction above, and state any remaining limitations.";
 const PROMPT_CACHE_KEY_NAMESPACE: &str = "papermachine-session";
-const DEFAULT_MAX_HOSTED_TOOL_CALLS_PER_RESPONSE: u32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct AgentTurnRequest {
@@ -78,10 +77,7 @@ pub struct AgentTurnRequest {
     pub checkpoint_message: Option<String>,
     pub hosted_tools: Vec<HostedTool>,
     pub web_search_context_size: Option<WebSearchContextSize>,
-    pub max_steps: u32,
-    /// Maximum hosted web-search calls across this Turn. A zero value disables
-    /// hosted search even when the access profile permits network research.
-    pub max_search_calls: Option<u32>,
+    pub tools_enabled: bool,
     pub response_format: Option<ModelResponseFormat>,
     pub model_context_window: usize,
 }
@@ -118,8 +114,7 @@ impl AgentTurnRequest {
             checkpoint_message: None,
             hosted_tools: vec![HostedTool::WebSearch],
             web_search_context_size: None,
-            max_steps: 16,
-            max_search_calls: None,
+            tools_enabled: true,
             response_format: None,
             model_context_window: papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW,
         }
@@ -275,8 +270,8 @@ pub enum AgentError {
     Model(#[from] ModelError),
     #[error("agent run was cancelled")]
     Cancelled,
-    #[error("agent reached its step limit ({0})")]
-    StepLimit(u32),
+    #[error("agent model-step counter overflowed")]
+    StepCounterOverflow,
     #[error("model stream ended without a completion event")]
     IncompleteModelStream,
     #[error("model completed without a message or tool call")]
@@ -347,50 +342,36 @@ impl AgentRuntime {
         }
         let execution_gate = Arc::new(RwLock::new(()));
         let mut total_usage = request.initial_usage;
-        let tool_definitions = if request.max_steps > 1 {
+        let tool_definitions = if request.tools_enabled {
             self.tools.definitions_for(request.access)
         } else {
             Vec::new()
         };
-        let hosted_tools = if request.max_steps > 1
-            && request.access.allows_research_network()
-            && request.max_search_calls != Some(0)
-        {
+        let hosted_tools = if request.tools_enabled && request.access.allows_research_network() {
             request.hosted_tools.clone()
         } else {
             Vec::new()
         };
-        let per_response_search_limit = request
-            .max_search_calls
-            .map(|limit| limit.min(DEFAULT_MAX_HOSTED_TOOL_CALLS_PER_RESPONSE));
-        let model_instructions = if !hosted_tools.is_empty()
-            && let Some(limit) = per_response_search_limit.filter(|limit| *limit > 0)
-        {
-            format!(
-                "{}\n\nHosted search control: perform at most {limit} provider-hosted web search calls in any one model response. Return control after that batch so the runtime can account for usage before more searching.",
-                request.instructions
-            )
-        } else {
-            request.instructions.clone()
-        };
+        let model_instructions = request.instructions.clone();
         let history_budget = history_token_budget(&request, &tool_definitions)?;
         let compact_trigger = history_budget.saturating_mul(AUTO_COMPACT_PERCENT) / 100;
         let mut control_forced_final = false;
         let mut hosted_search_calls_used = request.hosted_search_calls_used;
 
-        if request.completed_model_steps >= request.max_steps {
-            if let Some(message) = request.checkpoint_message.clone() {
-                return Ok(AgentTurnResult {
-                    final_message: message,
-                    history,
-                    steps: request.completed_model_steps,
-                    usage: total_usage,
-                });
-            }
-            return Err(AgentError::StepLimit(request.max_steps));
+        if let Some(message) = request.checkpoint_message.clone() {
+            return Ok(AgentTurnResult {
+                final_message: message,
+                history,
+                steps: request.completed_model_steps,
+                usage: total_usage,
+            });
         }
 
-        for step in request.completed_model_steps.saturating_add(1)..=request.max_steps {
+        let mut step = request
+            .completed_model_steps
+            .checked_add(1)
+            .ok_or(AgentError::StepCounterOverflow)?;
+        loop {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
@@ -457,22 +438,16 @@ impl AgentRuntime {
                     .await
                     .map_err(AgentError::EventSink)?;
             }
-            let remaining_search_calls = request
-                .max_search_calls
-                .map(|limit| limit.saturating_sub(hosted_search_calls_used));
-            let search_limit_forced_final =
-                !hosted_tools.is_empty() && remaining_search_calls == Some(0);
-            let final_sample =
-                control_forced_final || search_limit_forced_final || step == request.max_steps;
+            let final_sample = control_forced_final;
             let already_has_final_prompt = matches!(
                 history.last(),
                 Some(ModelInputItem::Message { role: MessageRole::User, content })
-                    if content == FINAL_SAMPLE_PROMPT
+                    if content == CONTROL_FINISH_PROMPT
             );
             if final_sample && !already_has_final_prompt {
                 history.push(ModelInputItem::Message {
                     role: MessageRole::User,
-                    content: FINAL_SAMPLE_PROMPT.to_string(),
+                    content: CONTROL_FINISH_PROMPT.to_string(),
                 });
             }
             let removed_items = trim_history(&mut history, history_budget);
@@ -501,18 +476,8 @@ impl AgentRuntime {
                 .await
                 .map_err(AgentError::EventSink)?;
 
-            // Keep the declared hosted-tool set stable for prompt caching and
-            // previous_response_id continuation. Once the Turn limit is
-            // exhausted, tool_choice=none on the forced final sample prevents
-            // further calls without changing request properties.
             let step_hosted_tools = hosted_tools.clone();
             let has_step_tools = !tool_definitions.is_empty() || !step_hosted_tools.is_empty();
-            let max_tool_calls = remaining_search_calls
-                .filter(|remaining| *remaining > 0)
-                .filter(|_| !step_hosted_tools.is_empty())
-                .map(|remaining| {
-                    per_response_search_limit.map_or(remaining, |limit| remaining.min(limit))
-                });
             let mut model_request = ModelRequest {
                 model: request.model.clone(),
                 reasoning_effort: request.reasoning_effort,
@@ -529,7 +494,6 @@ impl AgentRuntime {
                 } else {
                     ModelToolChoice::Auto
                 },
-                max_tool_calls,
                 response_format: request.response_format.clone(),
             };
             model_request.prompt_cache = Some(prompt_cache_config(&model_request));
@@ -547,14 +511,11 @@ impl AgentRuntime {
                 "available_tools": model_request.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
                 "available_hosted_tools": model_request.hosted_tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
                 "web_search_context_size": request.web_search_context_size,
-                "max_search_calls": request.max_search_calls,
+                "tools_enabled": request.tools_enabled,
                 "hosted_search_calls_used": hosted_search_calls_used,
-                "remaining_search_calls": remaining_search_calls,
-                "per_response_search_limit": per_response_search_limit,
                 "tool_choice": model_request.tool_choice,
                 "final_sample": final_sample,
                 "control_forced_final": control_forced_final,
-                "search_limit_forced_final": search_limit_forced_final,
             });
             self.events
                 .emit(AgentEvent::ModelStepStarted {
@@ -671,9 +632,8 @@ impl AgentRuntime {
             );
             let model_step_output =
                 inspectable_model_output(&message, &response_items, request_metadata.as_ref());
-            // Persist provider-hosted tool actions before budget accounting can
-            // stop the Turn. Otherwise the over-budget response is charged but
-            // its search activity disappears from usage and the Session trace.
+            // Persist provider-hosted tool actions before the model Step is
+            // completed so search telemetry and the Session trace stay aligned.
             for item in &response_items {
                 if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
                     self.events
@@ -793,9 +753,8 @@ impl AgentRuntime {
                     .await
                     .map_err(AgentError::EventSink)?;
             }
+            step = step.checked_add(1).ok_or(AgentError::StepCounterOverflow)?;
         }
-
-        Err(AgentError::StepLimit(request.max_steps))
     }
 
     async fn sample_model_step(
@@ -903,7 +862,6 @@ impl AgentRuntime {
             web_search_context_size: None,
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::Auto,
-            max_tool_calls: None,
             response_format: None,
         };
         model_request.prompt_cache = Some(prompt_cache_config(&model_request));
@@ -1255,7 +1213,6 @@ mod tests {
             web_search_context_size: None,
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
-            max_tool_calls: None,
             response_format: None,
         };
         let first = prompt_cache_config(&build("session-a", "question A", "shared instructions"));

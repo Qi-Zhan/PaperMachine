@@ -84,8 +84,7 @@ export interface Turn {
   reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   prompt: PromptSnapshot
   access: AgentAccessProfile
-  max_steps: number
-  max_search_calls: number | null
+  tools_enabled: boolean
   web_search_context_size: 'low' | 'medium' | 'high' | null
   response_format: unknown | null
   skill_snapshots: SkillSnapshot[]
@@ -115,18 +114,7 @@ export interface AgentStep {
   updated_at: string
 }
 
-export interface Budget {
-  max_agents: number
-  max_concurrent_actions: number
-  max_action_steps: number
-  max_total_tokens: number | null
-  max_uncached_tokens: number | null
-  max_hosted_search_calls: number | null
-  max_wall_time_seconds: number | null
-  max_cost_usd: number | null
-}
-
-export interface BudgetUsage {
+export interface WorkflowUsage {
   agents_created: number
   actions_started: number
   actions_completed: number
@@ -146,7 +134,6 @@ export interface WorkflowProgramManifest {
   entrypoint: string
   params_schema: Record<string, unknown>
   output_schema: Record<string, unknown>
-  default_budget: Budget
 }
 
 export interface WorkflowProgram {
@@ -194,8 +181,7 @@ export interface Workflow {
   output: unknown | null
   error: string | null
   attention_required: boolean
-  budget: Budget
-  usage: BudgetUsage
+  usage: WorkflowUsage
   created_at: string
   updated_at: string
 }

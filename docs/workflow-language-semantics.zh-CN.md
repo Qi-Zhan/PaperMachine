@@ -79,7 +79,7 @@ run 的输出就是 Python entrypoint 的返回值，runner 通过 `complete` ef
 第一次 action、Team activate、relation、channel send、针对该 Agent 的人工请求，
 或显式 retire 会触发 `create_agent`。随后 Rust：
 
-1. 检查 run 状态与 `max_agents`；
+1. 检查 run 状态；
 2. 在该 run 的 Project 下创建 Session；
 3. 从 Agent override 或 Workflow defaults 解析 model 与 skills；
 4. 创建 WorkflowParticipant 映射；
@@ -131,29 +131,22 @@ Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 的�
 
 `@action` 方法声明 prompt 和参数签名。方法体不会作为 agent 逻辑执行。
 调用方法会产生一个 awaitable；await 它会请求 `invoke_action`。
-`@action(max_steps=N)` 可缩小单个 action 的模型采样次数，Workflow 的
-`max_action_steps` 仍是硬上限；`max_steps=1` 会让第一次采样直接成为禁用工具的
-最终回答。`@action(max_search_calls=N)` 限制整个 Turn 内的 hosted web search
-次数，设为 `0` 会禁用 hosted search，但不会改变 Agent 的其他权限。PaperMachine
-先探测 endpoint 是否接受 Responses API 的 `max_tool_calls`，再核对响应中实际产生的
-hosted-call 数。拒绝字段时记录 `runtime_fallback`；接受字段却超过目标时，本次记录
-`provider_violated`，同一模型的后续响应切换到 runtime fallback。fallback 会在相邻
-采样之间停止继续搜索，因此暴露不兼容行为的那个 provider response 仍可能已经超限。
-每个 response 最多从剩余额度中获得 4 次调用，并收到内容稳定的对应控制指令；真正
-执行其中任一机制的 endpoint 不会让单个 response 吞掉整个 Turn，且 continuation
-identity 不会变化。
+之后 Agent 执行与 Codex 相同的主循环：采样模型、执行模型请求的工具、追加工具输出，
+再继续采样。模型返回不带 tool call 的 terminal assistant message、用户执行
+finish/interrupt/cancel，或 runtime/provider 基础设施失败时，Action 才结束。
+这里没有 Action step 数或 hosted-search 次数额度。
 `reasoning_effort`（`none`、`low`、`medium`、`high`、`xhigh` 或 `max`）可覆盖
 该 action 的服务端默认推理强度；这个值会固化到 Turn，并出现在 model step 的
 输入元数据里。
 `search_context_size`（`low`、`medium` 或 `high`）控制每次 hosted search 附带
-多少检索上下文；范围明确的探索 route 应先用 `low`，只有确实需要更丰富页面
+多少检索上下文；探索 route 可先用 `low`，只有确实需要更丰富页面
 上下文时再提高。
 `finalize="after_search"` 为必须交付最终结果的 action 建立显式完成边界：若第一次
 Turn 使用过 hosted search，同一个持久 Agent Session 会再收到一个
-`max_steps=1`、`max_search_calls=0` 的 Action Turn，把前面的研究结果或过程播报
-转换成真正的最终交付物。`finalize="always"` 即使第一次 Turn 没用 hosted tools
-也会执行该无工具 Turn。finalizer 是独立持久化、可见的 ActionInvocation/Turn，
-因此会被预算、恢复和检查，而不是隐藏的后处理。
+显式禁用工具的 Action Turn，把前面的研究结果或过程播报转换成真正的最终交付物。
+`finalize="always"` 即使第一次 Turn 没用 hosted tools 也会执行该无工具 Turn。
+finalizer 是独立持久化、可见的 ActionInvocation/Turn，因此可以恢复和检查，
+而不是隐藏的后处理。typed-action 的 JSON repair 使用同一个内部无工具策略。
 ```text
 ActionInvocation
   Attempt 1 -> Turn 1 -> model/tool Steps
@@ -186,11 +179,11 @@ run request 或启动上下文快照；interrupt/retry guidance 属于 control l
 | `failed` | runtime/model/tool 失败终止了 invocation。 |
 | `cancelled` | run 或 Turn cancellation 终止了 invocation。 |
 
-完成的 action 返回 assistant 输出字符串。usage 与 Step 数会累加到
-Workflow budget usage。provider 对 incomplete sample 返回的 usage 会跨重试
+完成的 action 返回 assistant 输出字符串。token/cache usage、Step 数、hosted-search
+次数与耗时会累加到 Workflow telemetry。provider 对 incomplete sample 返回的 usage 会跨重试
 累积；如果所有重试都失败，最后一个 model Step 会以 failed 状态持久化，已经
-消耗的 token 仍然计入该 run。若 output limit 或只有 reasoning 的 completion
-没有产生 message/tool call，有限重试会降低 reasoning effort，并明确要求按原始
+消耗的 token 仍然记录到该 run。若 output limit 或只有 reasoning 的 completion
+没有产生 message/tool call，固定的瞬时错误重试会降低 reasoning effort，并明确要求按原始
 格式交付 final answer。
 
 Action 完成和整个 Workflow 的结果是否被接受是两层语义。例如内置
@@ -206,11 +199,8 @@ Action 完成和整个 Workflow 的结果是否被接受是两层语义。例如
 
 启动前，`together` 会检查直接传入的 `_ActionCall`。如果两个 call 指向同一
 Agent 对象，它会抛出 `ValueError`，并且该组 action 一个也不会启动。
-Rust runtime 还会独立应用：
-
-- 受 `max_concurrent_actions` 约束的 run 级 semaphore；
-- 每个 Agent instance 一个 mutex，用于串行化其 Session 中的 Turn；
-- Session runtime 的全局 concurrent-Turn 上限。
+Rust runtime 还会为每个 Agent instance 应用一个 mutex，串行化其 Session 中的
+Turn，并应用 Session runtime 的服务端全局 concurrent-Turn 上限。
 
 因此，不同 Agent Session 可以同步工作。同一 Agent 的 call 即使通过普通
 Python task 并发创建，也会在 per-Agent gate 排队。
@@ -229,7 +219,7 @@ primitive，不是隐藏的执行循环。
 执行前，Rust 会收集所有涉及该 Agent 的入边和出边，并注入可读的关系上下文。
 relation 不会自动发消息，也不会自动调用 target。
 
-在 Agent budget 用尽前，可以动态创建 Agent 和修改 Team。把 Agent 从 Team
+Workflow 处于 active 状态时可以动态创建 Agent 和修改 Team。把 Agent 从 Team
 移除不会 retire 它；retire 必须显式执行。
 
 ## 8. Task Scope
@@ -302,7 +292,7 @@ background loop：
 
 1. 按名字注册或复用 active timer；
 2. 等待 `next_fire_at`；
-3. 持久化一次 fire，推进 count/deadline，并更新 budget usage；
+3. 持久化一次 fire，推进 count/deadline，并更新 usage telemetry；
 4. await callback；
 5. 重复。
 
@@ -316,39 +306,27 @@ timer loop 会 await callback，所以同一个 TimerHandle 的 callback 不会�
 callback 中的 action 每次都会创建新 Turn。workflow 完成时，active timer record
 会变为 completed。
 
-## 12. 完成、失败与 Budget
+## 12. 完成、失败与可观测性
 
 | Workflow 状态 | 进入条件 | 是否接受 effect |
 |---|---|---|
 | `created` | run 已持久化，等待 scheduler。 | checkpoint 可以进入启动阶段。 |
-| `running` | worker 正在解释源码。 | 可以，但受校验与 budget 约束。 |
+| `running` | worker 正在解释源码。 | 可以，但受校验与权限约束。 |
 | `waiting_for_user` | Workflow 正在请求用户输入。 | 用户提交通过校验的回答后继续。 |
 | `waiting_for_timer` | Workflow 正在等待 timer deadline。 | timer 唤醒后继续。 |
 | `waiting_for_signal` | Workflow 正在等待 Channel Signal。 | 收到匹配 Signal 后继续。 |
 | `paused` | 用户暂停 run。 | 已有调用在 checkpoint 等待。 |
 | `completed` | `complete` 已保存输出。 | 不再接受新领域工作。 |
-| `failed` | Python、action、protocol、sandbox 或 budget 失败。 | 不接受。 |
+| `failed` | Python、action、protocol、sandbox、model 或 provider 失败。 | 不接受。 |
 | `cancelled` | 用户/runtime 取消。 | 不接受。 |
 
-Budget 字段包括 `max_agents`、`max_concurrent_actions`、`max_action_steps`、
-`max_total_tokens`、`max_uncached_tokens`、`max_hosted_search_calls`、
-`max_wall_time_seconds` 与可选 `max_cost_usd`。`max_total_tokens` 是 provider
-原始 input + output 的安全上限；
-`max_uncached_tokens` 是成本上限，按
-`input_tokens - cached_input_tokens + output_tokens` 计算，因此缓存读取仍被记录，
-但不会消耗未缓存额度。`max_action_steps` 是整个 run 内持久化 model、local tool、
-hosted tool 与 compaction Step 的总上限；Step 创建时立即计费，即使所在 action
-之后失败也不会丢失成本，并在每次模型采样前检查。多个并发中的 provider response
-一次返回多个 tool Step 时仍可能产生小幅、有界的超限。`max_hosted_search_calls`
-限制整个 run 内 provider-hosted
-search、open-page 与 find-in-page 的总次数；每个研究 action 还应声明
-`max_search_calls`，避免一次 provider 响应吃完整个 run 的额度。
-Agent、action、step、timer、hosted-search、token 与 wall-time usage 都会持久化。
-部分限制只在 effect/model 边界检查，并发中的响应可能让 run 级搜索总数小幅超限。
-endpoint 真正执行 `max_tool_calls` 时 action 级限制由 provider 硬执行；只接受但不
-执行也会在首次违规响应后被识别并降级。fallback 下 runtime 只能在 model sample
-之间执行限制，单个 response 仍可能超过 4 次的软批量上限。cost enforcement 需要
-provider 提供 cost estimate。
+Workflow 执行没有 Agent 数、Action step、hosted-search、token、wall-time 或 cost
+额度。这些量是观测数据，不参与控制流：Agent/action/step/timer/search 数、provider
+token 与 cache usage、wall-clock time 都会持久化并供 UI 检查。runtime 仍会执行
+权限、sandbox、Session 串行化、用户显式 pause/finish/interrupt/cancel、provider
+request/stream-idle timeout、context-window 安全与服务端全局并发限制。因此无人看管的
+Workflow 可能长时间运行并消耗大量 provider 资源；未来如果加入 quota policy，也应
+与描述协作逻辑的 Workflow 正交。
 
 未捕获的 Python exception 会让 runner 退出，并以有长度限制的 stderr 使 run
 失败。action failure 会作为 effect exception 返回 Python；workflow 若不捕获，

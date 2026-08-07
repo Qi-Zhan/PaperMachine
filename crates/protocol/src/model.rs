@@ -137,15 +137,6 @@ pub enum ModelTransport {
     ResponsesWebsocket,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaxToolCallsMode {
-    NotRequested,
-    ProviderEnforced,
-    ProviderViolated,
-    RuntimeFallback,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct ModelRequestMetadata {
     /// PaperMachine provider identifier selected by the model profile.
@@ -162,13 +153,6 @@ pub struct ModelRequestMetadata {
     pub prompt_cache_mode: PromptCacheMode,
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_breakpoint: bool,
-    /// Whether the provider accepted and honored the Responses API
-    /// `max_tool_calls` request property. ProviderViolated means the endpoint
-    /// accepted the field but emitted more hosted calls than requested;
-    /// subsequent requests fall back to runtime accounting. RuntimeFallback
-    /// means PaperMachine omitted the field because the endpoint rejected or
-    /// previously violated it.
-    pub max_tool_calls_mode: MaxToolCallsMode,
     pub used_previous_response_id: bool,
     pub continuation_miss_reason: Option<String>,
     pub websocket_fallback_reason: Option<String>,
@@ -202,10 +186,6 @@ pub struct ModelRequest {
     pub parallel_tool_calls: bool,
     #[serde(default)]
     pub tool_choice: ModelToolChoice,
-    /// Maximum number of provider-hosted built-in tool calls that may be
-    /// processed while producing this response.
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
     #[serde(default)]
     pub response_format: Option<ModelResponseFormat>,
 }

@@ -916,7 +916,6 @@ async fn create_workflow(
             source_timer_id: None,
         },
         params: request.params,
-        budget: None,
         default_model: model.to_string(),
         access: request.access,
         enabled_skills: request.enabled_skills,

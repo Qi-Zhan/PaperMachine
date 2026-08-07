@@ -101,18 +101,10 @@ class _ActionDescriptor:
         self,
         function: Callable[..., Any],
         prompt: str | None = None,
-        max_steps: int | None = None,
-        max_search_calls: int | None = None,
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         finalize: str | None = None,
     ) -> None:
-        if max_steps is not None and (isinstance(max_steps, bool) or max_steps < 1):
-            raise ValueError("action max_steps must be a positive integer")
-        if max_search_calls is not None and (
-            isinstance(max_search_calls, bool) or max_search_calls < 0
-        ):
-            raise ValueError("action max_search_calls must be a non-negative integer")
         if search_context_size not in {None, "low", "medium", "high"}:
             raise ValueError(
                 "action search_context_size must be one of: low, medium, high"
@@ -138,8 +130,6 @@ class _ActionDescriptor:
         self.human_message_parameter = _human_message_parameter(function)
         self.return_kind = _json_return_kind(function)
         self.response_format = _response_format(self.name, self.return_kind)
-        self.max_steps = max_steps
-        self.max_search_calls = max_search_calls
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
@@ -186,8 +176,6 @@ class _ActionDescriptor:
                 arguments,
                 self.return_kind,
                 self.response_format,
-                self.max_steps,
-                self.max_search_calls,
                 self.search_context_size,
                 self.reasoning_effort,
                 self.finalize,
@@ -201,8 +189,6 @@ class _ActionDescriptor:
 def action(
     argument: Any = None,
     *,
-    max_steps: int | None = None,
-    max_search_calls: int | None = None,
     search_context_size: str | None = None,
     reasoning_effort: str | None = None,
     finalize: str | None = None,
@@ -210,8 +196,6 @@ def action(
     if callable(argument):
         return _ActionDescriptor(
             argument,
-            max_steps=max_steps,
-            max_search_calls=max_search_calls,
             search_context_size=search_context_size,
             reasoning_effort=reasoning_effort,
             finalize=finalize,
@@ -223,8 +207,6 @@ def action(
         return _ActionDescriptor(
             function,
             argument,
-            max_steps,
-            max_search_calls,
             search_context_size,
             reasoning_effort,
             finalize,
@@ -354,8 +336,6 @@ class _ActionCall(Awaitable[Any]):
         arguments: dict[str, Any],
         return_kind: str | None,
         response_format: dict[str, Any] | None,
-        max_steps: int | None,
-        max_search_calls: int | None,
         search_context_size: str | None,
         reasoning_effort: str | None,
         finalize: str | None,
@@ -368,8 +348,6 @@ class _ActionCall(Awaitable[Any]):
         self.arguments = arguments
         self.return_kind = return_kind
         self.response_format = response_format
-        self.max_steps = max_steps
-        self.max_search_calls = max_search_calls
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
@@ -405,8 +383,7 @@ class _ActionCall(Awaitable[Any]):
                     "original_action": self.name,
                     "finalization_policy": self.finalize,
                 },
-                max_steps=1,
-                max_search_calls=0,
+                tools_enabled=False,
                 search_context_size=None,
                 reasoning_effort=self.reasoning_effort,
                 use_human_message=False,
@@ -437,8 +414,7 @@ class _ActionCall(Awaitable[Any]):
                     "parser_error": str(error),
                     "repair_attempt": repair_attempt + 1,
                 },
-                max_steps=1,
-                max_search_calls=0,
+                tools_enabled=False,
                 search_context_size=None,
                 reasoning_effort="low",
                 use_human_message=False,
@@ -456,8 +432,7 @@ class _ActionCall(Awaitable[Any]):
         action_name: str | None = None,
         prompt: str | None = None,
         arguments: dict[str, Any] | None = None,
-        max_steps: int | None = None,
-        max_search_calls: int | None = None,
+        tools_enabled: bool = True,
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         use_human_message: bool = False,
@@ -470,12 +445,7 @@ class _ActionCall(Awaitable[Any]):
                 "prompt": prompt or self.prompt,
                 "arguments": self.arguments if arguments is None else arguments,
                 "response_format": self.response_format,
-                "max_steps": self.max_steps if max_steps is None else max_steps,
-                "max_search_calls": (
-                    self.max_search_calls
-                    if max_search_calls is None
-                    else max_search_calls
-                ),
+                "tools_enabled": tools_enabled,
                 "web_search_context_size": (
                     self.search_context_size
                     if search_context_size is None

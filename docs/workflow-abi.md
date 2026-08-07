@@ -16,7 +16,6 @@ class Researcher(Agent):
     system_prompt = "Prefer primary evidence and preserve uncertainty."
 
     @action(
-        max_search_calls=16,
         search_context_size="low",
         reasoning_effort="high",
     )
@@ -27,7 +26,7 @@ class Researcher(Agent):
 class Synthesizer(Agent):
     access = "model_only"
 
-    @action(max_steps=1, reasoning_effort="medium")
+    @action(reasoning_effort="medium")
     async def synthesize(self, question: str, findings: list[str]):
         """Compare findings and return the strongest bounded conclusion."""
 
@@ -56,15 +55,6 @@ class Synthesizer(Agent):
     output_schema={
         "type": "object",
         "properties": {"summary": {"type": "string"}},
-    },
-    budget={
-        "max_agents": 8,
-        "max_concurrent_actions": 4,
-        "max_action_steps": 24,
-        "max_total_tokens": 1500000,
-        "max_uncached_tokens": 400000,
-        "max_hosted_search_calls": 64,
-        "max_wall_time_seconds": 7200,
     },
 )
 async def main(ctx):
@@ -103,7 +93,6 @@ must be Python literals.
 | `description` | Protocol purpose shown on the Workflow page. |
 | `params_schema` | Supported JSON Schema subset for reusable run parameters, checked before scheduling. A string with `format: "model-profile"` gets a configured-model picker and profile validation. |
 | `output_schema` | Declared result contract; currently descriptive at completion. |
-| `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
 
 The runtime provides `ctx.request`, `ctx.params`, `ctx.workflow_id`,
 `ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
@@ -130,7 +119,7 @@ summaries.
 | `Agent(model=...)` | Binds this persistent Agent Session to a configured model profile; an empty value inherits the Run default. Different roles use different models by ordinary Python construction. |
 | `Agent(access=...)` | Overrides the class access profile for this instance. |
 | `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
-| `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, and `reasoning_effort` give each role its own sample, search, retrieval-context, and compute policy. |
+| `@action` | Declares a model-backed action. Optional `search_context_size`, `reasoning_effort`, and `finalize` configure retrieval context, model compute, and post-search finalization. The model/tool loop ends naturally on a terminal assistant message. |
 | `await together(...)` | Runs awaitables concurrently; duplicate same-Agent actions fail before starting. |
 | `Team(name, *agents)` | Creates a named, dynamically mutable membership set. |
 | `await team.add/remove(...)` | Changes Team membership. |
@@ -233,10 +222,10 @@ Python process or execution permit for each idle wait.
 
 ## Concurrency and timers
 
-`together` is explicit concurrency. A run-level semaphore enforces
-`max_concurrent_actions`; a per-Agent mutex ensures that one Session never runs
-two Turns concurrently. The output tuple preserves argument order, independent
-of completion order.
+`together` is explicit concurrency. Server-wide run/Turn limits protect local
+resources, while a per-Agent mutex ensures that one Session never runs two
+Turns concurrently. The output tuple preserves argument order, independent of
+completion order.
 
 Timers use `coalesce`, `skip`, or `queue` policy metadata and persist fire count,
 next fire time, and last fire time. Dormant timer waits are scheduler wakeups,

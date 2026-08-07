@@ -22,11 +22,11 @@ provider 的完整 instructions，以及该最终文本的 hash。
 
 Layers are rendered in this order into the single `instructions` field used by
 the Responses-compatible provider API. Later layers specialize the context but
-do not grant permissions. Filesystem, command, network, budget, and approval
+do not grant permissions. Filesystem, command, network, and approval
 rules are always enforced by runtime code, never by prompt text.
 
 这些层按表中顺序渲染到 Responses-compatible API 的单一 `instructions` 字段。
-后面的层可以细化任务语境，但不能提升权限。文件、命令、网络、预算与人工授权都由
+后面的层可以细化任务语境，但不能提升权限。文件、命令、网络与人工授权都由
 runtime 代码执行，不能靠 prompt 获得或绕过。
 
 ## Editing semantics / 修改语义

@@ -55,7 +55,6 @@ WORKFLOW_METADATA_KEYS = {
     "description",
     "params_schema",
     "output_schema",
-    "budget",
     "entrypoint",
 }
 
@@ -247,20 +246,6 @@ def find_manifest(tree: ast.Module) -> tuple[dict[str, Any] | None, ast.AST | No
     return metadata, node, entrypoint
 
 
-def budget(raw: Any) -> dict[str, Any]:
-    values = dict(raw or {})
-    return {
-        "max_agents": int(values.get("max_agents", 12)),
-        "max_concurrent_actions": int(values.get("max_concurrent_actions", 4)),
-        "max_action_steps": int(values.get("max_action_steps", 32)),
-        "max_total_tokens": values.get("max_total_tokens", 2000000),
-        "max_uncached_tokens": values.get("max_uncached_tokens", 500000),
-        "max_hosted_search_calls": values.get("max_hosted_search_calls", 64),
-        "max_wall_time_seconds": values.get("max_wall_time_seconds", 14400),
-        "max_cost_usd": values.get("max_cost_usd"),
-    }
-
-
 def validate(source: str) -> dict[str, Any]:
     diagnostics: list[dict[str, Any]] = []
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
@@ -315,27 +300,6 @@ def validate(source: str) -> dict[str, Any]:
         if condition:
             diagnostics.append({"severity": "error", "message": message, "line": getattr(node, "lineno", None), "column": getattr(node, "col_offset", None)})
 
-    default_budget = budget(metadata.get("budget"))
-    max_action_steps = default_budget["max_action_steps"]
-    max_hosted_search_calls = default_budget["max_hosted_search_calls"]
-    if (
-        isinstance(max_action_steps, int)
-        and isinstance(max_hosted_search_calls, int)
-        and max_hosted_search_calls > 0
-        and max_action_steps <= max_hosted_search_calls
-    ):
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "message": (
-                    "max_action_steps cannot accommodate max_hosted_search_calls plus "
-                    "the model steps required to request and finish those searches"
-                ),
-                "line": getattr(node, "lineno", None),
-                "column": getattr(node, "col_offset", None),
-            }
-        )
-
     manifest = {
         "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"papermachine:workflow:{slug}")),
         "slug": slug,
@@ -344,7 +308,6 @@ def validate(source: str) -> dict[str, Any]:
         "entrypoint": entrypoint,
         "params_schema": metadata.get("params_schema", {"type": "object"}),
         "output_schema": metadata.get("output_schema", {}),
-        "default_budget": default_budget,
     }
     return {
         "valid": not any(item["severity"] == "error" for item in diagnostics),

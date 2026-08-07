@@ -6,7 +6,7 @@ class ProjectSummaryAgent(Agent):
     role = "project progress curator"
     system_prompt = """Build an honest, useful project progress page from the supplied PaperMachine snapshot. Treat Session Turns, Workflow outputs, and Artifact metadata as evidence. Separate completed findings, work in progress, unresolved questions, and recommended next actions. Preserve important uncertainty and failures instead of smoothing them over. Use the Project's working language. Never claim access to material absent from the snapshot."""
 
-    @action(max_steps=12)
+    @action
     async def render_progress_page(self, snapshot: dict):
         """Return one complete, self-contained HTML document for the Project overview. Use semantic HTML and an inline <style>; do not use scripts, external assets, remote fonts, Markdown fences, or invented citations. Include a compact headline/status area, current conclusions with their Session or Workflow provenance, active work, blockers/open questions, and concrete next actions. The page is embedded in a sandboxed iframe, so make it responsive and readable on white or light neutral backgrounds."""
 
@@ -56,16 +56,6 @@ class ProjectSummaryAgent(Agent):
             "refresh_count": {"type": "integer"},
         },
         "required": ["artifact_id", "refresh_count"],
-    },
-    budget={
-        "max_agents": 1,
-        "max_concurrent_actions": 1,
-        "max_action_steps": 100000,
-        "max_total_tokens": None,
-        "max_uncached_tokens": None,
-        "max_hosted_search_calls": 0,
-        "max_wall_time_seconds": None,
-        "max_cost_usd": None,
     },
 )
 async def main(ctx):

@@ -91,7 +91,7 @@ one Project.
   reuse provider-managed prompt caches with stable prompt-prefix keys shared by
   matching Agents, continue local tool loops and later Turns with per-Session
   WebSocket state, distinguish cache writes from cache reads, and compact long
-  histories at 90% of the available context budget.
+  histories at 90% of the available context capacity.
 - Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
 - Enable Project-local skills per Session and snapshot them per Turn.
 - Assign each Session/Workflow Agent one of five access profiles. A Workflow

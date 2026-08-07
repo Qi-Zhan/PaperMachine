@@ -1,5 +1,4 @@
 use crate::AgentAccessProfile;
-use crate::Budget;
 use crate::ProjectId;
 use crate::WorkflowProgramId;
 use chrono::DateTime;
@@ -18,7 +17,6 @@ pub struct WorkflowProgramManifest {
     pub entrypoint: String,
     pub params_schema: Value,
     pub output_schema: Value,
-    pub default_budget: Budget,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

@@ -13,7 +13,7 @@ server process. Before catalog registration, the AST validator:
 - requires exactly one literal `@workflow(...)` manifest;
 - rejects file, dynamic-code, reflection, dunder, process, socket, environment,
   and other explicitly forbidden names/calls;
-- validates slug, schemas, and budget metadata;
+- validates slug and schema metadata;
 - extracts Agent/action and coordination summaries for inspection.
 
 Validation is a usability and defense-in-depth layer, not the isolation
@@ -25,7 +25,7 @@ The runtime fails closed on platforms without an implemented Python sandbox.
 
 The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
-statuses, budgets, and Session serialization before applying them.
+statuses, permissions, and Session serialization before applying them.
 
 `ctx.project.snapshot()` is a Rust-owned read effect, not database access from
 Python. It is fixed to the current Workflow's Project, excludes summary runs to
@@ -133,21 +133,12 @@ not silently rewrite the endpoint.
   can only report execution as unknown: it cannot prove whether an external side
   effect happened before the process disappeared. Workflow authors should make
   destructive or non-idempotent tool operations require an explicit checkpoint.
-- Raw, uncached-token, and run-wide hosted-search budgets are checked at
-  effect/model boundaries. One in-flight response can exceed a remaining token,
-  search, or wall-time allowance before usage is reported. Per-action
-  `max_search_calls` is forwarded as the Responses API `max_tool_calls` hard
-  response limit when the endpoint supports it. PaperMachine probes field
-  acceptance once per model and also counts the actual hosted calls in every
-  response. If a proxy rejects the field, it is omitted. If a proxy accepts but
-  exceeds the requested limit, that response is recorded as
-  `provider_violated` and all later requests for the model use
-  `runtime_fallback`. In either fallback case the runtime stops further hosted
-  search between model samples, but the response that reveals a violation can
-  already have overshot its allowance. PaperMachine also batches the remaining
-  allowance at four hosted calls per response and adds a stable matching
-  instruction; non-enforcing proxies can still exceed this soft batch size
-  before the runtime regains control.
-- `max_cost_usd` is metadata until a provider client supplies pricing estimates.
+- Workflow execution currently has no step, hosted-search, token, wall-time, or
+  cost quota. An Action continues until the model returns a terminal answer,
+  the user finishes/interrupts/cancels it, or an infrastructure/provider error
+  occurs. Provider request and stream-idle timeouts still protect broken
+  connections, and server-wide concurrency limits protect the process, but
+  users should treat an unattended research Workflow as potentially unbounded.
+  Token/cache/search/time usage remains persisted for inspection.
 - Generated protocols and model output can still be wrong. Inspectability and
   provenance do not establish factual correctness.

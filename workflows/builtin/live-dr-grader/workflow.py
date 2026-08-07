@@ -18,8 +18,6 @@ This rubric is adapted from the upstream Microsoft LiveDRBench evaluators:
 Return indices into the supplied arrays, never copy reference answers into explanatory prose. Be conservative but do not reject an acronym or canonical short name merely because the reference uses a full title."""
 
     @action(
-        max_steps=1,
-        max_search_calls=0,
         reasoning_effort="high",
     )
     async def judge(
@@ -253,15 +251,6 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
         "type": "object",
         "properties": {"grading": {"type": "object"}},
         "required": ["grading"],
-    },
-    budget={
-        "max_agents": 1,
-        "max_concurrent_actions": 1,
-        "max_action_steps": 3,
-        "max_total_tokens": 250000,
-        "max_uncached_tokens": 100000,
-        "max_hosted_search_calls": 0,
-        "max_wall_time_seconds": 1800,
     },
 )
 async def main(ctx):

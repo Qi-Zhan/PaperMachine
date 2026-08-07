@@ -331,12 +331,7 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(usage["uncached_input_tokens"], 77)
         self.assertEqual(run_matrix.operational_wall_time(job, "research"), 13)
 
-    def test_budget_errors_are_not_retried(self) -> None:
-        self.assertFalse(
-            run_matrix.is_retryable_error(
-                "Workflow token budget exceeded: used 515213 of 500000 tokens"
-            )
-        )
+    def test_research_runtime_errors_are_retryable(self) -> None:
         self.assertTrue(
             run_matrix.is_retryable_error("model provider error: stream_read_error")
         )

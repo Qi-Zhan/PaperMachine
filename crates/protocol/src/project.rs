@@ -127,9 +127,7 @@ pub struct Workflow {
     pub error: Option<String>,
     pub attention_required: bool,
     #[serde(default)]
-    pub budget: Budget,
-    #[serde(default)]
-    pub usage: BudgetUsage,
+    pub usage: WorkflowUsage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -157,37 +155,8 @@ pub struct WorkflowEffect {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct Budget {
-    pub max_agents: u32,
-    pub max_concurrent_actions: u32,
-    pub max_action_steps: u32,
-    pub max_total_tokens: Option<u64>,
-    #[serde(default)]
-    pub max_uncached_tokens: Option<u64>,
-    #[serde(default)]
-    pub max_hosted_search_calls: Option<u32>,
-    pub max_wall_time_seconds: Option<u64>,
-    pub max_cost_usd: Option<f64>,
-}
-
-impl Default for Budget {
-    fn default() -> Self {
-        Self {
-            max_agents: 12,
-            max_concurrent_actions: 4,
-            max_action_steps: 32,
-            max_total_tokens: Some(2_000_000),
-            max_uncached_tokens: Some(500_000),
-            max_hosted_search_calls: Some(64),
-            max_wall_time_seconds: Some(14_400),
-            max_cost_usd: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct BudgetUsage {
+pub struct WorkflowUsage {
     pub agents_created: u32,
     pub actions_started: u32,
     pub actions_completed: u32,

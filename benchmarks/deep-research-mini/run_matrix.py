@@ -870,8 +870,6 @@ def mean(values: list[float]) -> float:
 
 
 def compact_error(error: str) -> str:
-    if "token budget exceeded" in error.lower():
-        return "token_budget_exceeded"
     if "stream_read_error" in error:
         return "stream_read_error"
     if "Broken pipe" in error:
@@ -879,8 +877,8 @@ def compact_error(error: str) -> str:
     return error.strip().splitlines()[-1][:120]
 
 
-def is_retryable_error(error: str) -> bool:
-    return "budget exceeded" not in error.lower()
+def is_retryable_error(_error: str) -> bool:
+    return True
 
 
 def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> str:

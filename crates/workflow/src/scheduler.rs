@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Utc;
-use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ChannelId;
 use papermachine_protocol::HumanRequestStatus;
 use papermachine_protocol::TimerStatus;
 use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkflowStatus;
+use papermachine_protocol::WorkflowUsage;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use serde::Serialize;
@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 use thiserror::Error;
@@ -255,34 +256,18 @@ async fn run_scheduled(
 
         let started = Instant::now();
         let execution = cancellation.child_token();
-        let result = match run.budget.max_wall_time_seconds {
-            Some(limit) if run.usage.wall_time_seconds >= limit => Err(format!(
-                "wall-time budget exhausted: used {} of {limit} seconds",
-                run.usage.wall_time_seconds
-            )),
-            Some(limit) => {
-                let remaining = limit.saturating_sub(run.usage.wall_time_seconds);
-                tokio::select! {
-                    result = inner.executor.execute(workflow_id, execution.clone()) => result,
-                    _ = tokio::time::sleep(Duration::from_secs(remaining)) => {
-                        execution.cancel();
-                        Err(format!("wall-time budget exceeded after {limit} seconds"))
-                    }
-                }
-            }
-            None => inner.executor.execute(workflow_id, execution).await,
-        };
+        let result = inner.executor.execute(workflow_id, execution).await;
         let elapsed = started
             .elapsed()
             .as_secs()
             .max(u64::from(!started.elapsed().is_zero()));
         inner
             .store
-            .add_budget_usage(
+            .add_workflow_usage(
                 workflow_id,
-                BudgetUsage {
+                WorkflowUsage {
                     wall_time_seconds: elapsed,
-                    ..BudgetUsage::default()
+                    ..WorkflowUsage::default()
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -468,7 +453,6 @@ pub enum WorkflowSchedulerError {
 mod tests {
     use super::*;
     use papermachine_protocol::AgentAccessProfile;
-    use papermachine_protocol::Budget;
     use papermachine_protocol::Session;
     use papermachine_protocol::Workflow;
     use papermachine_protocol::WorkflowProgramId;
@@ -570,7 +554,6 @@ mod tests {
                 entrypoint: "main".to_string(),
                 params_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
-                default_budget: Budget::default(),
             },
             source: WorkflowProgramSource::Builtin,
             definition_path: "builtin/scheduler-test/workflow.py".to_string(),
@@ -589,7 +572,6 @@ mod tests {
                 instructions: String::new(),
                 trigger: Default::default(),
                 params: json!({}),
-                budget: None,
                 default_model: "test-model".to_string(),
                 access: AgentAccessProfile::Research,
                 enabled_skills: Vec::new(),

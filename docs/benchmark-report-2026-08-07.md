@@ -1,5 +1,10 @@
 # PaperMachine auto-research 工程评估（2026-08-07）
 
+> 实现更新：本报告记录的是额度机制仍存在时的实验与故障历史。当前 runtime 已删除
+> Workflow/Action 的 step、search、token、wall-time、cost 额度，以及 provider
+> `max_tool_calls` 探测与 fallback；文中相关描述不代表现行 API。usage/cache/search/time
+> 指标仍继续记录。
+
 ## 结论先行
 
 当前框架已经可以真实运行由多个持久 Session 组成的 Python Workflow，并且能够在
@@ -193,8 +198,7 @@ Session，能复用该路线历史，而不是重建新 Agent。
 2. 保持 runtime/project/workflow/agent prompt 前缀稳定、可检查；
 3. 大 context 用语义 compaction，而不是每 Turn 重发无限历史；
 4. UI 同时显示 raw input、cached input、uncached input、cache mode/key 和 compaction；
-5. 用 provider capability profile 区分 continuation、显式 breakpoint、隐式 cache 和
-   tool-call limit 是否真的生效。
+5. 用 provider capability profile 区分 continuation、显式 breakpoint 与隐式 cache。
 
 当前单 Agent、r1、r2 的 uncached input 比为 1 : 4.38 : 5.44；output 比为
 1 : 6.38 : 7.24。当前复验 single、r3、r4 的 uncached input 比为
@@ -205,9 +209,9 @@ Session，能复用该路线历史，而不是重建新 Agent。
 
 1. **Project 目录可被旧数据库记录复用但磁盘目录已不存在。** 三个 benchmark runner
    现在都会在复用 Project 前重建 root；提交 `f2123eb`。
-2. **兼容 provider 接受 `max_tool_calls` 却不执行。** 现在会从实际响应检测 violation，
-   降级到 runtime 自己计数；提交 `aced188`。一个响应内部仍可能 overshoot，说明预算
-   必须在 framework 层最终兜底。
+2. **历史问题：兼容 provider 接受 `max_tool_calls` 却不执行。** 当时加入过实际响应
+   violation 检测与 runtime fallback（提交 `aced188`）；该额度机制现已整体删除，
+   不再属于当前 provider 路径。
 3. **Python Workflow 大 effect response 卡死。** 约 64 KiB 以上 JSONL response 超过
    asyncio 默认 StreamReader limit，三个 Workflow 在 action 已完成后永久等待。协议
    limit 已提升到 16 MiB，reader failure 会传播给所有 pending Future，不再静默挂起；
@@ -249,9 +253,9 @@ coverage/evaluator graph 可能把强单 Agent 已经找到的精确答案在 ha
 
 旧 6 题矩阵的 36 个 job 中只有 23 个 research 完成，且没有形成可用的完整 grade
 矩阵；报告里“0% accuracy”主要反映运行失败，不是模型质量。后续 Task 788 单点 probe
-成功找到 UFC 219 并通过独立 grader，cache read 90.3%；第二次 probe 因 provider 忽略
-工具调用上限而触发 runtime budget 失败。它验证了 provider capability bug 和修复方向，
-但不能当作 benchmark 分数。
+成功找到 UFC 219 并通过独立 grader，cache read 90.3%；第二次 probe 曾因当时的
+provider 工具调用额度路径触发 runtime 失败。它是已删除机制的历史诊断证据，不能当作
+benchmark 分数。
 
 ### 较早 DeepResearch 5×3×2
 

@@ -1293,7 +1293,7 @@ class HostInspector(Agent):
     access = "research"
     role = "host inspection"
 
-    @action(max_steps=1)
+    @action
     async def inspect(self, question: str) -> str:
         """Answer the question after access has been granted."""
 

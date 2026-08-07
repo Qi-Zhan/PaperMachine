@@ -364,8 +364,7 @@ impl Store {
         model: impl Into<String>,
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
-        max_steps: u32,
-        max_search_calls: Option<u32>,
+        tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -378,8 +377,7 @@ impl Store {
             model,
             prompt,
             reasoning_effort,
-            max_steps,
-            max_search_calls,
+            tools_enabled,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -396,8 +394,7 @@ impl Store {
         model: impl Into<String>,
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
-        max_steps: u32,
-        max_search_calls: Option<u32>,
+        tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -410,8 +407,7 @@ impl Store {
             model,
             prompt,
             reasoning_effort,
-            max_steps,
-            max_search_calls,
+            tools_enabled,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -428,8 +424,7 @@ impl Store {
         model: impl Into<String>,
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
-        max_steps: u32,
-        max_search_calls: Option<u32>,
+        tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -492,8 +487,7 @@ impl Store {
             reasoning_effort,
             prompt,
             access: session.access,
-            max_steps: max_steps.max(1),
-            max_search_calls,
+            tools_enabled,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -958,9 +952,6 @@ impl Store {
             id: WorkflowId::new(),
             project_id: request.project_id,
             started_from_session_id: request.started_from_session_id,
-            budget: request
-                .budget
-                .unwrap_or_else(|| request.program.manifest.default_budget.clone()),
             program: request.program,
             request: request.request,
             instructions: request.instructions,
@@ -975,7 +966,7 @@ impl Store {
             output: None,
             error: None,
             attention_required: false,
-            usage: BudgetUsage::default(),
+            usage: WorkflowUsage::default(),
             created_at: now,
             updated_at: now,
         };
@@ -1268,10 +1259,10 @@ impl Store {
         Ok(run)
     }
 
-    pub fn add_budget_usage(
+    pub fn add_workflow_usage(
         &self,
         id: WorkflowId,
-        delta: BudgetUsage,
+        delta: WorkflowUsage,
     ) -> Result<Workflow, StoreError> {
         // Read and update under one database lock. Workflow actions can finish in
         // parallel, so a separate get followed by update loses concurrent deltas.
@@ -1317,7 +1308,7 @@ impl Store {
             &transaction,
             run.project_id,
             run.id,
-            WorkflowEventPayload::BudgetUpdated {
+            WorkflowEventPayload::UsageUpdated {
                 usage: run.usage.clone(),
             },
         )?;
@@ -1372,12 +1363,6 @@ impl Store {
             return Err(StoreError::Invariant(
                 "cannot add an Agent to a terminal Workflow".to_string(),
             ));
-        }
-        if run.usage.agents_created >= run.budget.max_agents {
-            return Err(StoreError::Invariant(format!(
-                "Agent budget exhausted: {} of {}",
-                run.usage.agents_created, run.budget.max_agents
-            )));
         }
         let system_prompt = system_prompt.into();
         validate_system_prompt(&system_prompt)?;
@@ -1708,18 +1693,18 @@ impl Store {
             run.id,
             action_event_payload(&invocation, Some(attempt.id)),
         )?;
-        let budget_event = append_workflow_event_tx(
+        let usage_event = append_workflow_event_tx(
             &transaction,
             run.project_id,
             run.id,
-            WorkflowEventPayload::BudgetUpdated {
+            WorkflowEventPayload::UsageUpdated {
                 usage: run.usage.clone(),
             },
         )?;
         transaction.commit()?;
         drop(connection);
         self.shared.publish_workflow(action_event);
-        self.shared.publish_workflow(budget_event);
+        self.shared.publish_workflow(usage_event);
         Ok(attempt)
     }
 
@@ -1795,12 +1780,12 @@ impl Store {
             run.id,
             action_event_payload(&invocation, Some(attempt.id)),
         )?;
-        let budget_event = if status == ActionStatus::Completed {
+        let usage_event = if status == ActionStatus::Completed {
             Some(append_workflow_event_tx(
                 &transaction,
                 run.project_id,
                 run.id,
-                WorkflowEventPayload::BudgetUpdated {
+                WorkflowEventPayload::UsageUpdated {
                     usage: run.usage.clone(),
                 },
             )?)
@@ -1810,7 +1795,7 @@ impl Store {
         transaction.commit()?;
         drop(connection);
         self.shared.publish_workflow(action_event);
-        if let Some(event) = budget_event {
+        if let Some(event) = usage_event {
             self.shared.publish_workflow(event);
         }
         Ok(invocation)
@@ -2244,18 +2229,18 @@ impl Store {
                 fire_count: timer.fire_count,
             },
         )?;
-        let budget_event = append_workflow_event_tx(
+        let usage_event = append_workflow_event_tx(
             &transaction,
             run.project_id,
             run.id,
-            WorkflowEventPayload::BudgetUpdated {
+            WorkflowEventPayload::UsageUpdated {
                 usage: run.usage.clone(),
             },
         )?;
         transaction.commit()?;
         drop(connection);
         self.shared.publish_workflow(timer_event);
-        self.shared.publish_workflow(budget_event);
+        self.shared.publish_workflow(usage_event);
         Ok(timer)
     }
 

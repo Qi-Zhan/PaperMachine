@@ -1,8 +1,6 @@
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::ArtifactKind;
-use papermachine_protocol::Budget;
-use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
 use papermachine_protocol::HumanRequestStatus;
@@ -21,6 +19,7 @@ use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
 use papermachine_protocol::WorkflowStatus;
+use papermachine_protocol::WorkflowUsage;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
 use serde_json::json;
@@ -106,7 +105,6 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: AgentAccessProfile::Research,
             enabled_skills: Vec::new(),
@@ -180,7 +178,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: AgentAccessProfile::Research,
             enabled_skills: Vec::new(),
@@ -203,7 +200,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: AgentAccessProfile::Workspace,
             enabled_skills: Vec::new(),
@@ -233,7 +229,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: AgentAccessProfile::Workspace,
             enabled_skills: Vec::new(),
@@ -262,7 +257,6 @@ fn workflow() -> WorkflowProgramSnapshot {
             entrypoint: "main".to_string(),
             params_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
-            default_budget: Budget::default(),
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/parallel-review/workflow.py".to_string(),
@@ -291,7 +285,6 @@ fn workflow_for_session(
             instructions: String::new(),
             trigger: Default::default(),
             params: json!({}),
-            budget: None,
             default_model: "test-model".to_string(),
             access: AgentAccessProfile::Research,
             enabled_skills: Vec::new(),
@@ -324,8 +317,7 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -359,8 +351,7 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -391,8 +382,7 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -685,8 +675,7 @@ fn recovery_cancels_orphaned_turn_human_requests_idempotently() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -771,8 +760,7 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -858,8 +846,7 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
             "test-model",
             papermachine_protocol::PromptSnapshot::default(),
             None,
-            4,
-            None,
+            true,
             None,
             None,
             Vec::new(),
@@ -893,8 +880,7 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
                 "test-model",
                 papermachine_protocol::PromptSnapshot::default(),
                 None,
-                4,
-                None,
+                true,
                 None,
                 None,
                 Vec::new(),
@@ -960,7 +946,7 @@ fn workflow_effect_journal_replays_only_an_identical_request() {
 }
 
 #[test]
-fn concurrent_budget_updates_do_not_lose_deltas() {
+fn concurrent_usage_updates_do_not_lose_deltas() {
     const WORKERS: u32 = 8;
     const UPDATES_PER_WORKER: u32 = 25;
 
@@ -978,12 +964,12 @@ fn concurrent_budget_updates_do_not_lose_deltas() {
             scope.spawn(move || {
                 for _ in 0..UPDATES_PER_WORKER {
                     store
-                        .add_budget_usage(
+                        .add_workflow_usage(
                             run.id,
-                            BudgetUsage {
+                            WorkflowUsage {
                                 actions_started: 1,
                                 hosted_search_calls: 1,
-                                ..BudgetUsage::default()
+                                ..WorkflowUsage::default()
                             },
                         )
                         .expect("usage update should succeed");

@@ -19,7 +19,7 @@
    `together(...)` call.
 8. **Python owns control flow; Rust owns effects.** Workflow code may decide what
    to do next, but only Rust creates Sessions, calls models/tools, persists
-   state, applies controls, and enforces budgets.
+   state, applies controls, permissions, and sandbox boundaries.
 9. **A run snapshots its program.** Source, manifest, path, source owner, and
    SHA-256 are copied into the Workflow. Later files cannot change history.
 10. **Access is a Turn snapshot.** A Session chooses one of five profiles; a
@@ -185,7 +185,7 @@ PaperMachine config is absent. Codex configuration is not the model registry.
 
 History is stored locally, so `disable_response_storage=true` is supported.
 Before every model sample the agent estimates instruction, tool-schema, output,
-and history tokens. At 90% of the available history budget, it runs a no-tool
+and history tokens. At 90% of the available history capacity, it runs a no-tool
 semantic compaction sample and replaces early model-visible history with a
 handoff summary. Durable Turns, Steps, tool calls, and outputs remain unchanged
 for inspection. Deterministic middle-history trimming remains the final safety
@@ -292,7 +292,7 @@ ActionInvocation, ActionAttempt, and Turn, cancels only orphaned in-flight
 Steps/human-tool waiters, reconstructs a completed local-tool result from the
 Step's durable call ID, gives an execution-unknown tool an explicit restart
 result, and resumes at the next model sample. This avoids repeating a
-checkpointed completed sample or charging the Action-start budget twice. The
+checkpointed completed sample or counting the Action start twice. The
 effect journal is returned in Workflow views and is visible in the Session
 inspector.
 

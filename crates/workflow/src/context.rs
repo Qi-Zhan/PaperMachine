@@ -258,7 +258,6 @@ mod tests {
     use super::*;
     use papermachine_protocol::AgentAccessProfile;
     use papermachine_protocol::ArtifactKind;
-    use papermachine_protocol::Budget;
     use papermachine_protocol::WorkflowProgramId;
     use papermachine_protocol::WorkflowProgramManifest;
     use papermachine_protocol::WorkflowProgramSnapshot;
@@ -278,7 +277,6 @@ mod tests {
                 entrypoint: "main".to_string(),
                 params_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
-                default_budget: Budget::default(),
             },
             source: WorkflowProgramSource::Builtin,
             definition_path: "builtin/context-test/workflow.py".to_string(),
@@ -327,7 +325,6 @@ mod tests {
                 instructions: String::new(),
                 trigger: Default::default(),
                 params: json!({}),
-                budget: None,
                 default_model: "test-model".to_string(),
                 access: AgentAccessProfile::Research,
                 enabled_skills: Vec::new(),

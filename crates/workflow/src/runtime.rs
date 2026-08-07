@@ -27,7 +27,6 @@ use tokio::io::BufReader;
 use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -118,9 +117,6 @@ impl PythonWorkflowRuntime {
             sessions: self.sessions.clone(),
             workflow_id,
             cancellation: effect_cancellation.clone(),
-            action_permits: Arc::new(Semaphore::new(
-                run.budget.max_concurrent_actions.max(1) as usize
-            )),
             agent_gates: Mutex::new(HashMap::new()),
             effect_gates: Mutex::new(HashMap::new()),
             suspensions: Mutex::new(HashMap::new()),
@@ -264,7 +260,6 @@ struct RunEffectContext {
     sessions: SessionRuntime,
     workflow_id: WorkflowId,
     cancellation: CancellationToken,
-    action_permits: Arc<Semaphore>,
     agent_gates: Mutex<HashMap<AgentInstanceId, Arc<Mutex<()>>>>,
     effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     suspensions: Mutex<HashMap<String, WorkflowSuspension>>,
@@ -663,12 +658,6 @@ impl RunEffectContext {
             | ActionStatus::WaitingForHuman
             | ActionStatus::Interrupted => {}
         }
-        let _permit = tokio::select! {
-            permit = Arc::clone(&self.action_permits).acquire_owned() => {
-                permit.map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-            },
-            _ = self.cancellation.cancelled() => return Err(WorkflowRuntimeError::Cancelled),
-        };
         let gate = {
             let mut gates = self.agent_gates.lock().await;
             Arc::clone(
@@ -695,15 +684,6 @@ impl RunEffectContext {
                 None => self.store.start_action_attempt(invocation.id)?,
             };
             let guidance = interruption_guidance.take();
-            let max_steps = payload
-                .max_steps
-                .unwrap_or(run.budget.max_action_steps)
-                .min(run.budget.max_action_steps);
-            if max_steps == 0 {
-                return Err(WorkflowRuntimeError::Protocol(
-                    "action max_steps must be positive".to_string(),
-                ));
-            }
             let context = WorkflowTurnContext {
                 workflow_id: self.workflow_id,
                 action_invocation_id: invocation.id,
@@ -793,8 +773,7 @@ impl RunEffectContext {
                         },
                         prompt_layers,
                         payload.reasoning_effort,
-                        max_steps,
-                        payload.max_search_calls,
+                        payload.tools_enabled,
                         payload.web_search_context_size,
                         payload.response_format.clone(),
                         context,
@@ -1737,10 +1716,8 @@ struct InvokeActionEffect {
     prompt: String,
     arguments: Value,
     response_format: Option<ModelResponseFormat>,
-    #[serde(default)]
-    max_steps: Option<u32>,
-    #[serde(default)]
-    max_search_calls: Option<u32>,
+    #[serde(default = "default_tools_enabled")]
+    tools_enabled: bool,
     #[serde(default)]
     web_search_context_size: Option<WebSearchContextSize>,
     #[serde(default)]
@@ -1750,6 +1727,10 @@ struct InvokeActionEffect {
     human_request_id: Option<String>,
     #[serde(default)]
     human_message_argument: Option<String>,
+}
+
+const fn default_tools_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

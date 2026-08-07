@@ -13,8 +13,6 @@ use papermachine_model::ModelClient;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::AgentStep;
-use papermachine_protocol::Budget;
-use papermachine_protocol::BudgetUsage;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelResponseFormat;
@@ -36,6 +34,7 @@ use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkflowStatus;
+use papermachine_protocol::WorkflowUsage;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
@@ -54,7 +53,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions and budgets are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history.";
+const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history.";
 
 #[derive(Clone)]
 pub struct SessionRuntime {
@@ -145,8 +144,7 @@ impl SessionRuntime {
                 None,
                 Vec::new(),
                 None,
-                32,
-                None,
+                true,
                 None,
                 None,
                 None,
@@ -162,7 +160,6 @@ impl SessionRuntime {
         input: impl Into<String>,
         model_override: Option<&str>,
         additional_instructions: &str,
-        max_steps: u32,
         cancellation: CancellationToken,
     ) -> Result<Turn, SessionRuntimeError> {
         let turn = self
@@ -178,8 +175,7 @@ impl SessionRuntime {
                     additional_instructions,
                 ),
                 None,
-                max_steps,
-                None,
+                true,
                 None,
                 None,
                 None,
@@ -198,8 +194,7 @@ impl SessionRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
-        max_steps: u32,
-        max_search_calls: Option<u32>,
+        tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         context: WorkflowTurnContext,
@@ -213,8 +208,7 @@ impl SessionRuntime {
                 model_override,
                 prompt_layers,
                 reasoning_effort,
-                max_steps,
-                max_search_calls,
+                tools_enabled,
                 web_search_context_size,
                 response_format,
                 Some(context.action_attempt_id),
@@ -271,8 +265,7 @@ impl SessionRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
-        max_steps: u32,
-        max_search_calls: Option<u32>,
+        tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: Option<ActionAttemptId>,
@@ -304,8 +297,7 @@ impl SessionRuntime {
                 model,
                 prompt,
                 reasoning_effort,
-                max_steps,
-                max_search_calls,
+                tools_enabled,
                 web_search_context_size,
                 response_format,
                 resolved.snapshots,
@@ -318,8 +310,7 @@ impl SessionRuntime {
                 model,
                 prompt,
                 reasoning_effort,
-                max_steps,
-                max_search_calls,
+                tools_enabled,
                 web_search_context_size,
                 response_format,
                 resolved.snapshots,
@@ -455,14 +446,6 @@ async fn run_scheduled_turn(
         request.workflow_id = Some(context.workflow_id);
         request.action_invocation_id = Some(context.action_invocation_id);
         request.action_attempt_id = Some(context.action_attempt_id);
-        let run = inner.store.get_workflow(context.workflow_id)?;
-        if let Some(limit) = run.budget.max_hosted_search_calls {
-            let remaining = limit.saturating_sub(run.usage.hosted_search_calls);
-            request.max_search_calls = Some(
-                turn.max_search_calls
-                    .map_or(remaining, |action_limit| action_limit.min(remaining)),
-            );
-        }
     }
     request.initial_history = history;
     request.initial_usage = turn.usage;
@@ -472,10 +455,7 @@ async fn run_scheduled_turn(
     request.checkpoint_message = turn.checkpoint_message.clone();
     request.access = turn.access;
     request.reasoning_effort = turn.reasoning_effort;
-    request.max_steps = turn.max_steps;
-    if request.max_search_calls.is_none() {
-        request.max_search_calls = turn.max_search_calls;
-    }
+    request.tools_enabled = turn.tools_enabled;
     request.web_search_context_size = turn.web_search_context_size;
     request.response_format = turn.response_format;
     request.model_context_window = inner
@@ -559,41 +539,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         }
                     }
                 }
-                WorkflowStatus::Created | WorkflowStatus::Running => {
-                    if let Some(error) = workflow_action_step_budget_error(
-                        &run.budget,
-                        run.usage.action_steps,
-                        BudgetBoundary::BeforeModelStep,
-                    ) {
-                        return Err(error);
-                    }
-                    if let Some(error) = workflow_token_budget_error(
-                        &run.budget,
-                        run.usage.tokens,
-                        BudgetBoundary::BeforeModelStep,
-                    ) {
-                        return Err(error);
-                    }
-                    if let Some(limit) = run.budget.max_hosted_search_calls
-                        && run.usage.hosted_search_calls >= limit
-                    {
-                        let turn = self
-                            .store
-                            .get_turn(context.turn_id)
-                            .map_err(|error| error.to_string())?;
-                        if turn.access.allows_research_network() {
-                            return Ok(AgentCheckpoint {
-                                guidance: Vec::new(),
-                                interrupt: None,
-                                finish: Some(format!(
-                                    "The Workflow hosted web-search budget is exhausted: used {} of {limit} calls. Finish from evidence already gathered and state any remaining limitations.",
-                                    run.usage.hosted_search_calls
-                                )),
-                            });
-                        }
-                    }
-                    break;
-                }
+                WorkflowStatus::Created | WorkflowStatus::Running => break,
                 WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
                     return Ok(AgentCheckpoint {
                         guidance: Vec::new(),
@@ -935,23 +881,15 @@ impl AgentEventSink for SessionAgentEventSink {
                         .map_err(|error| error.to_string())?;
                 }
                 if let Some(workflow_id) = self.workflow_id {
-                    let run = self
-                        .store
-                        .add_budget_usage(
+                    self.store
+                        .add_workflow_usage(
                             workflow_id,
-                            BudgetUsage {
+                            WorkflowUsage {
                                 tokens: usage,
-                                ..BudgetUsage::default()
+                                ..WorkflowUsage::default()
                             },
                         )
                         .map_err(|error| error.to_string())?;
-                    if let Some(error) = workflow_token_budget_error(
-                        &run.budget,
-                        run.usage.tokens,
-                        BudgetBoundary::AfterModelStep,
-                    ) {
-                        return Err(error);
-                    }
                 }
                 self.append(
                     step_id,
@@ -977,23 +915,15 @@ impl AgentEventSink for SessionAgentEventSink {
                         .map_err(|error| error.to_string())?;
                 }
                 if let Some(workflow_id) = self.workflow_id {
-                    let run = self
-                        .store
-                        .add_budget_usage(
+                    self.store
+                        .add_workflow_usage(
                             workflow_id,
-                            BudgetUsage {
+                            WorkflowUsage {
                                 tokens: usage,
-                                ..BudgetUsage::default()
+                                ..WorkflowUsage::default()
                             },
                         )
                         .map_err(|error| error.to_string())?;
-                    if let Some(error) = workflow_token_budget_error(
-                        &run.budget,
-                        run.usage.tokens,
-                        BudgetBoundary::AfterModelStep,
-                    ) {
-                        return Err(error);
-                    }
                 }
                 self.append(
                     step_id,
@@ -1075,11 +1005,11 @@ impl AgentEventSink for SessionAgentEventSink {
                     && let Some(workflow_id) = self.workflow_id
                 {
                     self.store
-                        .add_budget_usage(
+                        .add_workflow_usage(
                             workflow_id,
-                            BudgetUsage {
+                            WorkflowUsage {
                                 hosted_search_calls: 1,
-                                ..BudgetUsage::default()
+                                ..WorkflowUsage::default()
                             },
                         )
                         .map_err(|error| error.to_string())?;
@@ -1133,23 +1063,15 @@ impl AgentEventSink for SessionAgentEventSink {
                         .map_err(|error| error.to_string())?;
                 }
                 if let Some(workflow_id) = self.workflow_id {
-                    let run = self
-                        .store
-                        .add_budget_usage(
+                    self.store
+                        .add_workflow_usage(
                             workflow_id,
-                            BudgetUsage {
+                            WorkflowUsage {
                                 tokens: usage,
-                                ..BudgetUsage::default()
+                                ..WorkflowUsage::default()
                             },
                         )
                         .map_err(|error| error.to_string())?;
-                    if let Some(error) = workflow_token_budget_error(
-                        &run.budget,
-                        run.usage.tokens,
-                        BudgetBoundary::AfterModelStep,
-                    ) {
-                        return Err(error);
-                    }
                 }
                 self.append(
                     step_id,
@@ -1190,23 +1112,15 @@ impl SessionAgentEventSink {
         let Some(workflow_id) = self.workflow_id else {
             return Ok(());
         };
-        let run = self
-            .store
-            .add_budget_usage(
+        self.store
+            .add_workflow_usage(
                 workflow_id,
-                BudgetUsage {
+                WorkflowUsage {
                     action_steps: 1,
-                    ..BudgetUsage::default()
+                    ..WorkflowUsage::default()
                 },
             )
             .map_err(|error| error.to_string())?;
-        if let Some(error) = workflow_action_step_budget_error(
-            &run.budget,
-            run.usage.action_steps,
-            BudgetBoundary::AfterModelStep,
-        ) {
-            return Err(error);
-        }
         Ok(())
     }
 
@@ -1255,70 +1169,6 @@ impl SessionAgentEventSink {
     }
 }
 
-#[derive(Clone, Copy)]
-enum BudgetBoundary {
-    BeforeModelStep,
-    AfterModelStep,
-}
-
-fn workflow_token_budget_error(
-    budget: &Budget,
-    usage: TokenUsage,
-    boundary: BudgetBoundary,
-) -> Option<String> {
-    let crossed = |used: u64, limit: u64| match boundary {
-        BudgetBoundary::BeforeModelStep => used >= limit,
-        BudgetBoundary::AfterModelStep => used > limit,
-    };
-    let state = match boundary {
-        BudgetBoundary::BeforeModelStep => "exhausted",
-        BudgetBoundary::AfterModelStep => "exceeded",
-    };
-
-    if let Some(limit) = budget.max_total_tokens
-        && crossed(usage.total_tokens(), limit)
-    {
-        return Some(format!(
-            "Workflow raw token budget {state}: used {} of {limit} total input-plus-output tokens",
-            usage.total_tokens()
-        ));
-    }
-    if let Some(limit) = budget.max_uncached_tokens
-        && crossed(usage.uncached_tokens(), limit)
-    {
-        return Some(format!(
-            "Workflow uncached token budget {state}: used {} of {limit} uncached-input-plus-output tokens (input {}, cached input {}, output {})",
-            usage.uncached_tokens(),
-            usage.input_tokens,
-            usage.cached_input_tokens,
-            usage.output_tokens
-        ));
-    }
-    None
-}
-
-fn workflow_action_step_budget_error(
-    budget: &Budget,
-    used: u32,
-    boundary: BudgetBoundary,
-) -> Option<String> {
-    let crossed = match boundary {
-        BudgetBoundary::BeforeModelStep => used >= budget.max_action_steps,
-        BudgetBoundary::AfterModelStep => used > budget.max_action_steps,
-    };
-    if !crossed {
-        return None;
-    }
-    let state = match boundary {
-        BudgetBoundary::BeforeModelStep => "exhausted",
-        BudgetBoundary::AfterModelStep => "exceeded",
-    };
-    Some(format!(
-        "Workflow action-step budget {state}: used {used} of {} persisted model, tool, and compaction steps",
-        budget.max_action_steps
-    ))
-}
-
 #[derive(Debug, Error)]
 pub enum SessionRuntimeError {
     #[error(transparent)]
@@ -1340,94 +1190,9 @@ pub enum SessionRuntimeError {
 }
 
 #[cfg(test)]
-mod budget_tests {
+mod recovery_tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn prompt_cache_reads_do_not_consume_uncached_budget() {
-        let budget = Budget {
-            max_total_tokens: Some(1_000),
-            max_uncached_tokens: Some(100),
-            ..Budget::default()
-        };
-        let usage = TokenUsage {
-            input_tokens: 900,
-            cached_input_tokens: 850,
-            output_tokens: 40,
-            cache_write_input_tokens: 0,
-        };
-
-        assert_eq!(usage.total_tokens(), 940);
-        assert_eq!(usage.uncached_tokens(), 90);
-        assert!(
-            workflow_token_budget_error(&budget, usage, BudgetBoundary::AfterModelStep).is_none()
-        );
-    }
-
-    #[test]
-    fn raw_and_uncached_limits_are_enforced_independently() {
-        let raw_limited = Budget {
-            max_total_tokens: Some(900),
-            max_uncached_tokens: Some(500),
-            ..Budget::default()
-        };
-        let cached_usage = TokenUsage {
-            input_tokens: 900,
-            cached_input_tokens: 850,
-            output_tokens: 40,
-            cache_write_input_tokens: 0,
-        };
-        assert!(
-            workflow_token_budget_error(
-                &raw_limited,
-                cached_usage,
-                BudgetBoundary::AfterModelStep,
-            )
-            .is_some_and(|error| error.contains("raw token budget exceeded"))
-        );
-
-        let uncached_limited = Budget {
-            max_total_tokens: Some(2_000),
-            max_uncached_tokens: Some(80),
-            ..Budget::default()
-        };
-        assert!(
-            workflow_token_budget_error(
-                &uncached_limited,
-                cached_usage,
-                BudgetBoundary::AfterModelStep,
-            )
-            .is_some_and(|error| error.contains("uncached token budget exceeded"))
-        );
-    }
-
-    #[test]
-    fn action_step_budget_checks_before_and_after_step_boundaries() {
-        let budget = Budget {
-            max_action_steps: 3,
-            ..Budget::default()
-        };
-
-        assert_eq!(
-            workflow_action_step_budget_error(&budget, 3, BudgetBoundary::BeforeModelStep,)
-                .as_deref(),
-            Some(
-                "Workflow action-step budget exhausted: used 3 of 3 persisted model, tool, and compaction steps"
-            )
-        );
-        assert!(
-            workflow_action_step_budget_error(&budget, 3, BudgetBoundary::AfterModelStep,)
-                .is_none()
-        );
-        assert_eq!(
-            workflow_action_step_budget_error(&budget, 4, BudgetBoundary::AfterModelStep,)
-                .as_deref(),
-            Some(
-                "Workflow action-step budget exceeded: used 4 of 3 persisted model, tool, and compaction steps"
-            )
-        );
-    }
 
     #[test]
     fn recovery_reuses_a_completed_tool_step_output() {
@@ -1447,8 +1212,7 @@ mod budget_tests {
                 "test-model",
                 PromptSnapshot::default(),
                 None,
-                2,
-                None,
+                true,
                 None,
                 None,
                 Vec::new(),

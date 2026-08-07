@@ -86,7 +86,7 @@ Session immediately. The first action, Team activation, relation, channel send,
 human request targeted at that Agent, or explicit retirement calls
 `create_agent`. Rust then:
 
-1. checks run status and `max_agents`;
+1. checks run status;
 2. creates a Session in the run's Project;
 3. resolves model and skills from Agent overrides or the Workflow defaults;
 4. creates the WorkflowParticipant mapping;
@@ -144,35 +144,26 @@ runtime primitive. A Workflow may expose such choices through arbitrary
 
 An `@action` method declares a prompt and argument signature. The method body is
 not executed as agent logic. Calling it creates an awaitable; awaiting that
-value requests `invoke_action`. `@action(max_steps=N)` may set a smaller
-per-action model-sample limit; the Workflow's `max_action_steps` remains the
-hard ceiling. Setting `max_steps=1` also disables tools for that action because
-the first sample must be the final response. `@action(max_search_calls=N)` sets
-a hosted web-search allowance across the Turn; zero disables hosted search
-without changing the Agent's other access permissions. PaperMachine first
-probes whether an endpoint accepts the Responses API `max_tool_calls` field and
-then verifies the actual hosted-call count. A rejecting endpoint records
-`runtime_fallback`; an endpoint that accepts but exceeds the requested limit
-records `provider_violated`, and later responses for that model switch to
-runtime fallback. Runtime fallback enforces the remaining allowance between
-samples, so the response that reveals unsupported behavior may already
-overshoot it. Each response receives at most four calls from the remaining
-allowance and a stable matching control instruction; this keeps one response
-from consuming an entire Turn on endpoints that honor either mechanism without
-changing continuation identity. `reasoning_effort` (`none`, `low`, `medium`,
+value requests `invoke_action`. The Agent then follows the Codex-like loop:
+sample the model, execute requested tools, append their outputs, and sample
+again. The Action ends when the model returns a terminal assistant message,
+the user finishes/interrupts/cancels it, or runtime/provider infrastructure
+fails. There is no Action step count or hosted-search-call quota.
+`reasoning_effort` (`none`, `low`, `medium`,
 `high`, `xhigh`, or `max`) overrides the server default for that action. The
 value is snapshotted on the Turn and shown in model-step input metadata.
 `search_context_size` (`low`, `medium`, or `high`) controls how much retrieved
-context each hosted search attaches; use `low` for bounded exploratory routes
+context each hosted search attaches; use `low` for exploratory routes
 and increase it only when the task needs richer page context.
 `finalize="after_search"` gives a deliverable-producing action an explicit
 completion boundary. If its first Turn used hosted search, the same persistent
-Agent Session receives a second `max_steps=1`, `max_search_calls=0` Action Turn
-that must turn the preceding research/progress output into the actual final
-deliverable. `finalize="always"` performs that model-only Turn even when the
-first Turn used no hosted search. The finalizer is a separate durable
-ActionInvocation and visible Turn, so it is budgeted, recoverable, and
-inspectable rather than hidden post-processing.
+Agent Session receives a second Action Turn with tools explicitly disabled. It
+must turn the preceding research/progress output into the actual final
+deliverable. `finalize="always"` performs that no-tool Turn even when the first
+Turn used no hosted search. The finalizer is a separate durable
+ActionInvocation and visible Turn, so it is recoverable and inspectable rather
+than hidden post-processing. Typed-action JSON repair uses the same internal
+no-tool policy.
 ```text
 ActionInvocation
   Attempt 1 -> Turn 1 -> model/tool Steps
@@ -210,12 +201,13 @@ snapshot. Interruption/retry guidance belongs to the control layer. See
 | `failed` | Runtime/model/tool failure ended the invocation. |
 | `cancelled` | Run or Turn cancellation ended the invocation. |
 
-One completed action returns its assistant output string. Usage and Step count
-are added to Workflow budget usage. Provider-reported usage from incomplete
+One completed action returns its assistant output string. Token/cache usage,
+Step count, hosted-search count, and timing are added to Workflow telemetry.
+Provider-reported usage from incomplete
 samples is retained across retries. If every retry fails, the final model Step
-is persisted as failed and the consumed usage is still charged to the run.
+is persisted as failed and the consumed usage is still recorded on the run.
 When an output limit or a reasoning-only completion produces no message or tool
-call, the bounded retry lowers reasoning effort and explicitly requests the
+call, the fixed transient retry lowers reasoning effort and explicitly requests the
 original final-answer format.
 
 Completion of an Action is distinct from acceptance of a whole Workflow's
@@ -233,11 +225,9 @@ uses `asyncio.gather` and returns a tuple in argument order.
 
 Before starting, `together` examines direct `_ActionCall` operands. If two calls
 target the same Agent object, it raises `ValueError`; no action in that group is
-started. The Rust runtime independently applies:
-
-- a run semaphore bounded by `max_concurrent_actions`;
-- one mutex per Agent instance, which serializes Turns in its Session;
-- the Session runtime's global concurrent-Turn bound.
+started. The Rust runtime independently applies one mutex per Agent instance,
+which serializes Turns in its Session, plus the Session runtime's server-wide
+concurrent-Turn bound.
 
 Different Agent Sessions can therefore work simultaneously. Calls to the same
 Agent outside one `together` group may be created concurrently by ordinary
@@ -258,8 +248,8 @@ an Agent action, Rust collects every incoming or outgoing relation involving
 that Agent and injects readable relationship context. A relation does not
 automatically send messages or invoke the target.
 
-Dynamic Agent creation and Team mutation are allowed until the Agent budget is
-exhausted. Team removal does not retire an Agent; retirement is explicit.
+Dynamic Agent creation and Team mutation are allowed while the Workflow is
+active. Team removal does not retire an Agent; retirement is explicit.
 
 ## 8. Task scopes
 
@@ -338,7 +328,7 @@ background loop:
 
 1. register or reuse an active timer by name;
 2. wait until `next_fire_at`;
-3. persist a fire, advance counts/deadline, and update budget usage;
+3. persist a fire, advance counts/deadline, and update usage telemetry;
 4. await the callback;
 5. repeat.
 
@@ -352,45 +342,29 @@ Because the timer loop awaits the callback, one TimerHandle does not overlap its
 own callback. A callback action creates a new Turn each time. Active timers are
 marked completed when the workflow completes.
 
-## 12. Completion, failure, and budgets
+## 12. Completion, failure, and observability
 
 | Workflow status | Entry condition | Effects accepted |
 |---|---|---|
 | `created` | Durable run exists, waiting for scheduler. | Checkpoints may proceed into startup. |
-| `running` | Worker is interpreting source. | Yes, subject to validation/budgets. |
+| `running` | Worker is interpreting source. | Yes, subject to validation and permissions. |
 | `waiting_for_user` | Workflow requested user input. | Resume follows a validated user response. |
 | `waiting_for_timer` | Workflow is waiting for a timer deadline. | Timer wake-up resumes execution. |
 | `waiting_for_signal` | Workflow is waiting for a Channel Signal. | Matching Signal resumes execution. |
 | `paused` | User paused the run. | Existing calls wait at checkpoints. |
 | `completed` | Python submitted output, the process exited successfully, final usage was recorded, and Rust committed the output. | No new domain work. |
-| `failed` | Python, action, protocol, sandbox, or budget failure. | No. |
+| `failed` | Python, action, protocol, sandbox, model, or provider failure. | No. |
 | `cancelled` | User/runtime cancellation. | No. |
 
-Budget fields are `max_agents`, `max_concurrent_actions`, `max_action_steps`,
-`max_total_tokens`, `max_uncached_tokens`, `max_hosted_search_calls`,
-`max_wall_time_seconds`, and optional `max_cost_usd`. `max_total_tokens` is the
-raw provider input-plus-output safety limit. `max_uncached_tokens` is the
-economic limit and counts
-`input_tokens - cached_input_tokens + output_tokens`; prompt-cache reads therefore
-remain visible but do not consume the uncached allowance.
-`max_action_steps` is the run-wide limit for persisted model, local-tool,
-hosted-tool, and compaction Steps. A Step is charged when it is created, including
-for actions that later fail, and the runtime checks the limit before each model
-sample. Concurrent provider responses can still produce a small bounded overshoot
-when several tool Steps arrive from the same in-flight response.
-`max_hosted_search_calls` bounds the run-wide sum of provider-hosted web search,
-open-page, and find-in-page actions. Each action should also declare
-`max_search_calls` so a single provider response cannot consume the whole run
-budget. Agent, action, step, timer, hosted-search, token, and wall-time usage are
-persisted. Some limits are checked only at effect/model boundaries; concurrent
-in-flight responses can overshoot the run-wide search limit. An action's
-provider-side limit is hard only when the endpoint actually honors
-`max_tool_calls`; acceptance without enforcement is detected after the first
-violating response and downgraded to runtime fallback.
-With a proxy that rejects that request property, the action limit is enforced
-between model samples and one response can still overshoot the four-call soft
-batch size. Cost enforcement
-requires a provider cost estimate.
+Workflow execution has no Agent, Action-step, hosted-search, token, wall-time,
+or cost quota. Those quantities are observations, not control-flow conditions:
+Agent/action/step/timer/search counts, provider token and cache usage, and
+wall-clock time are persisted and exposed for inspection. The runtime still
+enforces permissions, sandbox boundaries, Session serialization, explicit user
+pause/finish/interrupt/cancel, provider request/stream-idle timeouts, context
+window safety, and server-wide concurrency. An unattended Workflow can
+therefore run for a long time or consume substantial provider resources; a
+future quota policy should remain orthogonal to Workflow collaboration logic.
 
 An uncaught Python exception exits the runner and fails the run with bounded
 stderr. An action failure is returned to Python as an effect exception; if the

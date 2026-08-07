@@ -6,7 +6,7 @@ class Grader(Agent):
     role = "independent exact-answer grader"
     system_prompt = """Act only as a blinded answer-equivalence judge. Compare the final answer extractable from the submitted response with the supplied reference answer. Do not browse, solve the question again, repair the response, or award credit for background reasoning when the final answer is absent or ambiguous. Minor formatting differences and a small numerical margin may be accepted; any meaningful inconsistency or non-equivalence is incorrect."""
 
-    @action(max_steps=1, reasoning_effort="medium")
+    @action(reasoning_effort="medium")
     async def grade(
         self,
         question: str,
@@ -40,15 +40,6 @@ class Grader(Agent):
         "type": "object",
         "properties": {"grading": {"type": "object"}},
         "required": ["grading"],
-    },
-    budget={
-        "max_agents": 1,
-        "max_concurrent_actions": 1,
-        "max_action_steps": 3,
-        "max_total_tokens": 250000,
-        "max_uncached_tokens": 100000,
-        "max_hosted_search_calls": 0,
-        "max_wall_time_seconds": 1800,
     },
 )
 async def main(ctx):

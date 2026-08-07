@@ -35,7 +35,7 @@ order:
 - `evidence_r2`: the same workflow with at most one evaluator-directed follow-up
   round;
 - `evidence_r3`: at least three parallel routes and up to three evaluator passes,
-  with a larger workflow budget for difficult tasks;
+  intended for difficult tasks;
 - `evidence_r4`: four forced-independent routes and up to four evaluator passes,
   with four directed follow-ups per failed pass. This is the intentionally
   expensive stress tier, not the normal default recommendation.

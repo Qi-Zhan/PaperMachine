@@ -35,7 +35,7 @@ class Planner(Agent):
     role = "research coverage planner"
     system_prompt = """You are only a research-coverage Planner. Never research the question, guess its answer, emit the user's requested final-answer format, or behave like the Writer. Turn the user's request into an explicit, question-specific coverage contract before research starts. Derive it only from the request, never from imagined hidden benchmark criteria or from the apparent domain of one named clue. First classify the request as exact_match (one identity must satisfy conjunctive clues), qualifying_list (every main-list candidate must satisfy an explicit qualification), option_survey (different strategies/tools may cover different subproblems and trade-offs), or explanatory_report (coverage applies to the report rather than candidate selection). Make requirements atomic and testable, but separately record which requirements truly must hold jointly for the same candidate, entity, source, row, or time period. Never turn an option survey into an all-or-nothing candidate filter. Preserve only output schemas, date cutoffs, exclusions, and exhaustiveness requirements explicitly present in the original question. Create genuinely independent search strategies rather than assigning one jointly-required property to each route. Every route receives the original question and full contract, and must be able to discover complete evidence on its own. Use three or four routes only when their source families, query strategies, or search spaces truly differ. Do not create a join, synthesis, completeness-audit, or final-formatting route; the evaluator and writer already perform those jobs."""
 
-    @action(max_steps=1, reasoning_effort="medium")
+    @action(reasoning_effort="medium")
     async def plan(
         self,
         question: str,
@@ -53,8 +53,6 @@ class Researcher(Agent):
     system_prompt = """Use hosted web search actively and persistently. Keep the original question and every joint constraint visible throughout the route: never turn a conjunction into independent facts and then combine different entities or papers into a synthetic match. Start with high-information exact clue combinations, then broaden deliberately and test alternative interpretations without silently inventing a domain. Reformulate queries, open promising pages, and verify important claims against primary or authoritative sources. Do not stop at the first plausible answer. Preserve exact names, numbers, dates, qualifications, and requested JSON fields. Return a candidate-centred evidence ledger rather than a prose report. Give every finding a stable candidate_id as well as coverage IDs; candidate_outputs must state which one candidate they describe and which joint constraints remain unresolved. Each material finding must include a direct source URL, a compact evidence excerpt or precise paraphrase, source type, confidence, and whether it is supported, contradicted, or unresolved. Include all genuinely qualifying items when the request asks for a comprehensive list, but keep weak or partial candidates out of candidate_outputs."""
 
     @action(
-        max_steps=4,
-        max_search_calls=12,
         search_context_size="low",
         reasoning_effort="high",
     )
@@ -76,7 +74,7 @@ class Evaluator(Agent):
     role = "coverage and evidence evaluator"
     system_prompt = """Judge the evidence ledger against the frozen coverage contract, not against writing style. Honor answer_mode: exact_match and qualifying_list apply true joint constraints per candidate; option_survey applies coverage to the answer portfolio and retains evidence-backed options that solve distinct subproblems, with their scope and missing capabilities explicit; explanatory_report applies coverage to the report as a whole. First resolve candidate identity across routes. Evidence from several sources may corroborate one stable candidate, but evidence about different entities, materials, papers, versions, rows, or time periods must never be spliced into one candidate. Prefer precision over a long union of weakly related candidates, but do not reject a useful option merely because it does not independently solve every part of an option survey. Detect missing fields, unsupported or stale claims, incomplete supposedly exhaustive lists, contradictions, weak sources, and failure to obey the requested output format. Follow-ups must be narrow, evidence-seeking tasks assigned to an existing route index so that the same persistent Researcher Session can continue its work."""
 
-    @action(max_steps=1, reasoning_effort="high")
+    @action(reasoning_effort="high")
     async def assess(
         self,
         question: str,
@@ -86,7 +84,7 @@ class Evaluator(Agent):
     ) -> dict:
         """Return a JSON object with pass (boolean), score (0-100), rationale (string), coverage (array with coverage_id, status, evidence_refs, and gap), candidate_decisions (array with candidate_id, decision=approved/rejected/unresolved, satisfied_coverage_ids, failed_joint_constraints, evidence_refs, and reason), approved_candidates (array containing only output-ready candidates), contradictions (array), follow_ups (array with route_index, objective, and coverage_ids), and needs_human (boolean). Set pass=true only when every required coverage item has adequate evidence at the scope defined by answer_mode. Never approve a synthetic candidate assembled from different identities. For option_survey, an output-ready partial option is allowed when its actual role, scope, prerequisites, and gaps are explicit; for exact_match or qualifying_list, do not approve a merely topical or partial match unless the question requests it."""
 
-    @action(max_steps=1, reasoning_effort="high")
+    @action(reasoning_effort="high")
     async def audit_draft(
         self,
         question: str,
@@ -102,7 +100,7 @@ class Writer(Agent):
     role = "evidence-grounded finalizer"
     system_prompt = """Produce the exact deliverable requested by the user from the frozen coverage contract and evidence ledger. Treat the evaluator's approved_candidates as an allow-list: do not dump the union of route candidates, add merely topical results, or merge facts and provenance from different candidate identities. Preserve exact structured-output requirements: if the user asks for JSON, return valid JSON with no Markdown fence or surrounding commentary. A paper_title or other provenance field must name one actual source, never a synthetic list of supporting papers. For reports, cite direct source URLs next to supported claims. Never invent missing values or citations; make uncertainty explicit when the requested format permits it."""
 
-    @action(max_steps=1, reasoning_effort="high")
+    @action(reasoning_effort="high")
     async def compose(
         self,
         question: str,
@@ -112,11 +110,11 @@ class Writer(Agent):
     ):
         """Return only the final user-facing deliverable. Satisfy the output contract exactly and use only evidence present in the ledger."""
 
-    @action(max_steps=1, reasoning_effort="medium")
+    @action(reasoning_effort="medium")
     async def revise(self, draft_audit: dict):
         """Revise the draft already present in this persistent Writer Session. Apply every audit repair instruction, preserve approved content, remove unapproved or synthetic candidates, and return only the corrected final deliverable in the exact requested format."""
 
-    @action(max_steps=1, reasoning_effort="high")
+    @action(reasoning_effort="high")
     async def revise_from_human(
         self,
         guidance: HumanMessage,
@@ -642,7 +640,7 @@ async def _research_with_contract(
 @workflow(
     slug="evidence-loop",
     name="Evidence loop",
-    description="Freeze a question-specific coverage contract, run bounded independent parallel evidence routes, and reuse one continuation-stable action in each persistent route Session for evaluator-directed follow-up.",
+    description="Freeze a question-specific coverage contract, run independent parallel evidence routes, and reuse one continuation-stable action in each persistent route Session for evaluator-directed follow-up.",
     params_schema={
         "type": "object",
         "properties": {
@@ -704,15 +702,6 @@ async def _research_with_contract(
             "route_sessions_reused",
             "completion",
         ],
-    },
-    budget={
-        "max_agents": 8,
-        "max_concurrent_actions": 4,
-        "max_action_steps": 320,
-        "max_total_tokens": 8000000,
-        "max_uncached_tokens": 3000000,
-        "max_hosted_search_calls": 256,
-        "max_wall_time_seconds": 21600,
     },
 )
 async def main(ctx):
