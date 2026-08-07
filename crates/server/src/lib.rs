@@ -546,8 +546,15 @@ async fn open_project(
     Json(request): Json<ProjectPathRequest>,
 ) -> ApiResult<(StatusCode, Json<ProjectLibraryEntry>)> {
     let root = canonical_project_root(&request.root_path)?;
-    let (project, store) = load_project_store(&root, None)?;
-    if state.projects.read().await.contains_key(&project.id) {
+    let (stored_project, store) = inspect_project_store(&root)?;
+    if state.projects.read().await.contains_key(&stored_project.id) {
+        let registered = state.library.get(stored_project.id)?;
+        if PathBuf::from(&registered.root_path) != root {
+            return Err(ApiError::bad_request(
+                "Project is already open at another directory; use relocate",
+            ));
+        }
+        let project = store.relocate_project(stored_project.id, &root)?;
         return Ok((
             StatusCode::OK,
             Json(ProjectLibraryEntry {
@@ -556,6 +563,7 @@ async fn open_project(
             }),
         ));
     }
+    let project = store.relocate_project(stored_project.id, &root)?;
     state.library.register(&project)?;
     let runtime = state
         .runtime_factory
@@ -624,6 +632,17 @@ fn load_project_store(
     root: &std::path::Path,
     expected_id: Option<ProjectId>,
 ) -> ApiResult<(Project, Arc<Store>)> {
+    let (project, store) = inspect_project_store(root)?;
+    if expected_id.is_some_and(|expected_id| expected_id != project.id) {
+        return Err(ApiError::bad_request(
+            "Selected directory belongs to a different Project",
+        ));
+    }
+    let project = store.relocate_project(project.id, root)?;
+    Ok((project, store))
+}
+
+fn inspect_project_store(root: &std::path::Path) -> ApiResult<(Project, Arc<Store>)> {
     let metadata_root = root.join(".papermachine");
     let database = metadata_root.join("state/project.db");
     if !database.is_file() || !metadata_root.join("project.toml").is_file() {
@@ -639,13 +658,7 @@ fn load_project_store(
         )
         .into());
     }
-    let project = store.relocate_project(projects[0].id, root)?;
-    if expected_id.is_some_and(|expected_id| expected_id != project.id) {
-        return Err(ApiError::bad_request(
-            "Selected directory belongs to a different Project",
-        ));
-    }
-    Ok((project, store))
+    Ok((projects[0].clone(), store))
 }
 
 fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {

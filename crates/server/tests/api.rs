@@ -112,6 +112,7 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
     let relocated_root = directory.path().join("research/relocated");
     let app = test_app(&directory).await;
     let created = app
+        .clone()
         .oneshot(json_request(
             "POST",
             "/api/projects",
@@ -126,6 +127,31 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
     let project = response_json(created).await;
     let project_id = project["id"].as_str().expect("Project id should exist");
     assert_eq!(project["available"], true);
+
+    let opened_again = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/api/projects/open",
+            json!({"root_path": original_root}),
+        ))
+        .await
+        .expect("Opening the active Project should complete");
+    assert_eq!(opened_again.status(), StatusCode::OK);
+    assert_eq!(response_json(opened_again).await["id"], project_id);
+
+    let copied_root = directory.path().join("research/copied");
+    copy_directory(&original_root, &copied_root);
+    let opened_copy = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/api/projects/open",
+            json!({"root_path": copied_root}),
+        ))
+        .await
+        .expect("Opening a copied Project should complete with an API response");
+    assert_eq!(opened_copy.status(), StatusCode::BAD_REQUEST);
 
     std::fs::rename(&original_root, &relocated_root)
         .expect("Project directory should move while the server is stopped");
@@ -186,6 +212,20 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
     let reopened = response_json(reopened).await;
     assert_eq!(reopened["id"], project_id);
     assert_eq!(reopened["available"], true);
+}
+
+fn copy_directory(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("destination should be created");
+    for entry in std::fs::read_dir(source).expect("source directory should be readable") {
+        let entry = entry.expect("source entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_directory(&source_path, &destination_path);
+        } else {
+            std::fs::copy(&source_path, &destination_path).expect("source file should be copied");
+        }
+    }
 }
 
 fn prepare_root(root: &Path) {
