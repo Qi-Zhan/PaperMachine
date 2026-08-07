@@ -23,7 +23,7 @@ class BrowseCompMatrixTests(unittest.TestCase):
         run["usage"]["wall_time_seconds"] = 400
         self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 400)
 
-    def test_ensure_project_repairs_missing_reused_root(self) -> None:
+    def test_ensure_project_reuses_available_owned_state(self) -> None:
         class FakeApi:
             def __init__(self, root_path: str) -> None:
                 self.root_path = root_path
@@ -31,15 +31,21 @@ class BrowseCompMatrixTests(unittest.TestCase):
             def get(self, path):
                 if path != "/projects":
                     raise AssertionError(f"unexpected path: {path}")
-                return [{"id": "existing-project", "root_path": self.root_path}]
+                return [
+                    {
+                        "id": "existing-project",
+                        "root_path": self.root_path,
+                        "available": True,
+                    }
+                ]
 
             def post(self, path, payload):
                 raise AssertionError(f"unexpected project creation: {path} {payload}")
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "missing" / "research"
+            root = Path(temporary_directory) / "research"
+            root.mkdir()
             api = FakeApi(str(root.resolve()))
-            self.assertFalse(root.exists())
             self.assertEqual(
                 run_matrix.ensure_project(api, "Research", "Benchmark", root),
                 "existing-project",

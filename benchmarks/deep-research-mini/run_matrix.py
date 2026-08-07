@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+BENCHMARKS_ROOT = Path(__file__).resolve().parent.parent
+if str(BENCHMARKS_ROOT) not in sys.path:
+    sys.path.insert(0, str(BENCHMARKS_ROOT))
+
+from benchmark_runtime import isolated_server
+
 
 UPSTREAM_REPO = "Ayanami0730/deep_research_bench"
 QUERY_PATH = "data/prompt_data/query.jsonl"
@@ -306,11 +312,15 @@ def ensure_project(
     description: str,
     root_path: Path,
 ) -> str:
-    root_path.mkdir(parents=True, exist_ok=True)
     canonical_root = str(root_path.resolve())
     for project in api.get("/projects"):
         if project["root_path"] == canonical_root:
+            if not project["available"]:
+                raise RuntimeError(
+                    f"benchmark project state is unavailable: {canonical_root}"
+                )
             return str(project["id"])
+    root_path.mkdir(parents=True, exist_ok=True)
     created = api.post(
         "/projects",
         {"name": name, "description": description, "root_path": canonical_root},
@@ -1594,7 +1604,7 @@ def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-base", default="http://127.0.0.1:4310")
+    parser.add_argument("--server-config", type=Path)
     parser.add_argument("--task-ids", default="19,59,66,68,69")
     parser.add_argument(
         "--conditions", default="single_agent,evidence_r1,evidence_r2"
@@ -1620,8 +1630,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
     if args.repeats < (1 if args.exploratory else 2):
         raise ValueError(
             "repeats must be at least 1 for exploratory runs and at least 2 otherwise"
@@ -1720,7 +1729,9 @@ def main() -> int:
         print(f"prepared {len(state['jobs'])} jobs in {run_dir}")
         return 0
 
-    api = PaperMachineApi(args.api_base)
+    if api_base is None:
+        raise RuntimeError("benchmark execution requires an isolated server")
+    api = PaperMachineApi(api_base)
     health = api.get("/health")
     if health.get("model_mode") == "demo":
         raise RuntimeError("benchmark requires a substantive model provider")
@@ -1786,6 +1797,17 @@ def main() -> int:
     atomic_write_text(report_path, report)
     print(f"report: {report_path}")
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.prepare_only:
+        return run_matrix(args, None)
+    repository_root = Path(__file__).resolve().parents[2]
+    run_dir = Path(__file__).resolve().parent / "runs" / args.run_name
+    config_path = args.server_config or repository_root / "papermachine.toml"
+    with isolated_server(repository_root, run_dir, config_path) as api_base:
+        return run_matrix(args, api_base)
 
 
 if __name__ == "__main__":

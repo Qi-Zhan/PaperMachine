@@ -4,8 +4,9 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "pnpm --dir apps/web dev",
+    "server:dev": "python3 scripts/dev_server.py",
+    "server:demo": "python3 scripts/dev_server.py --demo",
     "build": "pnpm --dir apps/web build",
     "test": "pnpm --dir apps/web test"
   }
 }
-

@@ -20,6 +20,12 @@ Workflows:
 python3 benchmarks/browsecomp-mini/run_matrix.py
 ```
 
+Each run starts an isolated PaperMachine server on an ephemeral local port.
+The server uses `runs/<run-name>/server-data` for its project library and writes
+`runs/<run-name>/server.log`; it cannot add benchmark Projects to the normal
+user or development library. `--server-config <path>` selects the provider
+configuration, and the same run name resumes the same isolated state.
+
 Research and grader Workflows are Project-level launches with
 `context_mode=fresh`, so one encrypted task cannot inherit another task's
 research through Project context and no placeholder Session is required.
