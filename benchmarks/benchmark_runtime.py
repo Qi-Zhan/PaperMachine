@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import contextlib
-import shutil
+import hashlib
+import os
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -14,30 +16,42 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-def cargo_executable() -> str:
-    discovered = shutil.which("cargo")
-    rustup_proxy = Path.home() / ".cargo" / "bin" / "cargo"
-    if discovered:
-        return discovered
-    if rustup_proxy.is_file():
-        return str(rustup_proxy)
-    raise FileNotFoundError("cargo is required to run PaperMachine benchmarks")
-
-
 def server_data_dir(run_dir: Path) -> Path:
     """Return the only application-data directory used by a benchmark run."""
     return run_dir.resolve() / "server-data"
+
+
+def default_server_binary(repository_root: Path, *, windows: bool | None = None) -> Path:
+    is_windows = os.name == "nt" if windows is None else windows
+    executable = "papermachine-server.exe" if is_windows else "papermachine-server"
+    return repository_root.resolve() / "target" / "debug" / executable
+
+
+def runtime_artifact_fingerprints(
+    config_path: Path, server_binary: Path | None
+) -> dict[str, str]:
+    paths = {"server-config": config_path.resolve()}
+    if server_binary is not None:
+        paths["server-binary"] = server_binary.resolve()
+    missing = [f"{name}: {path}" for name, path in paths.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("benchmark runtime artifact is missing: " + ", ".join(missing))
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in paths.items()
+    }
 
 
 def server_command(
     repository_root: Path,
     run_dir: Path,
     config_path: Path,
+    server_binary: Path,
     port: int,
 ) -> list[str]:
     root = repository_root.resolve()
     return [
-        str(root / "target" / "debug" / "papermachine-server"),
+        str(server_binary.resolve()),
         "--resource-root",
         str(root),
         "--data-dir",
@@ -81,8 +95,9 @@ def isolated_server(
     repository_root: Path,
     run_dir: Path,
     config_path: Path,
+    server_binary: Path,
 ) -> Iterator[str]:
-    """Build and run PaperMachine with state contained by ``run_dir``."""
+    """Run a compiled PaperMachine server with state contained by ``run_dir``."""
     root = repository_root.resolve()
     run_root = run_dir.resolve()
     run_root.mkdir(parents=True, exist_ok=True)
@@ -91,21 +106,27 @@ def isolated_server(
     resolved_config = config_path.resolve()
     if not resolved_config.is_file():
         raise FileNotFoundError(f"PaperMachine config does not exist: {resolved_config}")
-
-    subprocess.run(
-        [cargo_executable(), "build", "-p", "papermachine-server"],
-        cwd=root,
-        check=True,
-    )
+    resolved_server = server_binary.resolve()
+    if not resolved_server.is_file():
+        raise FileNotFoundError(
+            f"PaperMachine server binary does not exist: {resolved_server}. "
+            "Build papermachine-server first or pass --server-bin."
+        )
     port = _available_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = run_root / "server.log"
     with log_path.open("ab") as log:
         process = subprocess.Popen(
-            server_command(root, run_root, resolved_config, port),
+            server_command(root, run_root, resolved_config, resolved_server, port),
             cwd=root,
             stdout=log,
             stderr=subprocess.STDOUT,
+            env={
+                **os.environ,
+                "PAPERMACHINE_PYTHON": os.environ.get(
+                    "PAPERMACHINE_PYTHON", sys.executable
+                ),
+            },
         )
         try:
             _wait_until_ready(process, base_url, log_path)

@@ -25,7 +25,11 @@ BENCHMARKS_ROOT = Path(__file__).resolve().parent.parent
 if str(BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_ROOT))
 
-from benchmark_runtime import isolated_server
+from benchmark_runtime import (
+    default_server_binary,
+    isolated_server,
+    runtime_artifact_fingerprints,
+)
 
 
 UPSTREAM_REPO = "Ayanami0730/deep_research_bench"
@@ -77,6 +81,7 @@ CONDITION_DESCRIPTIONS = {
     "evidence_r4": "four parallel evidence routes, up to four evaluator assessments, and up to four directed follow-ups per failed assessment",
 }
 RUNTIME_FILES = (
+    "benchmarks/benchmark_runtime.py",
     "benchmarks/deep-research-mini/run_matrix.py",
     "crates/agent/src/lib.rs",
     "crates/model/src/openai.rs",
@@ -95,7 +100,6 @@ RUNTIME_FILES = (
     "workflows/builtin/evidence-loop/workflow.py",
     "workflows/builtin/single-agent-research/workflow.py",
     "workflows/builtin/report-grader/workflow.py",
-    "papermachine.toml",
 )
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 URL_RE = re.compile(r"https?://[^\s)\]>]+")
@@ -181,15 +185,21 @@ def atomic_write_json(path: Path, value: Any) -> None:
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def runtime_fingerprint(root: Path) -> dict[str, str]:
-    return {
+def runtime_fingerprint(
+    root: Path, runtime_artifacts: dict[str, str] | None = None
+) -> dict[str, str]:
+    fingerprint = {
         relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
         for relative in RUNTIME_FILES
     }
+    fingerprint.update(runtime_artifacts or {})
+    return fingerprint
 
 
-def record_runtime_snapshot(state: dict[str, Any], root: Path) -> dict[str, str]:
-    current = runtime_fingerprint(root)
+def record_runtime_snapshot(
+    state: dict[str, Any], root: Path, runtime_artifacts: dict[str, str]
+) -> dict[str, str]:
+    current = runtime_fingerprint(root, runtime_artifacts)
     history = state.setdefault("runtime_source_history", [])
     original = state.get("runtime_source_sha256")
     if original and not any(item.get("files_sha256") == original for item in history):
@@ -1605,6 +1615,7 @@ def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-config", type=Path)
+    parser.add_argument("--server-bin", type=Path)
     parser.add_argument("--task-ids", default="19,59,66,68,69")
     parser.add_argument(
         "--conditions", default="single_agent,evidence_r1,evidence_r2"
@@ -1657,6 +1668,9 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
     snapshot_path = run_dir / "upstream-snapshot.json"
     state_path = run_dir / "state.json"
     report_path = run_dir / "report.md"
+    runtime_artifacts = runtime_artifact_fingerprints(
+        args.server_config, args.server_bin if api_base is not None else None
+    )
     snapshot = prepare_upstream_snapshot(task_ids, snapshot_path, args.refresh_upstream)
     tasks = {
         int(task["id"]): task
@@ -1711,13 +1725,15 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
                     "fetched_at",
                 )
             },
-            "runtime_source_sha256": runtime_fingerprint(repository_root),
+            "runtime_source_sha256": runtime_fingerprint(
+                repository_root, runtime_artifacts
+            ),
             "projects": {},
             "jobs": jobs,
         }
         save_state(state_path, state)
 
-    record_runtime_snapshot(state, repository_root)
+    record_runtime_snapshot(state, repository_root, runtime_artifacts)
     save_state(state_path, state)
 
     if args.retry_terminal_failures:
@@ -1801,12 +1817,17 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
 
 def main() -> int:
     args = parse_args()
+    repository_root = Path(__file__).resolve().parents[2]
+    args.server_config = (
+        args.server_config or repository_root / "papermachine.toml"
+    ).resolve()
+    args.server_bin = (args.server_bin or default_server_binary(repository_root)).resolve()
     if args.prepare_only:
         return run_matrix(args, None)
-    repository_root = Path(__file__).resolve().parents[2]
     run_dir = Path(__file__).resolve().parent / "runs" / args.run_name
-    config_path = args.server_config or repository_root / "papermachine.toml"
-    with isolated_server(repository_root, run_dir, config_path) as api_base:
+    with isolated_server(
+        repository_root, run_dir, args.server_config, args.server_bin
+    ) as api_base:
         return run_matrix(args, api_base)
 
 

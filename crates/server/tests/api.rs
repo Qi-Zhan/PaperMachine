@@ -53,6 +53,25 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+async fn initialization_validates_resources_before_opening_application_data() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let data_dir = directory.path().join("app-data");
+    let error = initialize(&ServerConfig {
+        resource_root: directory.path().join("incomplete-resources"),
+        data_dir: data_dir.clone(),
+        models: ServerModelConfig::Demo,
+        max_concurrent_runs: 1,
+        max_parallel_actions: 1,
+    })
+    .await
+    .err()
+    .expect("an incomplete resource tree must be rejected");
+
+    assert!(error.to_string().contains("built-in Workflow directory"));
+    assert!(!data_dir.exists());
+}
+
+#[tokio::test]
 async fn project_library_and_research_state_use_separate_roots() {
     let directory = tempdir().expect("temporary directory should be created");
     let project_root = directory.path().join("research/portable-paper");
@@ -240,8 +259,8 @@ fn prepare_root(root: &Path) {
         std::fs::copy(source, builtin.join("workflow.py"))
             .expect("builtin workflow should be copied");
     }
-    std::fs::create_dir_all(root.join("workflows/user"))
-        .expect("user workflow directory should be created");
+    let python_runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python");
+    copy_directory(&python_runtime, &root.join("python"));
 }
 
 async fn test_app(directory: &TempDir) -> Router {

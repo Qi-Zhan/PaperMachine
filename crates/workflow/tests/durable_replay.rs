@@ -12,6 +12,7 @@ use papermachine_store::{NewWorkflow, Store};
 use papermachine_tools::ToolRegistry;
 use papermachine_workflow::{
     PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
+    resolve_python_executable,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -159,24 +160,6 @@ async def main(ctx):
     }
 "#;
 
-fn python() -> PathBuf {
-    if let Some(value) = std::env::var_os("PAPERMACHINE_PYTHON") {
-        let path = PathBuf::from(value);
-        if path.is_file() {
-            return path;
-        }
-    }
-    [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/usr/bin/python3",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
-    .expect("a Python executable should be available on macOS")
-}
-
 fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot {
     WorkflowProgramSnapshot {
         project_id: None,
@@ -217,7 +200,7 @@ fn runtime_with(
     PythonWorkflowRuntime::new(
         store,
         sessions,
-        python(),
+        resolve_python_executable().expect("Python 3.11 or newer should be available"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python"),
         work_root,
     )

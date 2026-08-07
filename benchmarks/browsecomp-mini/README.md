@@ -17,14 +17,18 @@ and two-round coverage research, with two repeats and at most two concurrent
 Workflows:
 
 ```bash
+cargo build -p papermachine-server
 python3 benchmarks/browsecomp-mini/run_matrix.py
 ```
 
 Each run starts an isolated PaperMachine server on an ephemeral local port.
+The default binary is `target/debug/papermachine-server`; the runner does not
+build it or locate Cargo. Use `--server-bin <path>` for another build.
 The server uses `runs/<run-name>/server-data` for its project library and writes
 `runs/<run-name>/server.log`; it cannot add benchmark Projects to the normal
 user or development library. `--server-config <path>` selects the provider
-configuration, and the same run name resumes the same isolated state.
+configuration. Both selected artifacts are hashed into the runtime fingerprint,
+and the same run name resumes the same isolated state.
 
 Research and grader Workflows are Project-level launches with
 `context_mode=fresh`, so one encrypted task cannot inherit another task's

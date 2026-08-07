@@ -239,18 +239,24 @@ impl ProjectRuntimeFactory {
 }
 
 pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
+    let workflows_root = config.resource_root.join("workflows");
+    let builtins_root = workflows_root.join("builtin");
+    anyhow::ensure!(
+        builtins_root.is_dir(),
+        "PaperMachine built-in Workflow directory is missing: {}",
+        builtins_root.display()
+    );
+    let python_runtime_root = config.resource_root.join("python");
+    let validator = python_runtime_root.join("papermachine/_validate.py");
+    anyhow::ensure!(
+        validator.is_file(),
+        "PaperMachine Python runtime is missing: {}",
+        validator.display()
+    );
     let library = Arc::new(
         ProjectLibrary::open(config.data_dir.join("library.db"))
             .context("failed to open PaperMachine Project library")?,
     );
-    let python_runtime_root = {
-        let local = config.resource_root.join("python");
-        if local.is_dir() {
-            local
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python")
-        }
-    };
     let (model, default_model, model_context_window, mode, model_profiles, model_providers): InitializedModels = match &config.models {
         ServerModelConfig::Demo => (
             Arc::new(DemoModelClient),
@@ -288,7 +294,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         .context("failed to register exec_command")?
         .build();
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
-        workflows_root: config.resource_root.join("workflows"),
+        workflows_root,
         python_runtime_root,
         model: Arc::clone(&model),
         tools,

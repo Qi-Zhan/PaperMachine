@@ -11,6 +11,7 @@ use papermachine_store::StoreError;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -58,8 +59,13 @@ impl WorkflowProgramCatalog {
     ) -> Result<Self, WorkflowProgramCatalogError> {
         let builtins_root = workflows_root.as_ref().join("builtin");
         let python_runtime_root = python_runtime_root.as_ref().to_path_buf();
-        fs::create_dir_all(&builtins_root)?;
-        let python = find_python()?;
+        if !builtins_root.is_dir() {
+            return Err(WorkflowProgramCatalogError::Path(format!(
+                "built-in Workflow directory is missing: {}",
+                builtins_root.display()
+            )));
+        }
+        let python = resolve_python_executable()?;
         let mut catalog = Self {
             builtins_root,
             python_runtime_root,
@@ -310,37 +316,54 @@ fn workflow_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     Ok(files)
 }
 
-fn find_python() -> Result<PathBuf, WorkflowProgramCatalogError> {
-    if let Some(path) = std::env::var_os("PAPERMACHINE_PYTHON") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
+pub fn resolve_python_executable() -> Result<PathBuf, WorkflowProgramCatalogError> {
+    if let Some(configured) = env::var_os("PAPERMACHINE_PYTHON") {
+        let configured = PathBuf::from(configured);
+        let path = resolve_executable(&configured).ok_or_else(|| {
+            WorkflowProgramCatalogError::PythonUnavailable(configured.display().to_string())
+        })?;
+        if supported_python(&path) {
             return Ok(path);
         }
-        return Err(WorkflowProgramCatalogError::PythonUnavailable(
-            path.display().to_string(),
-        ));
+        return Err(WorkflowProgramCatalogError::PythonUnavailable(format!(
+            "{} is not Python 3.11 or newer",
+            path.display()
+        )));
     }
-    for path in [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/usr/bin/python3",
-    ] {
-        let candidate = PathBuf::from(path);
-        if candidate.is_file() {
-            let output = Command::new(&candidate)
-                .arg("-c")
-                .arg("import sys; print(sys.version_info[:2] >= (3, 11))")
-                .output();
-            if output
-                .is_ok_and(|output| output.status.success() && output.stdout.starts_with(b"True"))
-            {
-                return Ok(candidate);
-            }
+    let names: &[&str] = if cfg!(windows) {
+        &["python3.exe", "python.exe"]
+    } else {
+        &["python3", "python"]
+    };
+    for name in names {
+        let candidate = PathBuf::from(name);
+        if let Some(path) = resolve_executable(&candidate)
+            && supported_python(&path)
+        {
+            return Ok(path);
         }
     }
     Err(WorkflowProgramCatalogError::PythonUnavailable(
-        "Python 3.11 or newer was not found".to_string(),
+        "Python 3.11 or newer was not found on PATH; set PAPERMACHINE_PYTHON".to_string(),
     ))
+}
+
+fn resolve_executable(value: &Path) -> Option<PathBuf> {
+    if value.is_absolute() || value.components().count() > 1 {
+        return value.is_file().then(|| value.to_path_buf());
+    }
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(value))
+        .find(|candidate| candidate.is_file())
+}
+
+fn supported_python(path: &Path) -> bool {
+    Command::new(path)
+        .arg("-c")
+        .arg("import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 #[derive(Debug, Error)]

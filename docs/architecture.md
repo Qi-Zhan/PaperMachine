@@ -98,6 +98,13 @@ project_root/.papermachine/     one research effort's owned state
   skills/
 ```
 
+`resource_root` is required server configuration; no current-working-directory
+default or compile-time source-tree fallback is used. Startup fails before
+opening application data if the built-in Workflow directory or Python DSL
+validator is missing. `PAPERMACHINE_PYTHON` may select the Python executable;
+otherwise PaperMachine resolves `python3` or `python` from `PATH` and verifies
+Python 3.11 or newer. It does not probe installation-specific absolute paths.
+
 The platform default `data_dir` is
 `~/Library/Application Support/PaperMachine` on macOS,
 `$XDG_DATA_HOME/papermachine` (or `~/.local/share/papermachine`) on Linux, and

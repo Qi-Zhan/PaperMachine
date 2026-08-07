@@ -53,18 +53,21 @@ The default experiment is five tasks, the three controlled baseline conditions
 `--conditions` to add only the expensive difficulty tiers deliberately:
 
 ```bash
+cargo build -p papermachine-server
 python3 benchmarks/deep-research-mini/run_matrix.py
 python3 benchmarks/deep-research-mini/run_matrix.py \
   --conditions evidence_r3,evidence_r4 \
   --run-name deepseek-difficulty-5x2x2-2026-08-07
 ```
 
-The runner builds and starts its own PaperMachine server on an ephemeral local
-port. Its global project library and server log live inside
+The runner starts the already-compiled `target/debug/papermachine-server` on an
+ephemeral local port. It never invokes Cargo or guesses a toolchain location;
+`--server-bin <path>` selects another binary. Its global project library and server log live inside
 `runs/<run-name>/server-data` and `runs/<run-name>/server.log`; it never attaches
 to the normal user or development server. Use `--server-config <path>` to select
-a provider configuration. Reusing the same run name resumes both benchmark
-state and its isolated project library.
+a provider configuration. The selected configuration and server binary hashes
+are included in the runtime fingerprint. Reusing the same run name resumes both
+benchmark state and its isolated project library.
 
 Each job starts its Workflow directly from the benchmark Project with
 `context_mode=fresh`; it does not create a placeholder Session, and prior jobs

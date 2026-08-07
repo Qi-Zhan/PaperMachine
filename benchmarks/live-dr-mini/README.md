@@ -25,14 +25,17 @@ Workflows execute at once so cache warming and wall-time measurements are not
 dominated by a burst of competing runs:
 
 ```bash
+cargo build -p papermachine-server
 python3 benchmarks/live-dr-mini/run_matrix.py
 ```
 
 The runner owns a PaperMachine server on an ephemeral local port for the life
-of the process. Its project library is `runs/<run-name>/server-data`, its log is
+of the process. It runs `target/debug/papermachine-server` by default without
+invoking Cargo; `--server-bin <path>` selects another compiled binary. Its project library is `runs/<run-name>/server-data`, its log is
 `runs/<run-name>/server.log`, and neither normal user data nor development data
-is opened. `--server-config <path>` selects the provider configuration; rerun
-the same name to resume its state.
+is opened. `--server-config <path>` selects the provider configuration. The
+binary and configuration are fingerprinted; rerun the same name to resume its
+state.
 
 Each research and grader job starts directly from the Project with a fresh
 launch context, keeping tasks isolated from prior benchmark results.

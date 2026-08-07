@@ -11,14 +11,17 @@ import sys
 from pathlib import Path
 
 
-def cargo_executable() -> str:
-    discovered = shutil.which("cargo")
-    rustup_proxy = Path.home() / ".cargo" / "bin" / "cargo"
+def cargo_executable(environment: dict[str, str] | None = None) -> str:
+    env = os.environ if environment is None else environment
+    configured = env.get("CARGO")
+    if configured:
+        return configured
+    discovered = shutil.which("cargo", path=env.get("PATH", ""))
     if discovered:
         return discovered
-    if rustup_proxy.is_file():
-        return str(rustup_proxy)
-    raise FileNotFoundError("cargo is required to run the PaperMachine server")
+    raise FileNotFoundError(
+        "cargo is not available; set CARGO or add cargo to PATH"
+    )
 
 
 def development_data_dir(
@@ -75,7 +78,14 @@ def main() -> int:
             ["--config", str((args.config or repository_root / "papermachine.toml").resolve())]
         )
     print(f"development data: {data_dir}", flush=True)
-    return subprocess.run(command, cwd=repository_root, check=False).returncode
+    environment = os.environ.copy()
+    environment.setdefault("PAPERMACHINE_PYTHON", sys.executable)
+    return subprocess.run(
+        command,
+        cwd=repository_root,
+        env=environment,
+        check=False,
+    ).returncode
 
 
 if __name__ == "__main__":

@@ -50,8 +50,9 @@ research directory. The repository is never used as an implicit data store.
 ## Storage model
 
 `resource_root` is read-only application material: web assets, the Python DSL
-runtime, and built-in Workflows. `data_dir` contains only application-global
-state:
+runtime, and built-in Workflows. The server requires it explicitly through
+`--resource-root` or `PAPERMACHINE_RESOURCE_ROOT`; it never infers resources
+from the current working directory. `data_dir` contains only application-global state:
 
 | Platform | Default `data_dir` |
 | --- | --- |
@@ -180,7 +181,8 @@ pnpm server:demo
 Open <http://127.0.0.1:4310>. Demo mode exercises the full runtime and UI but
 does not perform substantive research. The development launcher uses the
 platform `data_dir` above with a dedicated `dev` suffix, so it cannot populate
-the normal Project library.
+the normal Project library. It uses `CARGO` when explicitly set, otherwise
+`cargo` from `PATH`; it does not guess a Rust installation directory.
 
 For real models, PaperMachine loads `config.toml` from its platform user-data
 directory by default, or the file passed to `--config`. The committed

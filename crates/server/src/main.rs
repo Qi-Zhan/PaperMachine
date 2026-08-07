@@ -19,7 +19,7 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[command(about = "Local-first auto-research server")]
 struct Args {
     /// Read-only PaperMachine resources: web assets, Python runtime, and built-in Workflows.
-    #[arg(long, env = "PAPERMACHINE_RESOURCE_ROOT", default_value = ".")]
+    #[arg(long, env = "PAPERMACHINE_RESOURCE_ROOT")]
     resource_root: PathBuf,
     /// Durable PaperMachine application data. Uses the platform user-data directory by default.
     #[arg(long, env = "PAPERMACHINE_DATA_DIR")]
