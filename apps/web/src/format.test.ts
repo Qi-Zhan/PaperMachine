@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sessionEventTitle, shortId, statusLabel } from './format'
+import { primaryActionText, sessionEventTitle, shortId, statusLabel } from './format'
 import { setLocale } from './i18n'
 
 describe('format helpers', () => {
@@ -35,5 +35,16 @@ describe('format helpers', () => {
       }),
     ).toBe('Tool 已完成')
     setLocale('en')
+  })
+
+  it('selects conversational text from structured Workflow Action input', () => {
+    expect(
+      primaryActionText({
+        question: 'The broad user request',
+        objective: 'Verify the disputed primary-source claim',
+        coverage_ids: ['evidence'],
+      }),
+    ).toBe('Verify the disputed primary-source claim')
+    expect(primaryActionText({ evidence_ledger: [] })).toBeNull()
   })
 })

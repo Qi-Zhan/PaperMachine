@@ -62,9 +62,11 @@
           <article v-for="turn in view.turns" :key="turn.id" class="turn-block">
             <div :class="turn.origin === 'user' ? 'user-message' : 'workflow-message'">
               <span v-if="turn.origin === 'workflow'" class="message-origin">
-                <GitBranch :size="12" /> {{ t('session.workflowTask') }}
+                <GitBranch :size="12" />
+                {{ t('session.workflowTask') }}
+                <template v-if="actionForTurn(turn.id)"> · {{ actionForTurn(turn.id)?.action_name }}</template>
               </span>
-              <p>{{ turn.input }}</p>
+              <p>{{ turnMessage(turn) }}</p>
               <time>{{ formatDateTime(turn.created_at) }}</time>
             </div>
 
@@ -97,6 +99,20 @@
                 <ChevronDown :size="14" />
               </summary>
               <div class="step-list">
+                <details v-if="actionForTurn(turn.id)" class="prompt-snapshot-row">
+                  <summary>
+                    <span class="step-kind-icon" data-kind="workflow"><GitBranch :size="13" /></span>
+                    <span class="step-name">{{ actionForTurn(turn.id)?.action_name }}</span>
+                    <span class="step-meta">{{ t('session.actionInput') }}</span>
+                    <ChevronRight :size="13" />
+                  </summary>
+                  <div class="step-payload">
+                    <div>
+                      <span>{{ t('session.actionInput') }}</span>
+                      <pre>{{ prettyActionArguments(actionForTurn(turn.id)?.arguments) }}</pre>
+                    </div>
+                  </div>
+                </details>
                 <details v-if="turn.prompt.layers.length" class="prompt-snapshot-row">
                   <summary>
                     <span class="step-kind-icon" data-kind="system"><Info :size="13" /></span>
@@ -548,7 +564,7 @@ import {
   X,
 } from '@lucide/vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { formatCount, formatDateTime, formatDuration, shortId, statusLabel } from '../format'
+import { formatCount, formatDateTime, formatDuration, primaryActionText, shortId, statusLabel } from '../format'
 import { useAppI18n } from '../i18n'
 import { liveAssistantOutput } from '../sessionEvents'
 import type {
@@ -705,6 +721,22 @@ watch(
 
 function stepsFor(turnId: string) {
   return props.view.steps.filter((step) => step.turn_id === turnId)
+}
+function actionForTurn(turnId: string) {
+  const attempt = props.workflowView?.attempts.find((candidate) => candidate.turn_id === turnId)
+  if (!attempt) return null
+  return props.workflowView?.actions.find((action) => action.id === attempt.invocation_id) ?? null
+}
+function turnMessage(turn: Turn): string {
+  if (turn.origin === 'user') return turn.input
+  const primary = primaryActionText(actionForTurn(turn.id)?.arguments)
+  if (primary) return primary
+  return actionForTurn(turn.id) ? t('session.workflowStructuredInput') : turn.input
+}
+function prettyActionArguments(value: unknown): string {
+  const rendered = pretty(value)
+  const limit = 20_000
+  return rendered.length <= limit ? rendered : `${rendered.slice(0, limit)}\n…`
 }
 function noticesFor(turnId: string) {
   return props.events.filter(

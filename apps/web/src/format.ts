@@ -45,6 +45,16 @@ export function statusLabel(status: string): string {
   return statusText(status)
 }
 
+export function primaryActionText(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const argumentsObject = value as Record<string, unknown>
+  for (const key of ['message', 'objective', 'question', 'request', 'task', 'guidance', 'prompt', 'topic']) {
+    const candidate = argumentsObject[key]
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return null
+}
+
 export function sessionEventTitle(event: SessionEvent): string {
   const explicit: Record<string, string> = {
     session_created: t('event.sessionCreated'),
