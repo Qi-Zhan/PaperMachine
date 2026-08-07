@@ -294,6 +294,14 @@
           </button>
         </header>
 
+        <details class="session-settings-panel">
+          <summary>
+            <SlidersHorizontal :size="14" />
+            <span>{{ t('session.settings') }}</span>
+            <small>{{ view.session.model }} · {{ accessLabel(view.session.access) }}</small>
+            <ChevronRight :size="13" />
+          </summary>
+
         <section class="inspector-section access-profile-control">
           <div class="inspector-title-row">
             <h3>{{ t('session.access') }}</h3>
@@ -344,6 +352,7 @@
           />
           <p>{{ t('prompt.futureTurns') }}</p>
         </section>
+        </details>
 
         <section class="inspector-section">
           <div class="inspector-title-row">
@@ -606,6 +615,7 @@ import {
   ScanSearch,
   Search,
   SendHorizontal,
+  SlidersHorizontal,
   Sparkles,
   Square,
   TerminalSquare,

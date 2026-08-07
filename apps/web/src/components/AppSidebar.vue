@@ -129,7 +129,7 @@
 
     <footer class="sidebar-footer">
       <span class="connection-dot" :data-online="online" />
-      <span>{{ mode === 'demo' ? t('sidebar.demoModel') : 'OpenAI' }}</span>
+      <span :title="modelLabel">{{ mode === 'demo' ? t('sidebar.demoModel') : modelLabel }}</span>
       <span class="sidebar-footer-spacer" />
       <div class="locale-switch" role="group" :aria-label="t('common.language')">
         <button type="button" :data-active="locale === 'zh-CN'" @click="setLocale('zh-CN')">中</button>
@@ -153,6 +153,7 @@ const props = defineProps<{
   selectedProjectId: string | null
   selectedSessionId: string | null
   mode: string
+  modelLabel: string
   online: boolean
   workflowsActive: boolean
 }>()

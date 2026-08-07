@@ -276,7 +276,7 @@
 
       <section class="overview-section artifact-index">
         <div class="section-heading">
-          <h2>{{ t('project.artifacts') }}</h2>
+          <h2>{{ t('project.otherArtifacts') }}</h2>
           <span>{{ researchArtifacts.length }}</span>
         </div>
         <div v-if="researchArtifacts.length" class="artifact-grid">
@@ -294,7 +294,7 @@
             <ExternalLink :size="13" />
           </button>
         </div>
-        <p v-else class="section-empty">{{ t('project.noArtifacts') }}</p>
+        <p v-else class="section-empty">{{ t('project.noOtherArtifacts') }}</p>
       </section>
     </main>
 

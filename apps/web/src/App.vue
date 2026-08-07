@@ -8,6 +8,7 @@
         :selected-project-id="selectedProjectId"
         :selected-session-id="selectedSessionId"
         :mode="health?.model_mode ?? 'demo'"
+        :model-label="defaultModelLabel"
         :online="online"
         :workflows-active="workflowLibraryOpen"
         @home="showHome"
@@ -277,6 +278,13 @@ const workflowDialogSkills = computed(() =>
 const projectPathDialogProject = computed(() =>
   projects.value.find((project) => project.id === projectPathDialogProjectId.value) ?? null,
 )
+const defaultModelLabel = computed(() => {
+  if (!health.value || health.value.model_mode === 'demo') return ''
+  const profile = health.value.model_profiles.find(
+    (candidate) => candidate.id === health.value?.default_model,
+  )
+  return profile ? `${profile.provider} · ${profile.model}` : health.value.default_model
+})
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
