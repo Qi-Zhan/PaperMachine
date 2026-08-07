@@ -4,6 +4,7 @@ use crate::ModelStream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream;
+use papermachine_protocol::HostedTool;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelRequest;
 use std::collections::VecDeque;
@@ -57,5 +58,9 @@ impl ModelClient for ScriptedModelClient {
             .ok_or(ModelError::ScriptExhausted)?;
 
         Ok(stream::iter(response.into_iter().map(Ok)).boxed())
+    }
+
+    fn supports_hosted_tool(&self, _model: &str, _tool: HostedTool) -> bool {
+        true
     }
 }

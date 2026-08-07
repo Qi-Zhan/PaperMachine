@@ -6,6 +6,7 @@ mod scripted;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use papermachine_protocol::HostedTool;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelRequest;
 use papermachine_protocol::TokenUsage;
@@ -77,5 +78,9 @@ pub trait ModelClient: Send + Sync {
 
     fn model_context_window(&self, _model: &str) -> Option<usize> {
         None
+    }
+
+    fn supports_hosted_tool(&self, _model: &str, _tool: HostedTool) -> bool {
+        false
     }
 }

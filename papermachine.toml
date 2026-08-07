@@ -11,6 +11,7 @@ request_timeout_seconds = 900
 stream_idle_timeout_seconds = 300
 store_responses = false
 responses_websockets = false
+hosted_web_search = false
 prompt_cache_mode = "implicit"
 reasoning_effort = "medium"
 
@@ -28,6 +29,7 @@ request_timeout_seconds = 900
 stream_idle_timeout_seconds = 300
 store_responses = false
 responses_websockets = false
+hosted_web_search = true
 prompt_cache_mode = "implicit"
 reasoning_effort = "high"
 

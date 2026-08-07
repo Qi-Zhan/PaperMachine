@@ -54,7 +54,7 @@ fn demo_research_response(prompt: &str) -> String {
         .unwrap_or("the requested question")
         .trim();
     format!(
-        "Demo result for **{focus}**\n\n- Observation: this Turn ran through the same Session, model-step, and tool-ready agent loop used in OpenAI mode.\n- Evidence boundary: demo mode does not perform substantive web or file research.\n- Next step: run with the configured OpenAI endpoint for evidence-bearing results."
+        "Demo result for **{focus}**\n\n- Observation: this Turn ran through the same Session, model-step, and tool-ready agent loop used in provider mode.\n- Evidence boundary: demo mode does not perform substantive web or file research.\n- Next step: run with a configured Responses-compatible provider for evidence-bearing results."
     )
 }
 

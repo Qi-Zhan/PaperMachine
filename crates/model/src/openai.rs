@@ -119,6 +119,7 @@ pub struct OpenAiResponsesConfig {
     pub reasoning_effort: Option<OpenAiReasoningEffort>,
     pub store_responses: bool,
     pub responses_websockets: bool,
+    pub hosted_web_search: bool,
     pub prompt_cache_mode: OpenAiPromptCacheMode,
 }
 
@@ -137,6 +138,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
             .field("reasoning_effort", &self.reasoning_effort)
             .field("store_responses", &self.store_responses)
             .field("responses_websockets", &self.responses_websockets)
+            .field("hosted_web_search", &self.hosted_web_search)
             .field("prompt_cache_mode", &self.prompt_cache_mode)
             .finish()
     }
@@ -633,6 +635,12 @@ impl ModelClient for OpenAiResponsesClient {
             .remove(session_key);
         if let Some(mut state) = state {
             let _ = state.connection.close(None).await;
+        }
+    }
+
+    fn supports_hosted_tool(&self, _model: &str, tool: papermachine_protocol::HostedTool) -> bool {
+        match tool {
+            papermachine_protocol::HostedTool::WebSearch => self.config.hosted_web_search,
         }
     }
 }
@@ -1243,6 +1251,7 @@ mod tests {
             reasoning_effort: Some(OpenAiReasoningEffort::Medium),
             store_responses: false,
             responses_websockets: true,
+            hosted_web_search: true,
             prompt_cache_mode: OpenAiPromptCacheMode::Implicit,
         }
     }

@@ -80,12 +80,15 @@ def main() -> int:
     print(f"development data: {data_dir}", flush=True)
     environment = os.environ.copy()
     environment.setdefault("PAPERMACHINE_PYTHON", sys.executable)
-    return subprocess.run(
-        command,
-        cwd=repository_root,
-        env=environment,
-        check=False,
-    ).returncode
+    try:
+        return subprocess.run(
+            command,
+            cwd=repository_root,
+            env=environment,
+            check=False,
+        ).returncode
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":

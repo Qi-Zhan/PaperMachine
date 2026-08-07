@@ -9,6 +9,7 @@ use crate::OpenAiResponsesClient;
 use crate::OpenAiResponsesConfig;
 use async_trait::async_trait;
 use futures::StreamExt;
+use papermachine_protocol::HostedTool;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelRequest;
 use serde::Deserialize;
@@ -37,6 +38,7 @@ pub struct ModelProviderInfo {
     pub request_timeout_seconds: u64,
     pub stream_idle_timeout_seconds: u64,
     pub responses_websockets: bool,
+    pub hosted_web_search: bool,
     pub prompt_cache_mode: String,
 }
 
@@ -135,6 +137,7 @@ impl ConfiguredModels {
             )?;
             let prompt_cache_mode = provider.prompt_cache_mode.unwrap_or_default();
             let responses_websockets = provider.responses_websockets.unwrap_or(true);
+            let hosted_web_search = provider.hosted_web_search;
             let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
                 provider_id: provider_id.clone(),
                 endpoint: endpoint.clone(),
@@ -147,6 +150,7 @@ impl ConfiguredModels {
                 reasoning_effort: provider.reasoning_effort,
                 store_responses: provider.store_responses.unwrap_or(false),
                 responses_websockets,
+                hosted_web_search,
                 prompt_cache_mode,
             })?;
             providers.push(ModelProviderInfo {
@@ -157,6 +161,7 @@ impl ConfiguredModels {
                 request_timeout_seconds: request_timeout.as_secs(),
                 stream_idle_timeout_seconds: stream_idle_timeout.as_secs(),
                 responses_websockets,
+                hosted_web_search,
                 prompt_cache_mode: prompt_cache_mode_name(prompt_cache_mode).to_string(),
             });
             clients.insert(provider_id, Arc::new(client));
@@ -302,6 +307,14 @@ impl ModelClient for ModelRouter {
             .get(model)
             .map(|route| route.profile.context_window)
     }
+
+    fn supports_hosted_tool(&self, model: &str, tool: HostedTool) -> bool {
+        self.routes.get(model).is_some_and(|route| {
+            route
+                .client
+                .supports_hosted_tool(&route.profile.model, tool)
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,6 +345,7 @@ struct ProviderConfigFile {
     reasoning_effort: Option<OpenAiReasoningEffort>,
     store_responses: Option<bool>,
     responses_websockets: Option<bool>,
+    hosted_web_search: bool,
     prompt_cache_mode: Option<OpenAiPromptCacheMode>,
 }
 
@@ -429,12 +443,14 @@ kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 responses_websockets = false
+hosted_web_search = true
 prompt_cache_mode = "implicit"
 
 [providers.openai]
 kind = "open_ai_responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+hosted_web_search = false
 
 [models.deepseek-flash]
 provider = "deepseek"
@@ -454,6 +470,30 @@ context_window = 1000000
         assert_eq!(configured.default_model, "deepseek-flash");
         assert_eq!(configured.profiles.len(), 2);
         assert_eq!(configured.providers.len(), 2);
+        assert!(
+            configured
+                .providers
+                .iter()
+                .find(|provider| provider.id == "deepseek")
+                .is_some_and(|provider| provider.hosted_web_search)
+        );
+        assert!(
+            configured
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai")
+                .is_some_and(|provider| !provider.hosted_web_search)
+        );
+        assert!(
+            configured
+                .router
+                .supports_hosted_tool("deepseek-flash", HostedTool::WebSearch)
+        );
+        assert!(
+            !configured
+                .router
+                .supports_hosted_tool("openai-main", HostedTool::WebSearch)
+        );
         assert_eq!(
             configured.router.model_context_window("deepseek-flash"),
             Some(1_000_000)
@@ -470,6 +510,7 @@ default_model = "main"
 kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+hosted_web_search = true
 [models.main]
 provider = "deepseek"
 model = "deepseek-v4-flash"
@@ -496,6 +537,29 @@ context_window = 1000000
             ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
                 .expect_err("provider kind should be explicit");
         assert!(error.to_string().contains("missing field `kind`"));
+    }
+
+    #[test]
+    fn hosted_web_search_capability_is_required() {
+        let source = r#"
+default_model = "main"
+[providers.deepseek]
+kind = "open_ai_responses"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+[models.main]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+context_window = 1000000
+"#;
+        let error =
+            ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
+                .expect_err("hosted web search support should be explicit");
+        assert!(
+            error
+                .to_string()
+                .contains("missing field `hosted_web_search`")
+        );
     }
 
     #[tokio::test]

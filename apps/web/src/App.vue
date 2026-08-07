@@ -74,6 +74,7 @@
         :skills-busy="skillsBusy"
         :access-busy="accessBusy"
         :prompt-busy="promptBusy"
+        :hosted-web-search="sessionHostedWebSearch"
         @open-sidebar="mobileSidebarOpen = true"
         @select-project="selectProject"
         @select-session="selectSession"
@@ -284,6 +285,15 @@ const defaultModelLabel = computed(() => {
     (candidate) => candidate.id === health.value?.default_model,
   )
   return profile ? `${profile.provider} · ${profile.model}` : health.value.default_model
+})
+const sessionHostedWebSearch = computed(() => {
+  const profile = health.value?.model_profiles.find(
+    (candidate) => candidate.id === sessionView.value?.session.model,
+  )
+  if (!profile) return false
+  return health.value?.model_providers.find(
+    (provider) => provider.id === profile.provider,
+  )?.hosted_web_search ?? false
 })
 
 onMounted(async () => {

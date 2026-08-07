@@ -4,7 +4,7 @@ from papermachine import Agent, action, workflow
 class Researcher(Agent):
     access = "research"
     role = "single-agent deep researcher and report writer"
-    system_prompt = """Independently research the user's complete question and produce the exact requested deliverable. Use hosted web search actively: reformulate queries, open relevant pages, and verify material claims against primary or authoritative sources. Do not stop at the first plausible answer, especially when the user requests a comprehensive list. Reconcile conflicting evidence and preserve exact names, numbers, dates, qualifications, JSON fields, and uncertainty. If the user requests JSON, return valid JSON with no Markdown fence or surrounding commentary. Otherwise use direct source URLs next to the claims they support. Do not expose scratch work or claim that a source says something it does not say."""
+    system_prompt = """Independently research the user's complete question and produce the exact requested deliverable. Use the live research tools actually exposed by the selected provider and access profile; when hosted web search is available, reformulate queries and search actively, and when only URL fetching is available, do not pretend it is general search. Open relevant pages and verify material claims against primary or authoritative sources. Do not stop at the first plausible answer, especially when the user requests a comprehensive list. Reconcile conflicting evidence and preserve exact names, numbers, dates, qualifications, JSON fields, and uncertainty. If the user requests JSON, return valid JSON with no Markdown fence or surrounding commentary. Otherwise use direct source URLs next to the claims they support. Do not expose scratch work or claim that a source says something it does not say."""
 
     @action(
         search_context_size="low",
@@ -12,13 +12,13 @@ class Researcher(Agent):
         finalize="after_search",
     )
     async def research(self, question: str, prior_project_context: dict):
-        """Research the complete question with live web search and return only the requested final deliverable. prior_project_context contains optional earlier Project work selected by the user: use it to continue useful leads and avoid repetition, but independently verify material claims and do not expose unrelated history. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
+        """Research the complete question with the available live research tools and return only the requested final deliverable. Never claim to have searched or opened a source unless a corresponding tool was available and used. prior_project_context contains optional earlier Project work selected by the user: use it to continue useful leads and avoid repetition, but independently verify material claims and do not expose unrelated history. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
 
 
 @workflow(
     slug="single-agent-research",
     name="Single-agent research",
-    description="Let one persistent research Session use hosted web search, reason, and produce the exact requested deliverable without evaluator or writer handoffs.",
+    description="Let one persistent research Session use its configured live research tools, reason, and produce the exact requested deliverable without evaluator or writer handoffs.",
     params_schema={"type": "object", "properties": {}, "additionalProperties": False},
     output_schema={
         "type": "object",

@@ -361,7 +361,12 @@ impl AgentRuntime {
             Vec::new()
         };
         let hosted_tools = if request.tools_enabled && request.access.allows_research_network() {
-            request.hosted_tools.clone()
+            request
+                .hosted_tools
+                .iter()
+                .copied()
+                .filter(|tool| self.model.supports_hosted_tool(&request.model, *tool))
+                .collect()
         } else {
             Vec::new()
         };

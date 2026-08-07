@@ -213,6 +213,7 @@ api_key_env = "AEROIDES_API_KEY"
 request_timeout_seconds = 900
 stream_idle_timeout_seconds = 300
 responses_websockets = false
+hosted_web_search = false
 prompt_cache_mode = "implicit"
 
 [providers.deepseek]
@@ -222,12 +223,14 @@ api_key_env = "DEEPSEEK_API_KEY"
 request_timeout_seconds = 900
 stream_idle_timeout_seconds = 300
 responses_websockets = false
+hosted_web_search = true
 prompt_cache_mode = "implicit"
 
 [providers.openai]
 kind = "open_ai_responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "PAPERMACHINE_OPENAI_API_KEY"
+hosted_web_search = true
 
 [models.deepseek-flash]
 provider = "deepseek"
@@ -256,8 +259,10 @@ selected explicitly. Only the credential variable named by each provider's
 `api_key_env` is read from the environment.
 
 Provider request deadlines, stream-idle deadlines, cache mode, response
-storage, reasoning defaults, and transport policy belong in that provider's
-TOML table. `prompt_cache_mode` accepts `auto` (default), `implicit`, or
+storage, reasoning defaults, hosted-tool capability, and transport policy belong
+in that provider's TOML table. `hosted_web_search` is required: set it only when
+the endpoint returns auditable Responses `web_search_call` items, rather than
+merely accepting the tool schema. `prompt_cache_mode` accepts `auto` (default), `implicit`, or
 `explicit`. Auto mode probes explicit-breakpoint support once per model and
 uses provider-managed implicit caching when an OpenAI-compatible endpoint
 rejects the breakpoint field.

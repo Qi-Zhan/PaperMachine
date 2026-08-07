@@ -267,6 +267,12 @@ the end of the stable developer instructions. Providers that reject that field
 use ordinary implicit caching instead. A provider's `prompt_cache_mode` setting
 may pin `implicit` or `explicit` when provider behavior is already known.
 
+Hosted tools are provider capabilities, not properties inferred from the wire
+protocol. Every provider explicitly declares `hosted_web_search`; the Agent
+filters hosted definitions for the selected model profile before sampling.
+Local function tools such as `fetch_url` remain governed by the Turn access
+snapshot independently of that provider capability.
+
 The final model sample keeps the same instructions and history prefix, appends
 a final-answer message, removes local and hosted tool definitions, and sets
 `tool_choice=none`. This gives compatible providers no tool surface even when

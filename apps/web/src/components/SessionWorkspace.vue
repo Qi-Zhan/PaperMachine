@@ -665,6 +665,7 @@ const props = defineProps<{
   skillsBusy: boolean
   accessBusy: boolean
   promptBusy: boolean
+  hostedWebSearch: boolean
 }>()
 const emit = defineEmits<{
   'open-sidebar': []
@@ -913,7 +914,9 @@ function accessDescription(access: AgentAccessProfile): string {
   if (access === 'model_only') return t('access.modelOnlyDescription')
   if (access === 'read_only') return t('access.readOnlyDescription')
   if (access === 'workspace') return t('access.workspaceDescription')
-  if (access === 'research') return t('access.researchDescription')
+  if (access === 'research') {
+    return t(props.hostedWebSearch ? 'access.researchDescription' : 'access.researchWithoutHostedSearchDescription')
+  }
   return t('access.fullAccessDescription')
 }
 function send() {
