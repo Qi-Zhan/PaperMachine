@@ -70,35 +70,76 @@
               <time>{{ formatDateTime(turn.created_at) }}</time>
             </div>
 
-            <details
+            <section
               v-if="turn.prompt.layers.length || stepsFor(turn.id).length || turn.status !== 'completed'"
-              class="execution-details"
-              :open="['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status)"
+              class="execution-trace"
             >
-              <summary>
-                <span class="turn-state-icon" :data-status="turn.status">
-                  <LoaderCircle v-if="turn.status === 'queued' || turn.status === 'running'" class="spin" :size="14" />
-                  <CircleHelp v-else-if="turn.status === 'waiting_for_human'" :size="14" />
-                  <Pause v-else-if="turn.status === 'paused'" :size="14" />
-                  <CircleCheck v-else-if="turn.status === 'completed'" :size="14" />
-                  <CircleX v-else :size="14" />
-                </span>
-                <span>{{ executionLabel(turn) }}</span>
-                <span class="execution-meta">
-                  {{ stepsFor(turn.id).length }} {{ t(stepsFor(turn.id).length === 1 ? 'session.step' : 'session.steps') }}
-                  <template v-if="turn.usage.input_tokens + turn.usage.output_tokens">
-                    · {{ formatCount(turn.usage.input_tokens + turn.usage.output_tokens) }} {{ t('session.tokens') }}
-                  </template>
-                  <template v-if="turn.usage.cached_input_tokens">
-                    · {{ formatCount(turn.usage.cached_input_tokens) }} {{ t('session.cachedTokens') }}
-                  </template>
-                  <template v-if="turn.usage.cache_write_input_tokens">
-                    · {{ formatCount(turn.usage.cache_write_input_tokens) }} {{ t('session.cacheWriteTokens') }}
-                  </template>
-                </span>
-                <ChevronDown :size="14" />
-              </summary>
-              <div class="step-list">
+              <div v-if="activityStepsFor(turn.id).length || noticesFor(turn.id).length" class="activity-list">
+                <details v-for="step in activityStepsFor(turn.id)" :key="step.id" class="activity-row">
+                  <summary>
+                    <span class="activity-icon" :data-kind="activityKind(step)">
+                      <Search v-if="activityKind(step) === 'search'" :size="17" />
+                      <FileText v-else-if="activityKind(step) === 'read'" :size="17" />
+                      <TerminalSquare v-else-if="activityKind(step) === 'command'" :size="17" />
+                      <Save v-else-if="activityKind(step) === 'edit'" :size="17" />
+                      <Activity v-else :size="17" />
+                    </span>
+                    <span class="activity-copy">
+                      <strong>{{ activityLabel(step) }}</strong>
+                      <small v-if="activitySubject(step)">{{ activitySubject(step) }}</small>
+                    </span>
+                    <span class="activity-meta">
+                      <template v-if="step.status !== 'completed'">{{ statusLabel(step.status) }}</template>
+                      <template v-if="step.duration_ms !== null"><span v-if="step.status !== 'completed'"> · </span>{{ formatDuration(step.duration_ms) }}</template>
+                    </span>
+                    <ChevronDown :size="14" />
+                  </summary>
+                  <div class="activity-payload step-payload">
+                    <div>
+                      <span>{{ t('common.input') }}</span>
+                      <pre>{{ pretty(step.input) }}</pre>
+                    </div>
+                    <div v-if="step.output !== null">
+                      <span>{{ t('common.output') }}</span>
+                      <pre>{{ pretty(step.output) }}</pre>
+                    </div>
+                  </div>
+                </details>
+                <div v-for="notice in noticesFor(turn.id)" :key="notice.id" class="activity-notice">
+                  <TriangleAlert v-if="notice.type !== 'context_trimmed'" :size="17" />
+                  <BrainCircuit v-else :size="17" />
+                  <span>{{ noticeText(notice) }}</span>
+                </div>
+              </div>
+
+              <details
+                class="execution-details"
+                :open="['queued', 'running', 'waiting_for_human', 'paused'].includes(turn.status) && activityStepsFor(turn.id).length === 0"
+              >
+                <summary>
+                  <span class="turn-state-icon" :data-status="turn.status">
+                    <LoaderCircle v-if="turn.status === 'queued' || turn.status === 'running'" class="spin" :size="15" />
+                    <CircleHelp v-else-if="turn.status === 'waiting_for_human'" :size="15" />
+                    <Pause v-else-if="turn.status === 'paused'" :size="15" />
+                    <CircleCheck v-else-if="turn.status === 'completed'" :size="15" />
+                    <CircleX v-else :size="15" />
+                  </span>
+                  <span>{{ executionLabel(turn) }}</span>
+                  <span class="execution-meta">
+                    {{ stepsFor(turn.id).length }} {{ t(stepsFor(turn.id).length === 1 ? 'session.step' : 'session.steps') }}
+                    <template v-if="turn.usage.input_tokens + turn.usage.output_tokens">
+                      · {{ formatCount(turn.usage.input_tokens + turn.usage.output_tokens) }} {{ t('session.tokens') }}
+                    </template>
+                    <template v-if="turn.usage.cached_input_tokens">
+                      · {{ formatCount(turn.usage.cached_input_tokens) }} {{ t('session.cachedTokens') }}
+                    </template>
+                    <template v-if="turn.usage.cache_write_input_tokens">
+                      · {{ formatCount(turn.usage.cache_write_input_tokens) }} {{ t('session.cacheWriteTokens') }}
+                    </template>
+                  </span>
+                  <ChevronDown :size="14" />
+                </summary>
+                <div class="step-list">
                 <details v-if="actionForTurn(turn.id)" class="prompt-snapshot-row">
                   <summary>
                     <span class="step-kind-icon" data-kind="workflow"><GitBranch :size="13" /></span>
@@ -132,7 +173,7 @@
                     </details>
                   </div>
                 </details>
-                <details v-for="step in stepsFor(turn.id)" :key="step.id" class="step-row">
+                <details v-for="step in technicalStepsFor(turn.id)" :key="step.id" class="step-row">
                   <summary>
                     <span class="step-kind-icon" :data-kind="step.kind">
                       <TerminalSquare v-if="step.kind === 'tool'" :size="13" />
@@ -160,12 +201,9 @@
                     </div>
                   </div>
                 </details>
-                <div v-for="notice in noticesFor(turn.id)" :key="notice.id" class="execution-notice">
-                  <TriangleAlert :size="13" />
-                  <span>{{ noticeText(notice) }}</span>
                 </div>
-              </div>
-            </details>
+              </details>
+            </section>
 
             <div v-if="turn.output" class="assistant-message">
               <MarkdownView :source="turn.output" />
@@ -555,6 +593,7 @@ import {
   Radio,
   Save,
   ScanSearch,
+  Search,
   SendHorizontal,
   Sparkles,
   Square,
@@ -564,11 +603,21 @@ import {
   X,
 } from '@lucide/vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { formatCount, formatDateTime, formatDuration, primaryActionText, shortId, statusLabel } from '../format'
+import {
+  agentActivityKind,
+  agentActivitySubject,
+  formatCount,
+  formatDateTime,
+  formatDuration,
+  primaryActionText,
+  shortId,
+  statusLabel,
+} from '../format'
 import { useAppI18n } from '../i18n'
 import { liveAssistantOutput } from '../sessionEvents'
 import type {
   AgentAccessProfile,
+  AgentStep,
   Artifact,
   Project,
   ProjectSkill,
@@ -721,6 +770,26 @@ watch(
 
 function stepsFor(turnId: string) {
   return props.view.steps.filter((step) => step.turn_id === turnId)
+}
+function activityStepsFor(turnId: string) {
+  return stepsFor(turnId).filter((step) => step.kind === 'tool')
+}
+function technicalStepsFor(turnId: string) {
+  return stepsFor(turnId).filter((step) => step.kind !== 'tool')
+}
+function activityKind(step: AgentStep) {
+  return agentActivityKind(step.name)
+}
+function activityLabel(step: AgentStep): string {
+  const kind = activityKind(step)
+  if (kind === 'search') return t('session.activitySearched')
+  if (kind === 'read') return t('session.activityRead')
+  if (kind === 'command') return t('session.activityRanCommand')
+  if (kind === 'edit') return t('session.activityEdited')
+  return t('session.activityUsedTool', { name: step.name })
+}
+function activitySubject(step: AgentStep): string | null {
+  return agentActivitySubject(step.input)
 }
 function actionForTurn(turnId: string) {
   const attempt = props.workflowView?.attempts.find((candidate) => candidate.turn_id === turnId)

@@ -55,6 +55,47 @@ export function primaryActionText(value: unknown): string | null {
   return null
 }
 
+export type AgentActivityKind = 'search' | 'read' | 'command' | 'edit' | 'tool'
+
+export function agentActivityKind(name: string): AgentActivityKind {
+  const normalized = name.toLowerCase()
+  if (normalized.includes('search')) return 'search'
+  if (['write', 'edit', 'patch', 'save'].some((part) => normalized.includes(part))) return 'edit'
+  if (['shell', 'command', 'exec', 'terminal'].some((part) => normalized.includes(part))) return 'command'
+  if (['read', 'list', 'find', 'open', 'fetch', 'get'].some((part) => normalized.includes(part))) return 'read'
+  return 'tool'
+}
+
+export function agentActivitySubject(value: unknown): string | null {
+  const subject = findActivitySubject(value)
+  if (subject === null || subject === undefined) return null
+  const rendered = String(subject).replace(/\s+/g, ' ').trim()
+  if (!rendered) return null
+  return rendered.length <= 180 ? rendered : `${rendered.slice(0, 177)}…`
+}
+
+function findActivitySubject(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string' || typeof value === 'number') return value
+  if (!value || typeof value !== 'object' || depth > 2) return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const candidate = findActivitySubject(item, depth + 1)
+      if (candidate !== null) return candidate
+    }
+    return null
+  }
+  const record = value as Record<string, unknown>
+  for (const key of ['query', 'url', 'path', 'file_path', 'command', 'cmd', 'pattern', 'name']) {
+    const candidate = record[key]
+    if (typeof candidate === 'string' || typeof candidate === 'number') return candidate
+  }
+  for (const candidate of Object.values(record)) {
+    const nested = findActivitySubject(candidate, depth + 1)
+    if (nested !== null) return nested
+  }
+  return null
+}
+
 export function sessionEventTitle(event: SessionEvent): string {
   const explicit: Record<string, string> = {
     session_created: t('event.sessionCreated'),

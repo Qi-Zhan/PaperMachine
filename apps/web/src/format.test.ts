@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { primaryActionText, sessionEventTitle, shortId, statusLabel } from './format'
+import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel } from './format'
 import { setLocale } from './i18n'
 
 describe('format helpers', () => {
@@ -46,5 +46,14 @@ describe('format helpers', () => {
       }),
     ).toBe('Verify the disputed primary-source claim')
     expect(primaryActionText({ evidence_ledger: [] })).toBeNull()
+  })
+
+  it('summarizes tool steps as Codex-style activity rows', () => {
+    expect(agentActivityKind('web_search')).toBe('search')
+    expect(agentActivityKind('read_file')).toBe('read')
+    expect(agentActivityKind('apply_patch')).toBe('edit')
+    expect(agentActivityKind('shell_command')).toBe('command')
+    expect(agentActivitySubject({ action: { query: '  exact   clue search  ' } })).toBe('exact clue search')
+    expect(agentActivitySubject({ opaque: {} })).toBeNull()
   })
 })
