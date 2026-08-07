@@ -33,7 +33,7 @@ DEFAULT_COVERAGE = [
 class Planner(Agent):
     access = "model_only"
     role = "research coverage planner"
-    system_prompt = """Turn the user's request into an explicit, question-specific coverage contract before research starts. Derive it only from the request, never from imagined hidden benchmark criteria or from the apparent domain of one named clue. First classify the request as exact_match (one identity must satisfy conjunctive clues), qualifying_list (every main-list candidate must satisfy an explicit qualification), option_survey (different strategies/tools may cover different subproblems and trade-offs), or explanatory_report (coverage applies to the report rather than candidate selection). Make requirements atomic and testable, but separately record which requirements truly must hold jointly for the same candidate, entity, source, row, or time period. Never turn an option survey into an all-or-nothing candidate filter. Preserve only output schemas, date cutoffs, exclusions, and exhaustiveness requirements explicitly present in the original question. Create genuinely independent search strategies rather than assigning one jointly-required property to each route. Every route receives the original question and full contract, and must be able to discover complete evidence on its own. Use three or four routes only when their source families, query strategies, or search spaces truly differ. Do not create a join, synthesis, completeness-audit, or final-formatting route; the evaluator and writer already perform those jobs."""
+    system_prompt = """You are only a research-coverage Planner. Never research the question, guess its answer, emit the user's requested final-answer format, or behave like the Writer. Turn the user's request into an explicit, question-specific coverage contract before research starts. Derive it only from the request, never from imagined hidden benchmark criteria or from the apparent domain of one named clue. First classify the request as exact_match (one identity must satisfy conjunctive clues), qualifying_list (every main-list candidate must satisfy an explicit qualification), option_survey (different strategies/tools may cover different subproblems and trade-offs), or explanatory_report (coverage applies to the report rather than candidate selection). Make requirements atomic and testable, but separately record which requirements truly must hold jointly for the same candidate, entity, source, row, or time period. Never turn an option survey into an all-or-nothing candidate filter. Preserve only output schemas, date cutoffs, exclusions, and exhaustiveness requirements explicitly present in the original question. Create genuinely independent search strategies rather than assigning one jointly-required property to each route. Every route receives the original question and full contract, and must be able to discover complete evidence on its own. Use three or four routes only when their source families, query strategies, or search spaces truly differ. Do not create a join, synthesis, completeness-audit, or final-formatting route; the evaluator and writer already perform those jobs."""
 
     @action(max_steps=1, reasoning_effort="medium", max_output_tokens=32_768)
     async def plan(
@@ -42,8 +42,9 @@ class Planner(Agent):
         minimum_route_count: int,
         maximum_route_count: int,
         extra_requirements: list[str],
+        recovery_instruction: str,
     ) -> dict:
-        """Return a JSON object with answer_mode (exact_match, qualifying_list, option_survey, or explanatory_report), deliverable (string), output_contract (string), candidate_key (string describing what identifies one candidate when applicable), coverage_items (array of objects with id, requirement, acceptance_test), joint_constraints (array of strings describing only requirements that truly must be satisfied by the same candidate rather than by a portfolio of options), routes (array of objects with name, objective, coverage_ids), and verification_rules (array of strings). Create between minimum_route_count and maximum_route_count genuinely independent search routes, and produce no more than 16 coverage items."""
+        """Return only the Planner JSON object; do not answer the research question. Required fields are answer_mode (exact_match, qualifying_list, option_survey, or explanatory_report), deliverable (string), output_contract (string), candidate_key (string describing what identifies one candidate when applicable), coverage_items (array of objects with id, requirement, acceptance_test), joint_constraints (array of strings describing only requirements that truly must be satisfied by the same candidate rather than by a portfolio of options), routes (array of objects with name, objective, coverage_ids), and verification_rules (array of strings). Create between minimum_route_count and maximum_route_count genuinely independent search routes, and produce no more than 16 coverage items. If recovery_instruction is non-empty, correct the prior contract violation it describes."""
 
 
 class Researcher(Agent):
@@ -173,19 +174,153 @@ def _answer_mode(raw_mode, question):
     )
     if any(marker in question_text for marker in survey_markers):
         return "option_survey"
-    if requested in allowed:
-        return requested
+    list_markers = (
+        "list all",
+        "all items",
+        "all candidates",
+        "every candidate",
+        "which ones",
+        "列出所有",
+        "所有符合",
+        "全部符合",
+    )
+    if any(marker in question_text for marker in list_markers):
+        return "qualifying_list"
     exact_markers = (
         "find one",
         "identify one",
+        "identify the",
+        "name of",
+        "what is the name",
+        "who is",
+        "who was",
+        "exact answer",
         "same candidate",
         "all of the following",
         "同时满足",
         "同一个",
+        "名字",
+        "名称",
+        "是谁",
+        "找出这个",
     )
     if any(marker in question_text for marker in exact_markers):
         return "exact_match"
+    if requested in allowed:
+        return requested
     return "explanatory_report"
+
+
+def _plan_contract_error(raw, question, minimum_route_count, maximum_route_count):
+    if not isinstance(raw, dict):
+        return "planner output must be a JSON object"
+    required_text = ("deliverable", "output_contract", "candidate_key")
+    missing_text = [field for field in required_text if not _clean_text(raw.get(field))]
+    if missing_text:
+        return "missing non-empty fields: " + ", ".join(missing_text)
+    requested_mode = _clean_text(raw.get("answer_mode")).casefold()
+    if requested_mode not in {
+        "exact_match",
+        "qualifying_list",
+        "option_survey",
+        "explanatory_report",
+    }:
+        return "answer_mode is missing or invalid"
+    expected_mode = _answer_mode(requested_mode, question)
+    if requested_mode != expected_mode:
+        return (
+            f"answer_mode {requested_mode!r} conflicts with the request; "
+            f"expected {expected_mode!r}"
+        )
+
+    coverage = raw.get("coverage_items")
+    if not isinstance(coverage, list) or not coverage:
+        return "coverage_items must be a non-empty array"
+    coverage_ids = set()
+    for index, item in enumerate(coverage[:16]):
+        if not isinstance(item, dict):
+            return f"coverage_items[{index}] must be an object"
+        coverage_id = _clean_text(item.get("id"))
+        if not coverage_id or not _clean_text(item.get("requirement")) or not _clean_text(item.get("acceptance_test")):
+            return f"coverage_items[{index}] is missing id, requirement, or acceptance_test"
+        if coverage_id in coverage_ids:
+            return f"duplicate coverage id: {coverage_id}"
+        coverage_ids.add(coverage_id)
+
+    routes = raw.get("routes")
+    if not isinstance(routes, list) or not (
+        minimum_route_count <= len(routes) <= maximum_route_count
+    ):
+        return (
+            "routes must contain between "
+            f"{minimum_route_count} and {maximum_route_count} entries"
+        )
+    route_strategies = set()
+    for index, route in enumerate(routes):
+        if not isinstance(route, dict):
+            return f"routes[{index}] must be an object"
+        name = _clean_text(route.get("name"))
+        objective = _clean_text(route.get("objective"))
+        if not name or not objective:
+            return f"routes[{index}] is missing name or objective"
+        strategy_key = (name.casefold(), objective.casefold())
+        if strategy_key in route_strategies:
+            return "routes must use genuinely distinct names and objectives"
+        route_strategies.add(strategy_key)
+        assigned = route.get("coverage_ids")
+        if not isinstance(assigned, list) or not assigned:
+            return f"routes[{index}].coverage_ids must be a non-empty array"
+        unknown = [str(value) for value in assigned if str(value) not in coverage_ids]
+        if unknown:
+            return f"routes[{index}] references unknown coverage ids: " + ", ".join(unknown)
+
+    if expected_mode in {"exact_match", "qualifying_list"}:
+        joint = raw.get("joint_constraints")
+        if not isinstance(joint, list) or not any(_clean_text(value) for value in joint):
+            return f"{expected_mode} requires explicit joint_constraints"
+    if not isinstance(raw.get("verification_rules"), list):
+        return "verification_rules must be an array"
+    return ""
+
+
+async def _plan_with_contract(
+    planner,
+    question,
+    minimum_route_count,
+    maximum_route_count,
+    extra_requirements,
+):
+    recovery_instruction = ""
+    last_error = ""
+    for _attempt in range(2):
+        raw = await planner.plan(
+            question,
+            minimum_route_count,
+            maximum_route_count,
+            extra_requirements,
+            recovery_instruction,
+        )
+        last_error = _plan_contract_error(
+            raw,
+            question,
+            minimum_route_count,
+            maximum_route_count,
+        )
+        if not last_error:
+            return _normalize_plan(
+                raw,
+                question,
+                minimum_route_count,
+                maximum_route_count,
+                extra_requirements,
+            )
+        recovery_instruction = (
+            "The previous response was not a valid research plan ("
+            + last_error
+            + "). Do not answer or research the user's question. Return the complete "
+            "question-specific Planner JSON contract with every required field."
+        )
+    raise ValueError("planner failed semantic contract after retry: " + last_error)
 
 
 def _normalize_plan(raw, question, minimum_route_count, maximum_route_count, extra_requirements):
@@ -376,6 +511,66 @@ def _normalize_draft_audit(raw):
     return audit
 
 
+def _normalize_evaluation(raw, plan):
+    evaluation = dict(raw) if isinstance(raw, dict) else {}
+    for field in (
+        "coverage",
+        "candidate_decisions",
+        "approved_candidates",
+        "contradictions",
+        "follow_ups",
+    ):
+        value = evaluation.get(field)
+        if not isinstance(value, list):
+            evaluation[field] = [] if value in (None, "") else [value]
+
+    model_pass = evaluation.get("pass") is True
+    consistency_errors = []
+    if model_pass and evaluation["follow_ups"]:
+        consistency_errors.append(
+            "The evaluator marked the evidence as passing while requesting follow-up research."
+        )
+    if model_pass and evaluation.get("needs_human") is True:
+        consistency_errors.append(
+            "The evaluator marked the evidence as passing while requesting human review."
+        )
+
+    required_ids = {
+        str(item.get("id"))
+        for item in plan.get("coverage_items") or []
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    covered_ids = {
+        str(item.get("coverage_id"))
+        for item in evaluation["coverage"]
+        if isinstance(item, dict)
+        and str(item.get("status", "")).casefold()
+        in {"covered", "complete", "completed", "passed", "satisfied"}
+    }
+    missing_coverage = sorted(required_ids - covered_ids)
+    if model_pass and missing_coverage:
+        consistency_errors.append(
+            "The evaluator pass omitted covered evidence for: "
+            + ", ".join(missing_coverage)
+        )
+
+    if (
+        model_pass
+        and plan.get("answer_mode") in {"exact_match", "qualifying_list"}
+        and not evaluation["approved_candidates"]
+    ):
+        consistency_errors.append(
+            "An exact-match or qualifying-list pass requires at least one approved candidate."
+        )
+
+    evaluation["model_pass"] = model_pass
+    evaluation["consistency_errors"] = consistency_errors
+    evaluation["pass"] = model_pass and not consistency_errors
+    if consistency_errors and not evaluation["follow_ups"]:
+        evaluation["needs_human"] = True
+    return evaluation
+
+
 def _audit_policy(raw):
     value = _clean_text(raw, "deliver_with_warning").casefold()
     allowed = {"deliver_with_warning", "wait_for_human", "fail_run"}
@@ -546,14 +741,8 @@ async def main(ctx):
     evaluator = Evaluator(name="Evaluator", model=evaluator_model)
     writer = Writer(name="Writer", model=writer_model)
 
-    raw_plan = await planner.plan(
-        ctx.request,
-        minimum_route_count,
-        route_count,
-        extra_requirements,
-    )
-    plan = _normalize_plan(
-        raw_plan,
+    plan = await _plan_with_contract(
+        planner,
         ctx.request,
         minimum_route_count,
         route_count,
@@ -610,7 +799,10 @@ async def main(ctx):
         ledger.extend(initial)
 
     round_number = 1
-    evaluation = await evaluator.assess(ctx.request, plan, ledger, round_number)
+    evaluation = _normalize_evaluation(
+        await evaluator.assess(ctx.request, plan, ledger, round_number),
+        plan,
+    )
     reused_sessions = False
 
     while evaluation.get("pass") is not True and round_number < max_rounds:
@@ -643,7 +835,10 @@ async def main(ctx):
                 )
             )
             ledger.extend(follow_up_packets)
-        evaluation = await evaluator.assess(ctx.request, plan, ledger, round_number)
+        evaluation = _normalize_evaluation(
+            await evaluator.assess(ctx.request, plan, ledger, round_number),
+            plan,
+        )
 
     report = await writer.compose(ctx.request, plan, ledger, evaluation)
     initial_draft_audit = _normalize_draft_audit(

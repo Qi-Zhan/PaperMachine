@@ -16,6 +16,8 @@ packet_contract_error = WORKFLOW["_packet_contract_error"]
 normalize_plan = WORKFLOW["_normalize_plan"]
 normalize_output_contract = WORKFLOW["_normalize_output_contract"]
 normalize_draft_audit = WORKFLOW["_normalize_draft_audit"]
+normalize_evaluation = WORKFLOW["_normalize_evaluation"]
+plan_contract_error = WORKFLOW["_plan_contract_error"]
 audit_policy = WORKFLOW["_audit_policy"]
 completion_reasons = WORKFLOW["_completion_reasons"]
 
@@ -45,6 +47,73 @@ class EvidencePacketContractTests(unittest.TestCase):
 
 
 class EvidencePlanContractTests(unittest.TestCase):
+    def valid_exact_plan(self) -> dict:
+        return {
+            "answer_mode": "exact_match",
+            "deliverable": "Identify the one matching person.",
+            "output_contract": "Return the requested explanation and exact answer.",
+            "candidate_key": "person name",
+            "coverage_items": [
+                {
+                    "id": "identity",
+                    "requirement": "One person satisfies every clue.",
+                    "acceptance_test": "Every clue is verified for the same person.",
+                }
+            ],
+            "joint_constraints": ["Every clue belongs to the same person."],
+            "routes": [
+                {
+                    "name": "Exact phrase search",
+                    "objective": "Search rare clue combinations across primary sources.",
+                    "coverage_ids": ["identity"],
+                },
+                {
+                    "name": "Independent identity challenge",
+                    "objective": "Generate alternatives and try to falsify each complete match.",
+                    "coverage_ids": ["identity"],
+                },
+            ],
+            "verification_rules": ["Verify the identifying statement directly."],
+        }
+
+    def test_name_question_is_exact_match_even_if_planner_calls_it_report(self) -> None:
+        plan = self.valid_exact_plan()
+        plan["answer_mode"] = "explanatory_report"
+
+        error = plan_contract_error(
+            plan,
+            "Can you tell me the name of the one person matching every clue?",
+            2,
+            2,
+        )
+
+        self.assertIn("expected 'exact_match'", error)
+
+    def test_final_answer_shaped_planner_output_fails_closed(self) -> None:
+        error = plan_contract_error(
+            {
+                "Explanation": "A guessed answer rather than a plan.",
+                "Exact Answer": "Someone",
+                "Confidence": "50%",
+            },
+            "What is the name of the matching person?",
+            2,
+            2,
+        )
+
+        self.assertIn("missing non-empty fields", error)
+
+    def test_valid_question_specific_plan_passes_contract(self) -> None:
+        self.assertEqual(
+            plan_contract_error(
+                self.valid_exact_plan(),
+                "What is the name of the one person matching every clue?",
+                2,
+                2,
+            ),
+            "",
+        )
+
     def test_normalization_preserves_joint_candidate_constraints(self) -> None:
         plan = normalize_plan(
             {
@@ -144,6 +213,32 @@ class EvidencePlanContractTests(unittest.TestCase):
 
 
 class DraftAuditContractTests(unittest.TestCase):
+    def test_evaluator_followups_override_an_inconsistent_pass(self) -> None:
+        evaluation = normalize_evaluation(
+            {
+                "pass": True,
+                "coverage": [
+                    {"coverage_id": "identity", "status": "covered"}
+                ],
+                "approved_candidates": [{"candidate_id": "candidate-a"}],
+                "follow_ups": [
+                    {
+                        "route_index": 0,
+                        "objective": "Verify the identifying source directly.",
+                        "coverage_ids": ["identity"],
+                    }
+                ],
+            },
+            {
+                "answer_mode": "exact_match",
+                "coverage_items": [{"id": "identity"}],
+            },
+        )
+
+        self.assertTrue(evaluation["model_pass"])
+        self.assertFalse(evaluation["pass"])
+        self.assertEqual(len(evaluation["consistency_errors"]), 1)
+
     def test_completion_reasons_cover_evidence_human_and_draft_gates(self) -> None:
         reasons = completion_reasons(
             {"pass": False, "needs_human": True},
