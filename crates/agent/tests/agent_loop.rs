@@ -334,8 +334,8 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
 
     let requests = model.requests().expect("requests should be recorded");
     assert_eq!(requests.len(), 1);
-    assert!(!requests[0].tools.is_empty());
-    assert!(!requests[0].hosted_tools.is_empty());
+    assert!(requests[0].tools.is_empty());
+    assert!(requests[0].hosted_tools.is_empty());
     assert_eq!(requests[0].instructions, "Research carefully.");
     assert_eq!(requests[0].tool_choice, ModelToolChoice::None);
     assert!(requests[0].input.iter().any(|item| {

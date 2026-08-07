@@ -193,7 +193,7 @@ impl SessionRuntime {
                 None,
             )
             .await?;
-        run_scheduled_turn(Arc::clone(&self.inner), turn.id, None, cancellation).await?;
+        self.run_tracked_turn(turn.id, None, cancellation).await?;
         Ok(self.inner.store.get_turn(turn.id)?)
     }
 
@@ -226,13 +226,8 @@ impl SessionRuntime {
                 Some(context.action_attempt_id),
             )
             .await?;
-        run_scheduled_turn(
-            Arc::clone(&self.inner),
-            turn.id,
-            Some(context),
-            cancellation,
-        )
-        .await?;
+        self.run_tracked_turn(turn.id, Some(context), cancellation)
+            .await?;
         Ok(self.inner.store.get_turn(turn.id)?)
     }
 
@@ -255,14 +250,36 @@ impl SessionRuntime {
                 SessionEventPayload::AssistantMessageReset,
             )?;
         }
-        run_scheduled_turn(
+        self.run_tracked_turn(turn_id, Some(context), cancellation)
+            .await?;
+        Ok(self.inner.store.get_turn(turn_id)?)
+    }
+
+    async fn run_tracked_turn(
+        &self,
+        turn_id: TurnId,
+        workflow_context: Option<WorkflowTurnContext>,
+        parent_cancellation: CancellationToken,
+    ) -> Result<(), SessionRuntimeError> {
+        let cancellation = parent_cancellation.child_token();
+        {
+            let mut active = self.inner.active.lock().await;
+            if active.contains_key(&turn_id) {
+                return Err(SessionRuntimeError::Scheduling(format!(
+                    "Turn {turn_id} is already running"
+                )));
+            }
+            active.insert(turn_id, cancellation.clone());
+        }
+        let result = run_scheduled_turn(
             Arc::clone(&self.inner),
             turn_id,
-            Some(context),
+            workflow_context,
             cancellation,
         )
-        .await?;
-        Ok(self.inner.store.get_turn(turn_id)?)
+        .await;
+        self.inner.active.lock().await.remove(&turn_id);
+        result
     }
 
     #[allow(clippy::too_many_arguments)]

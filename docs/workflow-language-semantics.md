@@ -323,8 +323,9 @@ Control messages are asynchronous:
 | pause | Changes run to `paused`. Workflow and Agent checkpoints wait; an already in-flight provider response is not rolled back. |
 | resume | Changes run to `running`; waiting checkpoints continue. |
 | cancel | Changes run to `cancelled` and propagates cancellation to Python, model, and tool work. |
+| Stop Turn | Cancels only that active Turn and its model/tool Steps. It does not ask the model to synthesize an answer. If it belongs to a Workflow Action, the effect returns a cancellation error for ordinary Workflow error handling. |
 
-Guide/interrupt delivery is durable and at-most-once at the Store level: pending
+Guide/finish/interrupt delivery is durable and at-most-once at the Store level: pending
 messages are marked applied when a checkpoint consumes them.
 
 ## 10. Channels and signals

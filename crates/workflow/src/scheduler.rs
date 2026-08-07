@@ -487,6 +487,20 @@ mod tests {
         executions: StdMutex<HashMap<WorkflowId, usize>>,
     }
 
+    struct BlockingExecutor;
+
+    #[async_trait]
+    impl WorkflowRuntime for BlockingExecutor {
+        async fn execute(
+            &self,
+            _workflow_id: WorkflowId,
+            cancellation: CancellationToken,
+        ) -> Result<WorkflowExecution, String> {
+            cancellation.cancelled().await;
+            Err("cancelled by scheduler".to_string())
+        }
+    }
+
     #[async_trait]
     impl WorkflowRuntime for SignalWaitExecutor {
         async fn execute(
@@ -674,6 +688,61 @@ mod tests {
                 WorkflowStatus::Completed
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_workflow_reaches_its_executor() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store = Arc::new(
+            Store::open_in_memory(directory.path().join("managed"))
+                .expect("store should open in memory"),
+        );
+        let project = store
+            .create_project("Cancellation", "", directory.path().join("workspace"))
+            .expect("Project should be created");
+        let session = store
+            .create_session(project.id, "Origin", "", "test-model", Vec::new())
+            .expect("Session should be created");
+        let run = create_test_workflow(&store, &session, "Block until cancelled");
+        let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(BlockingExecutor), 1);
+
+        scheduler
+            .start(run.id)
+            .await
+            .expect("Workflow should start");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store
+                    .get_workflow(run.id)
+                    .expect("Workflow should load")
+                    .status
+                    == WorkflowStatus::Running
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Workflow should become running");
+        scheduler
+            .cancel(run.id)
+            .await
+            .expect("Workflow should cancel");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), scheduler.wait(run.id))
+                .await
+                .expect("cancel should reach the executor promptly")
+                .expect("cancelled Workflow should remain scheduled")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .get_workflow(run.id)
+                .expect("Workflow should load")
+                .status,
+            WorkflowStatus::Cancelled
+        );
     }
 
     #[tokio::test]

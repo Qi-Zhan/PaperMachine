@@ -328,9 +328,16 @@ impl AgentRuntime {
         request: AgentTurnRequest,
         cancellation: CancellationToken,
     ) -> Result<AgentTurnResult, AgentError> {
-        tokio::fs::create_dir_all(&request.workspace_root)
+        let workspace = tokio::fs::canonicalize(&request.workspace_root)
             .await
             .map_err(|error| ModelError::Configuration(error.to_string()))?;
+        if !workspace.is_dir() {
+            return Err(ModelError::Configuration(format!(
+                "Session Workspace is not a directory: {}",
+                workspace.display()
+            ))
+            .into());
+        }
         self.events
             .emit(AgentEvent::Started {
                 objective: request.objective.clone(),
@@ -482,8 +489,17 @@ impl AgentRuntime {
                 .await
                 .map_err(AgentError::EventSink)?;
 
-            let step_hosted_tools = hosted_tools.clone();
-            let has_step_tools = !tool_definitions.is_empty() || !step_hosted_tools.is_empty();
+            let step_tools = if final_sample {
+                Vec::new()
+            } else {
+                tool_definitions.clone()
+            };
+            let step_hosted_tools = if final_sample {
+                Vec::new()
+            } else {
+                hosted_tools.clone()
+            };
+            let has_step_tools = !step_tools.is_empty() || !step_hosted_tools.is_empty();
             let mut model_request = ModelRequest {
                 model: request.model.clone(),
                 reasoning_effort: request.reasoning_effort,
@@ -491,11 +507,11 @@ impl AgentRuntime {
                 input: history.clone(),
                 prompt_cache: None,
                 transport_session_key: Some(request.session_id.to_string()),
-                tools: tool_definitions.clone(),
+                tools: step_tools,
                 hosted_tools: step_hosted_tools,
                 web_search_context_size: request.web_search_context_size,
                 parallel_tool_calls: has_step_tools,
-                tool_choice: if final_sample && has_step_tools {
+                tool_choice: if final_sample {
                     ModelToolChoice::None
                 } else {
                     ModelToolChoice::Auto
@@ -620,10 +636,12 @@ impl AgentRuntime {
                     })
                     .await
                     .map_err(AgentError::EventSink)?;
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    250_u64.saturating_mul(1_u64 << retry),
-                ))
-                .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(
+                        250_u64.saturating_mul(1_u64 << retry),
+                    )) => {}
+                    _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+                }
             };
             step_usage.saturating_add_assign(retry_usage);
             total_usage.saturating_add_assign(step_usage);

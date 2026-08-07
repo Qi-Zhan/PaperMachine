@@ -150,10 +150,10 @@ small packages owned by one Project.
 - Read bounded Project state from Workflow code with `ctx.project.snapshot()`
   and publish deterministic text/HTML Artifacts with `publish_artifact(...)`.
 - Launch with either a fresh context or one immutable, bounded Project snapshot.
-  The latter is exposed as `ctx.context` and automatically reused in every
-  Agent Turn; a Session-origin snapshot focuses that Session without copying
-  its mutable system prompt. Workflows may still request live state explicitly
-  with `ctx.project.snapshot()`.
+  The latter is exposed as `ctx.context`; the Workflow explicitly routes raw or
+  summarized portions to the Agents that need them. A Session-origin snapshot
+  focuses that Session without copying its mutable system prompt. Workflows may
+  still request live state explicitly with `ctx.project.snapshot()`.
 - Generate a Project progress webpage manually or with the built-in scheduled
   `project-summary` Workflow, with an explicit user-editable Workflow prompt.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;

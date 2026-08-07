@@ -282,8 +282,9 @@ Control message 是异步的：
 | pause | 把 run 设为 `paused`。workflow 与 Agent checkpoint 等待；已经在途的 provider response 不会回滚。 |
 | resume | 把 run 设为 `running`，等待中的 checkpoint 继续。 |
 | cancel | 把 run 设为 `cancelled`，并把 cancellation 传播到 Python、model 与 tool。 |
+| Stop Turn | 只取消该 active Turn 及其 model/tool Steps，不要求模型生成收尾答案。如果它属于 Workflow Action，对应 effect 会把取消错误交回普通 Workflow 异常处理。 |
 
-guide/interrupt 的 delivery 在 Store 层持久且 at-most-once：checkpoint 消费
+guide/finish/interrupt 的 delivery 在 Store 层持久且 at-most-once：checkpoint 消费
 pending message 时会把它标记为 applied。
 
 ## 10. Channel 与 Signal

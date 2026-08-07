@@ -21,6 +21,7 @@ use papermachine_protocol::WorkflowProgramSource;
 use papermachine_protocol::WorkflowStatus;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
+use papermachine_session::SessionRuntimeError;
 use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
@@ -144,6 +145,133 @@ async fn cancelling_a_turn_closes_its_running_model_step() {
     let steps = store.list_steps(turn.id).expect("steps should load");
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].status, StepStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
+    );
+    let project = store
+        .create_project(
+            "Action cancellation",
+            "",
+            directory.path().join("workspace"),
+        )
+        .expect("Project should be created");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let run = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: Some(origin.id),
+            program: workflow_snapshot(),
+            request: "Wait for cancellation".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: serde_json::json!({}),
+            default_model: "test-model".to_string(),
+            access: papermachine_protocol::AgentAccessProfile::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect("Workflow should be created");
+    store
+        .set_workflow_status(run.id, WorkflowStatus::Running, None)
+        .expect("Workflow should start");
+    let participant = store
+        .create_participant(
+            run.id,
+            "Researcher",
+            "Researcher",
+            "evidence",
+            "",
+            "",
+            Vec::new(),
+            papermachine_protocol::AgentAccessProfile::Research,
+        )
+        .expect("participant should be created");
+    let invocation = store
+        .create_action_invocation(
+            run.id,
+            None,
+            participant.id,
+            "investigate",
+            "Wait",
+            serde_json::json!({}),
+        )
+        .expect("invocation should be created");
+    let attempt = store
+        .start_action_attempt(invocation.id)
+        .expect("attempt should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let runtime = SessionRuntime::new(
+        Arc::clone(&store),
+        Arc::new(BlockingModelClient),
+        ToolRegistry::default(),
+        skills,
+        SessionRuntimeConfig {
+            default_model: "test-model".to_string(),
+            model_context_window: 128_000,
+            max_concurrent_turns: 1,
+        },
+    );
+    let participant_session_id = participant.session_id;
+    let workflow_id = run.id;
+    let invocation_id = invocation.id;
+    let attempt_id = attempt.id;
+    let execution = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .execute_workflow_action(
+                    participant_session_id,
+                    TurnOrigin::Workflow,
+                    "Wait",
+                    None,
+                    Vec::new(),
+                    None,
+                    true,
+                    None,
+                    None,
+                    WorkflowTurnContext {
+                        workflow_id,
+                        action_invocation_id: invocation_id,
+                        action_attempt_id: attempt_id,
+                    },
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        })
+    };
+
+    let mut active_turn = None;
+    for _ in 0..100 {
+        active_turn = store
+            .list_turns(participant_session_id)
+            .expect("Turns should load")
+            .into_iter()
+            .find(|turn| turn.status == TurnStatus::Running);
+        if active_turn.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let turn = active_turn.expect("Workflow Action Turn should be running");
+    runtime.cancel(turn.id).await.expect("Turn should cancel");
+    let result = execution.await.expect("execution task should join");
+    assert!(matches!(result, Err(SessionRuntimeError::Cancelled)));
+    assert_eq!(
+        store.get_turn(turn.id).expect("Turn should load").status,
+        TurnStatus::Cancelled
+    );
+    assert_eq!(
+        store.list_steps(turn.id).expect("Steps should load")[0].status,
+        StepStatus::Cancelled
+    );
 }
 
 #[tokio::test]

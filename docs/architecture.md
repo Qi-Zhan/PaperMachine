@@ -298,12 +298,17 @@ billed prompt-cache read/write counters.
 Pause is a Workflow state. Runtime and Agent checkpoints wait while paused;
 an in-flight provider request is not forcibly rewound. Resume releases the next
 checkpoint. Cancel propagates a cancellation token to the workflow, actions,
-tools, and model streams.
+tools, and model streams. Stop Turn is narrower: it cancels that Turn's active
+model or tool work and closes its running Steps. It does not synthesize a final
+answer and is not implemented as a prompt.
 
 `guide` is consumed at the next Agent checkpoint and appended as a user-history
 item for the running action. `interrupt` terminates the current ActionAttempt;
 the workflow runtime starts a new attempt for the same ActionInvocation with the
 interruption text in an inspectable `control` prompt layer.
+`finish` asks for one last synthesis sample; the runtime removes local and
+hosted tool definitions from that request instead of relying only on
+`tool_choice=none`.
 
 Only explicit Workflow code can create a typed HumanRequest through the
 `ask_human` DSL effect. Models do not receive an `ask_human` tool. An Action may
