@@ -59,7 +59,8 @@ UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这�
 3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowProgramSnapshot。
 4. 校验 model、skills、Workflow 权限上限与 Agent class override。starting Session
    必须属于该 Project，并构成不可越过的外层权限上限。
-5. 保存具体的用户 `request`、可选 run `instructions`、trigger 来源，以及
+5. 按 manifest 的 `request_mode` 校验后，保存具体的用户任务或不保存启动任务，
+   再保存可选 run `instructions`、trigger 来源，以及
    `fresh` 启动上下文或一份有界且不可变的 Project 快照。在上下文
    构造中，starting Session 用于确定快照焦点和记录来源，而不是复制 Session prompt。
 6. 创建 Project-owned、状态为 `created` 的 Workflow，并可选记录 starting Session。
@@ -67,7 +68,9 @@ UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这�
 
 runner 分别通过 `ctx.request`、`ctx.params`、`ctx.trigger` 和 `ctx.context`
 暴露这些值。WorkflowProgram 面向一类任务，必须显式决定把具体 request 或哪部分
-context 传给哪个 Agent Action；runtime 不会自动把它们提升为 instructions。
+context 传给哪个 Agent Action；`request_mode="none"` 的程序得到空的
+`ctx.request`，并应通过显式 `ask_human` effect 接收用户消息；runtime 不会自动把
+这些值提升为 instructions。
 当前 HTTP launcher 对 Project 级启动记录 `manual`，对 Session-origin 启动记录
 `user`；`workflow` 与 `timer` 是为内部启动路径保留的 domain value。唤醒一个已有的
 timer-backed run 不会创建新 Workflow，也不会改变它的 trigger。

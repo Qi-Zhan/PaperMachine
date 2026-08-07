@@ -380,7 +380,7 @@
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflow.request }}</strong>
+                <strong>{{ workflowTitle(workflow) }}</strong>
                 <small>{{ formatDateTime(workflow.updated_at) }}</small>
               </span>
               <span class="status-pin" :data-status="workflow.status" />
@@ -611,6 +611,7 @@ import {
   primaryActionText,
   shortId,
   statusLabel,
+  workflowTitle,
 } from '../format'
 import { useAppI18n } from '../i18n'
 import { liveAssistantOutput } from '../sessionEvents'

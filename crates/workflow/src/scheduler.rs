@@ -559,6 +559,7 @@ mod tests {
                 name: "Scheduler test".to_string(),
                 description: String::new(),
                 entrypoint: "main".to_string(),
+                request_mode: Default::default(),
                 params_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
             },

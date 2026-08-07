@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel } from './format'
+import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel, workflowTitle } from './format'
 import { setLocale } from './i18n'
+import type { Workflow } from './types'
 
 describe('format helpers', () => {
   it('formats canonical session labels', () => {
@@ -53,5 +54,13 @@ describe('format helpers', () => {
     expect(agentActivityKind('shell_command')).toBe('command')
     expect(agentActivitySubject({ action: { query: '  exact   clue search  ' } })).toBe('exact clue search')
     expect(agentActivitySubject({ opaque: {} })).toBeNull()
+  })
+
+  it('uses the Workflow name when an interactive run has no user task', () => {
+    const workflow = {
+      request: '',
+      program: { manifest: { name: 'Interactive agent' } },
+    } as Workflow
+    expect(workflowTitle(workflow)).toBe('Interactive agent')
   })
 })

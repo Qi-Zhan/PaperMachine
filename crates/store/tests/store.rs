@@ -256,6 +256,7 @@ fn workflow() -> WorkflowProgramSnapshot {
             name: "Parallel review".to_string(),
             description: "Run independent Sessions and synthesize them.".to_string(),
             entrypoint: "main".to_string(),
+            request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
         },

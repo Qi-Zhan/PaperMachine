@@ -91,13 +91,15 @@ must be Python literals.
 | `slug` | Lowercase kebab-case catalog key. |
 | `name` | Human-readable name. |
 | `description` | Protocol purpose shown on the Workflow page. |
+| `request_mode` | `"required"` by default. Use `"none"` for a persistent interactive Workflow whose user messages enter through `ask_human`, not through a launch task. |
 | `params_schema` | Supported JSON Schema subset for reusable run parameters, checked before scheduling. A string with `format: "model-profile"` gets a configured-model picker and profile validation. |
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 
 The runtime provides `ctx.request`, `ctx.params`, `ctx.workflow_id`,
 `ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
-per-run user task; a WorkflowProgram stays generic and explicitly decides which
-Actions receive that request. `ctx.params` contains reusable knobs validated by
+per-run user task for `request_mode="required"`; it is empty for
+`request_mode="none"`. A WorkflowProgram stays generic and explicitly decides
+which Actions receive a task. `ctx.params` contains reusable knobs validated by
 `params_schema`. `ctx.trigger` carries durable launch provenance. The current
 public launcher emits `manual` for a Project launch and `user` for a
 Session-origin launch; `workflow` and `timer` are reserved domain values for

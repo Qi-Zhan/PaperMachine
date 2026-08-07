@@ -53,6 +53,7 @@ WORKFLOW_METADATA_KEYS = {
     "slug",
     "name",
     "description",
+    "request_mode",
     "params_schema",
     "output_schema",
     "entrypoint",
@@ -279,6 +280,7 @@ def validate(source: str) -> dict[str, Any]:
     slug = str(metadata.get("slug", ""))
     name = str(metadata.get("name", ""))
     description = str(metadata.get("description", ""))
+    request_mode = str(metadata.get("request_mode", "required"))
     unknown_metadata = sorted(set(metadata) - WORKFLOW_METADATA_KEYS)
     if unknown_metadata:
         diagnostics.append(
@@ -294,6 +296,7 @@ def validate(source: str) -> dict[str, Any]:
         (not SLUG.fullmatch(slug), "workflow slug must use lowercase kebab-case"),
         (not name.strip(), "workflow name is required"),
         (not description.strip(), "workflow description is required"),
+        (request_mode not in {"required", "none"}, "request_mode must be required or none"),
         (not isinstance(metadata.get("params_schema", {}), dict), "params_schema must be a literal dict"),
         (not isinstance(metadata.get("output_schema", {}), dict), "output_schema must be a literal dict"),
     ]:
@@ -306,6 +309,7 @@ def validate(source: str) -> dict[str, Any]:
         "name": name,
         "description": description,
         "entrypoint": entrypoint,
+        "request_mode": request_mode,
         "params_schema": metadata.get("params_schema", {"type": "object"}),
         "output_schema": metadata.get("output_schema", {}),
     }

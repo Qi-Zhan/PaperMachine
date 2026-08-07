@@ -1087,7 +1087,8 @@ async fn list_project_workflows(
 #[serde(deny_unknown_fields)]
 struct CreateWorkflowRequest {
     program_slug: String,
-    request: String,
+    #[serde(default)]
+    request: Option<String>,
     #[serde(default)]
     instructions: String,
     #[serde(default = "empty_object")]
@@ -1165,9 +1166,6 @@ async fn create_workflow(
     Path(project_id): Path<String>,
     Json(request): Json<CreateWorkflowRequest>,
 ) -> ApiResult<(StatusCode, Json<Workflow>)> {
-    if request.request.trim().is_empty() {
-        return Err(ApiError::bad_request("Workflow request must not be empty"));
-    }
     let project_id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(project_id).await?;
     runtime
@@ -1196,6 +1194,22 @@ async fn create_workflow(
                 .collect::<std::collections::HashSet<_>>(),
         )
     };
+    let user_task = request.request.as_deref().unwrap_or_default().trim();
+    match snapshot.manifest.request_mode {
+        WorkflowRequestMode::Required if user_task.is_empty() => {
+            return Err(ApiError::bad_request(format!(
+                "WorkflowProgram {:?} requires a user task",
+                snapshot.manifest.slug
+            )));
+        }
+        WorkflowRequestMode::None if !user_task.is_empty() => {
+            return Err(ApiError::bad_request(format!(
+                "WorkflowProgram {:?} starts without a user task",
+                snapshot.manifest.slug
+            )));
+        }
+        WorkflowRequestMode::Required | WorkflowRequestMode::None => {}
+    }
     if let Some(unknown) = request
         .agent_access_overrides
         .keys()
@@ -1232,7 +1246,7 @@ async fn create_workflow(
         project_id,
         started_from_session_id: request.started_from_session_id,
         program: snapshot,
-        request: request.request.trim().to_string(),
+        request: user_task.to_string(),
         instructions: request.instructions.trim().to_string(),
         trigger: WorkflowTrigger {
             kind: if request.started_from_session_id.is_some() {

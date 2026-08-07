@@ -26,14 +26,17 @@
         </select>
         <p v-if="selectedWorkflow" class="field-note">{{ selectedWorkflow.manifest.description }}</p>
 
-        <label class="field-label" for="workflow-request">{{ t('dialog.request') }}</label>
-        <textarea
-          id="workflow-request"
-          ref="requestInput"
-          v-model="requestText"
-          class="text-area text-area--small"
-          required
-        />
+        <template v-if="requestMode === 'required'">
+          <label class="field-label" for="workflow-request">{{ t('dialog.request') }}</label>
+          <textarea
+            id="workflow-request"
+            ref="requestInput"
+            v-model="requestText"
+            class="text-area text-area--small"
+            required
+          />
+        </template>
+        <p v-else class="field-note workflow-prompt-note">{{ t('dialog.workflowNoUserTask') }}</p>
 
         <label class="field-label" for="workflow-instructions">{{ t('dialog.workflowInstructions') }}</label>
         <textarea
@@ -43,7 +46,7 @@
           :placeholder="t('dialog.workflowInstructionsPlaceholder')"
         />
         <p class="field-note workflow-prompt-note">
-          {{ t(session ? 'dialog.workflowPromptStackFromSession' : 'dialog.workflowPromptStack') }}
+          {{ t(requestMode === 'none' ? 'dialog.workflowPromptStackInteractive' : session ? 'dialog.workflowPromptStackFromSession' : 'dialog.workflowPromptStack') }}
         </p>
 
         <section v-if="schemaFields.length" class="workflow-launch-section">
@@ -363,6 +366,7 @@ let programRequest = 0
 
 const keyOf = (workflow: WorkflowProgram) => workflow.manifest.slug
 const selectedWorkflow = computed(() => props.workflows.find((workflow) => keyOf(workflow) === workflowKey.value))
+const requestMode = computed(() => selectedWorkflow.value?.manifest.request_mode ?? 'required')
 const originLabel = computed(() => {
   if (!props.project) return 'Project'
   return props.session ? `${props.project.name} · ${props.session.title}` : props.project.name
@@ -403,7 +407,13 @@ const schemaFields = computed<SchemaField[]>(() => {
 })
 const advancedFields = computed(() => schemaFields.value.filter((field) => field.advanced))
 const visibleFields = computed(() => schemaFields.value.filter((field) => !field.advanced || advancedVisible.value))
-const canSubmit = computed(() => Boolean(props.project && selectedWorkflow.value && requestText.value.trim() && !programLoading.value && !programError.value))
+const canSubmit = computed(() => Boolean(
+  props.project &&
+  selectedWorkflow.value &&
+  (requestMode.value === 'none' || requestText.value.trim()) &&
+  !programLoading.value &&
+  !programError.value,
+))
 const displayError = computed(() => localError.value || programError.value || props.error)
 
 watch(
@@ -485,7 +495,7 @@ function resetAgentOverrides() {
 }
 
 function submit() {
-  if (!selectedWorkflow.value || !requestText.value.trim() || props.busy || !canSubmit.value) return
+  if (!selectedWorkflow.value || props.busy || !canSubmit.value) return
   const params: Record<string, unknown> = {}
   for (const field of schemaFields.value) {
     const value = formValues.value[field.key]
@@ -506,7 +516,7 @@ function submit() {
   localError.value = ''
   emit('submit', {
     workflow: selectedWorkflow.value,
-    request: requestText.value.trim(),
+    request: requestMode.value === 'required' ? requestText.value.trim() : '',
     instructions: instructions.value.trim(),
     params,
     contextMode: contextMode.value,

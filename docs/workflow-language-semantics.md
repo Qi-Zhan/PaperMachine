@@ -61,7 +61,8 @@ consistent created run:
 4. Validate the selected model, skills, Workflow access ceiling, and Agent class
    overrides. A starting Session must belong to the Project and is a hard outer
    access bound.
-5. Store the concrete user `request`, optional run `instructions`, trigger
+5. Enforce the manifest's `request_mode`, then store either the concrete user
+   task or no launch task, plus optional run `instructions`, trigger
    provenance, and either a `fresh` launch context or one bounded immutable Project
    snapshot. For context construction, a starting Session supplies focus and
    provenance rather than a copied Session prompt.
@@ -71,7 +72,9 @@ consistent created run:
 The runner exposes these values separately as `ctx.request`, `ctx.params`,
 `ctx.trigger`, and `ctx.context`. A WorkflowProgram is generic for a task class:
 it must explicitly pass the concrete request or selected context into an Agent
-Action. The runtime never turns either value into instructions automatically.
+Action. A `request_mode="none"` program receives an empty `ctx.request` and is
+expected to obtain user messages through explicit `ask_human` effects. The
+runtime never turns either value into instructions automatically.
 The current HTTP launcher records `manual` for a Project launch and `user` for
 a Session-origin launch. The `workflow` and `timer` trigger kinds are reserved
 for internal launch paths; waking an existing timer-backed run does not create

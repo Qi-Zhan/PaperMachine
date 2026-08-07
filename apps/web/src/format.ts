@@ -1,8 +1,12 @@
-import type { SessionEvent } from './types'
+import type { SessionEvent, Workflow } from './types'
 import { currentLocale, statusText, t } from './i18n'
 
 export function shortId(value: string): string {
   return value.slice(-8)
+}
+
+export function workflowTitle(workflow: Workflow): string {
+  return workflow.request.trim() || workflow.program.manifest.name
 }
 
 export function formatDate(value: string): string {

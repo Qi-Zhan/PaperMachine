@@ -15,6 +15,7 @@ class InteractiveAgent(Agent):
     slug="interactive-agent",
     name="Interactive agent",
     description="Run one persistent Agent Session that waits for a human message before every Turn. The normal New Session action uses this built-in Workflow.",
+    request_mode="none",
     params_schema={
         "type": "object",
         "properties": {

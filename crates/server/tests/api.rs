@@ -382,7 +382,6 @@ async fn start_interactive_session(
             &format!("/api/projects/{project_id}/workflows"),
             json!({
                 "program_slug": "interactive-agent",
-                "request": format!("Persistent interactive Session: {title}"),
                 "params": {
                     "session_title": title,
                     "agent_system_prompt": "",
@@ -395,6 +394,7 @@ async fn start_interactive_session(
         .expect("interactive Workflow request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
     let workflow = response_json(response).await;
+    assert_eq!(workflow["request"], "");
     let workflow_id = workflow["id"]
         .as_str()
         .expect("interactive Workflow id should exist");
@@ -419,6 +419,41 @@ async fn start_interactive_session(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("interactive Workflow did not create its Session")
+}
+
+#[tokio::test]
+async fn workflow_request_mode_matches_the_program_contract() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let project = create_project(&app, directory.path(), "Request modes").await;
+
+    let interactive_with_task = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "interactive-agent",
+                "request": "This must be a Session message instead.",
+                "params": {}
+            }),
+        ))
+        .await
+        .expect("interactive request should be validated");
+    assert_eq!(interactive_with_task.status(), StatusCode::BAD_REQUEST);
+
+    let research_without_task = app
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "parallel-discovery",
+                "params": {}
+            }),
+        ))
+        .await
+        .expect("research request should be validated");
+    assert_eq!(research_without_task.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

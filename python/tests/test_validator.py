@@ -35,6 +35,7 @@ async def main(ctx):
 
         self.assertTrue(result["valid"])
         self.assertEqual(result["manifest"]["slug"], "review-report")
+        self.assertEqual(result["manifest"]["request_mode"], "required")
         self.assertEqual(
             result["agents"],
             [
@@ -46,6 +47,25 @@ async def main(ctx):
             ],
         )
         self.assertEqual(result["features"]["human_checkpoints"], 1)
+
+    def test_declares_workflow_without_a_launch_user_task(self) -> None:
+        result = validate(
+            '''
+from papermachine import ask_human, workflow
+
+@workflow(
+    slug="interactive-session",
+    name="Interactive session",
+    description="Wait for messages in a persistent session.",
+    request_mode="none",
+)
+async def main(ctx):
+    return {"message": await ask_human("Send a message")}
+'''
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["manifest"]["request_mode"], "none")
 
     def test_rejects_forbidden_imports(self) -> None:
         result = validate(

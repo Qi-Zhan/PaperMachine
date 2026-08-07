@@ -8,6 +8,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRequestMode {
+    #[default]
+    Required,
+    None,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowProgramManifest {
     pub id: WorkflowProgramId,
@@ -15,6 +23,9 @@ pub struct WorkflowProgramManifest {
     pub name: String,
     pub description: String,
     pub entrypoint: String,
+    /// Whether this program starts from one immutable user task or creates its
+    /// own interaction points (for example, a persistent interactive Session).
+    pub request_mode: WorkflowRequestMode,
     pub params_schema: Value,
     pub output_schema: Value,
 }

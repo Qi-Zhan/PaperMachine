@@ -80,15 +80,21 @@ Run Workflow 提供 `fresh` 和 `project_snapshot`。`fresh` 不加入既有研�
 相关数据并作为 Action 参数传入。整个 run 期间快照内容不变，只有显式调用
 `await ctx.project.snapshot()` 才会读取较新的 Project 状态。
 
-The concrete run `request` follows the same rule: it is available as
-`ctx.request`, never automatically inserted into provider instructions. When a
-Workflow calls `agent.act(ctx.request, ...)`, it becomes inspectable Turn data.
-`ctx.params` are reusable run controls and only reach a model when explicitly
-passed by the program.
+For a Workflow whose manifest uses `request_mode="required"`, the concrete run
+`request` follows the same rule: it is available as `ctx.request`, never
+automatically inserted into provider instructions. When a Workflow calls
+`agent.act(ctx.request, ...)`, it becomes inspectable Turn data. A
+`request_mode="none"` Workflow starts without a user task and receives an empty
+`ctx.request`; persistent interactive Sessions obtain true user Turns through
+`ask_human` and `HumanMessage`. `ctx.params` are reusable run controls and only
+reach a model when explicitly passed by the program.
 
-具体 run `request` 遵循同一规则：它通过 `ctx.request` 提供，但绝不会自动插入
-provider instructions。Workflow 调用 `agent.act(ctx.request, ...)` 时，它才成为可检查
-的 Turn data。`ctx.params` 是可复用的 run 控制参数，也只有被程序显式传入才会到达模型。
+manifest 使用 `request_mode="required"` 时，具体 run `request` 遵循同一规则：它通过
+`ctx.request` 提供，但绝不会自动插入 provider instructions。Workflow 调用
+`agent.act(ctx.request, ...)` 时，它才成为可检查的 Turn data。
+`request_mode="none"` 的 Workflow 不带用户任务启动，并得到空的 `ctx.request`；持久
+交互 Session 通过 `ask_human` 和 `HumanMessage` 接收真正的用户 Turn。`ctx.params`
+是可复用的 run 控制参数，也只有被程序显式传入才会到达模型。
 
 ## Message origin / 消息来源
 

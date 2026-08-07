@@ -169,6 +169,7 @@ fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot
             name: "Durable replay".to_string(),
             description: "Runtime recovery test".to_string(),
             entrypoint: "main".to_string(),
+            request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
         },

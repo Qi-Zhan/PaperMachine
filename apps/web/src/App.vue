@@ -732,7 +732,6 @@ async function createSession(input: CreateSessionInput) {
     const title = input.title.trim() || t('dialog.newSessionPlaceholder')
     const workflow = await api.createWorkflow(project.id, {
       program_slug: 'interactive-agent',
-      request: 'Maintain a persistent interactive project conversation.',
       instructions: '',
       params: {
         session_title: title,
@@ -988,7 +987,7 @@ async function createWorkflow(input: {
   try {
     const workflow = await api.createWorkflow(project.id, {
       program_slug: input.workflow.manifest.slug,
-      request: input.request,
+      ...(input.workflow.manifest.request_mode === 'required' ? { request: input.request } : {}),
       instructions: input.instructions,
       params: input.params,
       ...(origin ? { started_from_session_id: origin.id } : {}),

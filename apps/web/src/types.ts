@@ -135,6 +135,7 @@ export interface WorkflowProgramManifest {
   name: string
   description: string
   entrypoint: string
+  request_mode: 'required' | 'none'
   params_schema: Record<string, unknown>
   output_schema: Record<string, unknown>
 }
@@ -457,7 +458,7 @@ export interface CreateSessionInput {
 }
 export interface CreateWorkflowInput {
   program_slug: string
-  request: string
+  request?: string
   instructions: string
   params: Record<string, unknown>
   started_from_session_id?: Id

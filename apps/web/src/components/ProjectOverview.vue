@@ -167,7 +167,7 @@
             <GitBranch :size="14" />
             <span>
               <strong>{{ group.workflow.program.manifest.name }}</strong>
-              <small>{{ group.workflow.request }}</small>
+              <small v-if="group.workflow.request">{{ group.workflow.request }}</small>
             </span>
             <StatusBadge :status="group.workflow.status" />
           </div>
@@ -212,7 +212,7 @@
             >
               <GitBranch :size="14" />
               <span>
-                <strong>{{ workflow.request }}</strong>
+                <strong>{{ workflowTitle(workflow) }}</strong>
                 <small>{{ workflow.program.manifest.name }} · {{ formatDate(workflow.updated_at) }}</small>
               </span>
               <StatusBadge :status="workflow.status" />
@@ -327,7 +327,7 @@ import {
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { api } from '../api'
-import { formatDate, formatDateTime } from '../format'
+import { formatDate, formatDateTime, workflowTitle } from '../format'
 import { useAppI18n } from '../i18n'
 import type { Artifact, ProjectOverview, ProjectSkill, Workflow } from '../types'
 import StatusBadge from './StatusBadge.vue'
