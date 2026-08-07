@@ -15,7 +15,7 @@ provider 的完整 instructions，以及该最终文本的 hash。
 |---:|---|---|---|
 | 1 | `runtime` | no | PaperMachine built-in runtime contract |
 | 2 | `project` | yes | `<project-root>/.papermachine/prompts/system.md` |
-| 3 | `workflow` | yes | Workflow objective, launch-time system prompt, immutable launch context, action contract, and relevant relations |
+| 3 | `workflow` | yes | Optional run `instructions`, Action contract, and relevant relations |
 | 4 | `agent` or `session` | yes | Agent class/constructor `system_prompt`, or an interactive Session system prompt |
 | 5 | `skills` | yes | enabled Project Skill snapshots |
 | 6 | `control` | yes | explicit runtime or human attempt guidance |
@@ -33,7 +33,7 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 
 - Project Page edits the Project system prompt file.
 - A Session inspector edits that Session's system prompt between active Turns.
-- Starting a Workflow may supply a Workflow-wide system prompt.
+- Starting a Workflow may supply Workflow-wide run `instructions`.
 - Starting from a Session records provenance and may focus captured research
   context, but does not inherit or copy that Session's system prompt.
 - An Agent class uses `system_prompt = "..."`; a constructor may override it.
@@ -44,7 +44,7 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 
 - Project Page 负责修改项目级 system prompt 文件。
 - Session 右侧 inspector 可以在没有 active Turn 时修改该 Session 的 system prompt。
-- 启动 Workflow 时可以提供该 Workflow 共享的 system prompt。
+- 启动 Workflow 时可以提供该 Workflow 共享的 run `instructions`。
 - 从 Session 启动会记录来源，并可在研究上下文中优先包含该 Session，但不会继承或
   复制它的 system prompt。
 - Agent class 使用 `system_prompt = "..."`，构造实例时也可以覆盖。
@@ -52,7 +52,7 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 
 `project-summary` makes this split concrete. Its reviewed Agent base prompt and
 Action contract stay in the built-in Workflow source. The Project Page edits
-the summary run's Workflow system prompt: what to emphasize, preserve, or omit.
+the summary run's `instructions`: what to emphasize, preserve, or omit.
 The Project system prompt still applies underneath it. Updating a scheduled
 summary starts a new snapshotted Workflow run and terminates the old schedule;
 previous summary Turns and HTML Artifacts remain attributable to their original
@@ -60,7 +60,7 @@ prompt snapshots.
 
 `project-summary` 把这个分层直接呈现在 UI 中：内置 Workflow 源码保存经审查的
 Agent 基础 prompt 与 Action contract；Project Page 编辑的是该 summary run 的
-Workflow system prompt，用来说明应优先展示、保留或省略什么；Project system
+run `instructions`，用来说明应优先展示、保留或省略什么；Project system
 prompt 仍然位于更前面的共享层。修改定时摘要会启动一个使用新 prompt 快照的
 Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到原 prompt。
 
@@ -68,18 +68,27 @@ Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到�
 
 Run Workflow offers `fresh` and `project_snapshot`. `fresh` adds no previous
 research data. `project_snapshot` stores one bounded Project snapshot on the
-Workflow, exposes the same JSON to the Python program as `ctx.context`, and
-adds one readable `Workflow launch context` layer to every Agent Turn. The
-snapshot is treated as untrusted data, not instructions. It remains byte-stable
-for the whole run; only an explicit `await ctx.project.snapshot()` effect reads
-newer Project state.
+Workflow and exposes the same JSON to the Python program as `ctx.context`.
+It does not add any prompt layer. The Workflow must explicitly select and pass
+the relevant data as Action arguments. The snapshot remains byte-stable for the
+whole run; only an explicit `await ctx.project.snapshot()` effect reads newer
+Project state.
 
 Run Workflow 提供 `fresh` 和 `project_snapshot`。`fresh` 不加入既有研究数据；
 `project_snapshot` 在 Workflow 上保存一份有界 Project 快照，通过 `ctx.context`
-把同一份 JSON 交给 Python，并在每个 Agent Turn 中加入可查看的
-`Workflow launch context` 层。快照只能作为不可信数据，不能作为指令；整个 run
-期间内容不变，只有显式调用 `await ctx.project.snapshot()` 才会读取较新的 Project
-状态。
+把同一份 JSON 交给 Python，但不会加入任何 prompt layer。Workflow 必须显式选择
+相关数据并作为 Action 参数传入。整个 run 期间快照内容不变，只有显式调用
+`await ctx.project.snapshot()` 才会读取较新的 Project 状态。
+
+The concrete run `request` follows the same rule: it is available as
+`ctx.request`, never automatically inserted into provider instructions. When a
+Workflow calls `agent.act(ctx.request, ...)`, it becomes inspectable Turn data.
+`ctx.params` are reusable run controls and only reach a model when explicitly
+passed by the program.
+
+具体 run `request` 遵循同一规则：它通过 `ctx.request` 提供，但绝不会自动插入
+provider instructions。Workflow 调用 `agent.act(ctx.request, ...)` 时，它才成为可检查
+的 Turn data。`ctx.params` 是可复用的 run 控制参数，也只有被程序显式传入才会到达模型。
 
 ## Message origin / 消息来源
 
@@ -99,17 +108,21 @@ model、tools 与 Step 结构，但 UI 必须明确显示来源，不能把 Work
 
 ## Cache behavior / 缓存行为
 
-The rendered snapshot is stable for a Turn and usually stable across Turns in
-one Session. In particular, a Workflow launch snapshot is captured once rather
-than rebuilding the whole Project context before each action. Editing any
-mutable layer intentionally changes the provider instruction prefix, so that
-next request may miss the old prompt cache. The routing cache key remains
-Session-scoped; the provider decides actual reuse by matching the full request
-prefix. Prompt transparency therefore makes cache misses explainable instead
-of silently reusing stale instructions.
+The rendered instruction snapshot is stable for a Turn and usually stable
+across Turns in one Agent Session. The concrete request and Action arguments
+remain message input rather than being rebuilt into system instructions. A
+captured Project snapshot costs no model tokens until Workflow code explicitly
+passes some or all of it. Run instructions and Agent system prompts stay stable;
+changing Action type, relations, skills, control guidance, or an editable prompt
+intentionally changes the instruction prefix. The routing cache key remains
+Session-scoped, while the provider decides actual reuse by matching request
+prefixes. Session history still grows and may be compacted; this separation
+makes misses attributable instead of silently re-sending unrelated Project data.
 
-同一 Turn 的渲染结果完全固定，同一 Session 的多个 Turns 通常也共享稳定前缀。
-尤其是 Workflow 启动快照只截取一次，不会在每个 action 前重新拼接整个 Project。
-修改任意可变层会有意改变下一次请求的 instruction prefix，因此可能无法读取旧缓存。
-cache routing key 仍以 Session 为作用域，真正是否复用由 provider 对实际前缀的匹配
-决定。这样缓存 miss 可以由 snapshot 差异解释，也不会偷偷复用过时指令。
+同一 Turn 的 instruction snapshot 完全固定，同一 Agent Session 的多个 Turns 通常
+共享稳定前缀。具体 request 与 Action 参数保留在 message input，不会反复拼进 system
+instructions；捕获的 Project 快照在 Workflow 显式传入前也不消耗模型 token。run
+instructions 与 Agent system prompt 保持稳定；切换 Action、修改 relation、skills、
+control guidance 或可编辑 prompt 会有意改变 instruction prefix。cache routing key
+仍以 Session 为作用域，真正复用由 provider 的请求前缀匹配决定。Session 历史仍会
+增长并可能触发 compaction，但缓存 miss 不再来自无关 Project 数据的隐式重发。

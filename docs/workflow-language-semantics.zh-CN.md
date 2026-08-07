@@ -12,11 +12,11 @@
 | `Turn` | `TurnId` | Session 中的一次用户/模型交互。 |
 | `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | 通过校验的 Python 源码及字面量 manifest；无 Project 表示 built-in。 |
-| `Workflow` | `WorkflowId` | Project 内对某个不可变 workflow 快照的一次执行。 |
+| `Workflow` | `WorkflowId` | Project 内对某个不可变 workflow 快照的一次执行，包含一份具体 `request`、校验后的 `params`、可选 run `instructions`、trigger 来源和启动上下文。 |
 | `WorkflowEffect` | `(WorkflowId, logical path)` | 对一次精确 Python effect 请求及其可 replay 的结果或错误所做的持久 journal 记录。 |
 | starting Session | `started_from_session_id?` | 可选的发起 Session。它表示来源，不表示所有权。 |
 | `Agent instance` | `AgentInstanceId` | workflow 中的一个参与者，由且仅由一个 Project-owned Session 承载。 |
-| `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录；可选记录作为已核验 user Turn 来源的 HumanRequest。 |
+| `ActionInvocation` | `ActionInvocationId` | 在某个 Agent 上调用一次已声明 action 的逻辑记录；保存 Action `contract`、绑定参数数据，并可选记录作为已核验 user Turn 来源的 HumanRequest。 |
 | `ActionAttempt` | `ActionAttemptId` | invocation 的一次执行尝试；被 interrupt 后可以产生新的 attempt。 |
 | `Team` | `TeamId` | 一组可动态修改的具名 Agent instance。 |
 | `AgentRelation` | `RelationId` | 会作为 action 上下文注入的有向、带类型关系。 |
@@ -41,7 +41,7 @@
 | I9 | 每个 Project 的每个 slug 最多有一个可编辑 WorkflowProgram；覆盖保存不会改变已创建 Workflow 的快照。 |
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
 | I11 | 在同一个 Workflow 内，一个逻辑 effect path 永久绑定到一种精确的 kind 与 payload。 |
-| I12 | Workflow 的启动配置与启动上下文在 run 创建后不可变。 |
+| I12 | Workflow 的 `request`、`params`、`instructions`、trigger、启动配置与启动上下文在 run 创建后不可变。 |
 
 UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
 建立 Session 的父子关系。
@@ -55,17 +55,23 @@ UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这�
 启动 run 时会完成以下操作，从而暴露一个一致的 created run：
 
 1. 按 `slug` 在 Project 可见 catalog 中解析；同 slug 的 Project source 覆盖 built-in。
-2. 按 `input_schema` 校验用户输入。
+2. 按 `params_schema` 校验可复用的 run `params`；对声明为 `format: "model-profile"` 的字段同时校验其模型 profile 是否存在。
 3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowProgramSnapshot。
 4. 校验 model、skills、Workflow 权限上限与 Agent class override。starting Session
    必须属于该 Project，并构成不可越过的外层权限上限。
-5. 保存 `fresh` 启动上下文，或截取一份有界且不可变的 Project 快照。在上下文
+5. 保存具体的用户 `request`、可选 run `instructions`、trigger 来源，以及
+   `fresh` 启动上下文或一份有界且不可变的 Project 快照。在上下文
    构造中，starting Session 用于确定快照焦点和记录来源，而不是复制 Session prompt。
 6. 创建 Project-owned、状态为 `created` 的 Workflow，并可选记录 starting Session。
 7. 调度该 run；worker 在解释 effect 前把它改为 `running`。
 
-run 的输出就是 Python entrypoint 的返回值。runner 通过 `complete` effect
-把它交给 Rust。
+runner 分别通过 `ctx.request`、`ctx.params`、`ctx.trigger` 和 `ctx.context`
+暴露这些值。WorkflowProgram 面向一类任务，必须显式决定把具体 request 或哪部分
+context 传给哪个 Agent Action；runtime 不会自动把它们提升为 instructions。
+当前 HTTP launcher 对 Project 级启动记录 `manual`，对 Session-origin 启动记录
+`user`；`workflow` 与 `timer` 是为内部启动路径保留的 domain value。唤醒一个已有的
+timer-backed run 不会创建新 Workflow，也不会改变它的 trigger。
+run 的输出就是 Python entrypoint 的返回值，runner 通过 `complete` effect 把它交给 Rust。
 
 ## 4. Agent 语义
 
@@ -115,6 +121,12 @@ Model sample 前会过滤 tool definitions，但这不是唯一安全边界。re
 
 `await agent.retire()` 会保留完整 Session 历史，但拒绝之后的 action。
 
+Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 的默认 profile；
+非空值会把这个持久 Agent Session 绑定到指定的已配置 profile。因此“一个模型生成，
+另一个模型检查”只是普通 DSL：`Generator(model=...)` 与 `Reviewer(model=...)`，
+不需要新的 runtime primitive。Workflow 可在任意 `params_schema` 字段上使用
+`format: "model-profile"`，向用户暴露模型选择。
+
 ## 5. Action、Attempt 与 Turn 语义
 
 `@action` 方法声明 prompt 和参数签名。方法体不会作为 agent 逻辑执行。
@@ -153,18 +165,20 @@ ActionInvocation
   Attempt 2 -> Turn 2 -> model/tool Steps   # 只在 interrupt/retry 后出现
 ```
 
-普通 action 会把 docstring/decorator prompt 与绑定参数格式化成来源为 workflow
-的 Turn objective。`ask_human` 返回的字符串则是 `HumanMessage`；当它传给标注为
+普通 action 的 docstring/decorator 会成为名为 `Action contract` 的、可检查的
+Workflow instruction layer；绑定参数会单独序列化为来源为 workflow 的 Turn input。
+`ctx.request`、`ctx.params` 或 `ctx.context` 只有在 Workflow 把所选值作为 Action 参数
+传入时才会到达模型。`ask_human` 返回的字符串则是 `HumanMessage`；当它传给标注为
 `HumanMessage` 的 action 参数时，Python 会同时提交 request ID 与参数名。只有该
 direct HumanRequest 已回答、属于当前 Workflow 与 Agent Session、answer 为字符串，
-并且与绑定参数完全一致时，Rust 才允许创建来源为 user 的 Turn。人类原文成为
-Turn input；action prompt 与其余参数进入可检查的 Workflow prompt layer；
-ActionInvocation 会保留来源 HumanRequest ID。
+并且与绑定参数完全一致时，Rust 才允许创建来源为 user 的 Turn。人类原文逐字成为
+Turn input；Action contract 与其余 Workflow 提供的上下文进入可检查、明确标为 data
+的 Workflow layer；ActionInvocation 会保留来源 HumanRequest ID。
 
 每个 Turn 都会快照实际使用且顺序固定的 prompt layers：runtime、Project、
-Workflow、Agent/Session、Skills、runtime control。配置后，不可变的启动上下文属于
-Workflow layer；与该 Agent 有关的有向关系也属于该层，interrupt/retry guidance
-属于 control layer。详见
+Workflow、Agent/Session、Skills、runtime control。Workflow layer 可包含本次 run
+的 `instructions`、Action contract 与该 Agent 有关的有向关系，但不会隐式包含
+run request 或启动上下文快照；interrupt/retry guidance 属于 control layer。详见
 [prompt 模型](prompt-model.md)。
 
 | Invocation/Attempt 状态 | 含义 |

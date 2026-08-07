@@ -12,11 +12,11 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | `Turn` | `TurnId` | One user/model interaction inside a Session. |
 | `AgentStep` | `StepId` | Inspectable model, tool, workflow, or system step under a Turn. |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | Validated Python source plus literal manifest. A missing Project denotes a built-in. |
-| `Workflow` | `WorkflowId` | One execution of an immutable workflow snapshot inside a Project. |
+| `Workflow` | `WorkflowId` | One execution of an immutable workflow snapshot inside a Project, with one concrete `request`, validated `params`, optional run `instructions`, trigger provenance, and launch context. |
 | `WorkflowEffect` | `(WorkflowId, logical path)` | Durable journal entry for one exact Python effect request and its replayable result or error. |
 | starting Session | `started_from_session_id?` | Optional Session from which a Workflow was started. It is provenance, not ownership. |
 | `Agent instance` | `AgentInstanceId` | One workflow actor backed by exactly one Project-owned Session. |
-| `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent; it optionally records the HumanRequest that sourced a verified user Turn. |
+| `ActionInvocation` | `ActionInvocationId` | Logical call of one declared action on one Agent; it stores the Action `contract`, bound argument data, and optionally the HumanRequest that sourced a verified user Turn. |
 | `ActionAttempt` | `ActionAttemptId` | One execution attempt for an invocation; it may be replaced after interruption. |
 | `Team` | `TeamId` | Named mutable set of Agent instances. |
 | `AgentRelation` | `RelationId` | Directed typed relation used as action context. |
@@ -41,7 +41,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | I9 | A Project has at most one editable WorkflowProgram per slug. Saving that slug replaces the program, never existing Workflow snapshots. |
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
 | I11 | Within one Workflow, a logical effect path is permanently bound to one exact kind and payload. |
-| I12 | Workflow launch configuration and launch context never mutate after run creation. |
+| I12 | Workflow `request`, `params`, `instructions`, trigger, launch configuration, and launch context never mutate after run creation. |
 
 The UI may visually group Agent Sessions beneath a Workflow. This does not
 create a Session parent/child relation.
@@ -56,19 +56,28 @@ Starting a run performs these operations atomically enough to expose one
 consistent created run:
 
 1. Resolve `slug` in the Project-visible catalog (Project source overrides a built-in of the same slug).
-2. Validate the user input against `input_schema`.
+2. Validate reusable run `params` against `params_schema`, including configured model-profile references declared with `format: "model-profile"`.
 3. Copy source, manifest, owner, path, and SHA-256 into a WorkflowProgramSnapshot.
 4. Validate the selected model, skills, Workflow access ceiling, and Agent class
    overrides. A starting Session must belong to the Project and is a hard outer
    access bound.
-5. Store either a `fresh` launch context or one bounded immutable Project
+5. Store the concrete user `request`, optional run `instructions`, trigger
+   provenance, and either a `fresh` launch context or one bounded immutable Project
    snapshot. For context construction, a starting Session supplies focus and
    provenance rather than a copied Session prompt.
 6. Create a Project-owned Workflow with `created` status and an optional starting Session.
 7. Schedule the run; the worker changes it to `running` before interpreting effects.
 
-The run's output is the value returned by the Python entrypoint. The runner
-sends it through the `complete` effect.
+The runner exposes these values separately as `ctx.request`, `ctx.params`,
+`ctx.trigger`, and `ctx.context`. A WorkflowProgram is generic for a task class:
+it must explicitly pass the concrete request or selected context into an Agent
+Action. The runtime never turns either value into instructions automatically.
+The current HTTP launcher records `manual` for a Project launch and `user` for
+a Session-origin launch. The `workflow` and `timer` trigger kinds are reserved
+for internal launch paths; waking an existing timer-backed run does not create
+a new Workflow or change its trigger.
+The run's output is the value returned by the Python entrypoint and sent through
+the `complete` effect.
 
 ## 4. Agent semantics
 
@@ -124,6 +133,13 @@ not Agent research-network access.
 
 `await agent.retire()` preserves all Session history but rejects later actions.
 
+An Agent class or constructor may set `model`. An empty model inherits the
+Workflow Run's default profile; a non-empty value binds that persistent Agent
+Session to the named configured profile. Therefore a generator/reviewer split
+is ordinary DSL (`Generator(model=...)`, `Reviewer(model=...)`), not a separate
+runtime primitive. A Workflow may expose such choices through arbitrary
+`params_schema` fields using `format: "model-profile"`.
+
 ## 5. Action, attempt, and Turn semantics
 
 An `@action` method declares a prompt and argument signature. The method body is
@@ -170,21 +186,26 @@ ActionInvocation
   Attempt 2 -> Turn 2 -> model/tool Steps   # only after interruption/retry
 ```
 
-For an ordinary action, the runtime formats the action docstring/decorator
-prompt and bound arguments as a workflow-origin Turn objective. A string answer
-returned by `ask_human` is instead a `HumanMessage`. When it is passed to an
+For an ordinary action, the action docstring/decorator becomes an inspectable
+Workflow instruction layer named `Action contract`. Bound arguments are
+serialized separately as the input of a workflow-origin Turn. This is the only
+way `ctx.request`, `ctx.params`, or `ctx.context` reaches a model: the Workflow
+must pass the selected value as an Action argument. A string answer returned by
+`ask_human` is instead a `HumanMessage`. When it is passed to an
 action parameter annotated as `HumanMessage`, Python sends the request ID and
 parameter name. Rust accepts a user-origin Turn only if that direct
 HumanRequest is answered, belongs to this Workflow and Agent Session, has a
-string answer, and exactly matches the bound argument. The human text becomes
-the Turn input; the action prompt and remaining arguments become an inspectable
-Workflow prompt layer. The ActionInvocation retains the source HumanRequest ID.
+string answer, and exactly matches the bound argument. The exact human text
+becomes the Turn input; the Action contract and any remaining Workflow-provided
+context become an inspectable Workflow layer clearly marked as data. The
+ActionInvocation retains the source HumanRequest ID.
 
 Every Turn snapshots the exact ordered prompt layers: runtime, Project,
-Workflow, Agent/Session, Skills, and runtime control. The Workflow layer
-includes the immutable launch context when configured. Relevant directed
-relations belong to that layer; interruption/retry guidance belongs to the
-control layer. See [prompt model](prompt-model.md).
+Workflow, Agent/Session, Skills, and runtime control. The Workflow layer may
+contain the run `instructions`, Action contract, and relevant directed
+relations. It never implicitly contains the run request or launch-context
+snapshot. Interruption/retry guidance belongs to the control layer. See
+[prompt model](prompt-model.md).
 
 | Invocation/attempt status | Meaning |
 |---|---|

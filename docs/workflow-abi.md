@@ -37,13 +37,21 @@ class Synthesizer(Agent):
     slug="parallel-review",
     name="Parallel review",
     description="Run independent Sessions, then synthesize them.",
-    input_schema={
+    params_schema={
         "type": "object",
         "properties": {
             "perspectives": {
                 "type": "array",
                 "items": {"type": "string"},
-            }
+            },
+            "research_model": {
+                "type": "string",
+                "format": "model-profile",
+            },
+            "review_model": {
+                "type": "string",
+                "format": "model-profile",
+            },
         },
     },
     output_schema={
@@ -61,14 +69,21 @@ class Synthesizer(Agent):
     },
 )
 async def main(ctx):
-    perspectives = ctx.input.get("perspectives") or ["support", "limitations"]
-    agents = [Researcher(name=f"Route {index + 1}") for index, _ in enumerate(perspectives)]
-    async with scope("Independent evidence", ctx.objective):
+    perspectives = ctx.params.get("perspectives") or ["support", "limitations"]
+    research_model = str(ctx.params.get("research_model") or "")
+    agents = [
+        Researcher(name=f"Route {index + 1}", model=research_model)
+        for index, _ in enumerate(perspectives)
+    ]
+    async with scope("Independent evidence", ctx.request):
         findings = await together(*(
-            agent.investigate(ctx.objective, perspective)
+            agent.investigate(ctx.request, perspective)
             for agent, perspective in zip(agents, perspectives)
         ))
-    summary = await Synthesizer(name="Synthesis").synthesize(ctx.objective, list(findings))
+    summary = await Synthesizer(
+        name="Synthesis",
+        model=str(ctx.params.get("review_model") or ""),
+    ).synthesize(ctx.request, list(findings))
     return {"summary": summary}
 ```
 
@@ -87,13 +102,21 @@ must be Python literals.
 | `slug` | Lowercase kebab-case catalog key. |
 | `name` | Human-readable name. |
 | `description` | Protocol purpose shown on the Workflow page. |
-| `input_schema` | Supported JSON Schema subset checked before scheduling. |
+| `params_schema` | Supported JSON Schema subset for reusable run parameters, checked before scheduling. A string with `format: "model-profile"` gets a configured-model picker and profile validation. |
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 | `budget` | Agent, action concurrency/steps, hosted-search, raw and uncached token, wall-time, and optional cost limits. |
 
-The runtime provides `ctx.objective`, `ctx.input`, `ctx.workflow_id`,
-`ctx.context`, and `ctx.project`. `ctx.context` is either `{}` for a fresh run or
-the immutable bounded Project snapshot selected at launch. In contrast,
+The runtime provides `ctx.request`, `ctx.params`, `ctx.workflow_id`,
+`ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
+per-run user task; a WorkflowProgram stays generic and explicitly decides which
+Actions receive that request. `ctx.params` contains reusable knobs validated by
+`params_schema`. `ctx.trigger` carries durable launch provenance. The current
+public launcher emits `manual` for a Project launch and `user` for a
+Session-origin launch; `workflow` and `timer` are reserved domain values for
+future internal launch paths. `ctx.context` is either
+`{}` for a fresh run or the immutable bounded Project snapshot selected at
+launch. Neither `ctx.request` nor `ctx.context` is automatically promoted into
+model instructions. In contrast,
 `await ctx.project.snapshot(...)` performs an explicit durable effect and
 returns a bounded view of current Project Sessions, Turns, Workflow results,
 and Artifact metadata; it excludes summary runs themselves to avoid recursive
@@ -105,6 +128,7 @@ summaries.
 |---|---|
 | `Agent(...)` | Local declaration; first use creates an Agent instance and Session. |
 | `Agent(system_prompt=...)` | Overrides the class system prompt for this persistent Agent Session. |
+| `Agent(model=...)` | Binds this persistent Agent Session to a configured model profile; an empty value inherits the Run default. Different roles use different models by ordinary Python construction. |
 | `Agent(access=...)` | Overrides the class access profile for this instance. |
 | `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
 | `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, `reasoning_effort`, and `max_output_tokens` give each role its own sample, search, retrieval-context, compute, and output policy. |
@@ -140,12 +164,16 @@ above it fails, and a downgrade applies directly. A Turn keeps the profile
 snapshot captured at creation.
 
 Agent classes may declare `system_prompt`; a constructor override takes
-precedence. Project, Workflow, Agent/Session, skill, and control layers are
-snapshotted on every Turn. See [prompt model](prompt-model.md).
+precedence. A run's `instructions`, the Agent system prompt, and the Action
+contract are instruction layers. The concrete `request` and bound Action
+arguments are Turn data only when the Workflow passes them. Project, Workflow,
+Agent/Session, skill, and control layers are snapshotted on every Turn. See
+[prompt model](prompt-model.md).
 
-The Project and Session launchers share this run contract. They select the
-Workflow system prompt, model profile, skills, Workflow ceiling, class
-overrides, schema input, and `fresh` or `project_snapshot` context mode. A
+The Project and Session launchers share this run contract. They supply the
+concrete `request`, optional run `instructions`, `params`, default model
+profile, skills, Workflow ceiling, class overrides, and `fresh` or
+`project_snapshot` context mode. A
 source Session contributes provenance and snapshot focus without copying its
 Session system prompt into new Agent Sessions; independently, its access
 profile is the outer run ceiling.
@@ -159,8 +187,8 @@ The built-in `project-summary` is the reference background program. It reads
 `ctx.project.snapshot()`, asks one persistent summary Agent to render a
 self-contained HTML report, publishes it as an Artifact, and optionally calls
 `wait(minutes=...)` before repeating. Its reviewed Agent prompt lives in source;
-the Project Page exposes the run's user-controlled Workflow system prompt and
-timer interval. A scheduled summary is therefore an ordinary durable Workflow,
+the Project Page exposes the run's user-controlled `instructions` and timer
+interval. A scheduled summary is therefore an ordinary durable Workflow,
 not a second "instance" entity or a hidden Project daemon.
 
 ## Effect protocol

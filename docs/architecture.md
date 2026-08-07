@@ -31,8 +31,16 @@
     `interactive-agent`; its persistent Agent Session waits for a verified human
     message before each Turn. No privileged standalone creation route exists.
 13. **A Workflow launch is explicit and immutable.** The run snapshots its
-    objective, Workflow system prompt, input, model, skills, permission ceiling,
-    per-Agent class overrides, and either fresh or bounded Project context.
+    concrete request, validated params, optional run instructions, trigger,
+    default model, skills, permission ceiling, per-Agent class overrides, and
+    either fresh or bounded Project context.
+14. **Instructions and task data are separate.** Runtime, Project, run, Agent,
+    Action contract, skill, and control instructions form the prompt snapshot.
+    The run request, params, and captured context reach a model only when Python
+    explicitly passes them as Action arguments.
+15. **Per-Agent model choice is ordinary DSL.** One persistent Agent Session
+    binds one configured model profile. Different roles use different models by
+    constructing different Agents with `model=...`; there is no model-slot entity.
 
 ## Ownership graph
 
@@ -45,6 +53,7 @@ Project
   |     +-- Turn ...
   +-- Workflow
         +-- started_from_session_id -> Session (optional)
+        +-- trigger -> user | workflow | timer | manual provenance
         +-- launch_context -> immutable Project snapshot (optional)
         +-- access ceiling / Agent class overrides
         +-- WorkflowParticipant -> Session
@@ -58,11 +67,12 @@ Sessions do not have parent IDs. The Project overview groups participant
 Sessions by Workflow for navigation, but that grouping is a view over
 WorkflowParticipant records, not a storage hierarchy.
 
-For an interactive action, Rust resolves the referenced answered HumanRequest,
+For a `HumanMessage` interactive action, Rust resolves the referenced answered HumanRequest,
 checks Workflow and Session ownership, verifies the bound string byte-for-byte,
 and only then creates a `user` Turn. The action prompt and non-message arguments
 become a Workflow prompt layer. Ordinary workflow-dispatched actions retain a
-`workflow` Turn and show their generated objective explicitly.
+`workflow` Turn: the Action contract is an instruction layer and the bound
+arguments are shown explicitly as Turn input data.
 
 ## Workflow launch
 
@@ -81,17 +91,20 @@ Launch context has two modes:
   applies because it is an instruction layer, not research data.
 - `project_snapshot` captures one bounded Rust-produced view of existing
   Sessions, Turns, Workflow results, and text Artifacts. It is stored on the
-  Workflow, exposed to Python as `ctx.context`, and automatically rendered as
-  untrusted Workflow context in every Agent Turn. It never changes during the
-  run. Code that intentionally needs current state calls
+  Workflow and exposed to Python as `ctx.context`. It is never automatically
+  rendered into an Agent Turn; Workflow code explicitly passes only relevant
+  data. It never changes during the run. Code that intentionally needs current
+  state calls
   `await ctx.project.snapshot()` as a separate durable effect.
 
-The immutable snapshot is important for both reproducibility and caching: an
-unrelated Project update cannot silently change the instruction prefix of an
-already-running Agent Session. A Session-origin launch prioritizes that
+The immutable snapshot is important for reproducibility, while explicit data
+flow is important for caching: unrelated Project data cannot silently enter or
+change the instruction prefix of an already-running Agent Session. A
+Session-origin launch prioritizes that
 Session's history in the snapshot, but does not copy its mutable Session system
-prompt into the new Agents. The prompt stack remains Project -> Workflow ->
-Agent/Session -> Skills -> Control.
+prompt into the new Agents. The instruction stack remains Runtime -> Project ->
+Run instructions/Action contract -> Agent/Session -> Skills -> Control; request
+and Action arguments remain Turn data.
 
 ## Runtime layers
 

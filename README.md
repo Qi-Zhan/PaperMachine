@@ -14,9 +14,12 @@ Session hierarchy.
 Both the Project page and a Session header use the same **Run Workflow**
 launcher. A Project-level launch starts new work from the Project as a whole;
 a Session-origin launch records that Session as provenance and can prioritize
-its recent Turns in the captured context. The Workflow's model, skills,
-permission ceiling, per-Agent access overrides, prompt, input, and launch
-context are explicit run configuration rather than hidden global state.
+its recent Turns in the captured context. The Workflow's concrete request,
+reusable params, optional run instructions, default model, skills, permission
+ceiling, per-Agent access overrides, trigger, and launch context are explicit
+run configuration rather than hidden global state. Workflow code decides which
+Agents receive the request or captured context; the runtime never promotes
+either into system instructions.
 
 The ordinary **New Session** command starts the reviewed `interactive-agent`
 Workflow. That program creates one persistent Agent Session, waits for a human
@@ -27,7 +30,7 @@ The **Project Page** can run the reviewed `project-summary` Workflow once or on
 a configurable durable timer. Its summary Agent reads a bounded snapshot of
 existing Project Sessions, Workflow results, and Artifact metadata, then
 publishes an immutable HTML progress report that the UI embeds in a sandboxed
-frame. The visible summary prompt is the run's ordinary Workflow system prompt;
+frame. The visible summary policy is the run's ordinary `instructions` field;
 there is no hidden summary daemon or extra instance model.
 
 ```text
