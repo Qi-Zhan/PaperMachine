@@ -31,6 +31,7 @@ class RunnerProtocolTest(unittest.TestCase):
                 "async def main(ctx):\n"
                 "    return {\n"
                 "        'request': ctx.request,\n"
+                "        'instructions': ctx.instructions,\n"
                 "        'params': ctx.params,\n"
                 "        'trigger': ctx.trigger,\n"
                 "        'context': ctx.context,\n"
@@ -71,6 +72,7 @@ class RunnerProtocolTest(unittest.TestCase):
                     {
                         "workflow_id": "test-workflow",
                         "request": "concrete user task",
+                        "instructions": "Prefer primary sources.",
                         "params": {"route_count": 2},
                         "trigger": {
                             "kind": "user",
@@ -90,6 +92,7 @@ class RunnerProtocolTest(unittest.TestCase):
                 request["payload"]["output"],
                 {
                     "request": "concrete user task",
+                    "instructions": "Prefer primary sources.",
                     "params": {"route_count": 2},
                     "trigger": {
                         "kind": "user",
@@ -155,6 +158,7 @@ class RunnerProtocolTest(unittest.TestCase):
                     {
                         "workflow_id": "test-workflow",
                         "request": "test",
+                        "instructions": "",
                         "params": {},
                         "trigger": {"kind": "manual"},
                     }
@@ -235,6 +239,7 @@ class RunnerProtocolTest(unittest.TestCase):
                     {
                         "workflow_id": "test-workflow",
                         "request": "test",
+                        "instructions": "",
                         "params": {},
                         "trigger": {"kind": "manual"},
                     }

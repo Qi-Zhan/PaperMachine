@@ -57,6 +57,7 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
                 main(
                     WorkflowContext(
                         request="",
+                        instructions="",
                         params={"session_title": "Cache investigation"},
                         workflow_id="workflow-1",
                     )

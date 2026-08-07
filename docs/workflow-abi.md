@@ -95,18 +95,21 @@ must be Python literals.
 | `params_schema` | Supported JSON Schema subset for reusable run parameters, checked before scheduling. A string with `format: "model-profile"` gets a configured-model picker and profile validation. |
 | `output_schema` | Declared result contract; currently descriptive at completion. |
 
-The runtime provides `ctx.request`, `ctx.params`, `ctx.workflow_id`,
-`ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
+The runtime provides `ctx.request`, `ctx.instructions`, `ctx.params`,
+`ctx.workflow_id`, `ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
 per-run user task for `request_mode="required"`; it is empty for
 `request_mode="none"`. A WorkflowProgram stays generic and explicitly decides
 which Actions receive a task. `ctx.params` contains reusable knobs validated by
 `params_schema`. `ctx.trigger` carries durable launch provenance. The current
 public launcher emits `manual` for a Project launch and `user` for a
 Session-origin launch; `workflow` and `timer` are reserved domain values for
-future internal launch paths. `ctx.context` is either
+future internal launch paths. `ctx.instructions` is the exact optional
+run-wide guidance entered at launch. It is exposed for Workflow control flow
+and is automatically included as a Workflow prompt layer in every Action Turn.
+`ctx.context` is either
 `{}` for a fresh run or the immutable bounded Project snapshot selected at
 launch. Neither `ctx.request` nor `ctx.context` is automatically promoted into
-model instructions. In contrast,
+model instructions; the Workflow must pass them to the relevant Actions. In contrast,
 `await ctx.project.snapshot(...)` performs an explicit durable effect and
 returns a bounded view of current Project Sessions, Turns, Workflow results,
 and Artifact metadata; it excludes summary runs themselves to avoid recursive

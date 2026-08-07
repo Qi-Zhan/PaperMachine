@@ -98,6 +98,7 @@ impl PythonWorkflowRuntime {
         let initialization = json!({
             "workflow_id": run.id,
             "request": run.request,
+            "instructions": run.instructions,
             "params": run.params,
             "trigger": run.trigger,
             "context": run.launch_context.snapshot.clone().unwrap_or_else(|| json!({})),

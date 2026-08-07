@@ -886,6 +886,7 @@ class ProjectContext:
 @dataclass(frozen=True)
 class WorkflowContext:
     request: str
+    instructions: str
     params: dict[str, Any]
     workflow_id: str
     trigger: dict[str, Any] = field(default_factory=dict)

@@ -64,6 +64,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             WORKFLOW["main"](
                 WorkflowContext(
                     request="Refresh progress.",
+                    instructions="",
                     params={"interval_minutes": 0},
                     workflow_id="workflow-summary",
                 )

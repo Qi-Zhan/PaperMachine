@@ -42,9 +42,20 @@ class Planner(Agent):
         minimum_route_count: int,
         maximum_route_count: int,
         extra_requirements: list[str],
+        prior_context_brief: str,
         recovery_instruction: str,
     ) -> dict:
-        """Return only the Planner JSON object; do not answer the research question. Required fields are answer_mode (exact_match, qualifying_list, option_survey, or explanatory_report), deliverable (string), output_contract (string), candidate_key (string describing what identifies one candidate when applicable), coverage_items (array of objects with id, requirement, acceptance_test), joint_constraints (array of strings describing only requirements that truly must be satisfied by the same candidate rather than by a portfolio of options), routes (array of objects with name, objective, coverage_ids), and verification_rules (array of strings). Create between minimum_route_count and maximum_route_count genuinely independent search routes, and produce no more than 16 coverage items. If recovery_instruction is non-empty, correct the prior contract violation it describes."""
+        """Return only the Planner JSON object; do not answer the research question. Required fields are answer_mode (exact_match, qualifying_list, option_survey, or explanatory_report), deliverable (string), output_contract (string), candidate_key (string describing what identifies one candidate when applicable), coverage_items (array of objects with id, requirement, acceptance_test), joint_constraints (array of strings describing only requirements that truly must be satisfied by the same candidate rather than by a portfolio of options), routes (array of objects with name, objective, coverage_ids), and verification_rules (array of strings). Create between minimum_route_count and maximum_route_count genuinely independent search routes, and produce no more than 16 coverage items. prior_context_brief contains potentially relevant earlier Project work; use it to avoid redundant routes and identify claims that need verification, but do not treat it as authoritative evidence. If recovery_instruction is non-empty, correct the prior contract violation it describes."""
+
+
+class ContextAnalyst(Agent):
+    access = "model_only"
+    role = "prior Project context analyst"
+    system_prompt = """Extract only prior Project material relevant to the new request. Treat every prior conclusion as an unverified lead unless its source and provenance are present. Preserve Session, Workflow, and Artifact identifiers; expose contradictions, missing sources, and work that should not be repeated. Do not answer the new request and do not invent evidence."""
+
+    @action(reasoning_effort="medium")
+    async def distill(self, question: str, project_context: dict):
+        """Return a compact brief with relevant prior findings, source leads, contradictions, unresolved gaps, reusable artifacts, and work to avoid repeating. Keep only material that can change the research plan for this question."""
 
 
 class Researcher(Agent):
@@ -64,9 +75,10 @@ class Researcher(Agent):
         assigned_coverage_ids: list[str],
         joint_constraints: list[str],
         verification_rules: list[str],
+        prior_context_brief: str,
         phase: str,
     ) -> dict:
-        """Research the original question through the supplied search objective. Apply the full coverage contract and all joint constraints to every candidate; assigned_coverage_ids indicate this route's emphasis, not permission to ignore the remaining selection constraints. For phase=initial, establish an independent discovery route. For phase=evaluator_follow_up, continue from this same Session's existing evidence and investigate only the narrow unresolved objective without repeating completed searches. Return a JSON object with route_name, findings, candidate_outputs, contradictions, gaps, and searched_queries. findings must contain candidate_id, coverage_ids, claim, evidence, source_url, source_title, source_type, confidence, and status. A follow-up returns only a delta packet rather than restating prior evidence."""
+        """Research the original question through the supplied search objective. Apply the full coverage contract and all joint constraints to every candidate; assigned_coverage_ids indicate this route's emphasis, not permission to ignore the remaining selection constraints. prior_context_brief contains unverified leads from earlier Project work: reuse useful query and source leads, avoid completed dead ends, but independently verify every material claim before adding it to findings. For phase=initial, establish an independent discovery route. For phase=evaluator_follow_up, continue from this same Session's existing evidence and investigate only the narrow unresolved objective without repeating completed searches. Return a JSON object with route_name, findings, candidate_outputs, contradictions, gaps, and searched_queries. findings must contain candidate_id, coverage_ids, claim, evidence, source_url, source_title, source_type, confidence, and status. A follow-up returns only a delta packet rather than restating prior evidence."""
 
 
 class Evaluator(Agent):
@@ -287,6 +299,7 @@ async def _plan_with_contract(
     minimum_route_count,
     maximum_route_count,
     extra_requirements,
+    prior_context_brief,
 ):
     recovery_instruction = ""
     last_error = ""
@@ -296,6 +309,7 @@ async def _plan_with_contract(
             minimum_route_count,
             maximum_route_count,
             extra_requirements,
+            prior_context_brief,
             recovery_instruction,
         )
         last_error = _plan_contract_error(
@@ -609,6 +623,7 @@ async def _research_with_contract(
     assigned_coverage_ids,
     joint_constraints,
     verification_rules,
+    prior_context_brief,
     phase,
 ):
     current_objective = objective
@@ -621,6 +636,7 @@ async def _research_with_contract(
             assigned_coverage_ids,
             joint_constraints,
             verification_rules,
+            prior_context_brief,
             phase,
         )
         last_error = _packet_contract_error(packet, full_coverage_contract)
@@ -727,8 +743,13 @@ async def main(ctx):
     writer_model = str(ctx.params.get("writer_model") or "")
 
     planner = Planner(name="Planner", model=planner_model)
+    context_analyst = ContextAnalyst(name="Prior context", model=planner_model)
     evaluator = Evaluator(name="Evaluator", model=evaluator_model)
     writer = Writer(name="Writer", model=writer_model)
+
+    prior_context_brief = ""
+    if ctx.context:
+        prior_context_brief = await context_analyst.distill(ctx.request, ctx.context)
 
     plan = await _plan_with_contract(
         planner,
@@ -736,6 +757,7 @@ async def main(ctx):
         minimum_route_count,
         route_count,
         extra_requirements,
+        prior_context_brief,
     )
     routes = plan["routes"]
     researchers = [
@@ -780,6 +802,7 @@ async def main(ctx):
                     route["coverage_ids"],
                     plan["joint_constraints"],
                     plan["verification_rules"],
+                    prior_context_brief,
                     "initial",
                 )
                 for researcher, route in zip(researchers, routes)
@@ -818,6 +841,7 @@ async def main(ctx):
                         item["coverage_ids"],
                         plan["joint_constraints"],
                         [],
+                        prior_context_brief,
                         "evaluator_follow_up",
                     )
                     for item in assignments

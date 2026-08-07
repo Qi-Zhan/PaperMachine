@@ -1161,6 +1161,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         let expected_access = match participant["class_name"].as_str() {
             Some("Researcher") => "read_only",
             Some("Synthesizer") => "model_only",
+            Some("ContextAnalyst") => "model_only",
             other => panic!("unexpected Agent class {other:?}"),
         };
         let session_id = &participant["session_id"];
@@ -1173,9 +1174,36 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         assert_eq!(session["access"], expected_access);
     }
 
-    let participant_session_id = completed["participants"][0]["session_id"]
-        .as_str()
-        .expect("participant Session id should exist");
+    let context_session_id = completed["participants"]
+        .as_array()
+        .expect("participants should be present")
+        .iter()
+        .find(|participant| participant["class_name"] == "ContextAnalyst")
+        .and_then(|participant| participant["session_id"].as_str())
+        .expect("ContextAnalyst Session id should exist");
+    let context_session = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/sessions/{context_session_id}"),
+        ))
+        .await
+        .expect("ContextAnalyst Session should load");
+    let context_session = response_json(context_session).await;
+    assert!(
+        context_session["turns"][0]["input"]
+            .as_str()
+            .is_some_and(|input| input.contains("Reuse this prior evidence instead of restarting.")),
+        "the Workflow must explicitly pass selected Project context to its context analyst"
+    );
+
+    let participant_session_id = completed["participants"]
+        .as_array()
+        .expect("participants should be present")
+        .iter()
+        .find(|participant| participant["class_name"] == "Researcher")
+        .and_then(|participant| participant["session_id"].as_str())
+        .expect("Researcher Session id should exist");
     let participant = app
         .oneshot(empty_request(
             "GET",
@@ -1197,7 +1225,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         participant["turns"][0]["input"].as_str().is_some_and(
             |input| !input.contains("Reuse this prior evidence instead of restarting.")
         ),
-        "capturing ctx.context does not implicitly pass it into an Agent Turn"
+        "Researcher receives the compact brief rather than the raw Project snapshot"
     );
 }
 

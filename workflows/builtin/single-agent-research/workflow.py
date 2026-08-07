@@ -11,8 +11,8 @@ class Researcher(Agent):
         reasoning_effort="high",
         finalize="after_search",
     )
-    async def research(self, question: str):
-        """Research the complete question with live web search and return only the requested final deliverable. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
+    async def research(self, question: str, prior_project_context: dict):
+        """Research the complete question with live web search and return only the requested final deliverable. prior_project_context contains optional earlier Project work selected by the user: use it to continue useful leads and avoid repetition, but independently verify material claims and do not expose unrelated history. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
 
 
 @workflow(
@@ -28,5 +28,5 @@ class Researcher(Agent):
 )
 async def main(ctx):
     researcher = Researcher(name="Single researcher")
-    report = await researcher.research(ctx.request)
+    report = await researcher.research(ctx.request, ctx.context)
     return {"report": report}

@@ -96,6 +96,19 @@ manifest 使用 `request_mode="required"` 时，具体 run `request` 遵循同�
 交互 Session 通过 `ask_human` 和 `HumanMessage` 接收真正的用户 Turn。`ctx.params`
 是可复用的 run 控制参数，也只有被程序显式传入才会到达模型。
 
+Run `instructions` have deliberately different semantics. The exact string is
+available to Python as `ctx.instructions`, and the runtime also snapshots it as
+a Workflow instruction layer on every Action Turn in that run. Use it for
+cross-Agent rules such as language, evidence policy, output conventions, or a
+summary policy. Use `ctx.request` for the concrete task and `ctx.context` for
+selected prior results. This prevents a Workflow author from accidentally
+treating task data or old model output as system-level authority.
+
+Run `instructions` 的语义刻意不同：Python 可通过 `ctx.instructions` 读取原文，
+runtime 也会把它作为该 run 每个 Action Turn 的 Workflow instruction layer 固化。
+它适合跨 Agent 的语言、证据、输出或摘要策略；具体任务放在 `ctx.request`，选择的
+既有结果放在 `ctx.context`。这样不会误把任务数据或旧模型输出提升成 system 级指令。
+
 ## Message origin / 消息来源
 
 `Turn.origin` is `user` for text submitted directly through the Session
