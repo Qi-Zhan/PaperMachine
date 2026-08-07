@@ -267,9 +267,10 @@ the end of the stable developer instructions. Providers that reject that field
 use ordinary implicit caching instead. A provider's `prompt_cache_mode` setting
 may pin `implicit` or `explicit` when provider behavior is already known.
 
-The final model sample no longer rewrites instructions or removes tool
-definitions. It appends a final-answer message and sets `tool_choice=none`, so
-the previously cached prefix and WebSocket response chain remain valid. Usage
+The final model sample keeps the same instructions and history prefix, appends
+a final-answer message, removes local and hosted tool definitions, and sets
+`tool_choice=none`. This gives compatible providers no tool surface even when
+they ignore the choice field; the input-history prefix remains cacheable. Usage
 records distinguish cache reads (`cached_input_tokens`) from first-time cache
 writes (`cache_write_input_tokens`). Model-step output also records the actual
 transport, cache mode/key, breakpoint use, continuation decision, and fallback
@@ -368,8 +369,12 @@ The Project Page is itself backed by ordinary Workflow data. A built-in
 `project-summary` run reads a bounded Rust-produced Project snapshot and
 publishes an immutable HTML report Artifact. The UI embeds only the newest
 Artifact in a sandboxed iframe; manual refreshes are one-shot runs, while an
-active refresh policy is simply a non-terminal scheduled Workflow. There is no
-separate summary-instance table or privileged summary daemon.
+active refresh policy is simply a non-terminal scheduled Workflow. Its first
+refresh is full; later timer firings request only changes since the prior
+`captured_at` cursor and skip model work when that delta is empty. The same
+summary Agent Session retains the prior report and can reuse its provider
+prefix. There is no separate summary-instance table or privileged summary
+daemon.
 
 ## Skills and workflow roots
 

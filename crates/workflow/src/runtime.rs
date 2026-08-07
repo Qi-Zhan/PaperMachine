@@ -1134,6 +1134,7 @@ impl RunEffectContext {
             run.project_id,
             ProjectSnapshotOptions {
                 exclude_workflow_id: Some(self.workflow_id),
+                updated_after: payload.updated_after,
                 max_sessions: payload.max_sessions,
                 max_turns_per_session: payload.max_turns_per_session,
                 max_workflows: payload.max_workflows,
@@ -1727,6 +1728,8 @@ struct AskHumanEffect {
 
 #[derive(Debug, Deserialize)]
 struct ProjectSnapshotEffect {
+    #[serde(default)]
+    updated_after: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default = "default_snapshot_sessions")]
     max_sessions: usize,
     #[serde(default = "default_snapshot_turns")]

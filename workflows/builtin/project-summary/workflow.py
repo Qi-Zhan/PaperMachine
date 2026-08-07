@@ -66,14 +66,25 @@ async def main(ctx):
     summarizer = ProjectSummaryAgent(name="Project summary")
     refresh_count = 0
     artifact_id = ""
+    snapshot_cursor = None
 
     while True:
         snapshot = await ctx.project.snapshot(
+            updated_after=snapshot_cursor,
             max_sessions=max_sessions,
             max_turns_per_session=turns_per_session,
             max_artifacts=max_artifacts,
             include_artifact_content=True,
         )
+        next_cursor = snapshot["captured_at"]
+        if snapshot_cursor is not None and not _has_project_changes(snapshot):
+            snapshot_cursor = next_cursor
+            await wait(
+                minutes=interval_minutes,
+                name="project-summary-refresh",
+                policy="coalesce",
+            )
+            continue
         html = _normalize_html(await summarizer.render_progress_page(snapshot))
         refresh_count += 1
         artifact = await publish_artifact(
@@ -84,12 +95,15 @@ async def main(ctx):
             metadata={
                 "role": "project_summary",
                 "captured_at": snapshot["captured_at"],
+                "snapshot_mode": snapshot["mode"],
+                "updated_after": snapshot["updated_after"],
                 "refresh_count": refresh_count,
                 "scheduled": interval_minutes > 0,
             },
             agent=summarizer,
         )
         artifact_id = artifact.id
+        snapshot_cursor = next_cursor
         if interval_minutes <= 0:
             return {"artifact_id": artifact_id, "refresh_count": refresh_count}
         await wait(
@@ -97,6 +111,10 @@ async def main(ctx):
             name="project-summary-refresh",
             policy="coalesce",
         )
+
+
+def _has_project_changes(snapshot):
+    return bool(snapshot["sessions"] or snapshot["workflows"] or snapshot["artifacts"])
 
 
 def _normalize_html(value):

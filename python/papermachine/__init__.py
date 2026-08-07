@@ -863,6 +863,7 @@ class ProjectContext:
     async def snapshot(
         self,
         *,
+        updated_after: str | None = None,
         max_sessions: int = 50,
         max_turns_per_session: int = 12,
         max_workflows: int = 200,
@@ -873,6 +874,7 @@ class ProjectContext:
         return await _effect(
             "project_snapshot",
             {
+                "updated_after": updated_after,
                 "max_sessions": max_sessions,
                 "max_turns_per_session": max_turns_per_session,
                 "max_workflows": max_workflows,

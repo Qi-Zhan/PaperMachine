@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use chrono::Utc;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
@@ -12,6 +13,7 @@ use std::collections::HashSet;
 pub struct ProjectSnapshotOptions {
     pub focus_session_id: Option<SessionId>,
     pub exclude_workflow_id: Option<WorkflowId>,
+    pub updated_after: Option<DateTime<Utc>>,
     pub max_sessions: usize,
     pub max_turns_per_session: usize,
     pub max_workflows: usize,
@@ -25,6 +27,7 @@ impl Default for ProjectSnapshotOptions {
         Self {
             focus_session_id: None,
             exclude_workflow_id: None,
+            updated_after: None,
             max_sessions: 50,
             max_turns_per_session: 12,
             max_workflows: 200,
@@ -40,6 +43,9 @@ pub fn build_project_snapshot(
     project_id: ProjectId,
     options: ProjectSnapshotOptions,
 ) -> Result<Value, StoreError> {
+    // Capture the upper bound before reading. Updates racing with the queries
+    // may appear in both this snapshot and the next one, but cannot be lost.
+    let captured_at = Utc::now();
     let max_sessions = options.max_sessions.clamp(1, 200);
     let max_turns = options.max_turns_per_session.clamp(1, 100);
     let max_workflows = options.max_workflows.clamp(1, 200);
@@ -66,6 +72,11 @@ pub fn build_project_snapshot(
         .list_sessions(project.id)?
         .into_iter()
         .filter(|session| !summary_session_ids.contains(&session.id))
+        .filter(|session| {
+            options
+                .updated_after
+                .is_none_or(|updated_after| session.updated_at > updated_after)
+        })
         .collect::<Vec<_>>();
     if let Some(focus_session_id) = options.focus_session_id {
         project_sessions.sort_by_key(|session| usize::from(session.id != focus_session_id));
@@ -77,6 +88,11 @@ pub fn build_project_snapshot(
             let turns = store
                 .list_turns(session.id)?
                 .into_iter()
+                .filter(|turn| {
+                    options
+                        .updated_after
+                        .is_none_or(|updated_after| turn.updated_at > updated_after)
+                })
                 .rev()
                 .take(max_turns)
                 .collect::<Vec<_>>()
@@ -117,6 +133,9 @@ pub fn build_project_snapshot(
         .filter(|workflow| {
             options.exclude_workflow_id != Some(workflow.id)
                 && workflow.program.manifest.slug != "project-summary"
+                && options
+                    .updated_after
+                    .is_none_or(|updated_after| workflow.updated_at > updated_after)
         })
         .take(max_workflows)
         .map(|workflow| {
@@ -152,6 +171,9 @@ pub fn build_project_snapshot(
         .into_iter()
         .filter(|artifact| {
             artifact.metadata.get("role").and_then(Value::as_str) != Some("project_summary")
+                && options
+                    .updated_after
+                    .is_none_or(|updated_after| artifact.created_at > updated_after)
         })
         .take(max_artifacts)
         .map(|artifact| {
@@ -183,7 +205,9 @@ pub fn build_project_snapshot(
         .collect::<Vec<_>>();
 
     Ok(json!({
-        "captured_at": Utc::now(),
+        "captured_at": captured_at,
+        "mode": if options.updated_after.is_some() { "delta" } else { "full" },
+        "updated_after": options.updated_after,
         "project": {
             "id": project.id,
             "name": project.name,
@@ -365,5 +389,53 @@ mod tests {
         assert_eq!(snapshot["artifacts"][0]["content"], "原始证据内容");
         assert_eq!(snapshot["artifacts"][0]["content_truncated"], false);
         assert_eq!(snapshot["limits"]["include_artifact_content"], true);
+    }
+
+    #[test]
+    fn snapshot_cursor_returns_only_later_project_changes() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store =
+            Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
+        let project = store
+            .create_project(
+                "Incremental context",
+                "Stable Project metadata",
+                directory.path().join("project"),
+            )
+            .expect("Project should be created");
+        store
+            .create_session(project.id, "Before cursor", "", "test-model", Vec::new())
+            .expect("initial Session should be created");
+
+        let full = build_project_snapshot(&store, project.id, ProjectSnapshotOptions::default())
+            .expect("full snapshot should be built");
+        let cursor = serde_json::from_value(full["captured_at"].clone())
+            .expect("captured_at should be a timestamp");
+        let empty_delta = build_project_snapshot(
+            &store,
+            project.id,
+            ProjectSnapshotOptions {
+                updated_after: Some(cursor),
+                ..ProjectSnapshotOptions::default()
+            },
+        )
+        .expect("empty delta should be built");
+        assert_eq!(empty_delta["mode"], "delta");
+        assert_eq!(empty_delta["sessions"], json!([]));
+
+        let later = store
+            .create_session(project.id, "After cursor", "", "test-model", Vec::new())
+            .expect("later Session should be created");
+        let changed = build_project_snapshot(
+            &store,
+            project.id,
+            ProjectSnapshotOptions {
+                updated_after: Some(cursor),
+                ..ProjectSnapshotOptions::default()
+            },
+        )
+        .expect("delta snapshot should be built");
+        assert_eq!(changed["sessions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(changed["sessions"][0]["id"], later.id.to_string());
     }
 }

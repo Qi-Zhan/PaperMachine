@@ -147,8 +147,10 @@ small packages owned by one Project.
 - Suspend quiescent human/timer/signal waits without retaining an idle Python
   process or global execution permit; replay wakes on an answer, due timer, or
   durable Signal, including concurrent background-timer plus human-wait flows.
-- Read bounded Project state from Workflow code with `ctx.project.snapshot()`
-  and publish deterministic text/HTML Artifacts with `publish_artifact(...)`.
+- Read bounded Project state from Workflow code with `ctx.project.snapshot()`;
+  long-lived Workflows can pass `captured_at` back as `updated_after` to receive
+  only later changes. Publish deterministic text/HTML Artifacts with
+  `publish_artifact(...)`.
 - Launch with either a fresh context or one immutable, bounded Project snapshot.
   The latter is exposed as `ctx.context`; the Workflow explicitly routes raw or
   summarized portions to the Agents that need them. A Session-origin snapshot
@@ -185,11 +187,12 @@ the normal Project library. It uses `CARGO` when explicitly set, otherwise
 
 For real models, PaperMachine loads `config.toml` from its platform user-data
 directory by default, or the file passed to `--config`. The committed
-development config uses DeepSeek V4 Flash and resolves its credential only from
-the environment:
+development config contains ordinary Responses-compatible profiles for GLM 5.2
+and DeepSeek V4 Flash. It currently selects GLM and resolves credentials only
+from the environment:
 
 ```sh
-DEEPSEEK_API_KEY=... pnpm server:dev
+AEROIDES_API_KEY=... DEEPSEEK_API_KEY=... pnpm server:dev
 ```
 
 `pnpm server:dev --config /absolute/path/config.toml` selects a different
@@ -201,7 +204,16 @@ The configuration shape supports several providers and model profiles in one
 server process:
 
 ```toml
-default_model = "deepseek-flash"
+default_model = "glm-5-2"
+
+[providers.aeroides]
+kind = "open_ai_responses"
+base_url = "https://private.aeroides.dev/v1"
+api_key_env = "AEROIDES_API_KEY"
+request_timeout_seconds = 900
+stream_idle_timeout_seconds = 300
+responses_websockets = false
+prompt_cache_mode = "implicit"
 
 [providers.deepseek]
 kind = "open_ai_responses"
@@ -221,6 +233,11 @@ api_key_env = "PAPERMACHINE_OPENAI_API_KEY"
 provider = "deepseek"
 model = "deepseek-v4-flash"
 context_window = 1000000
+
+[models.glm-5-2]
+provider = "aeroides"
+model = "glm-5.2"
+context_window = 1048576
 
 [models.openai-main]
 provider = "openai"

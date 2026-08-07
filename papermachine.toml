@@ -1,13 +1,30 @@
 # PaperMachine owns model/provider configuration. Credentials are resolved
 # from the process environment and must never be committed here.
-default_model = "deepseek-flash"
+default_model = "glm-5-2"
+
+[providers.aeroides]
+kind = "open_ai_responses"
+base_url = "https://private.aeroides.dev/v1"
+api_key_env = "AEROIDES_API_KEY"
+max_request_retries = 3
+request_timeout_seconds = 900
+stream_idle_timeout_seconds = 300
+store_responses = false
+responses_websockets = false
+prompt_cache_mode = "implicit"
+reasoning_effort = "medium"
+
+[models.glm-5-2]
+provider = "aeroides"
+model = "glm-5.2"
+context_window = 1048576
 
 [providers.deepseek]
 kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 max_request_retries = 3
-request_timeout_seconds = 60
+request_timeout_seconds = 900
 stream_idle_timeout_seconds = 300
 store_responses = false
 responses_websockets = false

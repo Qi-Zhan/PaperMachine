@@ -268,6 +268,9 @@ Signal 也会在 replay 后恰好消费一次。
 
 `ctx.context` 返回不可变的启动快照，`fresh` run 则返回 `{}`；
 `ctx.project.snapshot(...)` 另行读取属于当前 Project 的最新、有界持久状态；
+长程 Workflow 可以把上次快照的 `captured_at` 作为下一次的 `updated_after`，此时
+返回 `mode="delta"`，且只包含游标后更新的 Session/Turn、Workflow 与 Artifact。
+捕获时间在数据库读取前确定，因此并发更新最多在相邻快照中重复，不会落入游标空隙；
 `publish_artifact(...)` 只接受文本，并由 effect path 派生 Artifact ID，因此 replay
 幂等。用户 Workflow 可以用这两个 effect 构建 Project 级视图，而不需要直接访问
 SQLite 或 host 文件。

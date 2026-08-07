@@ -32,10 +32,13 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                 }
             if kind == "project_snapshot":
                 self.assertTrue(payload["include_artifact_content"])
+                self.assertIsNone(payload["updated_after"])
                 self.assertEqual(payload["max_workflows"], 200)
                 self.assertEqual(payload["max_text_chars"], 500_000)
                 return {
                     "captured_at": "2026-08-06T12:00:00Z",
+                    "mode": "full",
+                    "updated_after": None,
                     "project": {"name": "PaperMachine"},
                     "sessions": [{"title": "Research route"}],
                     "workflows": [],
@@ -49,6 +52,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             if kind == "publish_artifact":
                 self.assertEqual(payload["media_type"], "text/html; charset=utf-8")
                 self.assertEqual(payload["metadata"]["role"], "project_summary")
+                self.assertEqual(payload["metadata"]["snapshot_mode"], "full")
                 self.assertIn("<h1>Current progress</h1>", payload["content"])
                 return {
                     "artifact_id": "artifact-summary",
@@ -81,6 +85,18 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         html = WORKFLOW["_normalize_html"]("finding < uncertain & unresolved")
         self.assertIn("<!doctype html>", html)
         self.assertIn("finding &lt; uncertain &amp; unresolved", html)
+
+    def test_delta_change_detection_ignores_an_empty_tick(self) -> None:
+        self.assertFalse(
+            WORKFLOW["_has_project_changes"](
+                {"sessions": [], "workflows": [], "artifacts": []}
+            )
+        )
+        self.assertTrue(
+            WORKFLOW["_has_project_changes"](
+                {"sessions": [{"id": "changed"}], "workflows": [], "artifacts": []}
+            )
+        )
 
 
 if __name__ == "__main__":

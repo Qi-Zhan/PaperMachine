@@ -308,7 +308,12 @@ a concurrent branch is consumed exactly once after replay.
 
 `ctx.context` returns the immutable launch snapshot, or `{}` for a fresh run.
 `ctx.project.snapshot(...)` separately reads current bounded durable state owned
-by the Project. `publish_artifact(...)` accepts text, derives its Artifact ID
+by the Project. A long-lived Workflow may pass a previous snapshot's
+`captured_at` back as `updated_after`; the next snapshot has `mode="delta"` and
+contains only Sessions/Turns, Workflows, and Artifacts updated after that
+cursor. The capture timestamp is taken before database reads, so concurrent
+updates can be repeated but cannot fall between cursors. `publish_artifact(...)`
+accepts text, derives its Artifact ID
 from the effect path, and is idempotent under replay. These effects let ordinary
 user Workflows build Project-level views without direct SQLite or host-file
 access.
