@@ -160,9 +160,8 @@ overshoot it. Each response receives at most four calls from the remaining
 allowance and a stable matching control instruction; this keeps one response
 from consuming an entire Turn on endpoints that honor either mechanism without
 changing continuation identity. `reasoning_effort` (`none`, `low`, `medium`,
-`high`, `xhigh`, or `max`) overrides the server default for that action, while
-`max_output_tokens` sets its per-model-response output ceiling. Both values are
-snapshotted on the Turn and shown in model-step input metadata.
+`high`, `xhigh`, or `max`) overrides the server default for that action. The
+value is snapshotted on the Turn and shown in model-step input metadata.
 `search_context_size` (`low`, `medium`, or `high`) controls how much retrieved
 context each hosted search attaches; use `low` for bounded exploratory routes
 and increase it only when the task needs richer page context.
@@ -174,12 +173,6 @@ deliverable. `finalize="always"` performs that model-only Turn even when the
 first Turn used no hosted search. The finalizer is a separate durable
 ActionInvocation and visible Turn, so it is budgeted, recoverable, and
 inspectable rather than hidden post-processing.
-Because the Responses WebSocket beta is not consistent across compatible
-endpoints for `max_output_tokens`, an action with an explicit output ceiling
-uses HTTP SSE and records `max_output_tokens_requires_http`. Keep output ceilings
-on one-sample planning, evaluation, and writing actions; omit them on multi-step
-research actions that benefit from incremental WebSocket continuation.
-
 ```text
 ActionInvocation
   Attempt 1 -> Turn 1 -> model/tool Steps

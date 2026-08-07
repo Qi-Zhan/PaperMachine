@@ -367,7 +367,6 @@ impl Store {
         max_steps: u32,
         max_search_calls: Option<u32>,
         web_search_context_size: Option<WebSearchContextSize>,
-        max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
@@ -382,7 +381,6 @@ impl Store {
             max_steps,
             max_search_calls,
             web_search_context_size,
-            max_output_tokens,
             response_format,
             skill_snapshots,
         )
@@ -401,7 +399,6 @@ impl Store {
         max_steps: u32,
         max_search_calls: Option<u32>,
         web_search_context_size: Option<WebSearchContextSize>,
-        max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
@@ -416,7 +413,6 @@ impl Store {
             max_steps,
             max_search_calls,
             web_search_context_size,
-            max_output_tokens,
             response_format,
             skill_snapshots,
         )
@@ -435,7 +431,6 @@ impl Store {
         max_steps: u32,
         max_search_calls: Option<u32>,
         web_search_context_size: Option<WebSearchContextSize>,
-        max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
@@ -500,7 +495,6 @@ impl Store {
             max_steps: max_steps.max(1),
             max_search_calls,
             web_search_context_size,
-            max_output_tokens,
             response_format,
             skill_snapshots,
             history: Vec::new(),

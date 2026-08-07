@@ -796,7 +796,6 @@ impl RunEffectContext {
                         max_steps,
                         payload.max_search_calls,
                         payload.web_search_context_size,
-                        payload.max_output_tokens,
                         payload.response_format.clone(),
                         context,
                         self.cancellation.child_token(),
@@ -1746,8 +1745,6 @@ struct InvokeActionEffect {
     web_search_context_size: Option<WebSearchContextSize>,
     #[serde(default)]
     reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
-    max_output_tokens: Option<u32>,
     task_scope_id: Option<String>,
     #[serde(default)]
     human_request_id: Option<String>,

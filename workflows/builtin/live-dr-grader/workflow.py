@@ -21,7 +21,6 @@ Return indices into the supplied arrays, never copy reference answers into expla
         max_steps=1,
         max_search_calls=0,
         reasoning_effort="high",
-        max_output_tokens=16_384,
     )
     async def judge(
         self,

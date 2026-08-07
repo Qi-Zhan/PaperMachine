@@ -421,7 +421,6 @@ async fn workflow_token_budget_is_charged_at_each_model_step() {
             None,
             None,
             None,
-            None,
             WorkflowTurnContext {
                 workflow_id: run.id,
                 action_invocation_id: invocation.id,

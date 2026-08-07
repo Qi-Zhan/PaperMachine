@@ -328,7 +328,6 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             None,
             None,
             None,
-            None,
             Vec::new(),
         )
         .expect("first turn should be created");
@@ -364,7 +363,6 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             None,
             None,
             None,
-            None,
             Vec::new(),
         )
         .expect("second turn should be created");
@@ -394,7 +392,6 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
             papermachine_protocol::PromptSnapshot::default(),
             None,
             4,
-            None,
             None,
             None,
             None,
@@ -692,7 +689,6 @@ fn recovery_cancels_orphaned_turn_human_requests_idempotently() {
             None,
             None,
             None,
-            None,
             Vec::new(),
         )
         .expect("Turn should be created");
@@ -776,7 +772,6 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             papermachine_protocol::PromptSnapshot::default(),
             None,
             4,
-            None,
             None,
             None,
             None,
@@ -867,7 +862,6 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
             None,
             None,
             None,
-            None,
             Vec::new(),
         )
         .expect("exact human answer should become a user Turn");
@@ -900,7 +894,6 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
                 papermachine_protocol::PromptSnapshot::default(),
                 None,
                 4,
-                None,
                 None,
                 None,
                 None,

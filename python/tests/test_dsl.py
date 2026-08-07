@@ -23,7 +23,6 @@ class Writer(Agent):
         max_search_calls=0,
         search_context_size="low",
         reasoning_effort="low",
-        max_output_tokens=2_048,
     )
     async def compose(self, evidence: list[dict[str, Any]]) -> str:
         """Compose only from the supplied evidence."""
@@ -83,6 +82,7 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(action_effects[1]["max_steps"], 1)
         self.assertEqual(action_effects[1]["max_search_calls"], 0)
         self.assertEqual(action_effects[1]["agent_instance_id"], "agent")
+        self.assertNotIn("max_output_tokens", action_effects[1])
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
         actions = 0
@@ -238,7 +238,7 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(repair["agent_instance_id"], "agent")
         self.assertEqual(repair["max_steps"], 1)
         self.assertEqual(repair["max_search_calls"], 0)
-        self.assertEqual(repair["max_output_tokens"], 32_768)
+        self.assertNotIn("max_output_tokens", repair)
 
     def test_typed_action_stops_after_two_failed_repairs(self) -> None:
         calls = 0
@@ -285,7 +285,6 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(effects[-1][1]["max_search_calls"], 0)
         self.assertEqual(effects[-1][1]["web_search_context_size"], "low")
         self.assertEqual(effects[-1][1]["reasoning_effort"], "low")
-        self.assertEqual(effects[-1][1]["max_output_tokens"], 2_048)
         self.assertEqual(effects[0][1]["access"], "model_only")
 
     def test_constructor_override_and_dynamic_access_change_emit_profiles(self) -> None:
@@ -350,16 +349,6 @@ class ActionOptionsTest(unittest.TestCase):
 
             class Invalid(Agent):
                 @action(search_context_size="huge")
-                async def run(self) -> str:
-                    """Invalid action."""
-
-    def test_max_output_tokens_must_be_positive(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError, "max_output_tokens must be a positive integer"
-        ):
-
-            class Invalid(Agent):
-                @action(max_output_tokens=0)
                 async def run(self) -> str:
                     """Invalid action."""
 

@@ -87,7 +87,6 @@ export interface Turn {
   max_steps: number
   max_search_calls: number | null
   web_search_context_size: 'low' | 'medium' | 'high' | null
-  max_output_tokens: number | null
   response_format: unknown | null
   skill_snapshots: SkillSnapshot[]
   history: unknown[]

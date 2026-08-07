@@ -148,10 +148,6 @@ not silently rewrite the endpoint.
   allowance at four hosted calls per response and adds a stable matching
   instruction; non-enforcing proxies can still exceed this soft batch size
   before the runtime regains control.
-- An explicit `max_output_tokens` ceiling selects HTTP SSE because compatible
-  Responses WebSocket beta endpoints do not consistently accept that property.
-  Multi-step research actions should omit the ceiling to retain incremental
-  WebSocket continuation; one-step orchestration actions can use it safely.
 - `max_cost_usd` is metadata until a provider client supplies pricing estimates.
 - Generated protocols and model output can still be wrong. Inspectability and
   provenance do not establish factual correctness.

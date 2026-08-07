@@ -1020,11 +1020,6 @@ impl ModelClient for OpenAiResponsesClient {
         let prompt_cache_mode = self.resolve_prompt_cache_mode(&request).await;
         let (request, max_tool_calls_mode) = self.resolve_max_tool_calls(request).await;
         let transport_session_key = request.transport_session_key.clone();
-        // The Responses WebSocket beta (including otherwise compatible
-        // proxies) does not consistently accept max_output_tokens. A bounded
-        // one-shot action can safely use HTTP SSE; multi-sample research
-        // actions omit the cap so they retain incremental WebSocket state.
-        let output_limit_requires_http = request.max_output_tokens.is_some();
         let session_uses_http_fallback = match transport_session_key.as_deref() {
             Some(session_key) => {
                 let mut fallback_sessions = self.websocket_fallback_sessions.lock().await;
@@ -1034,15 +1029,11 @@ impl ModelClient for OpenAiResponsesClient {
             }
             None => false,
         };
-        let mut websocket_fallback_reason = if output_limit_requires_http {
-            Some("max_output_tokens_requires_http".to_string())
-        } else {
-            session_uses_http_fallback.then(|| "session_in_http_fallback_ttl".to_string())
-        };
+        let mut websocket_fallback_reason =
+            session_uses_http_fallback.then(|| "session_in_http_fallback_ttl".to_string());
         if self.config.responses_websockets
             && transport_session_key.is_some()
             && !session_uses_http_fallback
-            && !output_limit_requires_http
         {
             match self
                 .stream_websocket(request.clone(), prompt_cache_mode, max_tool_calls_mode)
@@ -1421,8 +1412,7 @@ fn prompt_cache_probe_body(model: &str, marked: bool) -> Value {
         ],
         "prompt_cache_key": PROMPT_CACHE_CAPABILITY_PROBE_KEY,
         "store": false,
-        "stream": false,
-        "max_output_tokens": 16
+        "stream": false
     });
     if marked {
         body["prompt_cache_options"] = json!({"mode": "explicit"});
@@ -1438,7 +1428,6 @@ fn max_tool_calls_probe_body(model: &str, marked: bool) -> Value {
         "tool_choice": "none",
         "store": false,
         "stream": false,
-        "max_output_tokens": 128,
     });
     if marked {
         body["max_tool_calls"] = json!(1);
@@ -1539,9 +1528,6 @@ fn request_body(
                 "strict": format.strict,
             }
         });
-    }
-    if let Some(max_output_tokens) = request.max_output_tokens {
-        body["max_output_tokens"] = json!(max_output_tokens);
     }
     body
 }
@@ -1742,7 +1728,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: Some(12),
-            max_output_tokens: Some(1000),
             response_format: Some(ModelResponseFormat {
                 name: "research_result".to_string(),
                 schema: json!({
@@ -1768,8 +1753,8 @@ mod tests {
         assert_eq!(body["tools"][1]["type"], "web_search");
         assert_eq!(body["tools"][1]["search_context_size"], "low");
         assert_eq!(body["max_tool_calls"], 12);
+        assert!(body.get("max_output_tokens").is_none());
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
-        assert_eq!(body["max_output_tokens"], 1000);
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["store"], false);
@@ -1796,7 +1781,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
 
@@ -1830,7 +1814,6 @@ mod tests {
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::None,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
 
@@ -1869,6 +1852,8 @@ mod tests {
         );
         assert!(control.get("prompt_cache_options").is_none());
         assert_eq!(marked["prompt_cache_key"], control["prompt_cache_key"]);
+        assert!(marked.get("max_output_tokens").is_none());
+        assert!(control.get("max_output_tokens").is_none());
     }
 
     #[test]
@@ -1878,6 +1863,8 @@ mod tests {
 
         assert_eq!(marked["max_tool_calls"], 1);
         assert!(control.get("max_tool_calls").is_none());
+        assert!(marked.get("max_output_tokens").is_none());
+        assert!(control.get("max_output_tokens").is_none());
         let mut marked_without_limit = marked;
         marked_without_limit
             .as_object_mut()
@@ -2007,7 +1994,6 @@ mod tests {
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::None,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
 
@@ -2078,7 +2064,6 @@ mod tests {
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
         let events = client
@@ -2205,7 +2190,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: Some(4),
-            max_output_tokens: None,
             response_format: None,
         };
         let events = client
@@ -2278,7 +2262,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: Some(1),
-            max_output_tokens: None,
             response_format: None,
         };
         let first = client
@@ -2320,76 +2303,6 @@ mod tests {
         assert_eq!(requests[0]["max_tool_calls"], 1);
         assert_eq!(requests[1]["max_tool_calls"], 1);
         assert!(requests[2].get("max_tool_calls").is_none());
-
-        server.abort();
-        let _ = server.await;
-    }
-
-    #[tokio::test]
-    async fn output_limited_request_uses_http_without_attempting_websocket() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("test listener should have an address");
-        let state = CacheProbeServerState::default();
-        let server_state = state.clone();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .route("/v1/responses", post(reject_explicit_cache_then_stream))
-                    .with_state(server_state),
-            )
-            .await
-            .expect("test HTTP server should run");
-        });
-
-        let mut config = test_config();
-        config.endpoint = Url::parse(&format!("http://{address}/v1/responses"))
-            .expect("test endpoint should parse");
-        config.responses_websockets = true;
-        let client = OpenAiResponsesClient::new(config).expect("test client should build");
-        let request = ModelRequest {
-            model: "gpt-test".to_string(),
-            reasoning_effort: Some(ReasoningEffort::Medium),
-            instructions: "plan briefly".to_string(),
-            input: vec![ModelInputItem::Message {
-                role: MessageRole::User,
-                content: "question".to_string(),
-            }],
-            prompt_cache: None,
-            transport_session_key: Some("session-with-limit".to_string()),
-            tools: Vec::new(),
-            hosted_tools: Vec::new(),
-            web_search_context_size: None,
-            parallel_tool_calls: false,
-            tool_choice: ModelToolChoice::None,
-            max_tool_calls: None,
-            max_output_tokens: Some(4_096),
-            response_format: None,
-        };
-        let events = client
-            .stream(request)
-            .await
-            .expect("HTTP stream should start")
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("HTTP stream should complete");
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ModelEvent::RequestMetadata {
-                metadata: ModelRequestMetadata {
-                    transport: ModelTransport::HttpSse,
-                    websocket_fallback_reason: Some(reason),
-                    ..
-                }
-            } if reason == "max_output_tokens_requires_http"
-        )));
-        let requests = state.requests.lock().await.clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["max_output_tokens"], 4_096);
 
         server.abort();
         let _ = server.await;
@@ -2581,7 +2494,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
         let first_events = client

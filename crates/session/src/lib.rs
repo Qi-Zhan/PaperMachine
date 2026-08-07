@@ -150,7 +150,6 @@ impl SessionRuntime {
                 None,
                 None,
                 None,
-                None,
             )
             .await?;
         self.schedule(turn.id).await?;
@@ -184,7 +183,6 @@ impl SessionRuntime {
                 None,
                 None,
                 None,
-                None,
             )
             .await?;
         run_scheduled_turn(Arc::clone(&self.inner), turn.id, None, cancellation).await?;
@@ -203,7 +201,6 @@ impl SessionRuntime {
         max_steps: u32,
         max_search_calls: Option<u32>,
         web_search_context_size: Option<WebSearchContextSize>,
-        max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
         context: WorkflowTurnContext,
         cancellation: CancellationToken,
@@ -219,7 +216,6 @@ impl SessionRuntime {
                 max_steps,
                 max_search_calls,
                 web_search_context_size,
-                max_output_tokens,
                 response_format,
                 Some(context.action_attempt_id),
             )
@@ -278,7 +274,6 @@ impl SessionRuntime {
         max_steps: u32,
         max_search_calls: Option<u32>,
         web_search_context_size: Option<WebSearchContextSize>,
-        max_output_tokens: Option<u32>,
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: Option<ActionAttemptId>,
     ) -> Result<Turn, SessionRuntimeError> {
@@ -312,7 +307,6 @@ impl SessionRuntime {
                 max_steps,
                 max_search_calls,
                 web_search_context_size,
-                max_output_tokens,
                 response_format,
                 resolved.snapshots,
             )?
@@ -327,7 +321,6 @@ impl SessionRuntime {
                 max_steps,
                 max_search_calls,
                 web_search_context_size,
-                max_output_tokens,
                 response_format,
                 resolved.snapshots,
             )?
@@ -485,7 +478,6 @@ async fn run_scheduled_turn(
     }
     request.web_search_context_size = turn.web_search_context_size;
     request.response_format = turn.response_format;
-    request.max_output_tokens = turn.max_output_tokens;
     request.model_context_window = inner
         .model
         .model_context_window(&turn.model)
@@ -1456,7 +1448,6 @@ mod budget_tests {
                 PromptSnapshot::default(),
                 None,
                 2,
-                None,
                 None,
                 None,
                 None,

@@ -506,7 +506,6 @@ context_window = 1000000
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::None,
             max_tool_calls: None,
-            max_output_tokens: None,
             response_format: None,
         };
 

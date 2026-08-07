@@ -19,7 +19,6 @@ class Researcher(Agent):
         max_search_calls=16,
         search_context_size="low",
         reasoning_effort="high",
-        max_output_tokens=16_384,
     )
     async def investigate(self, question: str, perspective: str):
         """Find evidence, counterevidence, provenance, and uncertainty."""
@@ -28,7 +27,7 @@ class Researcher(Agent):
 class Synthesizer(Agent):
     access = "model_only"
 
-    @action(max_steps=1, reasoning_effort="medium", max_output_tokens=8_192)
+    @action(max_steps=1, reasoning_effort="medium")
     async def synthesize(self, question: str, findings: list[str]):
         """Compare findings and return the strongest bounded conclusion."""
 
@@ -131,7 +130,7 @@ summaries.
 | `Agent(model=...)` | Binds this persistent Agent Session to a configured model profile; an empty value inherits the Run default. Different roles use different models by ordinary Python construction. |
 | `Agent(access=...)` | Overrides the class access profile for this instance. |
 | `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
-| `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, `reasoning_effort`, and `max_output_tokens` give each role its own sample, search, retrieval-context, compute, and output policy. |
+| `@action` | Declares a model-backed action. Optional `max_steps`, `max_search_calls`, `search_context_size`, and `reasoning_effort` give each role its own sample, search, retrieval-context, and compute policy. |
 | `await together(...)` | Runs awaitables concurrently; duplicate same-Agent actions fail before starting. |
 | `Team(name, *agents)` | Creates a named, dynamically mutable membership set. |
 | `await team.add/remove(...)` | Changes Team membership. |

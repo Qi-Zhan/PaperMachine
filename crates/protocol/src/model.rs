@@ -206,7 +206,6 @@ pub struct ModelRequest {
     /// processed while producing this response.
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
-    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub response_format: Option<ModelResponseFormat>,
 }

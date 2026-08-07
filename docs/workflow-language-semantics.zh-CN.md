@@ -143,8 +143,8 @@ hosted-call 数。拒绝字段时记录 `runtime_fallback`；接受字段却超�
 执行其中任一机制的 endpoint 不会让单个 response 吞掉整个 Turn，且 continuation
 identity 不会变化。
 `reasoning_effort`（`none`、`low`、`medium`、`high`、`xhigh` 或 `max`）可覆盖
-该 action 的服务端默认推理强度，`max_output_tokens` 则设置每次模型响应的输出
-上限；两者都会固化到 Turn，并出现在 model step 的输入元数据里。
+该 action 的服务端默认推理强度；这个值会固化到 Turn，并出现在 model step 的
+输入元数据里。
 `search_context_size`（`low`、`medium` 或 `high`）控制每次 hosted search 附带
 多少检索上下文；范围明确的探索 route 应先用 `low`，只有确实需要更丰富页面
 上下文时再提高。
@@ -154,11 +154,6 @@ Turn 使用过 hosted search，同一个持久 Agent Session 会再收到一个
 转换成真正的最终交付物。`finalize="always"` 即使第一次 Turn 没用 hosted tools
 也会执行该无工具 Turn。finalizer 是独立持久化、可见的 ActionInvocation/Turn，
 因此会被预算、恢复和检查，而不是隐藏的后处理。
-由于兼容 endpoint 对 Responses WebSocket beta 中的 `max_output_tokens` 支持并不
-一致，显式设置输出上限的 action 会走 HTTP SSE，并记录
-`max_output_tokens_requires_http`。输出上限适合单次采样的 planner、evaluator 和
-writer；需要增量 WebSocket 续接的多步 research action 应省略它。
-
 ```text
 ActionInvocation
   Attempt 1 -> Turn 1 -> model/tool Steps

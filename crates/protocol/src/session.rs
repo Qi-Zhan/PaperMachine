@@ -168,9 +168,6 @@ pub struct Turn {
     /// provider default.
     #[serde(default)]
     pub web_search_context_size: Option<WebSearchContextSize>,
-    /// Per-response output ceiling for model samples in this Turn.
-    #[serde(default)]
-    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub response_format: Option<ModelResponseFormat>,
     #[serde(default)]

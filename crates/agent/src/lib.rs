@@ -82,7 +82,6 @@ pub struct AgentTurnRequest {
     /// Maximum hosted web-search calls across this Turn. A zero value disables
     /// hosted search even when the access profile permits network research.
     pub max_search_calls: Option<u32>,
-    pub max_output_tokens: Option<u32>,
     pub response_format: Option<ModelResponseFormat>,
     pub model_context_window: usize,
 }
@@ -121,7 +120,6 @@ impl AgentTurnRequest {
             web_search_context_size: None,
             max_steps: 16,
             max_search_calls: None,
-            max_output_tokens: None,
             response_format: None,
             model_context_window: papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW,
         }
@@ -532,14 +530,12 @@ impl AgentRuntime {
                     ModelToolChoice::Auto
                 },
                 max_tool_calls,
-                max_output_tokens: request.max_output_tokens,
                 response_format: request.response_format.clone(),
             };
             model_request.prompt_cache = Some(prompt_cache_config(&model_request));
             let model_step_input = json!({
                 "model": request.model.as_str(),
                 "reasoning_effort": request.reasoning_effort,
-                "max_output_tokens": request.max_output_tokens,
                 "access": request.access,
                 "history_items": history.len(),
                 "estimated_history_tokens": estimated,
@@ -895,7 +891,6 @@ impl AgentRuntime {
             role: MessageRole::User,
             content: COMPACTION_PROMPT.to_string(),
         });
-        let max_output_tokens = (request.model_context_window / 16).clamp(512, 8_192) as u32;
         let mut model_request = ModelRequest {
             model: request.model.clone(),
             reasoning_effort: request.reasoning_effort,
@@ -909,7 +904,6 @@ impl AgentRuntime {
             parallel_tool_calls: false,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: None,
-            max_output_tokens: Some(max_output_tokens),
             response_format: None,
         };
         model_request.prompt_cache = Some(prompt_cache_config(&model_request));
@@ -1074,12 +1068,8 @@ fn history_token_budget(
             })
             .sum::<usize>(),
     );
-    let output_reserve = request
-        .max_output_tokens
-        .map(|value| value as usize)
-        .unwrap_or_else(|| {
-            (request.model_context_window / 8).clamp(1_024, DEFAULT_OUTPUT_RESERVE_TOKENS)
-        });
+    let output_reserve =
+        (request.model_context_window / 8).clamp(1_024, DEFAULT_OUTPUT_RESERVE_TOKENS);
     let safety_reserve = (request.model_context_window / 20).clamp(256, 4_096);
     let reserved = static_tokens
         .saturating_add(output_reserve)
@@ -1266,7 +1256,6 @@ mod tests {
             parallel_tool_calls: true,
             tool_choice: ModelToolChoice::Auto,
             max_tool_calls: None,
-            max_output_tokens: Some(1_000),
             response_format: None,
         };
         let first = prompt_cache_config(&build("session-a", "question A", "shared instructions"));

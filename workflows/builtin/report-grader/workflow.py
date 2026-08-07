@@ -6,7 +6,7 @@ class Grader(Agent):
     role = "independent post-write research report grader"
     system_prompt = """You are a strict, blinded evaluator. Grade only the supplied final report against every supplied criterion. You did not participate in the research and must not infer credit from hidden work. Do not browse, repair the report, or use a workflow's internal evaluator result. Unsupported, stale, contradictory, or uncited claims must not receive full credit. Apply the same 0-10 scale consistently across reports."""
 
-    @action(max_steps=1, reasoning_effort="medium", max_output_tokens=32_768)
+    @action(max_steps=1, reasoning_effort="medium")
     async def grade(
         self,
         question: str,
@@ -17,7 +17,7 @@ class Grader(Agent):
     ) -> dict:
         """Evaluate the final report point by point. Return one top-level array under each exact dimension key in required_counts, with exactly the stated number of items. Do not wrap the arrays in evaluations or dimensions. For every criterion in the supplied criteria object, return one item in the original order with criterion_index (zero-based integer), score (number from 0 through 10), and analysis (a concise evidence-based explanation). Use 0-2 for almost entirely missing, 2-4 for major deficiencies, 4-6 for basic/average fulfillment, 6-8 for good fulfillment with limitations, and 8-10 only for complete or outstanding fulfillment. Also return overall_assessment (string) and major_weaknesses (array of strings). Write analysis in the report's language. Return every criterion exactly once."""
 
-    @action(max_steps=1, reasoning_effort="medium", max_output_tokens=32_768)
+    @action(max_steps=1, reasoning_effort="medium")
     async def repair_contract(
         self,
         invalid_grading: dict,

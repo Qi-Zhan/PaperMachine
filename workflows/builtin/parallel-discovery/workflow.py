@@ -20,7 +20,7 @@ class Synthesizer(Agent):
     role = "research synthesis"
     system_prompt = "Compare independent findings and keep conclusions bounded by the evidence."
 
-    @action(max_steps=1, reasoning_effort="high", max_output_tokens=16_384)
+    @action(max_steps=1, reasoning_effort="high")
     async def synthesize(self, question: str, findings: list[str]):
         """Synthesize the findings into a concise answer. Identify agreements, conflicts, missing evidence, and the strongest defensible conclusion."""
 

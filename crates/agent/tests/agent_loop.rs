@@ -589,7 +589,6 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
         "Plan the research routes.",
     );
     request.reasoning_effort = Some(ReasoningEffort::High);
-    request.max_output_tokens = Some(32_768);
     request.max_steps = 1;
 
     let result = runtime

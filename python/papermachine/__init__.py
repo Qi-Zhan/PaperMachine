@@ -105,7 +105,6 @@ class _ActionDescriptor:
         max_search_calls: int | None = None,
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
-        max_output_tokens: int | None = None,
         finalize: str | None = None,
     ) -> None:
         if max_steps is not None and (isinstance(max_steps, bool) or max_steps < 1):
@@ -130,10 +129,6 @@ class _ActionDescriptor:
             raise ValueError(
                 "action reasoning_effort must be one of: none, low, medium, high, xhigh, max"
             )
-        if max_output_tokens is not None and (
-            isinstance(max_output_tokens, bool) or max_output_tokens < 1
-        ):
-            raise ValueError("action max_output_tokens must be a positive integer")
         if finalize not in {None, "always", "after_search"}:
             raise ValueError("action finalize must be one of: always, after_search")
         self.function = function
@@ -147,7 +142,6 @@ class _ActionDescriptor:
         self.max_search_calls = max_search_calls
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
-        self.max_output_tokens = max_output_tokens
         self.finalize = finalize
 
     def __get__(self, instance: Agent | None, owner: type[Agent]) -> Any:
@@ -196,7 +190,6 @@ class _ActionDescriptor:
                 self.max_search_calls,
                 self.search_context_size,
                 self.reasoning_effort,
-                self.max_output_tokens,
                 self.finalize,
                 self.human_message_parameter,
                 human_message.request_id if human_message is not None else None,
@@ -212,7 +205,6 @@ def action(
     max_search_calls: int | None = None,
     search_context_size: str | None = None,
     reasoning_effort: str | None = None,
-    max_output_tokens: int | None = None,
     finalize: str | None = None,
 ) -> Any:
     if callable(argument):
@@ -222,7 +214,6 @@ def action(
             max_search_calls=max_search_calls,
             search_context_size=search_context_size,
             reasoning_effort=reasoning_effort,
-            max_output_tokens=max_output_tokens,
             finalize=finalize,
         )
     if argument is not None and not isinstance(argument, str):
@@ -236,7 +227,6 @@ def action(
             max_search_calls,
             search_context_size,
             reasoning_effort,
-            max_output_tokens,
             finalize,
         )
 
@@ -368,7 +358,6 @@ class _ActionCall(Awaitable[Any]):
         max_search_calls: int | None,
         search_context_size: str | None,
         reasoning_effort: str | None,
-        max_output_tokens: int | None,
         finalize: str | None,
         human_message_parameter: str | None,
         human_request_id: str | None,
@@ -383,7 +372,6 @@ class _ActionCall(Awaitable[Any]):
         self.max_search_calls = max_search_calls
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
-        self.max_output_tokens = max_output_tokens
         self.finalize = finalize
         self.human_message_parameter = human_message_parameter
         self.human_request_id = human_request_id
@@ -421,7 +409,6 @@ class _ActionCall(Awaitable[Any]):
                 max_search_calls=0,
                 search_context_size=None,
                 reasoning_effort=self.reasoning_effort,
-                max_output_tokens=max(self.max_output_tokens or 0, 32_768),
                 use_human_message=False,
             )
         output = str(result.get("output", ""))
@@ -454,7 +441,6 @@ class _ActionCall(Awaitable[Any]):
                 max_search_calls=0,
                 search_context_size=None,
                 reasoning_effort="low",
-                max_output_tokens=max(self.max_output_tokens or 0, 32_768),
                 use_human_message=False,
             )
             output = str(result.get("output", ""))
@@ -474,7 +460,6 @@ class _ActionCall(Awaitable[Any]):
         max_search_calls: int | None = None,
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
-        max_output_tokens: int | None = None,
         use_human_message: bool = False,
     ) -> Any:
         return await _effect(
@@ -500,11 +485,6 @@ class _ActionCall(Awaitable[Any]):
                     self.reasoning_effort
                     if reasoning_effort is None
                     else reasoning_effort
-                ),
-                "max_output_tokens": (
-                    self.max_output_tokens
-                    if max_output_tokens is None
-                    else max_output_tokens
                 ),
                 "task_scope_id": _current_scope_id(),
                 "human_request_id": (
