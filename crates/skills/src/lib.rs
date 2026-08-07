@@ -39,7 +39,7 @@ impl ProjectSkillCatalog {
     }
 
     pub fn ensure_project(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
-        let root = self.project_root(project_id)?;
+        let root = self.managed_root(project_id)?;
         std::fs::create_dir_all(root.join("skills"))?;
         std::fs::create_dir_all(root.join("sources"))?;
         Ok(root)
@@ -60,7 +60,7 @@ impl ProjectSkillCatalog {
 
     pub fn load(&self, project_id: ProjectId, slug: &str) -> Result<ProjectSkill, SkillError> {
         validate_slug(slug)?;
-        let package = self.project_root(project_id)?.join("skills").join(slug);
+        let package = self.managed_root(project_id)?.join("skills").join(slug);
         let skill_path = package.join("SKILL.md");
         if !skill_path.is_file() {
             return Err(SkillError::NotFound(slug.to_string()));
@@ -72,7 +72,7 @@ impl ProjectSkillCatalog {
             slug: slug.to_string(),
             name: frontmatter.name,
             description: frontmatter.description,
-            relative_path: format!(".papermachine/skills/{slug}/SKILL.md"),
+            relative_path: format!("skills/{slug}/SKILL.md"),
             sha256: hash_package(&package)?,
             instructions: instructions.to_string(),
         })
@@ -125,22 +125,20 @@ impl ProjectSkillCatalog {
         &self,
         project_id: ProjectId,
         slugs: &[String],
-        session_workspace: &Path,
     ) -> Result<ResolvedSkills, SkillError> {
         let mut snapshots = Vec::new();
         let mut sections = Vec::new();
         for slug in unique_slugs(slugs)? {
             let skill = self.load(project_id, slug)?;
             let hash_prefix = skill.sha256.get(..16).unwrap_or(&skill.sha256);
-            let relative_package = PathBuf::from(".papermachine")
-                .join("state")
+            let relative_package = PathBuf::from("runtime")
                 .join("skill-snapshots")
                 .join(slug)
                 .join(hash_prefix);
-            let destination = session_workspace.join(&relative_package);
+            let destination = self.managed_root(project_id)?.join(&relative_package);
             if !destination.exists() {
                 copy_package(
-                    &self.project_root(project_id)?.join("skills").join(slug),
+                    &self.managed_root(project_id)?.join("skills").join(slug),
                     &destination,
                 )?;
             }
@@ -173,13 +171,14 @@ impl ProjectSkillCatalog {
 
     pub fn resolve_snapshots(
         &self,
-        session_workspace: &Path,
+        project_id: ProjectId,
         snapshots: &[SkillSnapshot],
     ) -> Result<String, SkillError> {
         let mut sections = Vec::new();
         for snapshot in snapshots {
             let path = safe_relative_path(&snapshot.relative_path)?;
-            let package = session_workspace
+            let package = self
+                .managed_root(project_id)?
                 .join(path)
                 .parent()
                 .ok_or_else(|| {
@@ -210,8 +209,9 @@ impl ProjectSkillCatalog {
         })
     }
 
-    fn project_root(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
-        Ok(PathBuf::from(self.store.get_project(project_id)?.root_path).join(".papermachine"))
+    fn managed_root(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
+        self.store.get_project(project_id)?;
+        Ok(self.store.managed_root().to_path_buf())
     }
 }
 

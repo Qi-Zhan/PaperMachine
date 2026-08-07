@@ -88,16 +88,17 @@ resource_root/                  read-only shipped resources
 
 data_dir/                       application-global state
   config.toml                   default provider configuration
-  library.db                    Project references and display metadata only
+  library.db                    Project references and display metadata
+  projects/<project-id>/        one Project's PaperMachine-owned state
+    state/project.db
+    artifacts/
+    workflow-runtime/
+    runtime/
+    prompts/
+    workflows/
+    skills/
 
-project_root/.papermachine/     one research effort's owned state
-  project.toml
-  state/project.db
-  artifacts/
-  workflow-runtime/
-  prompts/
-  workflows/
-  skills/
+workspace/                      user-owned files attached to a Project
 ```
 
 `resource_root` is required server configuration; no current-working-directory
@@ -115,20 +116,20 @@ library, and `--config` selects a provider file independently. No path is
 derived from the selected Project, and application data is never inferred from
 the current repository.
 
-Creating a Project writes its identity and complete research state under its
-own `.papermachine` directory, then registers a reference in `library.db`.
-Opening an existing Project requires both `project.toml` and `state/project.db`
-and verifies that the local database contains exactly that Project. Relocation
-updates the global reference only after the same identity is found at the new
-absolute path. Removing a reference never removes Project files. Relocation or
-removal is rejected while that Project has resumable work.
+Creating a Project allocates an ID, initializes its managed state under
+`data_dir/projects/<project-id>`, and attaches a user-selected absolute
+Workspace. The two roots must not overlap. PaperMachine creates no hidden files
+inside the Workspace. Relocation changes only the Workspace attachment.
+Removing a Project deletes its managed state but never deletes Workspace files.
+Relocation or removal is rejected while that Project has resumable work.
 
-At startup the server lists every global reference and marks a Project missing
-when its local database is unavailable. The web client renders this lightweight
-library first and requests a full overview only for the selected available
-Project. Each available Project has its own Store, catalog, Session runtime,
-and Workflow scheduler; process-wide semaphores still bound concurrent work
-across Projects.
+At startup the server opens managed Project databases by ID and independently
+checks whether each attached Workspace is available. The web client renders
+this lightweight library first and requests a full overview only for the
+selected Project. A missing Workspace does not make the managed Project
+disappear; it can be reattached. Each Project has its own Store, catalog,
+Session runtime, and Workflow scheduler; process-wide semaphores still bound
+concurrent work across Projects.
 
 ## Workflow launch
 
@@ -334,8 +335,8 @@ the UI separately confirms `full_access`.
 
 Each Project's SQLite database stores its JSON documents, indexed
 ownership/status columns, and ordered append-only Session and Workflow event
-streams. Its Artifacts are stored under that same Project's `.papermachine`
-directory using content-hashed metadata records. The separate global SQLite
+streams. Its Artifacts are stored under that same Project's managed directory
+using content-hashed metadata records. The separate global SQLite
 library stores no Session, Turn, Workflow, prompt, skill, or Artifact content.
 The web client uses SSE for live deltas and refreshes durable views for
 lifecycle changes.
@@ -370,20 +371,20 @@ separate summary-instance table or privileged summary daemon.
 Project-local skills live at:
 
 ```text
-<project-root>/.papermachine/skills/<slug>/SKILL.md
+<data-dir>/projects/<project-id>/skills/<slug>/SKILL.md
 ```
 
 The user-editable Project system prompt lives at:
 
 ```text
-<project-root>/.papermachine/prompts/system.md
+<data-dir>/projects/<project-id>/prompts/system.md
 ```
 
 Workflow source lives at:
 
 ```text
 workflows/builtin/<slug>/workflow.py
-<project-root>/.papermachine/workflows/<slug>/workflow.py
+<data-dir>/projects/<project-id>/workflows/<slug>/workflow.py
 ```
 
 Built-in and user workflows use the same validator and runtime. The directory

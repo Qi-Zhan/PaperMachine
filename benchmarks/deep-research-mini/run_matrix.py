@@ -320,20 +320,20 @@ def ensure_project(
     api: PaperMachineApi,
     name: str,
     description: str,
-    root_path: Path,
+    workspace_path: Path,
 ) -> str:
-    canonical_root = str(root_path.resolve())
+    canonical_root = str(workspace_path.resolve())
     for project in api.get("/projects"):
-        if project["root_path"] == canonical_root:
+        if project["workspace_path"] == canonical_root:
             if not project["available"]:
                 raise RuntimeError(
                     f"benchmark project state is unavailable: {canonical_root}"
                 )
             return str(project["id"])
-    root_path.mkdir(parents=True, exist_ok=True)
+    workspace_path.mkdir(parents=True, exist_ok=True)
     created = api.post(
         "/projects",
-        {"name": name, "description": description, "root_path": canonical_root},
+        {"name": name, "description": description, "workspace_path": canonical_root},
     )
     return str(created["id"])
 

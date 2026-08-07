@@ -5,8 +5,8 @@ ownership only; built-in and user workflows execute through the same Rust
 effect runtime.
 
 - `builtin/<slug>/workflow.py`: reviewed workflows shipped with PaperMachine.
-- `<project-root>/.papermachine/workflows/<slug>/workflow.py`: workflows authored
-  or generated for one Project in the Workflow page.
+- `<data-dir>/projects/<project-id>/workflows/<slug>/workflow.py`: workflows
+  authored or generated for one Project in the Workflow page.
 
 Each source defines Agent classes with an explicit `access` profile and
 `@action` methods, plus exactly one async

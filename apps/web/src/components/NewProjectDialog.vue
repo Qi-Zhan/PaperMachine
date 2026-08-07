@@ -22,20 +22,20 @@
         />
         <label class="field-label" for="project-description">{{ t('common.description') }}</label>
         <textarea id="project-description" v-model="description" class="text-area text-area--small" />
-        <label class="field-label" for="project-root">{{ t('dialog.projectRoot') }}</label>
+        <label class="field-label" for="project-root">{{ t('dialog.projectWorkspace') }}</label>
         <input
           id="project-root"
-          v-model="rootPath"
+          v-model="workspacePath"
           class="text-input code-input"
           autocomplete="off"
-          :placeholder="t('dialog.projectRootPlaceholder')"
+          :placeholder="t('dialog.projectWorkspacePlaceholder')"
           required
         />
-        <p class="field-note">{{ t('dialog.projectRootHelp') }}</p>
+        <p class="field-note">{{ t('dialog.projectWorkspaceHelp') }}</p>
         <p v-if="error" class="form-error">{{ error }}</p>
         <footer class="dialog-actions">
           <button class="text-button" type="button" @click="$emit('close')">{{ t('common.cancel') }}</button>
-          <button class="primary-button" type="submit" :disabled="busy || !name.trim() || !rootPath.trim()">
+          <button class="primary-button" type="submit" :disabled="busy || !name.trim() || !workspacePath.trim()">
             <LoaderCircle v-if="busy" class="spin" :size="16" />
             <FolderPlus v-else :size="16" />
             {{ t('dialog.createProject') }}
@@ -54,13 +54,13 @@ import { useAppI18n } from '../i18n'
 const props = defineProps<{ open: boolean; busy: boolean; error?: string }>()
 const emit = defineEmits<{
   close: []
-  submit: [input: { name: string; description: string; rootPath: string }]
+  submit: [input: { name: string; description: string; workspacePath: string }]
 }>()
 
 const name = ref('')
 const { t } = useAppI18n()
 const description = ref('')
-const rootPath = ref('')
+const workspacePath = ref('')
 const nameInput = ref<HTMLInputElement | null>(null)
 
 watch(
@@ -69,18 +69,18 @@ watch(
     if (!open) return
     name.value = ''
     description.value = ''
-    rootPath.value = ''
+    workspacePath.value = ''
     await nextTick()
     nameInput.value?.focus()
   },
 )
 
 function submit() {
-  if (!name.value.trim() || !rootPath.value.trim() || props.busy) return
+  if (!name.value.trim() || !workspacePath.value.trim() || props.busy) return
   emit('submit', {
     name: name.value.trim(),
     description: description.value.trim(),
-    rootPath: rootPath.value.trim(),
+    workspacePath: workspacePath.value.trim(),
   })
 }
 </script>

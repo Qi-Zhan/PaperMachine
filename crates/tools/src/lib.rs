@@ -40,6 +40,8 @@ pub struct ToolContext {
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub workspace_root: PathBuf,
+    pub sandbox_root: PathBuf,
+    pub protected_root: PathBuf,
     pub access: AgentAccessProfile,
     pub cancellation: CancellationToken,
 }
@@ -63,6 +65,8 @@ pub enum ToolError {
     InvalidArguments { tool: String, message: String },
     #[error("path must stay inside the Session workspace: {0}")]
     PathOutsideWorkspace(String),
+    #[error("path is reserved for PaperMachine managed state: {0}")]
+    PathInsideManagedState(String),
     #[error("tool I/O failed: {0}")]
     Io(String),
     #[error("command timed out after {seconds} seconds")]

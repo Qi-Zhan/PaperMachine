@@ -168,6 +168,7 @@ struct ProjectRuntime {
 }
 
 struct ProjectRuntimeFactory {
+    projects_root: PathBuf,
     workflows_root: PathBuf,
     python_runtime_root: PathBuf,
     model: Arc<dyn ModelClient>,
@@ -179,12 +180,12 @@ struct ProjectRuntimeFactory {
 }
 
 impl ProjectRuntimeFactory {
+    fn managed_root(&self, project_id: ProjectId) -> PathBuf {
+        self.projects_root.join(project_id.to_string())
+    }
+
     fn open_store(&self, project: &Project) -> Result<Arc<Store>, StoreError> {
-        let metadata_root = PathBuf::from(&project.root_path).join(".papermachine");
-        Ok(Arc::new(Store::open(
-            metadata_root.join("state/project.db"),
-            metadata_root.join("artifacts"),
-        )?))
+        Ok(Arc::new(Store::open(self.managed_root(project.id))?))
     }
 
     async fn build(&self, project: &Project, store: Arc<Store>) -> anyhow::Result<ProjectRuntime> {
@@ -213,7 +214,7 @@ impl ProjectRuntimeFactory {
             sessions.clone(),
             catalog.python(),
             catalog.python_runtime_root(),
-            PathBuf::from(&project.root_path).join(".papermachine/workflow-runtime"),
+            store.managed_root().join("workflow-runtime"),
         ));
         let scheduler = WorkflowScheduler::new_with_permits(
             Arc::clone(&store),
@@ -257,6 +258,9 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         ProjectLibrary::open(config.data_dir.join("library.db"))
             .context("failed to open PaperMachine Project library")?,
     );
+    let projects_root = config.data_dir.join("projects");
+    std::fs::create_dir_all(&projects_root)
+        .context("failed to create PaperMachine managed Project directory")?;
     let (model, default_model, model_context_window, mode, model_profiles, model_providers): InitializedModels = match &config.models {
         ServerModelConfig::Demo => (
             Arc::new(DemoModelClient),
@@ -294,6 +298,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         .context("failed to register exec_command")?
         .build();
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
+        projects_root,
         workflows_root,
         python_runtime_root,
         model: Arc::clone(&model),
@@ -310,7 +315,9 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
     });
     let mut projects = HashMap::new();
     for project in library.list()? {
-        let database = PathBuf::from(&project.root_path).join(".papermachine/state/project.db");
+        let database = runtime_factory
+            .managed_root(project.id)
+            .join("state/project.db");
         if !database.is_file() {
             continue;
         }
@@ -339,7 +346,6 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/open", post(open_project))
         .route(
             "/projects/{project_id}",
             get(get_project_overview)
@@ -460,6 +466,7 @@ struct ProjectLibraryEntry {
     #[serde(flatten)]
     project: Project,
     available: bool,
+    workspace_available: bool,
 }
 
 async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<ProjectLibraryEntry>>> {
@@ -477,6 +484,7 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
             .into_iter()
             .map(|project| ProjectLibraryEntry {
                 available: available.contains(&project.id),
+                workspace_available: PathBuf::from(&project.workspace_path).is_dir(),
                 project,
             })
             .collect(),
@@ -489,7 +497,7 @@ struct CreateProjectRequest {
     name: String,
     #[serde(default)]
     description: String,
-    root_path: String,
+    workspace_path: String,
 }
 
 async fn create_project(
@@ -499,35 +507,32 @@ async fn create_project(
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("Project name must not be empty"));
     }
-    if request.root_path.trim().is_empty() {
-        return Err(ApiError::bad_request("Project root path must not be empty"));
+    if request.workspace_path.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "Project Workspace path must not be empty",
+        ));
     }
-    let requested_root = PathBuf::from(request.root_path.trim());
-    if !requested_root.is_absolute() {
-        return Err(ApiError::bad_request("Project root path must be absolute"));
-    }
-    std::fs::create_dir_all(&requested_root).map_err(|error| StoreError::Io(error.to_string()))?;
-    let root = requested_root
-        .canonicalize()
-        .map_err(|error| StoreError::Io(error.to_string()))?;
+    let workspace = canonical_workspace(&request.workspace_path, true)?;
     if state
         .library
         .list()?
         .iter()
-        .any(|project| PathBuf::from(&project.root_path) == root)
+        .any(|project| PathBuf::from(&project.workspace_path) == workspace)
     {
         return Err(StoreError::Invariant(format!(
-            "Project directory is already registered: {}",
-            root.display()
+            "Project Workspace is already registered: {}",
+            workspace.display()
         ))
         .into());
     }
-    let metadata_root = root.join(".papermachine");
-    let store = Arc::new(Store::open(
-        metadata_root.join("state/project.db"),
-        metadata_root.join("artifacts"),
-    )?);
-    let project = store.create_project(request.name.trim(), request.description.trim(), &root)?;
+    let project_id = ProjectId::new();
+    let store = Arc::new(Store::open(state.runtime_factory.managed_root(project_id))?);
+    let project = store.create_project_with_id(
+        project_id,
+        request.name.trim(),
+        request.description.trim(),
+        &workspace,
+    )?;
     state.library.register(&project)?;
     let runtime = state
         .runtime_factory
@@ -540,6 +545,7 @@ async fn create_project(
         Json(ProjectLibraryEntry {
             project,
             available: true,
+            workspace_available: true,
         }),
     ))
 }
@@ -547,46 +553,7 @@ async fn create_project(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectPathRequest {
-    root_path: String,
-}
-
-async fn open_project(
-    State(state): State<AppState>,
-    Json(request): Json<ProjectPathRequest>,
-) -> ApiResult<(StatusCode, Json<ProjectLibraryEntry>)> {
-    let root = canonical_project_root(&request.root_path)?;
-    let (stored_project, store) = inspect_project_store(&root)?;
-    if state.projects.read().await.contains_key(&stored_project.id) {
-        let registered = state.library.get(stored_project.id)?;
-        if PathBuf::from(&registered.root_path) != root {
-            return Err(ApiError::bad_request(
-                "Project is already open at another directory; use relocate",
-            ));
-        }
-        let project = store.relocate_project(stored_project.id, &root)?;
-        return Ok((
-            StatusCode::OK,
-            Json(ProjectLibraryEntry {
-                project,
-                available: true,
-            }),
-        ));
-    }
-    let project = store.relocate_project(stored_project.id, &root)?;
-    state.library.register(&project)?;
-    let runtime = state
-        .runtime_factory
-        .build(&project, store)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    state.projects.write().await.insert(project.id, runtime);
-    Ok((
-        StatusCode::CREATED,
-        Json(ProjectLibraryEntry {
-            project,
-            available: true,
-        }),
-    ))
+    workspace_path: String,
 }
 
 async fn relocate_project(
@@ -595,22 +562,24 @@ async fn relocate_project(
     Json(request): Json<ProjectPathRequest>,
 ) -> ApiResult<Json<ProjectLibraryEntry>> {
     let project_id = parse_id(&project_id, "Project")?;
-    state.library.get(project_id)?;
-    if let Some(runtime) = state.projects.read().await.get(&project_id).cloned() {
-        ensure_project_can_detach(&runtime)?;
+    let runtime = state.project_runtime(project_id).await?;
+    ensure_project_can_detach(&runtime)?;
+    let workspace = canonical_workspace(&request.workspace_path, false)?;
+    if state.library.list()?.iter().any(|candidate| {
+        candidate.id != project_id && PathBuf::from(&candidate.workspace_path) == workspace
+    }) {
+        return Err(StoreError::Invariant(format!(
+            "Project Workspace is already registered: {}",
+            workspace.display()
+        ))
+        .into());
     }
-    let root = canonical_project_root(&request.root_path)?;
-    let (project, store) = load_project_store(&root, Some(project_id))?;
+    let project = runtime.store.relocate_project(project_id, &workspace)?;
     state.library.register(&project)?;
-    let runtime = state
-        .runtime_factory
-        .build(&project, store)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    state.projects.write().await.insert(project.id, runtime);
     Ok(Json(ProjectLibraryEntry {
         project,
         available: true,
+        workspace_available: true,
     }))
 }
 
@@ -624,50 +593,27 @@ async fn remove_project(
     }
     state.library.remove(project_id)?;
     state.projects.write().await.remove(&project_id);
+    let managed_root = state.runtime_factory.managed_root(project_id);
+    if managed_root.exists() {
+        std::fs::remove_dir_all(&managed_root)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn canonical_project_root(value: &str) -> ApiResult<PathBuf> {
-    let root = PathBuf::from(value.trim());
-    if !root.is_absolute() {
-        return Err(ApiError::bad_request("Project root path must be absolute"));
+fn canonical_workspace(value: &str, create: bool) -> ApiResult<PathBuf> {
+    let workspace = PathBuf::from(value.trim());
+    if !workspace.is_absolute() {
+        return Err(ApiError::bad_request(
+            "Project Workspace path must be absolute",
+        ));
     }
-    root.canonicalize().map_err(|error| {
-        ApiError::bad_request(format!("Project directory is unavailable: {error}"))
+    if create {
+        std::fs::create_dir_all(&workspace).map_err(|error| StoreError::Io(error.to_string()))?;
+    }
+    workspace.canonicalize().map_err(|error| {
+        ApiError::bad_request(format!("Project Workspace is unavailable: {error}"))
     })
-}
-
-fn load_project_store(
-    root: &std::path::Path,
-    expected_id: Option<ProjectId>,
-) -> ApiResult<(Project, Arc<Store>)> {
-    let (project, store) = inspect_project_store(root)?;
-    if expected_id.is_some_and(|expected_id| expected_id != project.id) {
-        return Err(ApiError::bad_request(
-            "Selected directory belongs to a different Project",
-        ));
-    }
-    let project = store.relocate_project(project.id, root)?;
-    Ok((project, store))
-}
-
-fn inspect_project_store(root: &std::path::Path) -> ApiResult<(Project, Arc<Store>)> {
-    let metadata_root = root.join(".papermachine");
-    let database = metadata_root.join("state/project.db");
-    if !database.is_file() || !metadata_root.join("project.toml").is_file() {
-        return Err(ApiError::bad_request(
-            "Selected directory is not a PaperMachine Project",
-        ));
-    }
-    let store = Arc::new(Store::open(database, metadata_root.join("artifacts"))?);
-    let projects = store.list_projects()?;
-    if projects.len() != 1 {
-        return Err(StoreError::Invariant(
-            "Project database must contain exactly one Project".to_string(),
-        )
-        .into());
-    }
-    Ok((projects[0].clone(), store))
 }
 
 fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {

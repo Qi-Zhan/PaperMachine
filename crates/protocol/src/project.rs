@@ -49,8 +49,9 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub description: String,
-    /// Canonical absolute directory owned by this Project.
-    pub root_path: String,
+    /// Canonical absolute user directory attached to this managed Project.
+    /// PaperMachine runtime state is stored separately and is never placed here.
+    pub workspace_path: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

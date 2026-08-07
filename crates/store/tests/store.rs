@@ -29,39 +29,44 @@ use tempfile::TempDir;
 use tempfile::tempdir;
 
 #[test]
-fn project_creation_initializes_owned_directory_and_rejects_reuse() {
+fn project_creation_separates_managed_state_from_workspace_and_rejects_reuse() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store =
-        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
-    let root = directory.path().join("paper-project");
+    let managed = directory.path().join("managed");
+    let store = Store::open_in_memory(&managed).expect("store should open");
+    let root = directory.path().join("paper-workspace");
     let project = store
         .create_project("Paper", "Directory ownership", &root)
         .expect("project should be created");
 
     assert_eq!(
-        project.root_path,
+        project.workspace_path,
         root.canonicalize()
-            .expect("Project root should be canonicalizable")
+            .expect("Project Workspace should be canonicalizable")
             .to_string_lossy()
     );
-    let metadata = root.join(".papermachine");
-    for child in ["prompts", "workflows", "skills", "state"] {
-        assert!(metadata.join(child).is_dir(), "missing {child} directory");
+    assert!(root.is_dir());
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("Workspace should list")
+            .next()
+            .is_none()
+    );
+    for child in ["prompts", "workflows", "skills", "state", "runtime"] {
+        assert!(
+            managed.join(child).is_dir(),
+            "missing managed {child} directory"
+        );
     }
     let prompt = store
         .get_project_system_prompt(project.id)
         .expect("Project system prompt should load");
     assert!(prompt.content.is_empty());
-    assert_eq!(prompt.relative_path, ".papermachine/prompts/system.md");
+    assert_eq!(prompt.relative_path, "prompts/system.md");
     let prompt = store
         .set_project_system_prompt(project.id, "Prefer primary evidence.")
         .expect("Project system prompt should update");
     assert_eq!(prompt.content, "Prefer primary evidence.");
     assert_eq!(prompt.sha256.len(), 64);
-    let config = std::fs::read_to_string(metadata.join("project.toml"))
-        .expect("project config should be readable");
-    assert!(config.contains(&project.id.to_string()));
-    assert!(config.contains("name = \"Paper\""));
     assert!(
         store.create_project("Duplicate", "", &root).is_err(),
         "one directory must belong to only one Project"
@@ -70,14 +75,18 @@ fn project_creation_initializes_owned_directory_and_rejects_reuse() {
         store
             .create_project("Relative", "", "relative/path")
             .is_err(),
-        "Project roots must be absolute"
+        "Project Workspaces must be absolute"
     );
+    let overlap = store
+        .create_project("Internal", "", managed.join("workspace"))
+        .expect_err("Workspace cannot overlap PaperMachine managed state");
+    assert!(overlap.to_string().contains("must be separate"));
 }
 
 #[test]
 fn archived_session_stays_hidden_when_its_active_turn_finishes() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Archived Session", "");
     let session = store
         .create_session(research.id, "Conversation", "", "test-model", Vec::new())
@@ -132,7 +141,7 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
     let mut original = workflow();
     original.project_id = Some(project.id);
     original.source = WorkflowProgramSource::User;
-    original.definition_path = ".papermachine/workflows/parallel-review/workflow.py".to_string();
+    original.definition_path = "workflows/parallel-review/workflow.py".to_string();
     original.sha256 = "original-sha".to_string();
     original.source_code = "async def main(ctx): return {'revision': 1}\n".to_string();
     store
@@ -348,7 +357,7 @@ fn workflow_for_session(
 #[test]
 fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Access snapshots", "");
     let session = store
         .create_session_with_access(
@@ -414,7 +423,7 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
 #[test]
 fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Prompt locking", "");
     let session = store
         .create_session(
@@ -464,7 +473,7 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
 #[test]
 fn collaboration_state_is_research_owned_and_events_are_ordered() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Paper", "Test research");
     let origin = store
         .create_session(research.id, "Claim audit", "", "test-model", Vec::new())
@@ -580,10 +589,10 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
 #[test]
 fn database_reopens_and_artifacts_are_content_addressed() {
     let directory = tempdir().expect("temporary directory should be created");
-    let database = directory.path().join("papermachine.db");
-    let artifacts = directory.path().join("artifacts");
+    let managed = directory.path().join("managed");
+    let artifacts = managed.join("artifacts");
     let (project_id, workflow_id) = {
-        let store = Store::open(&database, &artifacts).expect("store should open");
+        let store = Store::open(&managed).expect("store should open");
         let research = project(&store, &directory, "Persistent", "Reopen test");
         let session = store
             .create_session(research.id, "Persistence", "", "test-model", Vec::new())
@@ -608,7 +617,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
         (research.id, run.id)
     };
 
-    let reopened = Store::open(&database, &artifacts).expect("store should reopen");
+    let reopened = Store::open(&managed).expect("store should reopen");
     assert_eq!(
         reopened.list_projects().expect("projects should load")[0].id,
         project_id
@@ -635,7 +644,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
 #[test]
 fn terminal_runs_close_pending_human_control_and_timer_state() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Terminal cleanup", "");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -707,7 +716,7 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
 #[test]
 fn workflow_turn_and_action_attempt_are_attached_atomically() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Atomic Turn", "");
     let origin = store
         .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -776,7 +785,7 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
 #[test]
 fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Human Turn", "");
     let origin = store
         .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -881,7 +890,7 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
 #[test]
 fn workflow_effect_journal_replays_only_an_identical_request() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Effect journal", "");
     let origin = store
         .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -939,7 +948,7 @@ fn concurrent_usage_updates_do_not_lose_deltas() {
     const UPDATES_PER_WORKER: u32 = 25;
 
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path()).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Concurrent usage", "");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())

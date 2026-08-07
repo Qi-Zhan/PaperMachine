@@ -32,6 +32,12 @@ use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
+fn managed_root(fixture_root: &std::path::Path) -> std::path::PathBuf {
+    let path = fixture_root.join("managed");
+    std::fs::create_dir_all(&path).expect("managed fixture should be created");
+    path
+}
+
 #[derive(Clone, Copy)]
 struct FinishNowControl;
 
@@ -108,6 +114,8 @@ async fn agent_executes_a_tool_then_follows_up() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Use tools and report evidence.",
         "Write the evidence file.",
@@ -210,6 +218,8 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Read the evidence.",
@@ -261,6 +271,8 @@ async fn tools_enabled_false_omits_local_and_hosted_tools() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Find the answer.",
@@ -307,6 +319,8 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Continue researching.",
@@ -358,6 +372,8 @@ async fn model_only_access_omits_local_and_hosted_tools() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Answer without tools.",
         "Answer directly.",
@@ -417,6 +433,8 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         session_id,
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Continue the research.",
         "Resolve the remaining question.",
@@ -571,6 +589,8 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Return valid JSON.",
         "Plan the research routes.",
@@ -618,6 +638,8 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Return valid JSON.",
         "Plan the research routes.",
@@ -688,6 +710,8 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Return a short response.",
         "Test stream recovery.",
@@ -759,6 +783,8 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
         SessionId::new(),
         TurnId::new(),
         directory.path().to_path_buf(),
+        directory.path().join("sandbox"),
+        managed_root(directory.path()),
         "test-model",
         "Return a short response.",
         "Test empty completion recovery.",

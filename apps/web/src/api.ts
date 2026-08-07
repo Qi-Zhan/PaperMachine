@@ -44,12 +44,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>('/health'),
   listProjects: () => request<ProjectLibraryEntry[]>('/projects'),
-  createProject: (name: string, description: string, rootPath: string) =>
-    request<ProjectLibraryEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, root_path: rootPath }) }),
-  openProject: (rootPath: string) =>
-    request<ProjectLibraryEntry>('/projects/open', { method: 'POST', body: JSON.stringify({ root_path: rootPath }) }),
-  relocateProject: (projectId: string, rootPath: string) =>
-    request<ProjectLibraryEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ root_path: rootPath }) }),
+  createProject: (name: string, description: string, workspacePath: string) =>
+    request<ProjectLibraryEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, workspace_path: workspacePath }) }),
+  relocateProject: (projectId: string, workspacePath: string) =>
+    request<ProjectLibraryEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace_path: workspacePath }) }),
   removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
   updateProjectSystemPrompt: (projectId: string, systemPrompt: string) =>

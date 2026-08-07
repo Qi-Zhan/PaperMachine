@@ -62,29 +62,27 @@ from the current working directory. `data_dir` contains only application-global 
 | Windows | `%LOCALAPPDATA%\PaperMachine` |
 
 `<data_dir>/library.db` is a small library of Project identities, display
-metadata, and absolute directory references. The default provider configuration
+metadata, and absolute Workspace references. The default provider configuration
 is `<data_dir>/config.toml`; `--config` selects another file without changing
-where the library lives.
-
-Every Project is anchored to a user-selected absolute `project_root` and owns
-its research state:
+where the library lives. PaperMachine owns all Project state below `data_dir`:
 
 ```text
-<project_root>/.papermachine/
-  project.toml
+<data_dir>/projects/<project-id>/
   state/project.db
   artifacts/
   workflow-runtime/
+  runtime/
   prompts/
   workflows/
   skills/
 ```
 
-Creating a Project initializes this directory. Opening an existing Project
-registers it in the global library. Relocating verifies the Project identity at
-the new path, while removing a Project from the library never deletes its
-files. An unavailable path remains visible as a missing library entry until it
-is relocated or removed. The web client loads only the selected Project's full
+Each Project separately references one user-selected absolute Workspace. Agents
+start in that Workspace, but PaperMachine never writes application metadata
+there and rejects a Workspace that overlaps its managed state. Relocating a
+Project only changes this attachment. Removing a Project deletes its managed
+state and leaves the Workspace untouched. A missing Workspace remains visible
+and can be reattached. The web client loads only the selected Project's full
 overview.
 
 ## Codex relationship
@@ -116,7 +114,7 @@ small packages owned by one Project.
 - `apps/web`: Project overview, Session workbench, and Workflow page.
 - `python/papermachine`: user-facing DSL and the isolated effect client.
 - `workflows/builtin`: reviewed workflows shipped with PaperMachine.
-- `<project>/.papermachine/workflows`: Project-owned user WorkflowPrograms.
+- `<data_dir>/projects/<project-id>/workflows`: Project-owned user WorkflowPrograms.
 
 ## Current capabilities
 

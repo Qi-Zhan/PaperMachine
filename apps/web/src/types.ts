@@ -36,13 +36,14 @@ export interface Project {
   id: Id
   name: string
   description: string
-  root_path: string
+  workspace_path: string
   created_at: string
   updated_at: string
 }
 
 export interface ProjectLibraryEntry extends Project {
   available: boolean
+  workspace_available: boolean
 }
 
 export interface Session {

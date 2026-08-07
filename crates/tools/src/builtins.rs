@@ -69,7 +69,13 @@ impl ToolExecutor for ReadFileTool {
             .max_bytes
             .unwrap_or(DEFAULT_READ_BYTES)
             .clamp(1, MAX_FILE_BYTES);
-        let path = resolve_tool_path(&context.workspace_root, &args.path, context.access).await?;
+        let path = resolve_tool_path(
+            &context.workspace_root,
+            &context.protected_root,
+            &args.path,
+            context.access,
+        )
+        .await?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| ToolError::Io(error.to_string()))?;
@@ -146,7 +152,13 @@ impl ToolExecutor for WriteFileTool {
                 message: format!("content exceeds {MAX_FILE_BYTES} bytes"),
             });
         }
-        let path = resolve_tool_path(&context.workspace_root, &args.path, context.access).await?;
+        let path = resolve_tool_path(
+            &context.workspace_root,
+            &context.protected_root,
+            &args.path,
+            context.access,
+        )
+        .await?;
         if args.create_parents
             && let Some(parent) = path.parent()
         {
@@ -223,10 +235,12 @@ impl ToolExecutor for ExecCommandTool {
         let output = SandboxExecutor
             .run(
                 &context.workspace_root,
+                &context.sandbox_root,
                 &args.command,
                 SandboxPolicy {
                     filesystem,
                     network,
+                    protected_roots: vec![context.protected_root],
                     timeout: Duration::from_secs(timeout_seconds),
                     ..SandboxPolicy::default()
                 },

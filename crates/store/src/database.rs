@@ -9,7 +9,6 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
-use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -24,40 +23,41 @@ use std::sync::Mutex;
 use tokio::sync::broadcast;
 
 const SCHEMA_VERSION: u32 = 1;
-const PROJECT_SYSTEM_PROMPT_PATH: &str = ".papermachine/prompts/system.md";
+const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
     shared: StoreShared,
+    managed_root: PathBuf,
 }
 
 impl Store {
-    pub fn open(
-        database_path: impl AsRef<Path>,
-        artifact_root: impl AsRef<Path>,
-    ) -> Result<Self, StoreError> {
-        if let Some(parent) = database_path.as_ref().parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
-        }
-        let connection = Connection::open(database_path)?;
+    pub fn open(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let managed_root = initialize_managed_root(managed_root.as_ref())?;
+        let connection = Connection::open(managed_root.join("state/project.db"))?;
         initialize(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            shared: StoreShared::new(artifact_root)?,
+            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            managed_root,
         })
     }
 
-    pub fn open_in_memory(artifact_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+    pub fn open_in_memory(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let managed_root = initialize_managed_root(managed_root.as_ref())?;
         let connection = Connection::open_in_memory()?;
         initialize(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            shared: StoreShared::new(artifact_root)?,
+            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            managed_root,
         })
+    }
+
+    pub fn managed_root(&self) -> &Path {
+        &self.managed_root
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
@@ -72,41 +72,51 @@ impl Store {
         &self,
         name: impl Into<String>,
         description: impl Into<String>,
-        root_path: impl Into<PathBuf>,
+        workspace_path: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        let requested_root = root_path.into();
-        if !requested_root.is_absolute() {
+        self.create_project_with_id(ProjectId::new(), name, description, workspace_path)
+    }
+
+    pub fn create_project_with_id(
+        &self,
+        id: ProjectId,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        workspace_path: impl Into<PathBuf>,
+    ) -> Result<Project, StoreError> {
+        let requested_workspace = workspace_path.into();
+        if !requested_workspace.is_absolute() {
             return Err(StoreError::Invariant(
-                "Project root must be an absolute path".to_string(),
+                "Project Workspace must be an absolute path".to_string(),
             ));
         }
-        std::fs::create_dir_all(&requested_root)
+        std::fs::create_dir_all(&requested_workspace)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let root_path = requested_root
+        let workspace_path = requested_workspace
             .canonicalize()
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let root_string = root_path.to_string_lossy().into_owned();
+        ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
+        let workspace_string = workspace_path.to_string_lossy().into_owned();
         let exists = self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.root_path') = ?1)",
-            [&root_string],
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace_path') = ?1)",
+            [&workspace_string],
             |row| row.get::<_, bool>(0),
         )?;
         if exists {
             return Err(StoreError::Invariant(format!(
-                "Project directory is already registered: {}",
-                root_path.display()
+                "Project Workspace is already registered: {}",
+                workspace_path.display()
             )));
         }
         let now = Utc::now();
         let project = Project {
-            id: ProjectId::new(),
+            id,
             name: name.into(),
             description: description.into(),
-            root_path: root_string,
+            workspace_path: workspace_string,
             created_at: now,
             updated_at: now,
         };
-        initialize_project_directory(&project)?;
         self.insert_document(
             "projects",
             &project.id.to_string(),
@@ -131,31 +141,20 @@ impl Store {
     pub fn relocate_project(
         &self,
         id: ProjectId,
-        root_path: impl Into<PathBuf>,
+        workspace_path: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        let requested_root = root_path.into();
-        if !requested_root.is_absolute() {
+        let requested_workspace = workspace_path.into();
+        if !requested_workspace.is_absolute() {
             return Err(StoreError::Invariant(
-                "Project root must be an absolute path".to_string(),
+                "Project Workspace must be an absolute path".to_string(),
             ));
         }
-        let root_path = requested_root
+        let workspace_path = requested_workspace
             .canonicalize()
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let config_path = root_path.join(".papermachine/project.toml");
-        let config: StoredProjectConfig = toml::from_str(
-            &std::fs::read_to_string(&config_path)
-                .map_err(|error| StoreError::Io(error.to_string()))?,
-        )
-        .map_err(|error| StoreError::Serialization(error.to_string()))?;
-        if config.id != id.to_string() {
-            return Err(StoreError::Invariant(format!(
-                "Project identity mismatch in {}",
-                config_path.display()
-            )));
-        }
+        ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
         let mut project = self.get_project(id)?;
-        project.root_path = root_path.to_string_lossy().into_owned();
+        project.workspace_path = workspace_path.to_string_lossy().into_owned();
         project.updated_at = Utc::now();
         self.update_document(
             "projects",
@@ -170,8 +169,8 @@ impl Store {
         &self,
         id: ProjectId,
     ) -> Result<ProjectSystemPrompt, StoreError> {
-        let project = self.get_project(id)?;
-        let path = PathBuf::from(&project.root_path).join(PROJECT_SYSTEM_PROMPT_PATH);
+        self.ensure_project(id)?;
+        let path = self.managed_root.join(PROJECT_SYSTEM_PROMPT_PATH);
         reject_prompt_symlink(&path)?;
         let content =
             std::fs::read_to_string(&path).map_err(|error| StoreError::Io(error.to_string()))?;
@@ -187,10 +186,10 @@ impl Store {
         id: ProjectId,
         content: impl Into<String>,
     ) -> Result<ProjectSystemPrompt, StoreError> {
-        let project = self.get_project(id)?;
+        self.ensure_project(id)?;
         let content = content.into();
         validate_system_prompt(&content)?;
-        let path = PathBuf::from(&project.root_path).join(PROJECT_SYSTEM_PROMPT_PATH);
+        let path = self.managed_root.join(PROJECT_SYSTEM_PROMPT_PATH);
         reject_prompt_symlink(&path)?;
         write_atomic(&path, content.as_bytes())?;
         self.get_project_system_prompt(id)
@@ -3136,49 +3135,38 @@ impl Store {
     }
 }
 
-#[derive(Serialize)]
-struct ProjectConfig<'a> {
-    id: String,
-    name: &'a str,
-    description: &'a str,
-}
-
-#[derive(Deserialize)]
-struct StoredProjectConfig {
-    id: String,
-}
-
-fn initialize_project_directory(project: &Project) -> Result<(), StoreError> {
-    let metadata_root = PathBuf::from(&project.root_path).join(".papermachine");
-    let config_path = metadata_root.join("project.toml");
-    if config_path.exists() {
-        return Err(StoreError::Invariant(format!(
-            "Project directory is already initialized: {}",
-            config_path.display()
-        )));
+fn ensure_workspace_is_external(workspace: &Path, managed_root: &Path) -> Result<(), StoreError> {
+    if workspace.starts_with(managed_root) || managed_root.starts_with(workspace) {
+        return Err(StoreError::Invariant(
+            "Project Workspace must be separate from PaperMachine managed state".to_string(),
+        ));
     }
+    Ok(())
+}
+
+fn initialize_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
+    std::fs::create_dir_all(root).map_err(|error| StoreError::Io(error.to_string()))?;
     for directory in [
         "prompts",
         "workflows",
         "skills",
+        "sources",
         "state",
         "artifacts",
         "workflow-runtime",
+        "runtime/sandboxes",
+        "runtime/temp",
+        "runtime/skill-snapshots",
     ] {
-        std::fs::create_dir_all(metadata_root.join(directory))
+        std::fs::create_dir_all(root.join(directory))
             .map_err(|error| StoreError::Io(error.to_string()))?;
     }
-    write_atomic(&metadata_root.join("prompts/system.md"), b"")?;
-    let document = toml::to_string_pretty(&ProjectConfig {
-        id: project.id.to_string(),
-        name: &project.name,
-        description: &project.description,
-    })
-    .map_err(|error| StoreError::Serialization(error.to_string()))?;
-    let temporary = metadata_root.join("project.toml.tmp");
-    std::fs::write(&temporary, document).map_err(|error| StoreError::Io(error.to_string()))?;
-    std::fs::rename(&temporary, &config_path).map_err(|error| StoreError::Io(error.to_string()))?;
-    Ok(())
+    let system_prompt = root.join(PROJECT_SYSTEM_PROMPT_PATH);
+    if !system_prompt.exists() {
+        write_atomic(&system_prompt, b"")?;
+    }
+    root.canonicalize()
+        .map_err(|error| StoreError::Io(error.to_string()))
 }
 
 fn validate_system_prompt(content: &str) -> Result<(), StoreError> {

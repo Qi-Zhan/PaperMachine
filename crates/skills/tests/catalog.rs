@@ -6,9 +6,8 @@ use tempfile::tempdir;
 #[test]
 fn skill_packages_are_hashed_materialized_and_recovered_from_snapshots() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
-    );
+    let managed = directory.path().join("managed");
+    let store = Arc::new(Store::open_in_memory(&managed).expect("store should open"));
     let project = store
         .create_project("Skills", "", directory.path().join("project"))
         .expect("project should be created");
@@ -29,27 +28,20 @@ fn skill_packages_are_hashed_materialized_and_recovered_from_snapshots() {
         1
     );
 
-    let workspace = directory.path().join("session-workspace");
     let resolved = catalog
-        .resolve(project_id, &["source-audit".to_string()], &workspace)
+        .resolve(project_id, &["source-audit".to_string()])
         .expect("skill should resolve");
     assert!(resolved.instructions.contains("Open the primary source"));
-    assert!(
-        workspace
-            .join(&resolved.snapshots[0].relative_path)
-            .is_file()
-    );
+    assert!(managed.join(&resolved.snapshots[0].relative_path).is_file());
 
-    let package = directory
-        .path()
-        .join("project/.papermachine/skills/source-audit/SKILL.md");
+    let package = managed.join("skills/source-audit/SKILL.md");
     std::fs::write(
         package,
         "---\nname: Changed\ndescription: Changed later.\n---\n\nChanged instructions.\n",
     )
     .expect("source skill should change");
     let recovered = catalog
-        .resolve_snapshots(&workspace, &resolved.snapshots)
+        .resolve_snapshots(project_id, &resolved.snapshots)
         .expect("snapshot should remain reproducible");
     assert!(recovered.contains("Open the primary source"));
     assert!(!recovered.contains("Changed instructions"));
@@ -59,7 +51,7 @@ fn skill_packages_are_hashed_materialized_and_recovered_from_snapshots() {
 fn invalid_slugs_and_incomplete_skill_documents_are_rejected() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
+        Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
     );
     let project = store
         .create_project("Invalid skills", "", directory.path().join("project"))
@@ -73,7 +65,7 @@ fn invalid_slugs_and_incomplete_skill_documents_are_rejected() {
     );
     let package = catalog
         .ensure_project(project_id)
-        .expect("project root should exist")
+        .expect("managed Project root should exist")
         .join("skills/incomplete");
     std::fs::create_dir_all(&package).expect("package should exist");
     std::fs::write(package.join("SKILL.md"), "No frontmatter")

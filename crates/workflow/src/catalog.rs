@@ -73,13 +73,13 @@ impl WorkflowProgramCatalog {
             entries: BTreeMap::new(),
         };
         for path in workflow_files(&catalog.builtins_root)? {
-            let loaded = catalog.load_file(&path, None, WorkflowProgramSource::Builtin)?;
+            let loaded = catalog.load_file(&path, None, WorkflowProgramSource::Builtin, store)?;
             catalog.insert(loaded, store)?;
         }
         Ok(catalog)
     }
 
-    /// Load or refresh the workflow programs owned by one Project directory.
+    /// Load or refresh the workflow programs owned by one managed Project.
     pub fn load_project(
         &mut self,
         project: &Project,
@@ -87,10 +87,11 @@ impl WorkflowProgramCatalog {
     ) -> Result<(), WorkflowProgramCatalogError> {
         self.entries
             .retain(|(owner, _), _| *owner != Some(project.id));
-        let root = project_workflows_root(project);
+        let root = project_workflows_root(store);
         fs::create_dir_all(&root)?;
         for path in workflow_files(&root)? {
-            let loaded = self.load_file(&path, Some(project), WorkflowProgramSource::User)?;
+            let loaded =
+                self.load_file(&path, Some(project), WorkflowProgramSource::User, store)?;
             self.insert(loaded, store)?;
         }
         Ok(())
@@ -146,7 +147,7 @@ impl WorkflowProgramCatalog {
                 return Ok(existing.clone());
             }
         }
-        let directory = project_workflows_root(project).join(&manifest.slug);
+        let directory = project_workflows_root(store).join(&manifest.slug);
         fs::create_dir_all(&directory)?;
         let path = directory.join("workflow.py");
         let temporary = directory.join("workflow.py.tmp");
@@ -157,7 +158,7 @@ impl WorkflowProgramCatalog {
                 project_id: Some(project.id),
                 manifest,
                 source: WorkflowProgramSource::User,
-                definition_path: project_definition_path(&path, project)?,
+                definition_path: project_definition_path(&path, store)?,
                 sha256,
                 updated_at: Utc::now(),
             },
@@ -194,6 +195,7 @@ impl WorkflowProgramCatalog {
         path: &Path,
         project: Option<&Project>,
         source: WorkflowProgramSource,
+        store: &Store,
     ) -> Result<LoadedWorkflowProgram, WorkflowProgramCatalogError> {
         let source_code = fs::read_to_string(path)?;
         let validation = self.validate_source(&source_code)?;
@@ -209,7 +211,7 @@ impl WorkflowProgramCatalog {
             )
         })?;
         let definition_path = match project {
-            Some(project) => project_definition_path(path, project)?,
+            Some(_) => project_definition_path(path, store)?,
             None => {
                 let relative = path
                     .strip_prefix(&self.builtins_root)
@@ -247,17 +249,15 @@ impl WorkflowProgramCatalog {
     }
 }
 
-fn project_workflows_root(project: &Project) -> PathBuf {
-    PathBuf::from(&project.root_path)
-        .join(".papermachine")
-        .join("workflows")
+fn project_workflows_root(store: &Store) -> PathBuf {
+    store.managed_root().join("workflows")
 }
 
 fn project_definition_path(
     path: &Path,
-    project: &Project,
+    store: &Store,
 ) -> Result<String, WorkflowProgramCatalogError> {
-    path.strip_prefix(&project.root_path)
+    path.strip_prefix(store.managed_root())
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(|error| WorkflowProgramCatalogError::Path(error.to_string()))
 }

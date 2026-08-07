@@ -18,15 +18,6 @@
         <button
           class="icon-button"
           type="button"
-          :title="t('sidebar.openProject')"
-          :aria-label="t('sidebar.openProject')"
-          @click="$emit('open-project')"
-        >
-          <FolderOpen :size="16" />
-        </button>
-        <button
-          class="icon-button"
-          type="button"
           :title="t('sidebar.newProject')"
           :aria-label="t('sidebar.newProject')"
           @click="$emit('new-project')"
@@ -73,16 +64,16 @@
             class="project-select"
             type="button"
             :disabled="!project.available"
-            :title="project.available ? project.root_path : t('sidebar.projectMissing')"
+            :title="project.workspace_available ? project.workspace_path : t('sidebar.projectMissing')"
             @click="$emit('select-project', project.id)"
           >
             <ChevronDown :size="14" />
-            <Folder v-if="project.available" :size="15" />
+            <Folder v-if="project.workspace_available" :size="15" />
             <AlertTriangle v-else :size="15" />
             <span>{{ project.name }}</span>
           </button>
           <button
-            v-if="project.available"
+            v-if="project.workspace_available"
             class="row-icon-button"
             type="button"
             :title="t('sidebar.newSession')"
@@ -150,7 +141,7 @@
 </template>
 
 <script setup lang="ts">
-import { AlertTriangle, ChevronDown, Folder, FolderOpen, FolderPlus, GitBranch, MapPin, MoreHorizontal, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
+import { AlertTriangle, ChevronDown, Folder, FolderPlus, GitBranch, MapPin, MoreHorizontal, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { formatDate } from '../format'
 import { useAppI18n } from '../i18n'
@@ -170,7 +161,6 @@ defineEmits<{
   home: []
   'close-sidebar': []
   'new-project': []
-  'open-project': []
   'new-session': [projectId: string]
   'relocate-project': [projectId: string]
   'remove-project': [projectId: string]

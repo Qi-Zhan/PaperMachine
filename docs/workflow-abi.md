@@ -244,12 +244,13 @@ The catalog scans:
 
 ```text
 workflows/builtin/<slug>/workflow.py
-<project-root>/.papermachine/workflows/<slug>/workflow.py
+<data-dir>/projects/<project-id>/workflows/<slug>/workflow.py
 ```
 
 Both roots pass through the same AST validator. Saving a user WorkflowProgram
-writes validated source to its Project directory. Saving the same slug replaces
-the editable source; already-created Workflows keep their original source snapshot.
+writes validated source to that Project's PaperMachine-managed directory. Saving
+the same slug replaces the editable source; already-created Workflows keep their
+original source snapshot.
 
 The Workflow page uses the validator's AST summary to show Agent classes,
 actions, parallel blocks, Teams, relations, scopes, channels, timers, background

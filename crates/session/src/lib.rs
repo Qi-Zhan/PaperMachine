@@ -287,11 +287,10 @@ impl SessionRuntime {
         } else {
             session.model.clone()
         };
-        let workspace = session_workspace(&self.inner, &session)?;
-        let resolved =
-            self.inner
-                .skills
-                .resolve(session.project_id, &session.enabled_skills, &workspace)?;
+        let resolved = self
+            .inner
+            .skills
+            .resolve(session.project_id, &session.enabled_skills)?;
         let project_prompt = self
             .inner
             .store
@@ -333,10 +332,9 @@ impl SessionRuntime {
         let mut recovered = Vec::with_capacity(turns.len());
         for turn in turns {
             let session = self.inner.store.get_session(turn.session_id)?;
-            let workspace = session_workspace(&self.inner, &session)?;
             self.inner
                 .skills
-                .resolve_snapshots(&workspace, &turn.skill_snapshots)?;
+                .resolve_snapshots(session.project_id, &turn.skill_snapshots)?;
             let cancelled_steps = self.inner.store.cancel_running_steps_for_recovery(
                 turn.id,
                 "server process restarted while this Step was running",
@@ -444,6 +442,13 @@ async fn run_scheduled_turn(
         session.id,
         turn.id,
         workspace,
+        inner
+            .store
+            .managed_root()
+            .join("runtime/sandboxes")
+            .join(session.id.to_string())
+            .join(turn.id.to_string()),
+        inner.store.managed_root().to_path_buf(),
         turn.model.clone(),
         turn.prompt.rendered.clone(),
         turn.input.clone(),
@@ -589,7 +594,7 @@ fn session_workspace(
     session: &papermachine_protocol::Session,
 ) -> Result<PathBuf, StoreError> {
     Ok(PathBuf::from(
-        inner.store.get_project(session.project_id)?.root_path,
+        inner.store.get_project(session.project_id)?.workspace_path,
     ))
 }
 
@@ -1203,7 +1208,8 @@ mod recovery_tests {
     #[test]
     fn recovery_reuses_a_completed_tool_step_output() {
         let directory = tempdir().expect("temporary directory should be created");
-        let store = Store::open_in_memory(directory.path()).expect("Store should open");
+        let store =
+            Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
         let project = store
             .create_project("Tool recovery", "", directory.path().join("project"))
             .expect("Project should be created");

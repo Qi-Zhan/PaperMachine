@@ -35,6 +35,7 @@ pub enum FilesystemPolicy {
 pub struct SandboxPolicy {
     pub filesystem: FilesystemPolicy,
     pub network: NetworkPolicy,
+    pub protected_roots: Vec<PathBuf>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
 }
@@ -44,6 +45,7 @@ impl Default for SandboxPolicy {
         Self {
             filesystem: FilesystemPolicy::WorkspaceWrite,
             network: NetworkPolicy::Deny,
+            protected_roots: Vec::new(),
             timeout: Duration::from_secs(60),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
@@ -83,6 +85,7 @@ impl SandboxExecutor {
     pub async fn run(
         &self,
         workspace_root: &Path,
+        sandbox_root: &Path,
         shell_command: &str,
         policy: SandboxPolicy,
         cancellation: CancellationToken,
@@ -92,14 +95,28 @@ impl SandboxExecutor {
                 "command must not be empty".to_string(),
             ));
         }
-        tokio::fs::create_dir_all(workspace_root).await?;
         let workspace = tokio::fs::canonicalize(workspace_root).await?;
-        let sandbox_home = workspace.join(".sandbox-home");
-        let sandbox_tmp = workspace.join(".tmp");
+        if !workspace.is_dir() {
+            return Err(ExecutionError::InvalidWorkspace(
+                workspace.display().to_string(),
+            ));
+        }
+        tokio::fs::create_dir_all(sandbox_root).await?;
+        let sandbox_root = tokio::fs::canonicalize(sandbox_root).await?;
+        let sandbox_home = sandbox_root.join("home");
+        let sandbox_tmp = sandbox_root.join("tmp");
         tokio::fs::create_dir_all(&sandbox_home).await?;
         tokio::fs::create_dir_all(&sandbox_tmp).await?;
 
-        let (mut command, backend) = sandboxed_shell_command(&workspace, shell_command, &policy)?;
+        let protected_roots = policy
+            .protected_roots
+            .iter()
+            .map(std::fs::canonicalize)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut policy = policy;
+        policy.protected_roots = protected_roots;
+        let (mut command, backend) =
+            sandboxed_shell_command(&workspace, &sandbox_root, shell_command, &policy)?;
         configure_process_group(&mut command);
         let mut child = command
             .current_dir(&workspace)
@@ -196,10 +213,12 @@ async fn terminate_process_tree(child: &mut Child) {
 #[cfg(target_os = "macos")]
 fn sandboxed_shell_command(
     workspace: &Path,
+    sandbox_root: &Path,
     shell_command: &str,
     policy: &SandboxPolicy,
 ) -> Result<(Command, SandboxBackend), ExecutionError> {
-    if policy.filesystem == FilesystemPolicy::DangerFullAccess {
+    if policy.filesystem == FilesystemPolicy::DangerFullAccess && policy.protected_roots.is_empty()
+    {
         let mut command = Command::new("/bin/zsh");
         command.args(["-c", shell_command]);
         return Ok((command, SandboxBackend::Unrestricted));
@@ -211,29 +230,40 @@ fn sandboxed_shell_command(
         ));
     }
     let workspace = seatbelt_literal(workspace);
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| seatbelt_literal(&path));
-    let mut rules = vec!["(deny file-write*)".to_string()];
-    if policy.network == NetworkPolicy::Deny {
-        rules.push("(deny network*)".to_string());
+    let sandbox_root = seatbelt_literal(sandbox_root);
+    let mut rules = Vec::new();
+    if policy.filesystem != FilesystemPolicy::DangerFullAccess {
+        rules.push("(deny file-write*)".to_string());
+        if policy.network == NetworkPolicy::Deny {
+            rules.push("(deny network*)".to_string());
+        }
+        for root in [
+            "/Volumes",
+            "/private/tmp",
+            "/tmp",
+            "/var/tmp",
+            "/private/var/folders",
+        ] {
+            rules.push(format!("(deny file-read* (subpath \"{root}\"))"));
+        }
+        if let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|path| seatbelt_literal(&path))
+        {
+            rules.push(format!("(deny file-read* (subpath \"{home}\"))"));
+        }
     }
-    for root in [
-        "/Volumes",
-        "/private/tmp",
-        "/tmp",
-        "/var/tmp",
-        "/private/var/folders",
-    ] {
-        rules.push(format!("(deny file-read* (subpath \"{root}\"))"));
-    }
-    if let Some(home) = home {
-        rules.push(format!("(deny file-read* (subpath \"{home}\"))"));
+    for protected_root in &policy.protected_roots {
+        let protected_root = seatbelt_literal(protected_root);
+        rules.push(format!("(deny file-read* (subpath \"{protected_root}\"))"));
+        rules.push(format!("(deny file-write* (subpath \"{protected_root}\"))"));
     }
     rules.push(format!("(allow file-read* (subpath \"{workspace}\"))"));
+    rules.push(format!("(allow file-read* (subpath \"{sandbox_root}\"))"));
     if policy.filesystem == FilesystemPolicy::WorkspaceWrite {
         rules.push(format!("(allow file-write* (subpath \"{workspace}\"))"));
     }
+    rules.push(format!("(allow file-write* (subpath \"{sandbox_root}\"))"));
     rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
     let profile = format!("(version 1)\n(allow default)\n{}", rules.join("\n"));
     let mut command = Command::new(sandbox);
@@ -244,10 +274,12 @@ fn sandboxed_shell_command(
 #[cfg(not(target_os = "macos"))]
 fn sandboxed_shell_command(
     _workspace: &Path,
+    _sandbox_root: &Path,
     shell_command: &str,
     policy: &SandboxPolicy,
 ) -> Result<(Command, SandboxBackend), ExecutionError> {
-    if policy.filesystem == FilesystemPolicy::DangerFullAccess {
+    if policy.filesystem == FilesystemPolicy::DangerFullAccess && policy.protected_roots.is_empty()
+    {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", shell_command]);
         return Ok((command, SandboxBackend::Unrestricted));
@@ -296,6 +328,8 @@ where
 pub enum ExecutionError {
     #[error("invalid command: {0}")]
     InvalidCommand(String),
+    #[error("Session Workspace is not a directory: {0}")]
+    InvalidWorkspace(String),
     #[error("sandbox is unavailable: {0}")]
     SandboxUnavailable(String),
     #[error("command timed out after {0:?}")]

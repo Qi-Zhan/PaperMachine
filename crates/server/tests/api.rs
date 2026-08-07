@@ -72,9 +72,9 @@ async fn initialization_validates_resources_before_opening_application_data() {
 }
 
 #[tokio::test]
-async fn project_library_and_research_state_use_separate_roots() {
+async fn managed_project_state_is_separate_from_the_user_workspace() {
     let directory = tempdir().expect("temporary directory should be created");
-    let project_root = directory.path().join("research/portable-paper");
+    let workspace = directory.path().join("research/portable-paper");
     let app = test_app(&directory).await;
     let response = app
         .oneshot(json_request(
@@ -83,7 +83,7 @@ async fn project_library_and_research_state_use_separate_roots() {
             json!({
                 "name": "Portable paper",
                 "description": "Project-owned research state",
-                "root_path": project_root,
+                "workspace_path": workspace,
             }),
         ))
         .await
@@ -91,15 +91,22 @@ async fn project_library_and_research_state_use_separate_roots() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let project = response_json(response).await;
 
+    let managed = directory
+        .path()
+        .join("app-data/projects")
+        .join(project["id"].as_str().expect("Project id should exist"));
     assert!(directory.path().join("app-data/library.db").is_file());
+    assert!(managed.join("state/project.db").is_file());
+    assert!(managed.join("artifacts").is_dir());
+    assert!(managed.join("workflow-runtime").is_dir());
+    assert!(managed.join("prompts/system.md").is_file());
+    assert!(workspace.is_dir());
     assert!(
-        project_root
-            .join(".papermachine/state/project.db")
-            .is_file()
+        std::fs::read_dir(&workspace)
+            .expect("Workspace should list")
+            .next()
+            .is_none()
     );
-    assert!(project_root.join(".papermachine/artifacts").is_dir());
-    assert!(project_root.join(".papermachine/workflow-runtime").is_dir());
-    assert!(!directory.path().join(".papermachine").exists());
 
     let restarted = test_app(&directory).await;
     let projects = restarted
@@ -125,7 +132,7 @@ async fn project_library_and_research_state_use_separate_roots() {
 }
 
 #[tokio::test]
-async fn project_library_relocates_removes_and_reopens_owned_state() {
+async fn project_workspace_relocates_without_moving_managed_state_and_delete_preserves_workspace() {
     let directory = tempdir().expect("temporary directory should be created");
     let original_root = directory.path().join("research/original");
     let relocated_root = directory.path().join("research/relocated");
@@ -138,7 +145,7 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
             json!({
                 "name": "Movable project",
                 "description": "",
-                "root_path": original_root,
+                "workspace_path": original_root,
             }),
         ))
         .await
@@ -147,33 +154,11 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
     let project_id = project["id"].as_str().expect("Project id should exist");
     assert_eq!(project["available"], true);
 
-    let opened_again = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            "/api/projects/open",
-            json!({"root_path": original_root}),
-        ))
-        .await
-        .expect("Opening the active Project should complete");
-    assert_eq!(opened_again.status(), StatusCode::OK);
-    assert_eq!(response_json(opened_again).await["id"], project_id);
-
-    let copied_root = directory.path().join("research/copied");
-    copy_directory(&original_root, &copied_root);
-    let opened_copy = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            "/api/projects/open",
-            json!({"root_path": copied_root}),
-        ))
-        .await
-        .expect("Opening a copied Project should complete with an API response");
-    assert_eq!(opened_copy.status(), StatusCode::BAD_REQUEST);
+    let managed = directory.path().join("app-data/projects").join(project_id);
+    assert!(managed.join("state/project.db").is_file());
 
     std::fs::rename(&original_root, &relocated_root)
-        .expect("Project directory should move while the server is stopped");
+        .expect("Project Workspace should move while the server is stopped");
     let restarted = test_app(&directory).await;
     let projects = restarted
         .clone()
@@ -181,22 +166,24 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
         .await
         .expect("Project library should load");
     let projects = response_json(projects).await;
-    assert_eq!(projects[0]["available"], false);
+    assert_eq!(projects[0]["available"], true);
+    assert_eq!(projects[0]["workspace_available"], false);
 
     let relocated = restarted
         .clone()
         .oneshot(json_request(
             "PUT",
             &format!("/api/projects/{project_id}"),
-            json!({"root_path": relocated_root}),
+            json!({"workspace_path": relocated_root}),
         ))
         .await
         .expect("Project relocation should complete");
     assert_eq!(relocated.status(), StatusCode::OK);
     let relocated = response_json(relocated).await;
     assert_eq!(relocated["available"], true);
+    assert_eq!(relocated["workspace_available"], true);
     assert_eq!(
-        relocated["root_path"],
+        relocated["workspace_path"],
         relocated_root
             .canonicalize()
             .expect("relocated root should resolve")
@@ -213,24 +200,8 @@ async fn project_library_relocates_removes_and_reopens_owned_state() {
         .await
         .expect("Project removal should complete");
     assert_eq!(removed.status(), StatusCode::NO_CONTENT);
-    assert!(
-        relocated_root
-            .join(".papermachine/state/project.db")
-            .is_file()
-    );
-
-    let reopened = restarted
-        .oneshot(json_request(
-            "POST",
-            "/api/projects/open",
-            json!({"root_path": relocated_root}),
-        ))
-        .await
-        .expect("Project open should complete");
-    assert_eq!(reopened.status(), StatusCode::CREATED);
-    let reopened = response_json(reopened).await;
-    assert_eq!(reopened["id"], project_id);
-    assert_eq!(reopened["available"], true);
+    assert!(relocated_root.is_dir());
+    assert!(!managed.exists());
 }
 
 fn copy_directory(source: &Path, destination: &Path) {
@@ -345,7 +316,7 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             }
         })
         .collect::<String>();
-    let root_path = base.join("projects").join(directory_name);
+    let workspace_path = base.join("projects").join(directory_name);
     let response = app
         .clone()
         .oneshot(json_request(
@@ -354,7 +325,7 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             json!({
                 "name": name,
                 "description": "API test",
-                "root_path": root_path.to_string_lossy()
+                "workspace_path": workspace_path.to_string_lossy()
             }),
         ))
         .await
@@ -509,10 +480,7 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
     assert_eq!(project_prompt.status(), StatusCode::OK);
     let project_prompt = response_json(project_prompt).await;
     assert_eq!(project_prompt["content"], "Use only primary evidence.");
-    assert_eq!(
-        project_prompt["relative_path"],
-        ".papermachine/prompts/system.md"
-    );
+    assert_eq!(project_prompt["relative_path"], "prompts/system.md");
 
     let session_prompt = app
         .clone()
@@ -1399,9 +1367,19 @@ async fn api_generates_validates_and_publishes_python_workflows() {
         .expect("publish request should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
     assert!(
-        Path::new(&project.root_path)
-            .join(".papermachine/workflows/claim-challenge/workflow.py")
+        directory
+            .path()
+            .join("app-data/projects")
+            .join(project.id.to_string())
+            .join("workflows/claim-challenge/workflow.py")
             .is_file()
+    );
+    assert!(
+        std::fs::read_dir(&project.workspace_path)
+            .expect("Workspace should list")
+            .next()
+            .is_none(),
+        "publishing a Workflow must not write PaperMachine state into the Workspace"
     );
 
     let response = app

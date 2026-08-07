@@ -25,8 +25,8 @@ class LiveDrMatrixTests(unittest.TestCase):
 
     def test_ensure_project_reuses_available_owned_state(self) -> None:
         class FakeApi:
-            def __init__(self, root_path: str) -> None:
-                self.root_path = root_path
+            def __init__(self, workspace_path: str) -> None:
+                self.workspace_path = workspace_path
 
             def get(self, path):
                 if path != "/projects":
@@ -34,7 +34,7 @@ class LiveDrMatrixTests(unittest.TestCase):
                 return [
                     {
                         "id": "existing-project",
-                        "root_path": self.root_path,
+                        "workspace_path": self.workspace_path,
                         "available": True,
                     }
                 ]

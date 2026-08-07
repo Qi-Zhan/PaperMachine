@@ -14,7 +14,7 @@ provider 的完整 instructions，以及该最终文本的 hash。
 | Order | Layer | User control | Source |
 |---:|---|---|---|
 | 1 | `runtime` | no | PaperMachine built-in runtime contract |
-| 2 | `project` | yes | `<project-root>/.papermachine/prompts/system.md` |
+| 2 | `project` | yes | `<data-dir>/projects/<project-id>/prompts/system.md` |
 | 3 | `workflow` | yes | Optional run `instructions`, Action contract, and relevant relations |
 | 4 | `agent` or `session` | yes | Agent class/constructor `system_prompt`, or an interactive Session system prompt |
 | 5 | `skills` | yes | enabled Project Skill snapshots |

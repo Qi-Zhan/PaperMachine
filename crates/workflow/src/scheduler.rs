@@ -592,8 +592,10 @@ mod tests {
     #[tokio::test]
     async fn commits_output_only_after_final_usage_is_recorded() {
         let directory = tempdir().expect("temporary directory should be created");
-        let store =
-            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let store = Arc::new(
+            Store::open_in_memory(directory.path().join("managed"))
+                .expect("store should open in memory"),
+        );
         let research = store
             .create_project("Scheduler", "", directory.path().join("project"))
             .expect("research should be created");
@@ -628,8 +630,10 @@ mod tests {
     #[tokio::test]
     async fn process_restart_recovers_running_and_created_workflows() {
         let directory = tempdir().expect("temporary directory should be created");
-        let store =
-            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let store = Arc::new(
+            Store::open_in_memory(directory.path().join("managed"))
+                .expect("store should open in memory"),
+        );
         let research = store
             .create_project("Restart", "", directory.path().join("project"))
             .expect("research should be created");
@@ -675,8 +679,10 @@ mod tests {
     #[tokio::test]
     async fn suspended_workflow_releases_the_global_execution_permit() {
         let directory = tempdir().expect("temporary directory should be created");
-        let store =
-            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let store = Arc::new(
+            Store::open_in_memory(directory.path().join("managed"))
+                .expect("store should open in memory"),
+        );
         let research = store
             .create_project("Suspension", "", directory.path().join("project"))
             .expect("research should be created");
@@ -737,8 +743,10 @@ mod tests {
     #[tokio::test]
     async fn unrelated_workflow_events_do_not_replay_a_signal_waiter() {
         let directory = tempdir().expect("temporary directory should be created");
-        let store =
-            Arc::new(Store::open_in_memory(directory.path()).expect("store should open in memory"));
+        let store = Arc::new(
+            Store::open_in_memory(directory.path().join("managed"))
+                .expect("store should open in memory"),
+        );
         let research = store
             .create_project("Signals", "", directory.path().join("project"))
             .expect("research should be created");

@@ -20,6 +20,11 @@ fn context(root: &std::path::Path) -> ToolContext {
 }
 
 fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> ToolContext {
+    let fixture_root = root.parent().unwrap_or(root);
+    let sandbox_root = fixture_root.join("agent-sandbox");
+    let protected_root = fixture_root.join("managed-state");
+    std::fs::create_dir_all(&sandbox_root).expect("sandbox fixture should be created");
+    std::fs::create_dir_all(&protected_root).expect("managed fixture should be created");
     ToolContext {
         project_id: ProjectId::new(),
         session_id: SessionId::new(),
@@ -28,6 +33,8 @@ fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> To
         action_invocation_id: None,
         action_attempt_id: None,
         workspace_root: root.to_path_buf(),
+        sandbox_root,
+        protected_root,
         access,
         cancellation: CancellationToken::new(),
     }
@@ -133,12 +140,23 @@ async fn full_access_can_read_and_write_outside_the_workspace() {
     assert_eq!(read.value["content"], "host data");
 
     let command = format!("/bin/cat '{}'", outside.display());
+    #[cfg(target_os = "macos")]
     let command = ExecCommandTool
         .execute(access.clone(), json!({"command": command}))
         .await
-        .expect("full access should run an unrestricted host command");
+        .expect("full access should run an isolated host command");
+    #[cfg(target_os = "macos")]
     assert_eq!(command.value["stdout"], "host data");
-    assert_eq!(command.value["sandbox_backend"], "unrestricted");
+    #[cfg(target_os = "macos")]
+    assert_eq!(command.value["sandbox_backend"], "macos_seatbelt");
+    #[cfg(not(target_os = "macos"))]
+    assert!(matches!(
+        ExecCommandTool
+            .execute(access.clone(), json!({"command": command}))
+            .await
+            .expect_err("full access must fail closed without a protected sandbox"),
+        ToolError::IsolationUnavailable(_)
+    ));
 
     let written = directory.path().join("written-outside.txt");
     WriteFileTool
@@ -152,6 +170,30 @@ async fn full_access_can_read_and_write_outside_the_workspace() {
         std::fs::read_to_string(written).expect("outside write should exist"),
         "allowed by explicit grant"
     );
+}
+
+#[tokio::test]
+async fn full_access_still_excludes_papermachine_managed_state() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
+    let managed_secret = access.protected_root.join("project.db");
+    std::fs::write(&managed_secret, "private state").expect("managed fixture should be written");
+
+    let read_error = ReadFileTool
+        .execute(access.clone(), json!({"path": managed_secret}))
+        .await
+        .expect_err("managed state must not be model-readable");
+    let write_error = WriteFileTool
+        .execute(
+            access,
+            json!({"path": managed_secret, "content": "corrupted"}),
+        )
+        .await
+        .expect_err("managed state must not be model-writable");
+    assert!(matches!(read_error, ToolError::PathInsideManagedState(_)));
+    assert!(matches!(write_error, ToolError::PathInsideManagedState(_)));
 }
 
 #[tokio::test]
@@ -233,4 +275,24 @@ async fn command_cannot_read_or_write_outside_its_workspace() {
         .expect("sandboxed command should run");
     assert_eq!(output.value["stdout"], "read-deniedwrite-denied");
     assert!(!outside_write.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn full_access_command_cannot_read_papermachine_managed_state() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should be created");
+    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
+    let managed_secret = access.protected_root.join("project.db");
+    std::fs::write(&managed_secret, "private state").expect("managed fixture should be written");
+    let command = format!(
+        "if /bin/cat '{}' >/dev/null 2>&1; then printf leaked; else printf denied; fi",
+        managed_secret.display()
+    );
+    let output = ExecCommandTool
+        .execute(access, json!({"command": command}))
+        .await
+        .expect("protected full-access command should run");
+    assert_eq!(output.value["stdout"], "denied");
 }

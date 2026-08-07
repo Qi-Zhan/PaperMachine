@@ -40,27 +40,27 @@ impl ProjectLibrary {
         let connection = self.connection()?;
         let duplicate_path: Option<String> = connection
             .query_row(
-                "SELECT id FROM projects WHERE root_path = ?1 AND id != ?2",
-                params![project.root_path, project.id.to_string()],
+                "SELECT id FROM projects WHERE workspace_path = ?1 AND id != ?2",
+                params![project.workspace_path, project.id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
         if duplicate_path.is_some() {
             return Err(StoreError::Invariant(format!(
-                "Project directory is already registered: {}",
-                project.root_path
+                "Project Workspace is already registered: {}",
+                project.workspace_path
             )));
         }
         connection.execute(
-            "INSERT INTO projects (id, root_path, document_json, updated_at)
+            "INSERT INTO projects (id, workspace_path, document_json, updated_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET
-               root_path = excluded.root_path,
+               workspace_path = excluded.workspace_path,
                document_json = excluded.document_json,
                updated_at = excluded.updated_at",
             params![
                 project.id.to_string(),
-                project.root_path,
+                project.workspace_path,
                 serde_json::to_string(project)?,
                 project.updated_at.to_rfc3339(),
             ],
@@ -120,7 +120,7 @@ fn initialize(connection: &Connection) -> Result<(), StoreError> {
          PRAGMA synchronous = NORMAL;
          CREATE TABLE IF NOT EXISTS projects (
            id TEXT PRIMARY KEY,
-           root_path TEXT NOT NULL UNIQUE,
+           workspace_path TEXT NOT NULL UNIQUE,
            document_json TEXT NOT NULL,
            updated_at TEXT NOT NULL
          );",
@@ -138,7 +138,7 @@ mod tests {
             id: ProjectId::new(),
             name: "Research".to_string(),
             description: String::new(),
-            root_path: root.to_string(),
+            workspace_path: root.to_string(),
             created_at: now,
             updated_at: now,
         }

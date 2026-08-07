@@ -13,7 +13,6 @@
         @home="showHome"
         @close-sidebar="mobileSidebarOpen = false"
         @new-project="projectDialogOpen = true"
-        @open-project="openExistingProjectDialog"
         @new-session="openSessionDialog"
         @relocate-project="openRelocateProjectDialog"
         @remove-project="removeProject"
@@ -58,10 +57,6 @@
           <button class="primary-button" type="button" @click="projectDialogOpen = true">
             <FolderPlus :size="16" />
             {{ t('sidebar.newProject') }}
-          </button>
-          <button class="secondary-button" type="button" @click="openExistingProjectDialog">
-            <FolderOpen :size="16" />
-            {{ t('sidebar.openProject') }}
           </button>
         </div>
       </div>
@@ -137,9 +132,8 @@
       :open="projectPathDialogOpen"
       :busy="dialogBusy"
       :error="dialogError"
-      :mode="projectPathDialogMode"
       :project-name="projectPathDialogProject?.name"
-      :initial-path="projectPathDialogProject?.root_path"
+      :initial-path="projectPathDialogProject?.workspace_path"
       @close="closeProjectPathDialog"
       @submit="submitProjectPath"
     />
@@ -183,7 +177,6 @@
 <script setup lang="ts">
 import {
   AlertCircle,
-  FolderOpen,
   FolderPlus,
   FolderSearch2,
   LoaderCircle,
@@ -247,7 +240,6 @@ const promptBusy = ref(false)
 const summaryBusy = ref(false)
 const projectDialogOpen = ref(false)
 const projectPathDialogOpen = ref(false)
-const projectPathDialogMode = ref<'open' | 'relocate'>('open')
 const projectPathDialogProjectId = ref<string | null>(null)
 const sessionDialogOpen = ref(false)
 const skillDialogOpen = ref(false)
@@ -321,7 +313,13 @@ async function refreshProjectIndex(projectId: string) {
   const overview = await api.getProject(projectId)
   sessionsByProject[projectId] = overview.sessions
   const index = projects.value.findIndex((project) => project.id === projectId)
-  if (index >= 0) projects.value[index] = { ...overview.project, available: true }
+  if (index >= 0) {
+    projects.value[index] = {
+      ...overview.project,
+      available: true,
+      workspace_available: projects.value[index].workspace_available,
+    }
+  }
   if (selectedProjectId.value === projectId && !selectedSessionId.value) projectOverview.value = overview
   return overview
 }
@@ -644,11 +642,11 @@ function closeDialogs() {
   dialogError.value = ''
 }
 
-async function createProject(input: { name: string; description: string; rootPath: string }) {
+async function createProject(input: { name: string; description: string; workspacePath: string }) {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const project = await api.createProject(input.name, input.description, input.rootPath)
+    const project = await api.createProject(input.name, input.description, input.workspacePath)
     projects.value = [project, ...projects.value]
     sessionsByProject[project.id] = []
     skillsByProject[project.id] = []
@@ -661,15 +659,7 @@ async function createProject(input: { name: string; description: string; rootPat
   }
 }
 
-function openExistingProjectDialog() {
-  projectPathDialogMode.value = 'open'
-  projectPathDialogProjectId.value = null
-  projectPathDialogOpen.value = true
-  dialogError.value = ''
-}
-
 function openRelocateProjectDialog(projectId: string) {
-  projectPathDialogMode.value = 'relocate'
   projectPathDialogProjectId.value = projectId
   projectPathDialogOpen.value = true
   dialogError.value = ''
@@ -682,13 +672,14 @@ function closeProjectPathDialog() {
   dialogError.value = ''
 }
 
-async function submitProjectPath(rootPath: string) {
+async function submitProjectPath(workspacePath: string) {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const entry = projectPathDialogMode.value === 'open'
-      ? await api.openProject(rootPath)
-      : await api.relocateProject(projectPathDialogProjectId.value ?? '', rootPath)
+    const entry = await api.relocateProject(
+      projectPathDialogProjectId.value ?? '',
+      workspacePath,
+    )
     const existing = projects.value.findIndex((project) => project.id === entry.id)
     if (existing >= 0) projects.value[existing] = entry
     else projects.value = [entry, ...projects.value]

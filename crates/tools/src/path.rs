@@ -42,25 +42,51 @@ pub(crate) async fn resolve_workspace_path(
 
 pub(crate) async fn resolve_tool_path(
     workspace_root: &Path,
-    path: &str,
+    protected_root: &Path,
+    requested_path: &str,
     access: AgentAccessProfile,
 ) -> Result<PathBuf, ToolError> {
     if !access.is_unrestricted() {
-        return resolve_workspace_path(workspace_root, path).await;
+        return resolve_workspace_path(workspace_root, requested_path).await;
     }
-    let path = Path::new(path);
+    let path = Path::new(requested_path);
     if path.as_os_str().is_empty() {
         return Err(ToolError::InvalidArguments {
             tool: "file".to_string(),
             message: "path must not be empty".to_string(),
         });
     }
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
     } else {
         let workspace = tokio::fs::canonicalize(workspace_root)
             .await
             .map_err(|error| ToolError::Io(error.to_string()))?;
-        Ok(workspace.join(path))
+        workspace.join(path)
+    };
+    reject_managed_path(&candidate, protected_root, requested_path).await?;
+    Ok(candidate)
+}
+
+async fn reject_managed_path(
+    candidate: &Path,
+    protected_root: &Path,
+    original: &str,
+) -> Result<(), ToolError> {
+    let protected_root = tokio::fs::canonicalize(protected_root)
+        .await
+        .map_err(|error| ToolError::Io(error.to_string()))?;
+    let mut existing = candidate;
+    while tokio::fs::symlink_metadata(existing).await.is_err() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| ToolError::PathInsideManagedState(original.to_string()))?;
     }
+    let canonical_existing = tokio::fs::canonicalize(existing)
+        .await
+        .map_err(|error| ToolError::Io(error.to_string()))?;
+    if canonical_existing.starts_with(&protected_root) {
+        return Err(ToolError::PathInsideManagedState(original.to_string()));
+    }
+    Ok(())
 }
