@@ -22,8 +22,9 @@ Source license: Apache-2.0. Always record the workflow source hash, model,
 timestamp, report, token usage, cached input tokens, and observed failures when
 adding a run result.
 
-Development run metadata lives under `results/`. These files preserve measured
-behavior and known defects; they are not official DeepResearch Bench scores.
+Local run metadata lives under the ignored `runs/` directory. Consolidated,
+reviewed findings belong in `docs/`; transient provider responses and obsolete
+runtime shapes are not kept as fixtures.
 
 ## Controlled matrix runner
 
@@ -58,6 +59,21 @@ python3 benchmarks/deep-research-mini/run_matrix.py
 python3 benchmarks/deep-research-mini/run_matrix.py \
   --conditions evidence_r3,evidence_r4 \
   --run-name deepseek-difficulty-5x2x2-2026-08-07
+```
+
+An evidence-loop run can route each Agent role to a different configured model
+profile. Empty role overrides inherit `--model`; single-agent runs always use
+`--model`:
+
+```bash
+python3 benchmarks/deep-research-mini/run_matrix.py \
+  --conditions evidence_r2 \
+  --model glm-5-2 \
+  --planner-model glm-5-2 \
+  --research-model deepseek-flash \
+  --evaluator-model glm-5-2 \
+  --writer-model glm-5-2 \
+  --grader-model glm-5-2
 ```
 
 The runner starts the already-compiled `target/debug/papermachine-server` on an

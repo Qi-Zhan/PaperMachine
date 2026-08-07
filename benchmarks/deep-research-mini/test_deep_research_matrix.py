@@ -117,7 +117,12 @@ class MatrixTests(unittest.TestCase):
         }
         task = {"prompt": "Research question", "rubric": rubric, "language": "en"}
         research = run_matrix.launch_research_run(
-            api, "project-1", job, task, "deepseek-flash"
+            api,
+            "project-1",
+            job,
+            task,
+            "deepseek-flash",
+            {role: "" for role in run_matrix.AGENT_MODEL_ROLES},
         )
         grade = run_matrix.launch_grader_run(
             api, "project-2", job, task, "Final report", "deepseek-flash"
@@ -135,6 +140,32 @@ class MatrixTests(unittest.TestCase):
         for _, payload in api.requests:
             self.assertEqual(payload["context_mode"], "fresh")
             self.assertNotIn("started_from_session_id", payload)
+
+    def test_evidence_loop_can_route_each_agent_role_to_a_model(self) -> None:
+        class FakeApi:
+            def post(self, _path, payload):
+                self.payload = payload
+                return {"id": "mixed-model-run"}
+
+        api = FakeApi()
+        run_matrix.launch_research_run(
+            api,
+            "project-1",
+            {"task_id": 68, "condition": "evidence_r2", "repeat": 1},
+            {"prompt": "Research question"},
+            "glm-5-2",
+            {
+                "planner": "glm-5-2",
+                "research": "deepseek-flash",
+                "evaluator": "glm-5-2",
+                "writer": "glm-5-2",
+            },
+        )
+
+        self.assertEqual(api.payload["model"], "glm-5-2")
+        self.assertEqual(api.payload["params"]["max_rounds"], 2)
+        self.assertEqual(api.payload["params"]["research_model"], "deepseek-flash")
+        self.assertEqual(api.payload["params"]["writer_model"], "glm-5-2")
 
     def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
         attempts = [{"workflow_id": "failed-run"}]

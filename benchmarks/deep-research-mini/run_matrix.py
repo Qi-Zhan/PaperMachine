@@ -73,6 +73,7 @@ CONDITIONS = {
         },
     },
 }
+AGENT_MODEL_ROLES = ("planner", "research", "evaluator", "writer")
 CONDITION_DESCRIPTIONS = {
     "single_agent": "one persistent research Session searches, reasons, and writes directly, with no evaluator or handoff",
     "evidence_r1": "at least two independent research Sessions run in parallel; a fixed evaluator assesses their evidence once; a separate writer composes the report",
@@ -344,14 +345,24 @@ def launch_research_run(
     job: dict[str, Any],
     task: dict[str, Any],
     model: str,
+    agent_models: dict[str, str],
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
+    params = dict(condition["params"])
+    if condition["program_slug"] == "evidence-loop":
+        params.update(
+            {
+                f"{role}_model": agent_models[role]
+                for role in AGENT_MODEL_ROLES
+                if agent_models.get(role)
+            }
+        )
     run = api.post(
         f"/projects/{project_id}/workflows",
         {
             "program_slug": condition["program_slug"],
             "request": task["prompt"],
-            "params": condition["params"],
+            "params": params,
             "model": model,
             "access": "research",
             "enabled_skills": [],
@@ -923,6 +934,11 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
         f"- Research runs: {len(jobs)}",
         f"- Repeats per task and condition: {state['experiment']['repeats']}",
         f"- Research model: `{state['experiment']['model']}`",
+        "- Evidence-loop Agent models: "
+        + ", ".join(
+            f"{role}=`{model or 'inherit'}`"
+            for role, model in state["experiment"]["agent_models"].items()
+        ),
         f"- Grader model: `{state['experiment']['grader_model']}` in an independent no-tool Session",
         f"- Upstream commit: `{state['upstream']['source_commit']}`",
         "- Score: absolute point-wise post-write score using every upstream criterion and its two-level weights; this is not the upstream reference-normalized official RACE score.",
@@ -1320,6 +1336,7 @@ def run_research_phase(
     articles_dir: Path,
     project_id: str,
     model: str,
+    agent_models: dict[str, str],
     poll_seconds: float,
     max_attempts: int,
     max_parallel_runs: int,
@@ -1384,6 +1401,7 @@ def run_research_phase(
                 job,
                 tasks[int(job["task_id"])],
                 model,
+                agent_models,
             )
             attempt["runtime_source_sha256"] = state.get(
                 "current_runtime_source_sha256", {}
@@ -1623,6 +1641,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260805)
     parser.add_argument("--model", default="deepseek-flash")
+    parser.add_argument("--planner-model", default="")
+    parser.add_argument("--research-model", default="")
+    parser.add_argument("--evaluator-model", default="")
+    parser.add_argument("--writer-model", default="")
     parser.add_argument("--grader-model", default="deepseek-flash")
     parser.add_argument(
         "--run-name", default="deepseek-baseline-5x3x2-2026-08-07"
@@ -1654,6 +1676,10 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
     conditions = [
         value.strip() for value in args.conditions.split(",") if value.strip()
     ]
+    agent_models = {
+        role: str(getattr(args, f"{role}_model") or "")
+        for role in AGENT_MODEL_ROLES
+    }
     unknown_conditions = sorted(set(conditions) - CONDITIONS.keys())
     if not conditions or unknown_conditions:
         raise ValueError(
@@ -1688,6 +1714,7 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
             "repeats": args.repeats,
             "seed": args.seed,
             "model": args.model,
+            "agent_models": agent_models,
             "grader_model": args.grader_model,
             "max_parallel_runs": args.max_parallel_runs,
         }
@@ -1711,6 +1738,7 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
                 "repeats": args.repeats,
                 "seed": args.seed,
                 "model": args.model,
+                "agent_models": agent_models,
                 "grader_model": args.grader_model,
                 "max_parallel_runs": args.max_parallel_runs,
                 "scoring_method": "absolute_pointwise_full_upstream_rubric",
@@ -1788,6 +1816,7 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
             run_dir / "articles",
             state["projects"]["research"],
             args.model,
+            agent_models,
             args.poll_seconds,
             args.max_attempts,
             args.max_parallel_runs,
