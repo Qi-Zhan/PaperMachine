@@ -232,7 +232,11 @@ restart, the snapshotted Python program starts at its entrypoint: completed
 effects replay their stored results, while a journal entry left `started` is
 redispatched to deterministic domain-resource IDs. Unfinished Agent actions
 resume the same checkpointed Turn rather than sampling their first model step
-again.
+again. Local Tool Steps additionally persist a stable call/effect ID, an effect
+disposition (`pure`, `idempotent`, `reconcilable`, or `unknown`), and whether
+execution was only prepared or may have begun. Recovery replays only safe
+effects, reconciles where supported, and turns an uncertain unknown effect into
+an explicit model-visible `execution_unknown` result.
 
 When every live Python branch is waiting on replayable effects such as
 `ask_human`, `wait_timer`, or `wait_signal`, the runner reports a quiescent

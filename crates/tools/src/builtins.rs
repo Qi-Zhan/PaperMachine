@@ -9,6 +9,7 @@ use papermachine_execution::SandboxExecutor;
 use papermachine_execution::SandboxPolicy;
 use papermachine_protocol::PathOperation;
 use papermachine_protocol::ToolDefinition;
+use papermachine_protocol::ToolEffectDisposition;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -46,6 +47,10 @@ impl ToolExecutor for ReadFileTool {
             }),
             supports_parallel: true,
         }
+    }
+
+    fn effect_disposition(&self) -> ToolEffectDisposition {
+        ToolEffectDisposition::Pure
     }
 
     fn supports_parallel(&self) -> bool {
@@ -128,6 +133,10 @@ impl ToolExecutor for WriteFileTool {
         }
     }
 
+    fn effect_disposition(&self) -> ToolEffectDisposition {
+        ToolEffectDisposition::Idempotent
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
@@ -195,6 +204,10 @@ impl ToolExecutor for ExecCommandTool {
             }),
             supports_parallel: false,
         }
+    }
+
+    fn effect_disposition(&self) -> ToolEffectDisposition {
+        ToolEffectDisposition::Unknown
     }
 
     async fn execute(

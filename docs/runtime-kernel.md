@@ -185,3 +185,6 @@ The kernel cutover is complete only when:
 - process-level crash injection covers every durability boundary;
 - Rust, Python, and Web tests and the Web production build pass; and
 - a real provider run survives a forced server restart with inspectable proof.
+
+The current release validation target is macOS plus Linux; native Windows is
+intentionally excluded from the test matrix until the product needs it.

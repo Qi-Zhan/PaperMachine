@@ -153,7 +153,26 @@ pub enum StepStatus {
     Running,
     Completed,
     Failed,
+    ExecutionUnknown,
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffectDisposition {
+    Pure,
+    Idempotent,
+    Reconcilable,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionState {
+    Prepared,
+    Executing,
+    Completed,
+    ExecutionUnknown,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -167,6 +186,8 @@ pub struct AgentStep {
     /// leave this empty.
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    pub effect_disposition: Option<ToolEffectDisposition>,
+    pub execution_state: Option<ToolExecutionState>,
     pub status: StepStatus,
     pub input: Value,
     pub output: Option<Value>,

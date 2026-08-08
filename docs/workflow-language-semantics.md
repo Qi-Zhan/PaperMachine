@@ -397,8 +397,10 @@ protocol error.
 ## 13. Persistence and replay boundary
 
 All authoritative entities, effect outcomes, and ordered events are durable.
-Workflow source is snapshotted. Standalone Session Turns and every non-terminal
-Workflow are scheduled for restart recovery.
+Workflow source is snapshotted. Every non-terminal Workflow is scheduled for
+restart recovery. An unfinished standalone Session Turn is instead settled: a
+durable terminal candidate is committed, or the Turn becomes `interrupted`
+without another provider sample and waits for explicit user direction.
 
 The Python program restarts at its entrypoint rather than serializing a Python
 instruction pointer. Each DSL operation has a deterministic logical effect path.
@@ -414,12 +416,16 @@ An unfinished Action reuses its ActionInvocation, latest non-terminal Attempt,
 and attached Turn. Its Session rollout stores append-or-replace model-context
 mutations, cumulative usage, completed-model-step and hosted-search cursors,
 plus any terminal candidate message; the Turn's SQLite document does not copy
-the cumulative context. Each local Tool Step also stores its provider call ID.
-Recovery replays the rollout and reuses
-the exact output of a completed Tool Step; a Step still running when the process
-disappeared becomes an explicit execution-unknown restart output. A
-Workflow-level `ask_human` effect is itself journaled and continues waiting on
-its deterministic HumanRequest.
+the cumulative context. Each local Tool Step stores its provider call ID,
+effect disposition, and `prepared`/`executing` boundary. Recovery replays the
+rollout and reuses the exact output of a completed Tool Step. A prepared call
+has not crossed the external-effect boundary and may execute after recovery
+marks it executing. For an executing call, `pure` and `idempotent` tools may
+replay with the same effect ID, `reconcilable` tools inspect external state
+before returning a result or retrying, and `unknown` tools are never replayed
+automatically. The latter becomes an explicit `execution_unknown` function
+result. A Workflow-level `ask_human` effect is itself journaled and continues
+waiting on its deterministic HumanRequest.
 
 Human, timer, and signal waits additionally support process-free suspension.
 The Python effect client tracks all pending futures; only when every pending

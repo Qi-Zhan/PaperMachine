@@ -370,26 +370,32 @@ than the projection cursor. Its Artifacts are stored under that same Project's
 managed directory using content-hashed metadata records. The web client uses
 SSE for live deltas and refreshes durable views for lifecycle changes.
 
-Unfinished standalone Session Turns and every non-terminal Workflow are
-recovered at startup. A recovered Workflow reruns its immutable Python source
-from the entrypoint. DSL operations use deterministic logical effect paths;
-SQLite journals each path with the exact request hash, status, result, and
-error. A completed effect returns its stored result, while an effect that was
-started when the process disappeared is safely redispatched against
-deterministic resource IDs.
+At startup, unfinished standalone Session Turns are settled and every
+non-terminal Workflow is recovered. A standalone Turn with a durable terminal
+candidate is committed without another provider sample. Otherwise it becomes
+`interrupted`; its partial rollout context, recovered tool outputs, and an
+explicit process-restart marker are committed for the next user-directed Turn.
+It is never automatically sampled again. A recovered Workflow reruns its
+immutable Python source from the entrypoint. DSL operations use deterministic
+logical effect paths; SQLite journals each path with the exact request hash,
+status, result, and error. A completed effect returns its stored result, while
+an effect that was started when the process disappeared is redispatched against
+deterministic resource IDs defined by that effect's contract.
 
 Action Turns append context mutations, usage, completed-model-step and hosted
 search cursors, and a terminal candidate message to the Session rollout.
 Ordinary additions are append records; compaction and trimming are explicit
-replacement records that do not mutate prior entries. Recovery keeps the same
-ActionInvocation, ActionAttempt, and Turn, cancels only orphaned in-flight
-Steps, reconstructs context from the rollout and a completed local-tool result
-from the Step's durable call
-ID, gives an execution-unknown tool an explicit restart result, and resumes at
-the next model sample. This avoids repeating a
-checkpointed completed sample or counting the Action start twice. The
-effect journal is returned in Workflow views and is visible in the Session
-inspector.
+replacement records that do not mutate prior entries. Every local Tool Step
+persists its provider call ID, effect disposition, and the durability boundary
+between `prepared` and `executing`. Recovery keeps the same ActionInvocation,
+ActionAttempt, and Turn. It reuses completed results; executes a still-prepared
+call after durably marking it `executing`; replays an executing `pure` or
+`idempotent` call with the same effect ID; asks a `reconcilable` tool to inspect
+external state first; and never automatically replays an executing `unknown`
+call. The last case becomes `execution_unknown` and is supplied to the next
+model sample as a real function-call output. This avoids repeating a
+checkpointed completed sample or counting the Action start twice. The effect
+journal is returned in Workflow views and is visible in the Session inspector.
 
 The Project Page is itself backed by ordinary Workflow data. A built-in
 `project-summary` run reads a bounded Rust-produced Project snapshot and

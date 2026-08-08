@@ -2,6 +2,7 @@ use papermachine_protocol::AccessPreset;
 use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
+use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
 use papermachine_tools::ExecCommandTool;
@@ -46,6 +47,7 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
         workflow_id: Some(WorkflowId::new()),
         action_invocation_id: None,
         action_attempt_id: None,
+        effect_id: "test-effect".to_string(),
         sandbox_root,
         authorization,
         cancellation: CancellationToken::new(),
@@ -87,6 +89,22 @@ fn registry_exposes_exact_tools_for_each_access_profile() {
     assert_eq!(
         names(AccessPreset::FullAccess),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
+    );
+    assert_eq!(
+        registry.effect_disposition("read_file"),
+        Some(ToolEffectDisposition::Pure)
+    );
+    assert_eq!(
+        registry.effect_disposition("fetch_url"),
+        Some(ToolEffectDisposition::Pure)
+    );
+    assert_eq!(
+        registry.effect_disposition("write_file"),
+        Some(ToolEffectDisposition::Idempotent)
+    );
+    assert_eq!(
+        registry.effect_disposition("exec_command"),
+        Some(ToolEffectDisposition::Unknown)
     );
 }
 

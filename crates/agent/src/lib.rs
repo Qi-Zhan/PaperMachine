@@ -28,12 +28,14 @@ use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
+use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkflowId;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolRegistry;
+use papermachine_tools::model_visible_tool_result;
 use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
@@ -145,6 +147,10 @@ pub enum AgentEvent {
     },
     ToolCallStarted {
         call: ModelToolCall,
+        effect_disposition: ToolEffectDisposition,
+    },
+    ToolExecutionStarted {
+        call_id: String,
     },
     ToolCallCompleted {
         call_id: String,
@@ -725,7 +731,13 @@ impl AgentRuntime {
                     });
                 }
                 self.events
-                    .emit(AgentEvent::ToolCallStarted { call: call.clone() })
+                    .emit(AgentEvent::ToolCallStarted {
+                        call: call.clone(),
+                        effect_disposition: self
+                            .tools
+                            .effect_disposition(&call.name)
+                            .unwrap_or(ToolEffectDisposition::Unknown),
+                    })
                     .await
                     .map_err(AgentError::EventSink)?;
             }
@@ -751,6 +763,15 @@ impl AgentRuntime {
                     steps: step,
                     usage: total_usage,
                 });
+            }
+
+            for call in &calls {
+                self.events
+                    .emit(AgentEvent::ToolExecutionStarted {
+                        call_id: call.call_id.clone(),
+                    })
+                    .await
+                    .map_err(AgentError::EventSink)?;
             }
 
             let futures = calls.into_iter().map(|call| {
@@ -923,6 +944,7 @@ impl AgentRuntime {
                     workflow_id: request.workflow_id,
                     action_invocation_id: request.action_invocation_id,
                     action_attempt_id: request.action_attempt_id,
+                    effect_id: call.call_id.clone(),
                     sandbox_root: request.sandbox_root.clone(),
                     authorization: request.environment.authorization.clone(),
                     cancellation,
@@ -942,17 +964,7 @@ impl AgentRuntime {
         };
 
         let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let (output, success) = match result {
-            Ok(output) => (
-                json!({
-                    "ok": true,
-                    "summary": output.summary,
-                    "result": output.value,
-                }),
-                true,
-            ),
-            Err(error) => (json!({"ok": false, "error": error.to_string()}), false),
-        };
+        let (output, success) = model_visible_tool_result(result);
         ToolOutcome {
             call_id: call.call_id.clone(),
             output: output.clone(),

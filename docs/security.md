@@ -152,10 +152,12 @@ not silently rewrite the endpoint.
   sequence and shape of effects deterministic for the same snapshotted input;
   arbitrary external I/O remains outside the Python sandbox and effect model.
 - A local tool Step completed before a crash is replayed from its durable output.
-  If the process died while an arbitrary command/tool was running, PaperMachine
-  can only report execution as unknown: it cannot prove whether an external side
-  effect happened before the process disappeared. Workflow authors should make
-  destructive or non-idempotent tool operations require an explicit checkpoint.
+  Every call also persists whether it was merely prepared or may have started,
+  plus a `pure`, `idempotent`, `reconcilable`, or `unknown` disposition. Only
+  pure/idempotent effects replay automatically after the boundary; reconcilable
+  tools must inspect external state first. An arbitrary command is `unknown`,
+  because PaperMachine cannot prove whether its external effect happened before
+  the process disappeared, and is therefore surfaced without automatic replay.
 - An Action continues until the model returns a terminal answer, the user
   finishes/interrupts/cancels it, or an infrastructure/provider error occurs.
   Provider request and stream-idle timeouts protect broken connections, and

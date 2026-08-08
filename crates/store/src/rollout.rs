@@ -222,7 +222,11 @@ pub(crate) fn reconstruct(
                         state.committed_context.clone_from(&active.context);
                         state.active_turn = None;
                     }
-                    TurnStatus::Failed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
+                    TurnStatus::Interrupted => {
+                        state.committed_context.clone_from(&active.context);
+                        state.active_turn = None;
+                    }
+                    TurnStatus::Failed | TurnStatus::Cancelled => {
                         state.active_turn = None;
                     }
                     TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {}

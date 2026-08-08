@@ -461,8 +461,10 @@ pre {
 }
 
 .status-pin[data-status="failed"],
+.status-pin[data-status="execution_unknown"],
 .status-pin[data-status="cancelled"],
 .status-dot[data-status="failed"],
+.status-dot[data-status="execution_unknown"],
 .status-dot[data-status="cancelled"] {
   background: var(--red);
 }
@@ -643,6 +645,7 @@ pre {
 }
 
 .status-badge[data-status="failed"],
+.status-badge[data-status="execution_unknown"],
 .status-badge[data-status="cancelled"] {
   border-color: #efc9ce;
   color: #98323d;

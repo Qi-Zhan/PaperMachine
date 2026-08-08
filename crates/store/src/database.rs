@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -758,42 +758,6 @@ impl Store {
         self.get_turn(id)
     }
 
-    pub fn cancel_running_steps_for_recovery(
-        &self,
-        turn_id: TurnId,
-        reason: &str,
-    ) -> Result<usize, StoreError> {
-        let turn = self.get_turn(turn_id)?;
-        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(turn.session_id)?;
-        let documents: Vec<String> = {
-            let connection = self.connection()?;
-            let mut statement = connection.prepare(
-                "SELECT document_json FROM steps
-                 WHERE turn_id = ?1 AND status = 'running' ORDER BY sequence ASC",
-            )?;
-            let rows = statement.query_map([turn_id.to_string()], |row| row.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        if documents.is_empty() {
-            return Ok(0);
-        }
-        let mut steps = Vec::with_capacity(documents.len());
-        for document in &documents {
-            let mut step: AgentStep = serde_json::from_str(document)?;
-            step.status = StepStatus::Cancelled;
-            step.output = Some(json!({"error": reason, "recovered": true}));
-            step.updated_at = Utc::now();
-            steps.push(step);
-        }
-        self.commit_session_rollout_item_locked(
-            turn.session_id,
-            SessionRolloutItem::StepsUpdated { steps },
-        )?;
-        Ok(documents.len())
-    }
-
     fn persist_turn_status_locked(
         &self,
         mut turn: Turn,
@@ -854,7 +818,7 @@ impl Store {
         name: impl Into<String>,
         input: Value,
     ) -> Result<AgentStep, StoreError> {
-        self.create_step_inner(turn_id, kind, name, None, input)
+        self.create_step_inner(turn_id, kind, name, None, None, input)
     }
 
     pub fn create_tool_step(
@@ -863,8 +827,16 @@ impl Store {
         call_id: impl Into<String>,
         name: impl Into<String>,
         input: Value,
+        effect_disposition: ToolEffectDisposition,
     ) -> Result<AgentStep, StoreError> {
-        self.create_step_inner(turn_id, StepKind::Tool, name, Some(call_id.into()), input)
+        self.create_step_inner(
+            turn_id,
+            StepKind::Tool,
+            name,
+            Some(call_id.into()),
+            Some(effect_disposition),
+            input,
+        )
     }
 
     fn create_step_inner(
@@ -873,6 +845,7 @@ impl Store {
         kind: StepKind,
         name: impl Into<String>,
         tool_call_id: Option<String>,
+        effect_disposition: Option<ToolEffectDisposition>,
         input: Value,
     ) -> Result<AgentStep, StoreError> {
         let turn = self.get_turn(turn_id)?;
@@ -892,6 +865,8 @@ impl Store {
             kind,
             name: name.into(),
             tool_call_id,
+            effect_disposition,
+            execution_state: effect_disposition.map(|_| ToolExecutionState::Prepared),
             status: StepStatus::Running,
             input,
             output: None,
@@ -903,6 +878,32 @@ impl Store {
         self.commit_session_rollout_item_locked(
             turn.session_id,
             SessionRolloutItem::StepsCreated {
+                steps: vec![step.clone()],
+            },
+        )?;
+        Ok(step)
+    }
+
+    pub fn start_tool_execution(&self, id: StepId) -> Result<AgentStep, StoreError> {
+        let existing = self.get_step(id)?;
+        let turn = self.get_turn(existing.turn_id)?;
+        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(turn.session_id)?;
+        let mut step = self.get_step(id)?;
+        if step.kind != StepKind::Tool
+            || step.status != StepStatus::Running
+            || step.execution_state != Some(ToolExecutionState::Prepared)
+        {
+            return Err(StoreError::Invariant(format!(
+                "Step {id} is not a prepared Tool execution"
+            )));
+        }
+        step.execution_state = Some(ToolExecutionState::Executing);
+        step.updated_at = Utc::now();
+        self.commit_session_rollout_item_locked(
+            turn.session_id,
+            SessionRolloutItem::StepsUpdated {
                 steps: vec![step.clone()],
             },
         )?;
@@ -923,10 +924,33 @@ impl Store {
         let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
         self.replay_session_rollout_locked(turn.session_id)?;
         let mut step = self.get_step(id)?;
+        if step.status != StepStatus::Running {
+            return Err(StoreError::Invariant(format!(
+                "cannot finish terminal Step {id} from {:?}",
+                step.status
+            )));
+        }
+        if status == StepStatus::Running {
+            return Err(StoreError::Invariant(format!(
+                "cannot finish Step {id} with running status"
+            )));
+        }
         step.status = status;
         step.output = output;
         step.usage = usage;
         step.duration_ms = duration_ms;
+        if step.effect_disposition.is_some() {
+            step.execution_state = Some(match (status, step.execution_state) {
+                (StepStatus::ExecutionUnknown, _) => ToolExecutionState::ExecutionUnknown,
+                (_, Some(ToolExecutionState::Prepared)) => ToolExecutionState::Prepared,
+                (_, Some(ToolExecutionState::Executing)) => ToolExecutionState::Completed,
+                (_, state) => {
+                    return Err(StoreError::Invariant(format!(
+                        "cannot finish Tool Step {id} from execution state {state:?}"
+                    )));
+                }
+            });
+        }
         step.updated_at = Utc::now();
         self.commit_session_rollout_item_locked(
             turn.session_id,

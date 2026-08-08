@@ -348,8 +348,9 @@ protocol error。
 ## 13. 持久化与 Replay 边界
 
 所有权威 entity、effect 结果与有序 event 都会持久化，workflow 源码也会被
-快照。独立 Session Turn 和所有非终态 Workflow 都会在 server 重启时进入恢复
-调度。
+快照。所有非终态 Workflow 都会在 server 重启时进入恢复调度。未完成的独立
+Session Turn 则会被收束：已有持久化终态候选时直接提交，否则不再次请求 provider，
+而是转为 `interrupted` 并等待用户明确决定。
 
 runtime 不序列化 Python instruction pointer，而是从 entrypoint 重新执行源码。
 每个 DSL 操作都有确定性的逻辑 effect path；Store 会持久化该 path、kind、精确
@@ -363,9 +364,13 @@ effect 仍是 started，runtime 会用 `(WorkflowId, effect path, resource kind)
 对应 Session 的 append-only rollout 保存追加或显式替换的 model context、累计
 usage、已完成 model-step 与 hosted-search 游标，以及可能已经得到的终态候选消息；
 Turn 的 SQLite 文档不再复制累计 context。每个本地 Tool Step 还会保存 provider
-call ID；恢复会 replay rollout，并复用 completed Tool Step 的真实输出，而进程消失
-时仍是 running 的 Step 会得到明确的 execution-unknown restart 结果。workflow 级 `ask_human` 本身是
-journaled effect，因此会继续等待同一个确定性 HumanRequest。
+call ID、effect disposition，以及 `prepared`/`executing` 持久化边界。恢复会 replay
+rollout，并复用 completed Tool Step 的真实输出。`prepared` 表示尚未越过外部副作用
+边界，恢复时会先持久化为 `executing` 再执行；对于已是 `executing` 的调用，`pure`
+与 `idempotent` 可带同一 effect ID 重放，`reconcilable` 必须先检查外部状态，
+`unknown` 绝不自动重放，而是产生明确的 `execution_unknown` function result。
+workflow 级 `ask_human` 本身是 journaled effect，因此会继续等待同一个确定性
+HumanRequest。
 
 human、timer 与 signal wait 还支持不保留进程的挂起。Python effect client 会跟踪
 所有 pending future；只有全部 pending effect 都是可 replay wait 时才请求 runtime

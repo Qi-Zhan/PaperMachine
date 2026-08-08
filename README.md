@@ -179,7 +179,12 @@ small packages owned by one Project.
   interrupt an attempt; or let explicit Workflow code request typed human input.
 - Recover every non-terminal Workflow after a server restart by replaying its
   immutable Python source against deterministic effect IDs and a durable result
-  journal; unfinished Agent actions resume the same checkpointed Turn.
+  journal; unfinished Agent actions resume the same checkpointed Turn. Local
+  tool calls persist a `prepared`/`executing` boundary plus a `pure`,
+  `idempotent`, `reconcilable`, or `unknown` effect disposition, so recovery
+  replays only safe work. Standalone user Turns are never sampled again merely
+  because the server restarted: a durable terminal candidate is committed,
+  otherwise the Turn becomes `interrupted` with any uncertain effect exposed.
 - Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every
