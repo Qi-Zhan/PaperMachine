@@ -178,6 +178,21 @@ the same Project Workflow API used for every other program. The loop normally
 remains `waiting_for_user` for the lifetime of its Agent Session; closing that
 Session is the explicit operation that archives it and cancels the Workflow.
 
+The built-in `goal` is the reference autonomous continuation program. One
+persistent Agent performs an ordinary tool-capable `work()` Action and ends that
+same Turn with an internal `active`, `complete`, or `blocked` control footer.
+Plain Python removes the footer from the user-facing result and calls `work()`
+again only while the status remains `active`, preserving the Agent Session
+history and repeating the full objective. A missing status update also leaves
+the Goal active. `complete` requires a whole-objective evidence audit;
+`blocked` requires the same external blocker on at least three consecutive Goal
+Turns. The Action has no structured response format, so provider function tools
+remain available throughout the work Turn, and there is no second evaluator
+Action that can contradict the work it is judging. It never opens a HumanRequest
+between Turns. Existing Workflow guide, interrupt, pause, and cancel controls
+remain available asynchronously; provider errors fail the Workflow. These are
+stop conditions around the loop, not user waits inside it.
+
 The built-in `project-summary` is the reference background program. It reads
 `ctx.project.snapshot()`, asks one persistent summary Agent to render a
 self-contained HTML report, publishes it as an Artifact, and optionally calls

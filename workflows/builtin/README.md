@@ -8,6 +8,9 @@ while evaluators, synthesizers, writers, and graders that consume supplied
 evidence use `model_only`.
 
 - `parallel-discovery`: independent routes followed by one synthesis Session.
+- `goal`: one persistent Agent performs each tool-capable Turn, stops when that
+  Turn marks the objective complete or genuinely blocked, and otherwise starts
+  another Turn without waiting for a human.
 - `interactive-agent`: one persistent Session that waits for a human message
   before every conversational Turn until the user closes the Session; this
   powers the normal New Session action.

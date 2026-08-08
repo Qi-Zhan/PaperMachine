@@ -27,6 +27,14 @@ message before every Turn, and normally remains `waiting_for_user` for the
 Session's lifetime. Closing the Session archives its history and cancels that
 interactive Workflow. There is no separate standalone-Session creation path.
 
+The reviewed `goal` Workflow is the minimal autonomous loop: one persistent
+Agent performs a normal tool-capable Turn and leaves the Goal `active`, or marks
+that same Turn `complete` or genuinely `blocked`. Only `active` starts another
+Turn; it never waits for a user message between Turns. Model, access, persistent
+Agent prompt, Project context, and user guidance all use the ordinary Workflow
+and Session mechanisms; pause, cancellation, provider failure, and completion
+all stop the loop without a separate evaluator Agent.
+
 The **Project Page** can run the reviewed `project-summary` Workflow once or on
 a configurable durable timer. Its summary Agent reads a bounded snapshot of
 existing Project Sessions, Workflow results, and Artifact metadata, then

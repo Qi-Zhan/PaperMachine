@@ -219,7 +219,12 @@ fn copy_directory(source: &Path, destination: &Path) {
 }
 
 fn prepare_root(root: &Path) {
-    let builtins = ["interactive-agent", "parallel-discovery", "project-summary"];
+    let builtins = [
+        "goal",
+        "interactive-agent",
+        "parallel-discovery",
+        "project-summary",
+    ];
     for slug in builtins {
         let builtin = root.join("workflows/builtin").join(slug);
         std::fs::create_dir_all(&builtin).expect("builtin directory should be created");
@@ -952,6 +957,86 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
             .and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn goal_reuses_one_tool_capable_session_and_stops_on_same_turn_completion() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let scripted = ScriptedModelClient::new([
+        scripted_text("Inspected the objective.\n<!-- papermachine-goal:active -->"),
+        scripted_text("Implemented and verified it.\n<!-- papermachine-goal:complete -->"),
+    ]);
+    let app = test_app_with_model_profiles(&directory, scripted.clone()).await;
+    let project = create_project(&app, directory.path(), "Goal loop").await;
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflows", project.id),
+            json!({
+                "program_slug": "goal",
+                "request": "Implement and verify the requested change.",
+                "params": {
+                    "session_title": "Persistent Goal",
+                    "agent_model": "research-model",
+                    "agent_access": "research"
+                },
+                "model": "research-model",
+                "access": "research"
+            }),
+        ))
+        .await
+        .expect("Goal Workflow request should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let workflow = response_json(response).await;
+    let workflow_id = workflow["id"].as_str().expect("Workflow id should exist");
+    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+
+    assert_eq!(view["participants"].as_array().map(Vec::len), Some(1));
+    assert_eq!(view["sessions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(view["actions"].as_array().map(Vec::len), Some(2));
+    assert_eq!(view["attempts"].as_array().map(Vec::len), Some(2));
+    assert_eq!(view["workflow"]["output"]["status"], "complete");
+    assert_eq!(view["workflow"]["output"]["iterations"], 2);
+    assert_eq!(
+        view["workflow"]["output"]["result"],
+        "Implemented and verified it."
+    );
+    assert!(
+        view["actions"]
+            .as_array()
+            .expect("Actions should exist")
+            .iter()
+            .all(|action| action["action_name"] == "work")
+    );
+
+    let requests = scripted
+        .requests()
+        .expect("scripted model requests should load");
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.response_format.is_none())
+    );
+    assert!(requests.iter().all(|request| !request.tools.is_empty()));
+    assert!(requests.iter().all(|request| {
+        request
+            .instructions
+            .contains("<!-- papermachine-goal:complete -->")
+    }));
+
+    let session_id = view["sessions"][0]["id"]
+        .as_str()
+        .expect("Goal Session id should exist");
+    let session = app
+        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .await
+        .expect("Goal Session should load");
+    let session = response_json(session).await;
+    assert_eq!(session["turns"].as_array().map(Vec::len), Some(2));
 }
 
 #[cfg(target_os = "macos")]
