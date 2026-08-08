@@ -320,4 +320,6 @@ See the accepted [runtime kernel target](docs/runtime-kernel.md),
 [prompt model](docs/prompt-model.md),
 [workflow ABI](docs/workflow-abi.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
-[security boundaries](docs/security.md).
+[security boundaries](docs/security.md). The final clean-break test and real
+DeepSeek restart evidence are summarized in
+[the 2026-08-08 validation report](docs/clean-break-report-2026-08-08.md).
