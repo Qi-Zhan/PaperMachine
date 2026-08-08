@@ -290,7 +290,8 @@ pnpm --dir apps/web test
 pnpm --dir apps/web build
 ```
 
-See [architecture](docs/architecture.md), [prompt model](docs/prompt-model.md),
+See the accepted [runtime kernel target](docs/runtime-kernel.md),
+[architecture](docs/architecture.md), [prompt model](docs/prompt-model.md),
 [workflow ABI](docs/workflow-abi.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
 [security boundaries](docs/security.md).

@@ -13,6 +13,17 @@ Adapted files carry a source note where the relationship is direct. PaperMachine
 changes the original coding-agent concepts into research-specific protocols and
 does not claim API or behavior compatibility with Codex.
 
+The accepted runtime-kernel target maps the following upstream implementation
+areas for source adaptation. A mapping records provenance; it does not make the
+Codex configuration schema or product domain a PaperMachine compatibility
+surface.
+
+- `codex-rs/protocol/src/permissions.rs`
+- `codex-rs/sandboxing/src/manager.rs` and its platform backends
+- `codex-rs/core/src/exec_env.rs`
+- `codex-rs/thread-store/src/local/live_writer.rs`
+- `codex-rs/core/src/session/rollout_reconstruction.rs`
+
 ## codex-mobile
 
 The web interface uses interaction and layout ideas from codex-mobile at commit
