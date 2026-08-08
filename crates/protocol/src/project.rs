@@ -71,7 +71,6 @@ impl WorkspaceAttachment {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct WorkspaceSelection {
     pub roots: Vec<String>,
-    #[serde(default)]
     pub primary_root: usize,
 }
 
@@ -169,25 +168,20 @@ pub struct Workflow {
     /// Durable provenance for why and from where this Run was launched.
     pub trigger: WorkflowTrigger,
     pub default_model: String,
-    #[serde(default)]
     pub access: crate::AccessPreset,
-    #[serde(default)]
     pub enabled_skills: Vec<String>,
     /// Immutable Project state captured when this Workflow was launched. It is
     /// exposed as `ctx.context`; the Workflow must explicitly pass any relevant
     /// data to an Agent Action.
-    #[serde(default)]
     pub launch_context: WorkflowLaunchContext,
     /// Per-run overrides keyed by Python Agent class name. The Workflow access
     /// profile remains the hard upper bound.
-    #[serde(default)]
     pub agent_access_overrides: BTreeMap<String, crate::AccessPreset>,
     pub status: WorkflowStatus,
     pub params: Value,
     pub output: Option<Value>,
     pub error: Option<String>,
     pub attention_required: bool,
-    #[serde(default)]
     pub usage: WorkflowUsage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -223,7 +217,6 @@ pub struct WorkflowUsage {
     pub actions_completed: u32,
     pub action_steps: u32,
     pub timer_fires: u32,
-    #[serde(default)]
     pub hosted_search_calls: u32,
     pub tokens: TokenUsage,
     pub wall_time_seconds: u64,
@@ -248,7 +241,6 @@ pub struct WorkflowParticipant {
     pub role: String,
     pub system_prompt: String,
     pub model: String,
-    #[serde(default)]
     pub skills: Vec<String>,
     pub status: ParticipantStatus,
     pub created_at: DateTime<Utc>,
@@ -310,7 +302,6 @@ pub struct ActionInvocation {
     pub arguments: Value,
     /// Direct HumanRequest whose answered string became this Action Turn's
     /// user message. `None` means the Turn was dispatched as workflow work.
-    #[serde(default)]
     pub source_human_request_id: Option<HumanRequestId>,
     pub status: ActionStatus,
     pub output: Option<Value>,

@@ -126,7 +126,7 @@ impl AppState {
             .get(&project_id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound {
-                entity: "available project",
+                entity: "Project runtime",
                 id: project_id.to_string(),
             })
     }
@@ -368,6 +368,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             get(stream_session_events),
         )
         .route("/turns/{turn_id}/cancel", post(cancel_turn))
+        .route("/turns/{turn_id}/resume", post(resume_turn))
         .route(
             "/projects/{project_id}/workflow-programs",
             get(list_workflow_programs).post(save_workflow_program),
@@ -447,7 +448,6 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 struct ProjectCatalogEntry {
     #[serde(flatten)]
     project: Project,
-    available: bool,
     workspace_available: bool,
 }
 
@@ -463,12 +463,7 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
     for get_project in projects {
         let project = get_project?;
         entries.push(ProjectCatalogEntry {
-            available: true,
-            workspace_available: project
-                .workspace
-                .roots
-                .iter()
-                .all(|root| std::path::Path::new(root).is_dir()),
+            workspace_available: workspace_attachment_available(&project.workspace),
             project,
         });
     }
@@ -480,6 +475,18 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
             .then_with(|| left.project.id.cmp(&right.project.id))
     });
     Ok(Json(entries))
+}
+
+fn workspace_attachment_available(workspace: &WorkspaceAttachment) -> bool {
+    workspace.validate().is_ok()
+        && workspace.roots.iter().all(|root| {
+            let path = std::path::Path::new(root);
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && path.canonicalize().is_ok_and(|canonical| canonical == path)
+            })
+        })
 }
 
 #[derive(Deserialize)]
@@ -519,7 +526,6 @@ async fn create_project(
         StatusCode::CREATED,
         Json(ProjectCatalogEntry {
             project,
-            available: true,
             workspace_available: true,
         }),
     ))
@@ -545,7 +551,6 @@ async fn relocate_project(
         .relocate_project(&runtime.store, project_id, &workspace)?;
     Ok(Json(ProjectCatalogEntry {
         project,
-        available: true,
         workspace_available: true,
     }))
 }
@@ -607,7 +612,7 @@ fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {
         || !runtime.store.list_resumable_standalone_turns()?.is_empty()
     {
         return Err(StoreError::Invariant(
-            "Project has active work; finish or cancel it before changing its library entry"
+            "Project has active work; finish or cancel it before changing its Workspace attachment"
                 .to_string(),
         )
         .into());
@@ -737,6 +742,8 @@ struct SessionView {
     session: Session,
     turns: Vec<Turn>,
     steps: Vec<AgentStep>,
+    rollout: SessionRolloutStatus,
+    resumable_turn_ids: Vec<TurnId>,
     workflows: Vec<Workflow>,
     workflow_memberships: Vec<WorkflowParticipant>,
     human_requests: Vec<HumanRequest>,
@@ -757,6 +764,20 @@ async fn get_session_view(
     for turn in &turns {
         steps.extend(runtime.store.list_steps(turn.id)?);
     }
+    let resumable_turn_ids = turns
+        .iter()
+        .filter(|turn| turn.status == TurnStatus::Interrupted)
+        .filter_map(|turn| match runtime.store.is_workflow_turn(turn.id) {
+            Ok(false) => match runtime.store.is_turn_resumed(turn.id) {
+                Ok(false) => Some(Ok(turn.id)),
+                Ok(true) => None,
+                Err(error) => Some(Err(error)),
+            },
+            Ok(true) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let rollout = runtime.store.session_rollout_status(session_id)?;
     let workflows = runtime.store.list_session_workflows(session_id)?;
     let mut memberships = Vec::new();
     let mut requests = Vec::new();
@@ -780,6 +801,8 @@ async fn get_session_view(
         session,
         turns,
         steps,
+        rollout,
+        resumable_turn_ids,
         workflows,
         workflow_memberships: memberships,
         human_requests: requests,
@@ -949,6 +972,30 @@ async fn cancel_turn(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn resume_turn(
+    State(state): State<AppState>,
+    Path(turn_id): Path<String>,
+) -> ApiResult<(StatusCode, Json<Turn>)> {
+    let turn_id: TurnId = parse_id(&turn_id, "Turn")?;
+    let (runtime, interrupted) = state
+        .locate("turn", &turn_id.to_string(), |store| {
+            store.get_turn(turn_id)
+        })
+        .await?;
+    if interrupted.status != TurnStatus::Interrupted {
+        return Err(ApiError::bad_request(format!(
+            "Turn {turn_id} is not interrupted"
+        )));
+    }
+    if runtime.store.is_workflow_turn(turn_id)? {
+        return Err(ApiError::bad_request(
+            "Workflow-owned Turns are recovered by their Workflow runtime",
+        ));
+    }
+    let turn = runtime.sessions.resume_interrupted(turn_id).await?;
+    Ok((StatusCode::CREATED, Json(turn)))
+}
+
 async fn list_workflow_programs(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1086,9 +1133,7 @@ struct CreateWorkflowRequest {
     params: Value,
     #[serde(default)]
     started_from_session_id: Option<SessionId>,
-    #[serde(default)]
     model: String,
-    #[serde(default)]
     access: AccessPreset,
     #[serde(default)]
     enabled_skills: Vec<String>,
@@ -1103,20 +1148,27 @@ fn empty_object() -> Value {
 }
 
 fn validate_model_profile(state: &AppState, model: &str) -> ApiResult<()> {
-    if !state.model_profiles.is_empty()
-        && !state
+    let valid = if state.model_profiles.is_empty() {
+        model == state.default_model
+    } else {
+        state
             .model_profiles
             .iter()
             .any(|profile| profile.id == model)
-    {
-        return Err(ApiError::bad_request(format!(
-            "unknown model profile {model:?}; choose one of: {}",
+    };
+    if !valid {
+        let available = if state.model_profiles.is_empty() {
+            state.default_model.clone()
+        } else {
             state
                 .model_profiles
                 .iter()
                 .map(|profile| profile.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        };
+        return Err(ApiError::bad_request(format!(
+            "unknown model profile {model:?}; choose one of: {available}",
         )));
     }
     Ok(())
@@ -1161,11 +1213,12 @@ async fn create_workflow(
     runtime
         .skills
         .validate_enabled(project_id, &request.enabled_skills)?;
-    let model = if request.model.trim().is_empty() {
-        state.default_model.as_str()
-    } else {
-        request.model.trim()
-    };
+    let model = request.model.trim();
+    if model.is_empty() {
+        return Err(ApiError::bad_request(
+            "Workflow model must name an explicit model profile",
+        ));
+    }
     validate_model_profile(&state, model)?;
     let (snapshot, declared_agent_classes) = {
         let catalog = runtime.catalog.read().await;

@@ -39,7 +39,6 @@
           v-model="model"
           class="select-input"
         >
-          <option value="">{{ t('dialog.serverDefault') }} — {{ defaultModel }}</option>
           <option v-for="profile in modelProfiles" :key="profile.id" :value="profile.id">
             {{ profile.id }} · {{ profile.provider }}/{{ profile.model }}
           </option>
@@ -50,7 +49,7 @@
           v-model="model"
           class="text-input"
           autocomplete="off"
-          :placeholder="t('dialog.serverDefault')"
+          :placeholder="defaultModel"
         />
 
         <label class="field-label" for="session-access">{{ t('dialog.sessionAccess') }}</label>
@@ -75,7 +74,7 @@
         <p v-if="error" class="form-error">{{ error }}</p>
         <footer class="dialog-actions">
           <button class="text-button" type="button" @click="$emit('close')">{{ t('common.cancel') }}</button>
-          <button class="primary-button" type="submit" :disabled="busy">
+          <button class="primary-button" type="submit" :disabled="busy || !model.trim()">
             <LoaderCircle v-if="busy" class="spin" :size="16" />
             <MessageSquarePlus v-else :size="16" />
             {{ t('dialog.createSession') }}
@@ -126,7 +125,7 @@ watch(
     if (!open) return
     title.value = ''
     systemPrompt.value = ''
-    model.value = ''
+    model.value = props.defaultModel
     access.value = 'research'
     enabledSkills.value = []
     await nextTick()

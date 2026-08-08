@@ -66,6 +66,15 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
         .expect("rollout should reconstruct");
     assert_eq!(state.committed_context, context);
     assert!(state.active_turn.is_none());
+    let rollout_status = store
+        .session_rollout_status(session.id)
+        .expect("rollout status should load");
+    assert_eq!(rollout_status.version, 1);
+    assert!(rollout_status.last_sequence > 0);
+    assert_eq!(
+        rollout_status.projected_sequence,
+        rollout_status.last_sequence
+    );
 
     let connection =
         Connection::open(managed.join("state/project.db")).expect("Project database should open");

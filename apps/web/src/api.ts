@@ -65,6 +65,7 @@ export const api = {
   createTurn: (sessionId: string, input: string) =>
     request<Turn>(`/sessions/${sessionId}/turns`, { method: 'POST', body: JSON.stringify({ input }) }),
   cancelTurn: (turnId: string) => request<void>(`/turns/${turnId}/cancel`, { method: 'POST' }),
+  resumeTurn: (turnId: string) => request<Turn>(`/turns/${turnId}/resume`, { method: 'POST' }),
   updateSessionSkills: (sessionId: string, enabledSkills: string[]) =>
     request<Session>(`/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
   updateSessionAccess: (sessionId: string, access: AccessPreset) =>

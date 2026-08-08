@@ -9,6 +9,17 @@ PaperMachine 不把所有指令藏进一个不断变化、无法追溯的字符�
 保存不可变的 `PromptSnapshot`：包括各层内容、来源、各自的 SHA-256、最终发给
 provider 的完整 instructions，以及该最终文本的 hash。
 
+Project prompt state is PaperMachine-managed. Workspace files are user-owned
+resources, not prompt layers or Project storage: no Workspace file enters a
+model request unless a tool reads it or Workflow code explicitly passes its
+content through a structured runtime result. The Turn's authorization snapshot
+is enforced independently of all prompt text.
+
+Project prompt 由 PaperMachine 持久管理；Workspace 文件属于用户资源，既不是
+prompt layer，也不是 Project 存储。只有工具明确读取文件，或 Workflow 通过结构化
+runtime result 显式传递内容时，Workspace 数据才会进入模型请求。Turn 的权限快照
+始终独立于 prompt 文本执行。
+
 ## Resolution order / 解析顺序
 
 | Order | Layer | User control | Source |

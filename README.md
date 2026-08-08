@@ -5,6 +5,11 @@ of its durable, Codex-like **Sessions** and **Workflows**. A Session is the
 main workbench: each user message creates a Turn, and model samples, tool calls,
 retries, context trims, usage, and output remain inspectable under that Turn.
 
+> A Project is a research world persistently managed by PaperMachine; a
+> Workspace is the user filesystem an Agent is authorized to operate;
+> structured runtime APIs connect them, and they never share storage or a
+> security boundary.
+
 A WorkflowProgram is a Python collaboration protocol. Starting it creates a
 durable Workflow that snapshots the exact program source. It creates Agent
 instances, and every Agent instance is backed by an ordinary Project-owned
@@ -15,7 +20,7 @@ Both the Project page and a Session header use the same **Run Workflow**
 launcher. A Project-level launch starts new work from the Project as a whole;
 a Session-origin launch records that Session as provenance and can prioritize
 its recent Turns in the captured context. The Workflow's concrete request,
-reusable params, optional run instructions, default model, skills, permission
+reusable params, optional run instructions, explicitly selected model profile, skills, permission
 ceiling, per-Agent access overrides, trigger, and launch context are explicit
 run configuration rather than hidden global state. Workflow code decides which
 Agents receive the request or captured context; the runtime never promotes
@@ -185,6 +190,8 @@ small packages owned by one Project.
   replays only safe work. Standalone user Turns are never sampled again merely
   because the server restarted: a durable terminal candidate is committed,
   otherwise the Turn becomes `interrupted` with any uncertain effect exposed.
+  Explicit Resume creates a new user-directed Turn over the committed context;
+  it never reopens or resamples the interrupted Turn.
 - Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every
@@ -305,7 +312,8 @@ pnpm --dir apps/web build
 ```
 
 See the accepted [runtime kernel target](docs/runtime-kernel.md),
-[architecture](docs/architecture.md), [prompt model](docs/prompt-model.md),
+[architecture](docs/architecture.md), [Project/Workspace semantics](docs/project-workspace.md),
+[prompt model](docs/prompt-model.md),
 [workflow ABI](docs/workflow-abi.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
 [security boundaries](docs/security.md).

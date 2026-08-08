@@ -153,7 +153,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .expect("Project request should complete");
     let project = response_json(created).await;
     let project_id = project["id"].as_str().expect("Project id should exist");
-    assert_eq!(project["available"], true);
+    assert_eq!(project["workspace_available"], true);
 
     let managed = directory.path().join("app-data/projects").join(project_id);
     assert!(managed.join("state/project.db").is_file());
@@ -167,7 +167,6 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .await
         .expect("Project catalog should load");
     let projects = response_json(projects).await;
-    assert_eq!(projects[0]["available"], true);
     assert_eq!(projects[0]["workspace_available"], false);
 
     let relocated = restarted
@@ -181,7 +180,6 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .expect("Project relocation should complete");
     assert_eq!(relocated.status(), StatusCode::OK);
     let relocated = response_json(relocated).await;
-    assert_eq!(relocated["available"], true);
     assert_eq!(relocated["workspace_available"], true);
     assert_eq!(
         relocated["workspace"]["roots"][0],
@@ -322,7 +320,7 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             }
         })
         .collect::<String>();
-    let workspace_path = base.join("projects").join(directory_name);
+    let workspace_root = base.join("projects").join(directory_name);
     let response = app
         .clone()
         .oneshot(json_request(
@@ -332,7 +330,7 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
                 "name": name,
                 "description": "API test",
                 "workspace": {
-                    "roots": [workspace_path.to_string_lossy()],
+                    "roots": [workspace_root.to_string_lossy()],
                     "primary_root": 0
                 }
             }),
@@ -367,6 +365,7 @@ async fn start_interactive_session(
                     "agent_system_prompt": "",
                     "agent_access": access,
                 },
+                "model": "demo-model",
                 "access": access,
             }),
         ))
@@ -415,7 +414,9 @@ async fn workflow_request_mode_matches_the_program_contract() {
             json!({
                 "program_slug": "interactive-agent",
                 "request": "This must be a Session message instead.",
-                "params": {}
+                "params": {},
+                "model": "demo-model",
+                "access": "research"
             }),
         ))
         .await
@@ -428,7 +429,9 @@ async fn workflow_request_mode_matches_the_program_contract() {
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "parallel-discovery",
-                "params": {}
+                "params": {},
+                "model": "demo-model",
+                "access": "research"
             }),
         ))
         .await
@@ -794,7 +797,9 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
                 "request": "Compare two implementation approaches.",
                 "instructions": "Prefer directly comparable implementation evidence.",
                 "params": {"perspectives": ["primary evidence", "failure modes"]},
-                "started_from_session_id": origin.id
+                "started_from_session_id": origin.id,
+                "model": "demo-model",
+                "access": "research"
             }),
         ))
         .await
@@ -1063,7 +1068,9 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
             json!({
                 "program_slug": "parallel-discovery",
                 "request": "Reject an unknown per-Agent model profile.",
-                "params": {"research_model": "missing-model-profile"}
+                "params": {"research_model": "missing-model-profile"},
+                "model": "research-model",
+                "access": "research"
             }),
         ))
         .await
@@ -1083,7 +1090,8 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
                     "research_model": "research-model",
                     "synthesis_model": "review-model"
                 },
-                "model": "research-model"
+                "model": "research-model",
+                "access": "research"
             }),
         ))
         .await
@@ -1160,7 +1168,9 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             json!({
                 "program_slug": "parallel-discovery",
                 "request": "Reject an unknown Agent override.",
-                "agent_access_overrides": {"MissingAgent": "model_only"}
+                "agent_access_overrides": {"MissingAgent": "model_only"},
+                "model": "demo-model",
+                "access": "research"
             }),
         ))
         .await
@@ -1176,6 +1186,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
                 "program_slug": "parallel-discovery",
                 "request": "Reject access above the origin Session.",
                 "started_from_session_id": origin.id,
+                "model": "demo-model",
                 "access": "full_access"
             }),
         ))
@@ -1192,6 +1203,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
                 "program_slug": "parallel-discovery",
                 "request": "Reject an Agent override above the Workflow.",
                 "started_from_session_id": origin.id,
+                "model": "demo-model",
                 "access": "model_only",
                 "agent_access_overrides": {"Researcher": "research"}
             }),
@@ -1211,6 +1223,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
                 "params": {"perspectives": ["prior primary evidence"]},
                 "started_from_session_id": origin.id,
                 "context_mode": "project_snapshot",
+                "model": "demo-model",
                 "access": "research",
                 "agent_access_overrides": {
                     "Researcher": "read_only",
@@ -1341,6 +1354,7 @@ async fn project_summary_publishes_a_sandboxed_html_progress_page() {
                     "turns_per_session": 12,
                     "max_artifacts": 50
                 },
+                "model": "demo-model",
                 "access": "model_only"
             }),
         ))
@@ -1589,7 +1603,9 @@ async def main(ctx):
                 "program_slug": "human-decision",
                 "request": "Choose a project direction.",
                 "params": {},
-                "started_from_session_id": origin.id
+                "started_from_session_id": origin.id,
+                "model": "demo-model",
+                "access": "research"
             }),
         ))
         .await
@@ -1719,6 +1735,7 @@ async def main(ctx):
                 "program_slug": "access-grant",
                 "request": "Inspect the configured environment.",
                 "params": {},
+                "model": "demo-model",
                 "access": "full_access"
             }),
         ))

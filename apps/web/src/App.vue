@@ -37,7 +37,7 @@
         @saved="workflowSaved"
       />
 
-      <div v-else-if="projects.length === 0 || projects.every((project) => !project.available)" class="zero-state">
+      <div v-else-if="projects.length === 0" class="zero-state">
         <header class="zero-state-header">
           <button
             class="icon-button mobile-only"
@@ -65,6 +65,7 @@
       <SessionWorkspace
         v-else-if="sessionView && selectedProject"
         :project="selectedProject"
+        :workspace-available="selectedProject.workspace_available"
         :view="sessionView"
         :events="sessionEvents"
         :skills="projectSkills"
@@ -81,6 +82,7 @@
         @close-session="closeSession"
         @send="createTurn"
         @cancel-turn="cancelTurn"
+        @resume-turn="resumeTurn"
         @open-workflow="openSessionWorkflowDialog"
         @inspect-workflow="inspectWorkflow"
         @pause-workflow="pauseWorkflow"
@@ -98,6 +100,7 @@
       <ProjectOverview
         v-else-if="projectOverview"
         :overview="projectOverview"
+        :workspace-available="selectedProject?.workspace_available ?? false"
         :skills="projectSkills"
         :prompt-busy="promptBusy"
         :summary-busy="summaryBusy"
@@ -110,6 +113,7 @@
         @run-workflow="openProjectWorkflowDialog"
         @run-summary="runProjectSummary"
         @stop-summary="stopProjectSummary"
+        @relocate-workspace="openRelocateProjectDialog(projectOverview.project.id)"
       />
 
       <div v-else class="full-loading"><LoaderCircle class="spin" :size="18" /></div>
@@ -311,8 +315,8 @@ onMounted(async () => {
     if (initialRoute?.kind === 'session') restored = await selectSession(initialRoute.id)
     else if (initialRoute?.kind === 'project') restored = await selectProject(initialRoute.id)
     else if (initialRoute?.kind === 'workflows') restored = await openWorkflowLibrary(initialRoute.id)
-    const firstAvailable = projectResult.find((project) => project.available)
-    if (!restored && firstAvailable) await selectProject(firstAvailable.id)
+    const firstProject = projectResult[0]
+    if (!restored && firstProject) await selectProject(firstProject.id)
   } catch (error) {
     online.value = false
     globalError.value = messageOf(error)
@@ -334,7 +338,6 @@ async function refreshProjectIndex(projectId: string) {
   if (index >= 0) {
     projects.value[index] = {
       ...overview.project,
-      available: true,
       workspace_available: projects.value[index].workspace_available,
     }
   }
@@ -350,11 +353,8 @@ async function ensureProjectSkills(projectId: string, refresh = false) {
 }
 
 async function selectProject(projectId: string): Promise<boolean> {
-  const libraryEntry = projects.value.find((project) => project.id === projectId)
-  if (!libraryEntry?.available) {
-    openRelocateProjectDialog(projectId)
-    return false
-  }
+  const catalogEntry = projects.value.find((project) => project.id === projectId)
+  if (!catalogEntry) return false
   closeSessionStream()
   clearPoll()
   selectedProjectId.value = projectId
@@ -554,12 +554,12 @@ function showHome() {
   workflowLibraryOpen.value = false
   if (selectedProjectId.value) void selectProject(selectedProjectId.value)
   else {
-    const firstAvailable = projects.value.find((project) => project.available)
-    if (firstAvailable) void selectProject(firstAvailable.id)
+    const firstProject = projects.value[0]
+    if (firstProject) void selectProject(firstProject.id)
   }
 }
 
-async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projects.value.find((project) => project.available)?.id): Promise<boolean> {
+async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projects.value[0]?.id): Promise<boolean> {
   if (!projectId) return false
   selectedProjectId.value = projectId
   try {
@@ -725,7 +725,7 @@ async function removeProject(projectId: string) {
       projectOverview.value = null
       sessionView.value = null
       window.history.replaceState(null, '', window.location.pathname)
-      const next = projects.value.find((item) => item.available)
+      const next = projects.value[0]
       if (next) await selectProject(next.id)
     }
   } catch (error) {
@@ -838,6 +838,24 @@ async function cancelTurn(turnId: string) {
   }
 }
 
+async function resumeTurn(turnId: string) {
+  const view = sessionView.value
+  if (!view) return
+  try {
+    const turn = await api.resumeTurn(turnId)
+    if (sessionView.value?.session.id === view.session.id) {
+      sessionView.value = {
+        ...sessionView.value,
+        turns: [...sessionView.value.turns, turn],
+        resumable_turn_ids: sessionView.value.resumable_turn_ids.filter((id) => id !== turnId),
+      }
+      syncPoll()
+    }
+  } catch (error) {
+    globalError.value = messageOf(error)
+  }
+}
+
 async function updateSessionSkills(slugs: string[]) {
   const view = sessionView.value
   if (!view || skillsBusy.value) return
@@ -909,7 +927,8 @@ async function runProjectSummary(input: {
   replaceWorkflowId?: string
 }) {
   const overview = projectOverview.value
-  if (!overview || summaryBusy.value) return
+  const model = health.value?.default_model
+  if (!overview || !model || summaryBusy.value) return
   summaryBusy.value = true
   globalError.value = ''
   try {
@@ -926,7 +945,7 @@ async function runProjectSummary(input: {
         turns_per_session: 12,
         max_artifacts: 50,
       },
-      model: '',
+      model,
       access: 'model_only',
       enabled_skills: [],
     })

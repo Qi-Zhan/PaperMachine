@@ -1,11 +1,11 @@
-# Runtime kernel target
+# Runtime kernel contract
 
-Status: accepted clean-break target, 2026-08-08.
+Status: active clean-break contract, 2026-08-08.
 
-This document fixes the security and durability contracts for the next
-PaperMachine runtime kernel. It is intentionally not a compatibility contract:
-the new server opens only fresh state created with the new schema, and the HTTP
-API, stored documents, and internal Rust types may change without adapters.
+This document fixes the security and durability contracts for the current
+PaperMachine runtime kernel. The server opens only state created with its
+current schema; HTTP data, stored documents, and internal Rust types form one
+current contract.
 User-owned Workspace files remain outside that clean break and must never be
 deleted or rewritten as part of Project-state replacement.
 
@@ -86,7 +86,7 @@ authorization, but the PaperMachine-managed root remains protected.
 ## Project storage
 
 There is one authoritative Project record: the row in that Project's managed
-database. The target topology contains no global `library.db`.
+database. Startup discovers these per-Project stores directly.
 
 ```text
 data_dir/
@@ -105,10 +105,8 @@ into `projects/`. Project removal atomically renames managed state into
 `trash/` before asynchronous deletion. Workspace roots are never targets of
 those operations.
 
-The Store has one current schema and rejects older databases. There is no
-migration, backfill, dual read, dual write, or legacy-document fallback.
-Integrity checks and backups protect current-format state; they are recovery
-mechanisms, not compatibility mechanisms.
+The Store has one current schema. Integrity checks and backups protect that
+current-format state.
 
 ## Session journal and projection
 
@@ -148,7 +146,8 @@ Tools declare an effect disposition:
 Workflow-owned Turns resume automatically because the Workflow is the durable
 control-flow owner. This includes the ordinary built-in `goal` Workflow.
 Standalone user Turns interrupted by process loss become explicitly
-`interrupted` and wait for a user resume decision. An execution-unknown command
+`interrupted` and wait for a user resume decision. Resume creates a new Turn
+over committed Session context; it never reopens the interrupted Turn. An execution-unknown command
 is surfaced to the model and user; it is never silently treated as either
 failed or completed.
 
@@ -169,15 +168,15 @@ source where the semantics match this document:
 | append-only live writer | `codex-rs/thread-store/src/local/live_writer.rs` |
 | context reconstruction | `codex-rs/core/src/session/rollout_reconstruction.rs` |
 
-Direct adaptations retain source notes and Apache-2.0 attribution. Codex
-configuration schemas and product-domain objects are not compatibility goals.
+Direct adaptations retain source notes and Apache-2.0 attribution. PaperMachine
+keeps its own configuration schema and product-domain objects.
 
 ## Completion gates
 
-The kernel cutover is complete only when:
+The kernel is release-ready only when:
 
-- no runtime branch recognizes `goal`;
-- no production path creates or opens `library.db`;
+- built-in Workflows, including `goal`, use only ordinary Workflow primitives;
+- each Project Store is the sole authority for its managed research world;
 - direct tools and child processes agree on filesystem authorization;
 - all restricted child processes use the unified sandbox manager;
 - Session context is reconstructable from append-only rollouts;

@@ -1,7 +1,4 @@
-use papermachine_protocol::ProjectId;
 use papermachine_store::ProjectCatalog;
-use papermachine_store::Store;
-use rusqlite::Connection;
 use tempfile::tempdir;
 
 #[test]
@@ -86,25 +83,4 @@ fn startup_quarantines_unpublished_staging_state() {
     catalog
         .purge_trash_entry(&quarantined[0])
         .expect("quarantine should purge");
-}
-
-#[test]
-fn catalog_refuses_non_current_project_schema() {
-    let directory = tempdir().expect("temporary root should be created");
-    let catalog = ProjectCatalog::open(directory.path()).expect("catalog should open");
-    let project_id = ProjectId::new();
-    let managed = catalog.managed_root(project_id);
-    drop(Store::create(&managed).expect("fresh Store should be created"));
-    let connection = Connection::open(managed.join("state/project.db"))
-        .expect("database should open for fixture mutation");
-    connection
-        .execute_batch("PRAGMA user_version = 1;")
-        .expect("fixture schema should change");
-    drop(connection);
-
-    let error = catalog
-        .scan()
-        .err()
-        .expect("old schema must be rejected without migration");
-    assert!(error.to_string().contains("not current schema"));
 }

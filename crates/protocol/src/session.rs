@@ -50,10 +50,8 @@ pub struct Session {
     /// runtime layers are snapshotted separately for each Turn.
     pub system_prompt: String,
     pub model: String,
-    #[serde(default)]
     pub access: AccessPreset,
     pub status: SessionStatus,
-    #[serde(default)]
     pub enabled_skills: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -93,12 +91,14 @@ pub struct Turn {
     pub session_id: SessionId,
     pub status: TurnStatus,
     pub origin: TurnOrigin,
+    /// Present only on a new user-directed Turn created by explicitly resuming
+    /// one terminal interrupted standalone Turn.
+    pub resumed_from_turn_id: Option<TurnId>,
     pub input: String,
     pub output: Option<String>,
     pub model: String,
     /// Per-Turn model compute policy. `None` inherits the server/provider
     /// default.
-    #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
     pub prompt: PromptSnapshot,
     /// Immutable Workspace and materialized authorization captured when this
@@ -106,36 +106,24 @@ pub struct Turn {
     pub environment: TurnEnvironmentSnapshot,
     /// Internal Action policy used by finalization and JSON-repair Turns.
     /// Ordinary user and Workflow Turns enable tools according to `access`.
-    #[serde(default = "default_tools_enabled")]
     pub tools_enabled: bool,
     /// Hosted web-search retrieval size for this Turn. `None` inherits the
     /// provider default.
-    #[serde(default)]
     pub web_search_context_size: Option<WebSearchContextSize>,
-    #[serde(default)]
     pub response_format: Option<ModelResponseFormat>,
-    #[serde(default)]
     pub skill_snapshots: Vec<SkillSnapshot>,
-    #[serde(default)]
     pub usage: TokenUsage,
     /// Durable Agent loop cursor used to continue an interrupted Turn without
     /// replaying completed model samples.
-    #[serde(default)]
     pub completed_model_steps: u32,
-    #[serde(default)]
     pub hosted_search_calls_used: u32,
     /// Last terminal assistant message checkpointed before the Turn status was
     /// committed. This closes the small crash window between model completion
     /// and `complete_turn`.
-    #[serde(default)]
     pub checkpoint_message: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-const fn default_tools_enabled() -> bool {
-    true
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -184,14 +172,12 @@ pub struct AgentStep {
     pub name: String,
     /// Provider/tool-loop call ID for local tool Steps. Model and system Steps
     /// leave this empty.
-    #[serde(default)]
     pub tool_call_id: Option<String>,
     pub effect_disposition: Option<ToolEffectDisposition>,
     pub execution_state: Option<ToolExecutionState>,
     pub status: StepStatus,
     pub input: Value,
     pub output: Option<Value>,
-    #[serde(default)]
     pub usage: TokenUsage,
     pub duration_ms: Option<u64>,
     pub created_at: DateTime<Utc>,

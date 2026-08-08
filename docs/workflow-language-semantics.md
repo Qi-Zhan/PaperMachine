@@ -7,8 +7,9 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 
 | Term | Identity | Semantics |
 |---|---|---|
-| `Project` | `ProjectId` | Directory-backed ownership root for Sessions, Workflows, skills, artifacts, and UI overview. |
-| `Session` | `SessionId` | Durable multi-turn conversation and workspace. It has `user` or `workflow_agent` origin, never a parent Session. |
+| `Project` | `ProjectId` | PaperMachine-managed persistent research world and ownership root for Sessions, Workflows, skills, artifacts, prompts, and journals. It is not a filesystem directory exposed to an Agent. |
+| `Workspace` | `WorkspaceId` + revision | User-owned canonical filesystem roots attached to a Project. A Turn may operate them only through its materialized runtime authorization. Workspace is not Project storage. |
+| `Session` | `SessionId` | Durable multi-turn conversation. It has `user` or `workflow_agent` origin, never a parent Session. |
 | `Turn` | `TurnId` | One user/model interaction inside a Session. |
 | `AgentStep` | `StepId` | Inspectable model, tool, workflow, or system step under a Turn. |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | Validated Python source plus literal manifest. A missing Project denotes a built-in. |
@@ -42,6 +43,8 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
 | I11 | Within one Workflow, a logical effect path is permanently bound to one exact kind and payload. |
 | I12 | Workflow `request`, `params`, `instructions`, trigger, launch configuration, and launch context never mutate after run creation. |
+| I13 | Project-managed paths and attached Workspace roots never overlap; deleting a Project never deletes Workspace files. |
+| I14 | Every Turn snapshots one Workspace attachment revision and one materialized authorization hash; later relocation or permission changes affect only later Turns. |
 
 The UI may visually group Agent Sessions beneath a Workflow. This does not
 create a Session parent/child relation.
@@ -58,7 +61,7 @@ consistent created run:
 1. Resolve `slug` in the Project-visible catalog (Project source overrides a built-in of the same slug).
 2. Validate reusable run `params` against `params_schema`, including configured model-profile references declared with `format: "model-profile"`.
 3. Copy source, manifest, owner, path, and SHA-256 into a WorkflowProgramSnapshot.
-4. Validate the selected model, skills, Workflow access ceiling, and Agent class
+4. Validate the explicitly selected non-empty model profile, skills, Workflow access ceiling, and Agent class
    overrides. A starting Session must belong to the Project and is a hard outer
    access bound.
 5. Enforce the manifest's `request_mode`, then store either the concrete user
@@ -114,13 +117,13 @@ human request targeted at that Agent, or explicit retirement calls
 Each Session has one user-facing access profile, expanded into granular runtime
 capabilities:
 
-| Profile | Files | Commands | Project network | Model-visible resource tools |
+| Profile | Files | Commands | Network | Model-visible resource tools |
 |---|---|---|---|---|
 | `model_only` | None | None | None | None. |
-| `read_only` | Read Session workspace | None | None | `read_file`. |
-| `workspace` | Read/write Session workspace | Sandboxed, network denied | None | `read_file`, `write_file`, `exec_command`. |
-| `research` | Read/write Session workspace | Sandboxed, network denied | Hosted web search and controlled public-HTTPS fetch | Workspace tools, `fetch_url`, hosted web search. |
-| `full_access` | Read/write host filesystem | Unrestricted | Unrestricted | All registered tools and hosted web search. |
+| `read_only` | Read the attached Workspace authorized by the Turn | None | None | `read_file`. |
+| `workspace` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | None | `read_file`, `write_file`, `exec_command`. |
+| `research` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | Server-hosted web search and controlled public-HTTPS fetch | Workspace tools, `fetch_url`, hosted web search. |
+| `full_access` | Read/write host filesystem except PaperMachine-managed state | Platform sandbox remains active | Child network plus server-hosted tools | All registered tools and hosted web search. |
 
 The profile is declared with `access = "research"` on an Agent class or with an
 `access=` constructor override. `research` is the default. The launcher's
@@ -152,11 +155,13 @@ not Agent research-network access.
 `await agent.retire()` preserves all Session history but rejects later actions.
 
 An Agent class or constructor may set `model`. An empty model inherits the
-Workflow Run's default profile; a non-empty value binds that persistent Agent
+Workflow Run's explicitly selected profile; a non-empty value binds that persistent Agent
 Session to the named configured profile. Therefore a generator/reviewer split
 is ordinary DSL (`Generator(model=...)`, `Reviewer(model=...)`), not a separate
 runtime primitive. A Workflow may expose such choices through arbitrary
 `params_schema` fields using `format: "model-profile"`.
+This DSL inheritance occurs only after launch; the HTTP launch itself requires
+an explicit non-empty model profile and access ceiling.
 
 ## 5. Action, attempt, and Turn semantics
 
@@ -400,7 +405,9 @@ All authoritative entities, effect outcomes, and ordered events are durable.
 Workflow source is snapshotted. Every non-terminal Workflow is scheduled for
 restart recovery. An unfinished standalone Session Turn is instead settled: a
 durable terminal candidate is committed, or the Turn becomes `interrupted`
-without another provider sample and waits for explicit user direction.
+without another provider sample and waits for explicit user direction. Resume
+creates a new user Turn over the committed Session rollout; it never reopens the
+interrupted Turn. Workflow-owned Turns are not manually resumable.
 
 The Python program restarts at its entrypoint rather than serializing a Python
 instruction pointer. Each DSL operation has a deterministic logical effect path.

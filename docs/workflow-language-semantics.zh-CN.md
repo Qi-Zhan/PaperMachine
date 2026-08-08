@@ -7,8 +7,9 @@
 
 | 术语 | 标识 | 语义 |
 |---|---|---|
-| `Project` | `ProjectId` | 绑定目录的所有权根，管理 Session、Workflow、skill、artifact 和总览 UI。 |
-| `Session` | `SessionId` | 持久的多轮对话与 workspace。来源为 `user` 或 `workflow_agent`，不存在 parent Session。 |
+| `Project` | `ProjectId` | 由 PaperMachine 持久管理的研究世界，也是 Session、Workflow、skill、artifact、prompt 与 journal 的所有权根；它不是暴露给 Agent 的文件目录。 |
+| `Workspace` | `WorkspaceId` + revision | 挂载到 Project 的用户自有 canonical 文件系统根；Turn 只能通过实体化 runtime 权限操作它。Workspace 不是 Project 存储。 |
+| `Session` | `SessionId` | 持久的多轮对话。来源为 `user` 或 `workflow_agent`，不存在 parent Session。 |
 | `Turn` | `TurnId` | Session 中的一次用户/模型交互。 |
 | `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | 通过校验的 Python 源码及字面量 manifest；无 Project 表示 built-in。 |
@@ -42,6 +43,8 @@
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
 | I11 | 在同一个 Workflow 内，一个逻辑 effect path 永久绑定到一种精确的 kind 与 payload。 |
 | I12 | Workflow 的 `request`、`params`、`instructions`、trigger、启动配置与启动上下文在 run 创建后不可变。 |
+| I13 | Project managed path 与挂载的 Workspace root 永不重叠；删除 Project 永不删除 Workspace 文件。 |
+| I14 | 每个 Turn 都快照一个 Workspace attachment revision 和实体化权限 hash；后续 relocation 或权限修改只影响之后的 Turn。 |
 
 UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
 建立 Session 的父子关系。
@@ -57,7 +60,7 @@ UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这�
 1. 按 `slug` 在 Project 可见 catalog 中解析；同 slug 的 Project source 覆盖 built-in。
 2. 按 `params_schema` 校验可复用的 run `params`；对声明为 `format: "model-profile"` 的字段同时校验其模型 profile 是否存在。
 3. 把源码、manifest、owner、path 与 SHA-256 复制进 WorkflowProgramSnapshot。
-4. 校验 model、skills、Workflow 权限上限与 Agent class override。starting Session
+4. 校验显式选择且非空的 model profile、skills、Workflow 权限上限与 Agent class override。starting Session
    必须属于该 Project，并构成不可越过的外层权限上限。
 5. 按 manifest 的 `request_mode` 校验后，保存具体的用户任务或不保存启动任务，
    再保存可选 run `instructions`、trigger 来源，以及
@@ -103,13 +106,13 @@ cache 状态，创建普通的 `origin=user` Turn，但不会恢复或修改已�
 
 每个 Session 有一个面向用户的权限档位，runtime 会把它展开为细粒度能力：
 
-| 档位 | 文件 | 命令 | Project 网络 | Model 可见的资源工具 |
+| 档位 | 文件 | 命令 | 网络 | Model 可见的资源工具 |
 |---|---|---|---|---|
 | `model_only` | 无 | 无 | 无 | 无。 |
-| `read_only` | 只读 Session workspace | 无 | 无 | `read_file`。 |
-| `workspace` | 读写 Session workspace | 沙箱执行，禁止网络 | 无 | `read_file`、`write_file`、`exec_command`。 |
-| `research` | 读写 Session workspace | 沙箱执行，禁止网络 | 托管 web search 与受控的公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search。 |
-| `full_access` | 读写宿主机文件系统 | 不受限 | 不受限 | 所有已注册工具与托管 web search。 |
+| `read_only` | 只读该 Turn 获准操作的挂载 Workspace | 无 | 无 | `read_file`。 |
+| `workspace` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | 无 | `read_file`、`write_file`、`exec_command`。 |
+| `research` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | server-hosted web search 与受控公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search。 |
+| `full_access` | 除 PaperMachine managed state 外的宿主机文件系统 | 仍使用平台 sandbox | 子进程网络及 server-hosted 工具 | 所有已注册工具与托管 web search。 |
 
 Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
 `access=` 覆盖；默认值是 `research`。启动器选择的 Workflow 档位是整个 run
@@ -136,11 +139,13 @@ Model sample 前会过滤 tool definitions，但这不是唯一安全边界。re
 
 `await agent.retire()` 会保留完整 Session 历史，但拒绝之后的 action。
 
-Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 的默认 profile；
+Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 启动时显式选择的 profile；
 非空值会把这个持久 Agent Session 绑定到指定的已配置 profile。因此“一个模型生成，
 另一个模型检查”只是普通 DSL：`Generator(model=...)` 与 `Reviewer(model=...)`，
 不需要新的 runtime primitive。Workflow 可在任意 `params_schema` 字段上使用
 `format: "model-profile"`，向用户暴露模型选择。
+这种继承只属于启动后的 DSL 语义；HTTP launch 本身必须显式提供非空 model profile
+与 access ceiling。
 
 ## 5. Action、Attempt 与 Turn 语义
 
@@ -350,7 +355,9 @@ protocol error。
 所有权威 entity、effect 结果与有序 event 都会持久化，workflow 源码也会被
 快照。所有非终态 Workflow 都会在 server 重启时进入恢复调度。未完成的独立
 Session Turn 则会被收束：已有持久化终态候选时直接提交，否则不再次请求 provider，
-而是转为 `interrupted` 并等待用户明确决定。
+而是转为 `interrupted` 并等待用户明确决定。Resume 会基于已提交的 Session rollout
+创建一个新的 user Turn，绝不重新打开旧的 interrupted Turn；Workflow-owned Turn
+不能由用户手工 Resume。
 
 runtime 不序列化 Python instruction pointer，而是从 entrypoint 重新执行源码。
 每个 DSL 操作都有确定性的逻辑 effect path；Store 会持久化该 path、kind、精确

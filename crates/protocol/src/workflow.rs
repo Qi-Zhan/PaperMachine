@@ -74,7 +74,6 @@ pub struct WorkflowValidation {
 pub struct WorkflowAgentDeclaration {
     pub class_name: String,
     pub actions: Vec<String>,
-    #[serde(default)]
     pub access: AccessPreset,
 }
 

@@ -58,12 +58,11 @@
         <div
           class="project-row"
           :data-active="project.id === selectedProjectId && !selectedSessionId"
-          :data-available="project.available"
+          :data-workspace-available="project.workspace_available"
         >
           <button
             class="project-select"
             type="button"
-            :disabled="!project.available"
             :title="project.workspace_available ? project.workspace.roots[project.workspace.primary_root] : t('sidebar.projectMissing')"
             @click="$emit('select-project', project.id)"
           >

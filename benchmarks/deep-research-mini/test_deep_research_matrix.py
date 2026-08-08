@@ -68,18 +68,20 @@ class MatrixTests(unittest.TestCase):
         run["usage"]["wall_time_seconds"] = 400
         self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 400)
 
-    def test_ensure_project_reuses_available_owned_state(self) -> None:
+    def test_ensure_project_reuses_matching_workspace_attachment(self) -> None:
         class FakeApi:
-            def __init__(self, workspace_path: str) -> None:
-                self.workspace_path = workspace_path
+            def __init__(self, workspace_root: str) -> None:
+                self.workspace_root = workspace_root
 
             def get(self, path):
                 self.assert_path(path)
                 return [
                     {
                         "id": "existing-project",
-                        "workspace_path": self.workspace_path,
-                        "available": True,
+                        "workspace": {
+                            "roots": [self.workspace_root],
+                            "primary_root": 0,
+                        },
                     }
                 ]
 
@@ -100,6 +102,37 @@ class MatrixTests(unittest.TestCase):
                 "existing-project",
             )
             self.assertTrue(root.is_dir())
+
+    def test_ensure_project_creates_a_structured_workspace_attachment(self) -> None:
+        class FakeApi:
+            def __init__(self) -> None:
+                self.payload = None
+
+            def get(self, path):
+                self.assert_path(path)
+                return []
+
+            def post(self, path, payload):
+                self.assert_path(path)
+                self.payload = payload
+                return {"id": "created-project"}
+
+            @staticmethod
+            def assert_path(path):
+                if path != "/projects":
+                    raise AssertionError(f"unexpected path: {path}")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "research"
+            api = FakeApi()
+            self.assertEqual(
+                run_matrix.ensure_project(api, "Research", "Benchmark", root),
+                "created-project",
+            )
+            self.assertEqual(
+                api.payload["workspace"],
+                {"roots": [str(root.resolve())], "primary_root": 0},
+            )
 
     def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:
         class FakeApi:

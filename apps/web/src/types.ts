@@ -51,7 +51,6 @@ export interface WorkspaceAttachment {
 }
 
 export interface ProjectCatalogEntry extends Project {
-  available: boolean
   workspace_available: boolean
 }
 
@@ -91,6 +90,7 @@ export interface Turn {
   session_id: Id
   status: TurnStatus
   origin: TurnOrigin
+  resumed_from_turn_id: Id | null
   input: string
   output: string | null
   model: string
@@ -384,9 +384,17 @@ export interface SessionView {
   session: Session
   turns: Turn[]
   steps: AgentStep[]
+  rollout: SessionRolloutStatus
+  resumable_turn_ids: Id[]
   workflows: Workflow[]
   workflow_memberships: WorkflowParticipant[]
   human_requests: HumanRequest[]
+}
+
+export interface SessionRolloutStatus {
+  version: number
+  last_sequence: number
+  projected_sequence: number
 }
 
 export interface WorkflowView {

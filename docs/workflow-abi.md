@@ -4,6 +4,12 @@ PaperMachine workflows are async Python programs written against the small
 `papermachine` DSL. Python expresses the collaboration protocol; the Rust
 runtime interprets every stateful operation as a typed effect.
 
+A Project is PaperMachine's persistent research world. A Workspace attachment
+is user-owned filesystem authority, not Workflow storage. Python never receives
+the Workspace as an ambient directory API: Agent Turns cross that boundary
+through Rust effects using the Turn's immutable environment and authorization
+snapshot.
+
 ## Minimal source
 
 ```python
@@ -164,12 +170,18 @@ Agent/Session, skill, and control layers are snapshotted on every Turn. See
 [prompt model](prompt-model.md).
 
 The Project and Session launchers share this run contract. They supply the
-concrete `request`, optional run `instructions`, `params`, default model
+concrete `request`, optional run `instructions`, `params`, selected Run model
 profile, skills, Workflow ceiling, class overrides, and `fresh` or
 `project_snapshot` context mode. A
 source Session contributes provenance and snapshot focus without copying its
 Session system prompt into new Agent Sessions; independently, its access
 profile is the outer run ceiling.
+
+The HTTP launch request must explicitly name a non-empty model profile and one
+access ceiling. Blank or omitted model/access values are not inheritance. By
+contrast, `Agent(model="")` inside validated DSL source deliberately inherits
+that already-explicit Run model; this is a Workflow-language rule, not an API
+compatibility fallback.
 
 The built-in `interactive-agent` is the reference conversational program. It
 uses an ordinary `while` loop: `ask_human(..., agent=agent)`, then
@@ -206,7 +218,7 @@ not a second "instance" entity or a hidden Project daemon.
 The isolated runner reserves stdout for newline-delimited JSON:
 
 ```json
-{"id":"root/together:2/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_instance_id":"..."}}
+{"id":"root/together:2/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_instance_id":"...","action_name":"investigate","prompt":"Find evidence.","arguments":{"question":"..."},"response_format":null,"tools_enabled":true,"web_search_context_size":null,"reasoning_effort":null,"task_scope_id":null,"human_request_id":null,"human_message_argument":null}}
 {"id":"root/together:2/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
 ```
 
@@ -237,6 +249,12 @@ disposition (`pure`, `idempotent`, `reconcilable`, or `unknown`), and whether
 execution was only prepared or may have begun. Recovery replays only safe
 effects, reconciles where supported, and turns an uncertain unknown effect into
 an explicit model-visible `execution_unknown` result.
+
+Standalone Session Turns have a different owner. After process loss, a durable
+terminal candidate is committed; otherwise the old Turn becomes terminal
+`interrupted`. The user-facing Resume operation creates a new Turn over the
+committed Session rollout. It never redispatches the old Turn or exposes a
+Workflow-owned Turn to manual resume.
 
 When every live Python branch is waiting on replayable effects such as
 `ask_human`, `wait_timer`, or `wait_signal`, the runner reports a quiescent

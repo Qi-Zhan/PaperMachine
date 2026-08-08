@@ -102,9 +102,9 @@ impl Store {
         &self,
         name: impl Into<String>,
         description: impl Into<String>,
-        workspace_path: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        self.create_project_with_id(ProjectId::new(), name, description, workspace_path)
+        self.create_project_with_id(ProjectId::new(), name, description, workspace_root)
     }
 
     pub fn create_project_with_id(
@@ -112,9 +112,9 @@ impl Store {
         id: ProjectId,
         name: impl Into<String>,
         description: impl Into<String>,
-        workspace_path: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        let requested_workspace = workspace_path.into();
+        let requested_workspace = workspace_root.into();
         if !requested_workspace.is_absolute() {
             return Err(StoreError::Invariant(
                 "Project Workspace must be an absolute path".to_string(),
@@ -122,11 +122,11 @@ impl Store {
         }
         std::fs::create_dir_all(&requested_workspace)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let workspace_path = requested_workspace
+        let workspace_root = requested_workspace
             .canonicalize()
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
-        let workspace_string = workspace_path.to_string_lossy().into_owned();
+        ensure_workspace_is_external(&workspace_root, &self.managed_root)?;
+        let workspace_string = workspace_root.to_string_lossy().into_owned();
         let exists = self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace.roots[0]') = ?1)",
             [&workspace_string],
@@ -135,7 +135,7 @@ impl Store {
         if exists {
             return Err(StoreError::Invariant(format!(
                 "Project Workspace is already registered: {}",
-                workspace_path.display()
+                workspace_root.display()
             )));
         }
         let now = Utc::now();
@@ -171,20 +171,20 @@ impl Store {
     pub fn relocate_project(
         &self,
         id: ProjectId,
-        workspace_path: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        let requested_workspace = workspace_path.into();
+        let requested_workspace = workspace_root.into();
         if !requested_workspace.is_absolute() {
             return Err(StoreError::Invariant(
                 "Project Workspace must be an absolute path".to_string(),
             ));
         }
-        let workspace_path = requested_workspace
+        let workspace_root = requested_workspace
             .canonicalize()
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
+        ensure_workspace_is_external(&workspace_root, &self.managed_root)?;
         let mut project = self.get_project(id)?;
-        project.workspace.roots = vec![workspace_path.to_string_lossy().into_owned()];
+        project.workspace.roots = vec![workspace_root.to_string_lossy().into_owned()];
         project.workspace.primary_root = 0;
         project.workspace.revision = project
             .workspace
@@ -473,8 +473,39 @@ impl Store {
     ) -> Result<Turn, StoreError> {
         self.create_turn_inner(
             None,
+            None,
             session_id,
             origin,
+            input,
+            model,
+            prompt,
+            reasoning_effort,
+            tools_enabled,
+            web_search_context_size,
+            response_format,
+            skill_snapshots,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_resumed_turn(
+        &self,
+        resumed_from_turn_id: TurnId,
+        session_id: SessionId,
+        input: impl Into<String>,
+        model: impl Into<String>,
+        prompt: PromptSnapshot,
+        reasoning_effort: Option<ReasoningEffort>,
+        tools_enabled: bool,
+        web_search_context_size: Option<WebSearchContextSize>,
+        response_format: Option<ModelResponseFormat>,
+        skill_snapshots: Vec<SkillSnapshot>,
+    ) -> Result<Turn, StoreError> {
+        self.create_turn_inner(
+            None,
+            Some(resumed_from_turn_id),
+            session_id,
+            TurnOrigin::User,
             input,
             model,
             prompt,
@@ -503,6 +534,7 @@ impl Store {
     ) -> Result<Turn, StoreError> {
         self.create_turn_inner(
             Some(attempt_id),
+            None,
             session_id,
             origin,
             input,
@@ -520,6 +552,7 @@ impl Store {
     fn create_turn_inner(
         &self,
         attempt_id: Option<ActionAttemptId>,
+        resumed_from_turn_id: Option<TurnId>,
         session_id: SessionId,
         origin: TurnOrigin,
         input: impl Into<String>,
@@ -544,6 +577,28 @@ impl Store {
         let mut attempt = attempt_id
             .map(|id| self.get_action_attempt(id))
             .transpose()?;
+        if attempt_id.is_some() && resumed_from_turn_id.is_some() {
+            return Err(StoreError::Invariant(
+                "A Workflow Action Turn cannot resume a standalone Turn".to_string(),
+            ));
+        }
+        if let Some(interrupted_id) = resumed_from_turn_id {
+            let interrupted = self.get_turn(interrupted_id)?;
+            if interrupted.session_id != session_id
+                || interrupted.status != TurnStatus::Interrupted
+                || self.is_workflow_turn(interrupted_id)?
+            {
+                return Err(StoreError::Invariant(
+                    "Resume source must be an interrupted standalone Turn in the same Session"
+                        .to_string(),
+                ));
+            }
+            if self.is_turn_resumed(interrupted_id)? {
+                return Err(StoreError::Invariant(format!(
+                    "Interrupted Turn {interrupted_id} was already resumed"
+                )));
+            }
+        }
         if let Some(attempt) = attempt.as_ref() {
             let invocation = self.get_action_invocation(attempt.invocation_id)?;
             let valid_origin = match (origin, invocation.source_human_request_id) {
@@ -580,6 +635,7 @@ impl Store {
         }
         let now = Utc::now();
         let project = self.get_project(session.project_id)?;
+        ensure_workspace_attachment_available(&project.workspace)?;
         let environment = TurnEnvironmentSnapshot::materialize(
             project.workspace,
             self.managed_root.to_string_lossy().into_owned(),
@@ -591,6 +647,7 @@ impl Store {
             session_id,
             status: TurnStatus::Queued,
             origin,
+            resumed_from_turn_id,
             input,
             output: None,
             model: model.into(),
@@ -656,6 +713,34 @@ impl Store {
              ORDER BY t.updated_at ASC, t.id ASC",
             [],
         )
+    }
+
+    pub fn is_workflow_turn(&self, turn_id: TurnId) -> Result<bool, StoreError> {
+        self.get_turn(turn_id)?;
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM action_attempts
+                   WHERE json_extract(document_json, '$.turn_id') = ?1
+                 )",
+                [turn_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn is_turn_resumed(&self, turn_id: TurnId) -> Result<bool, StoreError> {
+        self.get_turn(turn_id)?;
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM turns
+                   WHERE json_extract(document_json, '$.resumed_from_turn_id') = ?1
+                 )",
+                [turn_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn start_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
@@ -3099,6 +3184,32 @@ impl Store {
         crate::rollout::reconstruct(&records)
     }
 
+    pub fn session_rollout_status(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionRolloutStatus, StoreError> {
+        self.get_session(session_id)?;
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
+        let records = crate::rollout::read(&self.shared.rollout_root, session_id)?;
+        let last_sequence = records.last().map_or(0, |record| record.sequence);
+        let projected_sequence = self
+            .connection()?
+            .query_row(
+                "SELECT last_sequence FROM session_rollout_projection WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(SessionRolloutStatus {
+            version: SESSION_ROLLOUT_VERSION,
+            last_sequence,
+            projected_sequence,
+        })
+    }
+
     fn commit_session_rollout_item(
         &self,
         session_id: SessionId,
@@ -3433,6 +3544,34 @@ fn ensure_workspace_is_external(workspace: &Path, managed_root: &Path) -> Result
         return Err(StoreError::Invariant(
             "Project Workspace must be separate from PaperMachine managed state".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn ensure_workspace_attachment_available(
+    workspace: &WorkspaceAttachment,
+) -> Result<(), StoreError> {
+    workspace.validate().map_err(StoreError::Invariant)?;
+    for root in &workspace.roots {
+        let attached = Path::new(root);
+        let metadata = std::fs::symlink_metadata(attached).map_err(|error| {
+            StoreError::Invariant(format!("Workspace root is unavailable: {root}: {error}"))
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(StoreError::Invariant(format!(
+                "Workspace root is not a real directory: {root}"
+            )));
+        }
+        let canonical = attached.canonicalize().map_err(|error| {
+            StoreError::Invariant(format!(
+                "Workspace root cannot be resolved: {root}: {error}"
+            ))
+        })?;
+        if canonical != attached {
+            return Err(StoreError::Invariant(format!(
+                "Workspace root no longer matches its attached canonical path: {root}"
+            )));
+        }
     }
     Ok(())
 }

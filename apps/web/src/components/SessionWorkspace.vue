@@ -36,6 +36,7 @@
           type="button"
           :title="t('session.startWorkflow')"
           :aria-label="t('session.startWorkflow')"
+          :disabled="!workspaceAvailable"
           @click="$emit('open-workflow')"
         >
           <GitBranch :size="16" />
@@ -72,6 +73,10 @@
 
           <article v-for="turn in view.turns" :key="turn.id" class="turn-block">
             <div :class="turn.origin === 'user' ? 'user-message' : 'workflow-message'">
+              <span v-if="turn.resumed_from_turn_id" class="message-origin">
+                <Play :size="12" />
+                {{ t('session.resumedFrom', { id: shortId(turn.resumed_from_turn_id) }) }}
+              </span>
               <span v-if="turn.origin === 'workflow'" class="message-origin">
                 <GitBranch :size="12" />
                 {{ t('session.workflowTask') }}
@@ -106,6 +111,11 @@
                     <ChevronDown :size="14" />
                   </summary>
                   <div class="activity-payload step-payload">
+                    <dl v-if="step.effect_disposition || step.execution_state || step.tool_call_id" class="tool-effect-meta">
+                      <div v-if="step.effect_disposition"><dt>{{ t('session.effectDisposition') }}</dt><dd>{{ step.effect_disposition }}</dd></div>
+                      <div v-if="step.execution_state"><dt>{{ t('session.executionState') }}</dt><dd>{{ step.execution_state }}</dd></div>
+                      <div v-if="step.tool_call_id"><dt>{{ t('session.toolCallId') }}</dt><dd>{{ step.tool_call_id }}</dd></div>
+                    </dl>
                     <div>
                       <span>{{ t('common.input') }}</span>
                       <pre>{{ pretty(step.input) }}</pre>
@@ -150,6 +160,26 @@
                   <ChevronDown :size="14" />
                 </summary>
                 <div class="step-list">
+                <details class="prompt-snapshot-row">
+                  <summary>
+                    <span class="step-kind-icon" data-kind="system"><Info :size="13" /></span>
+                    <span class="step-name">{{ t('session.environment') }}</span>
+                    <span class="step-meta">
+                      {{ accessLabel(turn.environment.authorization.preset) }} · {{ turn.environment.authorization_sha256.slice(0, 10) }}
+                    </span>
+                    <ChevronRight :size="13" />
+                  </summary>
+                  <div class="step-payload">
+                    <div>
+                      <span>{{ t('session.workspaceAttachment') }} · r{{ turn.environment.workspace.revision }}</span>
+                      <pre>{{ pretty({ id: turn.environment.workspace.id, roots: turn.environment.workspace.roots, primary_root: turn.environment.workspace.primary_root, cwd: turn.environment.cwd }) }}</pre>
+                    </div>
+                    <div>
+                      <span>{{ t('session.materializedAuthorization') }} · {{ turn.environment.authorization_sha256 }}</span>
+                      <pre>{{ pretty(turn.environment.authorization) }}</pre>
+                    </div>
+                  </div>
+                </details>
                 <details v-if="actionForTurn(turn.id)" class="prompt-snapshot-row">
                   <summary>
                     <span class="step-kind-icon" data-kind="workflow"><GitBranch :size="13" /></span>
@@ -228,6 +258,14 @@
             <div v-else-if="turn.error" class="turn-error" role="alert">
               <CircleAlert :size="15" />
               <span>{{ turn.error }}</span>
+              <button
+                v-if="isResumable(turn.id)"
+                class="secondary-button"
+                type="button"
+                @click="$emit('resume-turn', turn.id)"
+              >
+                <Play :size="13" /> {{ t('session.resumeInterruptedTurn') }}
+              </button>
             </div>
           </article>
         </div>
@@ -325,6 +363,8 @@
           <dl>
             <div><dt>{{ t('common.model') }}</dt><dd>{{ view.session.model }}</dd></div>
             <div><dt>Session</dt><dd>{{ shortId(view.session.id) }}</dd></div>
+            <div><dt>{{ t('session.rollout') }}</dt><dd>v{{ view.rollout.version }} · {{ view.rollout.last_sequence }}</dd></div>
+            <div><dt>{{ t('session.projection') }}</dt><dd>{{ view.rollout.projected_sequence }}</dd></div>
             <div><dt>{{ t('common.updated') }}</dt><dd>{{ formatDateTime(view.session.updated_at) }}</dd></div>
           </dl>
         </section>
@@ -385,6 +425,7 @@
               type="button"
               :title="t('session.startWorkflow')"
               :aria-label="t('session.startWorkflow')"
+              :disabled="!workspaceAvailable"
               @click="$emit('open-workflow')"
             >
               <Plus :size="14" />
@@ -656,6 +697,7 @@ import StatusBadge from './StatusBadge.vue'
 
 const props = defineProps<{
   project: Project
+  workspaceAvailable: boolean
   view: SessionView
   events: SessionEvent[]
   skills: ProjectSkill[]
@@ -674,6 +716,7 @@ const emit = defineEmits<{
   'close-session': []
   send: [input: string]
   'cancel-turn': [turnId: string]
+  'resume-turn': [turnId: string]
   'open-workflow': []
   'inspect-workflow': [workflowId: string]
   'pause-workflow': [workflowId: string]
@@ -728,9 +771,10 @@ const interactiveComposerLocked = computed(
   () => Boolean(interactiveWorkflow.value && !workflowIsTerminal(interactiveWorkflow.value)) && !composerHumanRequest.value,
 )
 const composerDisabled = computed(
-  () => sessionIsArchived.value || Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
+  () => !props.workspaceAvailable || sessionIsArchived.value || Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
 )
 const composerPlaceholder = computed(() => {
+  if (!props.workspaceAvailable) return t('session.workspaceUnavailable')
   if (sessionIsArchived.value) return t('session.closed')
   if (composerHumanRequest.value) return composerHumanRequest.value.question
   if (interactiveComposerLocked.value) return t('session.preparingNextTurn')
@@ -837,6 +881,9 @@ function noticesFor(turnId: string) {
 }
 function liveOutput(turnId: string): string {
   return liveAssistantOutput(props.events, turnId)
+}
+function isResumable(turnId: string): boolean {
+  return props.view.resumable_turn_ids.includes(turnId)
 }
 function noticeText(event: SessionEvent): string {
   if (event.type === 'context_trimmed') return t('session.contextCompacted', { count: String(event.removed_items ?? 0) })

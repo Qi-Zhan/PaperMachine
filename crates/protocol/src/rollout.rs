@@ -15,6 +15,15 @@ use serde::Serialize;
 
 pub const SESSION_ROLLOUT_VERSION: u32 = 1;
 
+/// Observable relationship between the canonical JSONL rollout and its
+/// SQLite query projection.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct SessionRolloutStatus {
+    pub version: u32,
+    pub last_sequence: u64,
+    pub projected_sequence: u64,
+}
+
 /// One durable, monotonically sequenced fact in a Session rollout.
 ///
 /// Rollouts are the canonical source for model context. SQLite stores the

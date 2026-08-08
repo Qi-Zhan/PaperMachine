@@ -21,14 +21,13 @@ const SENSITIVE_WORKSPACE_FILES: [&str; 3] = [".git-credentials", ".npmrc", ".py
 /// Stable user-facing choices. These values order Workflow ceilings, but all
 /// enforcement consumes [`AuthorizationContext`] instead of this preset.
 #[derive(
-    Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AccessPreset {
     ModelOnly,
     ReadOnly,
     Workspace,
-    #[default]
     Research,
     FullAccess,
 }

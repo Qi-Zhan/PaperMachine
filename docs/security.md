@@ -61,8 +61,8 @@ DOM.
 ## Agent tools
 
 Every Session selects one of five access presets. `model_only` has no resource
-tools; `read_only` can only read its Session Workspace; `workspace` adds
-Workspace writes and sandboxed commands; `research` adds hosted web search and
+tools; `read_only` can only read the attached Workspace authorized for the
+Turn; `workspace` adds writes there and sandboxed commands; `research` adds hosted web search and
 controlled URL fetching; `full_access` allows host files and child-process
 network after explicit human grant. Even `full_access` commands remain inside a
 platform sandbox so PaperMachine-managed state can stay unreadable and
@@ -84,6 +84,12 @@ capabilities, and network capabilities. The Turn persists that policy and its
 SHA-256. Tool schemas are filtered before model sampling, and registry dispatch
 plus each built-in implementation rechecks the same materialized context.
 Omitting a schema is therefore not the enforcement boundary.
+
+Before creating that Turn, the Store verifies that every attached root still
+exists as a real directory at the canonical path recorded by the attachment.
+A removed root or a path replaced by a symlink fails before model sampling.
+Relocation is an explicit Project operation that creates a later attachment
+revision; it never mutates the immutable environment of an earlier Turn.
 
 For every preset below `full_access`, `read_file` and `write_file` resolve paths
 and symlinks against the snapshotted Workspace roots. Direct file operations
@@ -158,6 +164,10 @@ not silently rewrite the endpoint.
   tools must inspect external state first. An arbitrary command is `unknown`,
   because PaperMachine cannot prove whether its external effect happened before
   the process disappeared, and is therefore surfaced without automatic replay.
+- A standalone interrupted Turn is terminal. The explicit Resume API creates a
+  new Turn in the same Session and consumes the already committed context; it
+  cannot reopen the old Turn. Workflow-owned Turns are recovered only by their
+  Workflow runtime.
 - An Action continues until the model returns a terminal answer, the user
   finishes/interrupts/cancels it, or an infrastructure/provider error occurs.
   Provider request and stream-idle timeouts protect broken connections, and

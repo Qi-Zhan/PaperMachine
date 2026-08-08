@@ -184,7 +184,6 @@
                 class="select-input"
                 :aria-label="t('common.model')"
               >
-                <option value="">{{ t('dialog.serverDefault') }} — {{ defaultModel }}</option>
                 <option v-if="unknownSelectedModel" :value="model">{{ model }}</option>
                 <option v-for="profile in modelProfiles" :key="profile.id" :value="profile.id">
                   {{ profile.id }} · {{ profile.provider }}/{{ profile.model }}
@@ -196,7 +195,7 @@
                 class="text-input"
                 autocomplete="off"
                 :aria-label="t('common.model')"
-                :placeholder="t('dialog.serverDefault')"
+                :placeholder="defaultModel"
               />
             </label>
             <label>
@@ -410,6 +409,7 @@ const visibleFields = computed(() => schemaFields.value.filter((field) => !field
 const canSubmit = computed(() => Boolean(
   props.project &&
   selectedWorkflow.value &&
+  model.value.trim() &&
   (requestMode.value === 'none' || requestText.value.trim()) &&
   !programLoading.value &&
   !programError.value,
@@ -427,7 +427,7 @@ watch(
     localError.value = ''
     programError.value = ''
     contextMode.value = 'project_snapshot'
-    model.value = props.session?.model ?? ''
+    model.value = props.session?.model ?? props.defaultModel
     access.value = props.session?.access ?? 'research'
     enabledSkills.value = [...(props.session?.enabled_skills ?? [])]
     initializeValues()

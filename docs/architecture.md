@@ -1,5 +1,10 @@
 # Architecture
 
+> A Project is a research world persistently managed by PaperMachine; a
+> Workspace is the user filesystem an Agent is authorized to operate;
+> structured runtime APIs connect them, and they never share storage or a
+> security boundary.
+
 ## Product invariants
 
 1. **Project is the ownership root.** It owns every Session, Workflow,
@@ -36,7 +41,7 @@
     creation route exists.
 13. **A Workflow launch is explicit and immutable.** The run snapshots its
     concrete request, validated params, optional run instructions, trigger,
-    default model, skills, permission ceiling, per-Agent class overrides, and
+    selected model profile, skills, permission ceiling, per-Agent class overrides, and
     either fresh or bounded Project context.
 14. **Instructions and task data are separate.** Runtime, Project, run, Agent,
     Action contract, skill, and control instructions form the prompt snapshot.
@@ -140,6 +145,13 @@ disappear; it can be reattached. Each Project has its own Store, Workflow
 catalog, Session runtime, and Workflow scheduler; process-wide semaphores still
 bound concurrent work across Projects.
 
+The HTTP representation keeps this boundary structural. Project creation and
+relocation accept `workspace: { roots, primary_root }`; Project listings expose
+that attachment plus `workspace_available`. There is no flattened path field.
+An unavailable attachment affects execution, not Project identity or access to
+managed history. Relocation increments the attachment revision, and every later
+Turn snapshots the new revision.
+
 ## Workflow launch
 
 The Project page and Session header open the same Run Workflow surface. The
@@ -205,22 +217,24 @@ to stderr and captured with a size limit.
 
 A user Turn or workflow action follows the same core path:
 
-1. Append the Turn to its Session rollout, then project it with its immutable
+1. Verify that every attached Workspace root is still a real directory at its
+   recorded canonical path. If not, fail before creating a Turn.
+2. Append the Turn to its Session rollout, then project it with its immutable
    Workspace/authorization environment,
    Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
    whether input is a direct/verified human message or program-generated
    Workflow work.
-2. Reconstruct canonical model context by replaying that append-only rollout.
-3. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
+3. Reconstruct canonical model context by replaying that append-only rollout.
+4. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
    prompt layers into the exact provider instructions.
-4. Stream a Responses API sample. Deltas remain ephemeral; completed model
+5. Stream a Responses API sample. Deltas remain ephemeral; completed model
    items and cursor checkpoints cross the rollout durability barrier before
    their SQLite projections. Each Session
    retains one sequential WebSocket continuation chain; unsupported providers
    fall back to HTTP SSE.
-5. Execute requested tools, append stable call/result and Step lifecycle facts,
+6. Execute requested tools, append stable call/result and Step lifecycle facts,
    project them, and sample again.
-6. Finish the Turn by journaling its output, usage, and terminal state. SQLite
+7. Finish the Turn by journaling its output, usage, and terminal state. SQLite
    never stores a cumulative context copy in the Turn document. If a
    provider reports an incomplete response after consuming tokens, retry usage
    is accumulated; a terminal failure persists a failed model Step and charges
@@ -255,7 +269,9 @@ shape, including compatible implementations such as DeepSeek's Responses
 endpoint. Provider formats are an adapter boundary, not a Workflow DSL concern.
 
 Outside explicit demo mode, the server must load a valid provider configuration,
-and all Session/Agent model selection uses its profile IDs.
+and all Session/Agent model selection uses its profile IDs. Workflow launch
+always names a non-empty model profile and access ceiling; the API does not use
+an omitted or blank value as an implicit profile selection.
 
 History is stored locally, so providers may set `store_responses = false`.
 Before every model sample the agent estimates instruction, tool-schema, output,
@@ -375,7 +391,13 @@ non-terminal Workflow is recovered. A standalone Turn with a durable terminal
 candidate is committed without another provider sample. Otherwise it becomes
 `interrupted`; its partial rollout context, recovered tool outputs, and an
 explicit process-restart marker are committed for the next user-directed Turn.
-It is never automatically sampled again. A recovered Workflow reruns its
+It is never automatically sampled again. The Session view exposes the canonical
+rollout version/sequence, its SQLite projection sequence, and the IDs of
+standalone interrupted Turns that may be resumed. Explicit Resume creates a
+new user Turn in the same Session over the committed context; the interrupted
+Turn remains terminal and is never reopened. Workflow-owned Turns are recovered
+only by their Workflow runtime and are not user-resumable through this endpoint.
+A recovered Workflow reruns its
 immutable Python source from the entrypoint. DSL operations use deterministic
 logical effect paths; SQLite journals each path with the exact request hash,
 status, result, and error. A completed effect returns its stored result, while

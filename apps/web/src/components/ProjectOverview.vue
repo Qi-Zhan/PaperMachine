@@ -17,11 +17,11 @@
         </div>
       </div>
       <div class="project-header-actions">
-        <button class="secondary-button" type="button" @click="$emit('run-workflow')">
+        <button class="secondary-button" type="button" :disabled="!workspaceAvailable" @click="$emit('run-workflow')">
           <GitBranch :size="15" />
           {{ t('project.runWorkflow') }}
         </button>
-        <button class="primary-button" type="button" @click="$emit('new-session')">
+        <button class="primary-button" type="button" :disabled="!workspaceAvailable" @click="$emit('new-session')">
           <MessageSquarePlus :size="16" />
           {{ t('sidebar.newSession') }}
         </button>
@@ -51,6 +51,19 @@
         </dl>
       </section>
 
+      <section class="workspace-attachment-card" :data-available="workspaceAvailable">
+        <FolderTree :size="19" />
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <strong>{{ workspaceAvailable ? t('project.workspaceAttached') : t('project.workspaceUnavailable') }}</strong>
+          <code>{{ primaryWorkspace }}</code>
+          <small>{{ t('project.workspaceRevision', { revision: overview.project.workspace.revision }) }} · {{ overview.project.workspace.id }}</small>
+        </div>
+        <button v-if="!workspaceAvailable" class="secondary-button" type="button" @click="$emit('relocate-workspace')">
+          {{ t('project.reattachWorkspace') }}
+        </button>
+      </section>
+
       <section class="overview-section project-progress-panel">
         <div class="project-progress-heading">
           <div>
@@ -62,7 +75,7 @@
             <button
               class="secondary-button"
               type="button"
-              :disabled="summaryBusy"
+              :disabled="summaryBusy || !workspaceAvailable"
               @click="runSummary(0)"
             >
               <LoaderCircle v-if="summaryBusy" class="spin" :size="14" />
@@ -72,7 +85,7 @@
             <button
               class="primary-button"
               type="button"
-              :disabled="summaryBusy || summaryIntervalDraft <= 0"
+              :disabled="summaryBusy || summaryIntervalDraft <= 0 || !workspaceAvailable"
               @click="runSummary(summaryIntervalDraft)"
             >
               <Clock3 :size="14" />
@@ -192,7 +205,7 @@
         <div v-if="!standaloneSessions.length && !workflowGroups.length" class="empty-band">
           <MessageSquare :size="18" />
           <span>{{ t('project.noSessions') }}</span>
-          <button class="text-command" type="button" @click="$emit('new-session')">{{ t('project.createSession') }}</button>
+          <button class="text-command" type="button" :disabled="!workspaceAvailable" @click="$emit('new-session')">{{ t('project.createSession') }}</button>
         </div>
       </section>
 
@@ -299,7 +312,7 @@
     </main>
 
     <footer class="overview-composer">
-      <button class="composer-shell" type="button" @click="$emit('new-session')">
+      <button class="composer-shell" type="button" :disabled="!workspaceAvailable" @click="$emit('new-session')">
         <span>{{ t('project.startSessionIn', { name: overview.project.name }) }}</span>
         <span class="composer-submit"><ArrowUp :size="17" /></span>
       </button>
@@ -314,6 +327,7 @@ import {
   ExternalLink,
   FileCode2,
   FileText,
+  FolderTree,
   GitBranch,
   MessageSquare,
   MessageSquarePlus,
@@ -337,6 +351,7 @@ const props = defineProps<{
   skills: ProjectSkill[]
   promptBusy: boolean
   summaryBusy: boolean
+  workspaceAvailable: boolean
 }>()
 const { t } = useAppI18n()
 const emit = defineEmits<{
@@ -349,7 +364,12 @@ const emit = defineEmits<{
   'run-workflow': []
   'run-summary': [input: { instructions: string; intervalMinutes: number; replaceWorkflowId?: string }]
   'stop-summary': [workflowId: string]
+  'relocate-workspace': []
 }>()
+
+const primaryWorkspace = computed(
+  () => props.overview.project.workspace.roots[props.overview.project.workspace.primary_root] ?? '',
+)
 
 const defaultSummaryInstructions =
   'Summarize the current research state for a project collaborator. Prioritize evidence-backed conclusions, active work, blockers, unresolved questions, and concrete next steps. Keep provenance visible and do not hide failed or inconclusive routes.'

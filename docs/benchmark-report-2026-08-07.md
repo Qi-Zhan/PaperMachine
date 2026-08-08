@@ -273,7 +273,8 @@ research 内核”。用户表达的是长期协作结构；runtime 负责解释
 
 `interactive-agent` 和 `project-summary` 都继续作为 built-in Workflow，而不是特殊旁路。
 Project 管理多个正在运行或已完成的 Workflow；Workflow 管理参与的 Session。Project
-目录是它的持久 research workspace。summary Workflow 读取 Project snapshot，在手动、
+是 PaperMachine 持久管理的研究世界；Agent 操作的是单独挂载、用户自有的 Workspace。
+summary Workflow 读取 Project snapshot，在手动、
 定时或 stale-on-open 条件触发时生成 HTML artifact；它的 prompt 使用正常的 Project、
 Workflow、Agent 分层机制。这样普通交互、定时总结和复杂研究共享同一个 runtime，用户
 又不需要理解额外的 “instance” 概念。

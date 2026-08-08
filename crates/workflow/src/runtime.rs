@@ -1544,9 +1544,7 @@ struct CreateAgentEffect {
     role: String,
     system_prompt: String,
     model: String,
-    #[serde(default)]
     skills: Vec<String>,
-    #[serde(default)]
     access: AccessPreset,
 }
 

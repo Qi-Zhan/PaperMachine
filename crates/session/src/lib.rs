@@ -168,6 +168,36 @@ impl SessionRuntime {
                 None,
                 None,
                 None,
+                None,
+            )
+            .await?;
+        self.schedule(turn.id).await?;
+        Ok(turn)
+    }
+
+    pub async fn resume_interrupted(
+        &self,
+        interrupted_turn_id: TurnId,
+    ) -> Result<Turn, SessionRuntimeError> {
+        let interrupted = self.inner.store.get_turn(interrupted_turn_id)?;
+        let turn = self
+            .prepare_turn(
+                interrupted.session_id,
+                TurnOrigin::User,
+                format!("Resume interrupted Turn {interrupted_turn_id}."),
+                None,
+                prompt_layer_from_text(
+                    PromptLayerKind::Control,
+                    "Process-recovery instruction",
+                    "runtime:resume-interrupted-turn",
+                    "Continue the original task from durable Session context. Inspect any execution_unknown tool outcomes before repeating side effects.",
+                ),
+                None,
+                true,
+                None,
+                None,
+                None,
+                Some(interrupted_turn_id),
             )
             .await?;
         self.schedule(turn.id).await?;
@@ -196,6 +226,7 @@ impl SessionRuntime {
                 ),
                 None,
                 true,
+                None,
                 None,
                 None,
                 None,
@@ -232,6 +263,7 @@ impl SessionRuntime {
                 web_search_context_size,
                 response_format,
                 Some(context.action_attempt_id),
+                None,
             )
             .await?;
         self.run_tracked_turn(turn.id, Some(context), cancellation)
@@ -302,6 +334,7 @@ impl SessionRuntime {
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: Option<ActionAttemptId>,
+        resumed_from_turn_id: Option<TurnId>,
     ) -> Result<Turn, SessionRuntimeError> {
         let session = self.inner.store.get_session(session_id)?;
         let model = if model_override.is_some_and(|model| !model.trim().is_empty()) {
@@ -325,6 +358,19 @@ impl SessionRuntime {
                 attempt_id,
                 session_id,
                 origin,
+                input,
+                model,
+                prompt,
+                reasoning_effort,
+                tools_enabled,
+                web_search_context_size,
+                response_format,
+                resolved.snapshots,
+            )?
+        } else if let Some(interrupted_turn_id) = resumed_from_turn_id {
+            self.inner.store.create_resumed_turn(
+                interrupted_turn_id,
+                session_id,
                 input,
                 model,
                 prompt,
