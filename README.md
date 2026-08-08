@@ -311,6 +311,10 @@ pnpm --dir apps/web test
 pnpm --dir apps/web build
 ```
 
+On macOS and Linux, the Rust workspace run includes the real-process `SIGKILL`
+matrix in `crates/server/tests/process_recovery.rs`. Native Windows is not in
+the current release test scope.
+
 See the accepted [runtime kernel target](docs/runtime-kernel.md),
 [architecture](docs/architecture.md), [Project/Workspace semantics](docs/project-workspace.md),
 [prompt model](docs/prompt-model.md),

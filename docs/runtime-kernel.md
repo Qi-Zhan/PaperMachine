@@ -147,9 +147,26 @@ Workflow-owned Turns resume automatically because the Workflow is the durable
 control-flow owner. This includes the ordinary built-in `goal` Workflow.
 Standalone user Turns interrupted by process loss become explicitly
 `interrupted` and wait for a user resume decision. Resume creates a new Turn
-over committed Session context; it never reopens the interrupted Turn. An execution-unknown command
-is surfaced to the model and user; it is never silently treated as either
-failed or completed.
+over committed Session context; it never reopens the interrupted Turn. An
+execution-unknown command is surfaced to the model and user; it is never
+silently treated as either failed or completed.
+
+The macOS/Linux process test launches the real server binary against a local
+Responses-compatible provider, pauses only debug builds at named durability
+boundaries, sends the server `SIGKILL`, and restarts it over the same managed
+data. The matrix verifies:
+
+| Killed state | Required restart result |
+| --- | --- |
+| rollout appended, SQLite projection pending | replay reaches the exact rollout sequence |
+| terminal model answer checkpointed, Turn commit pending | commit the answer without another sample |
+| unknown-effect tool prepared, execution not started | execute exactly once |
+| unknown-effect tool marked executing | surface `execution_unknown`, never replay |
+| standalone model sample in flight | interrupt without resampling; require one explicit new resume Turn |
+
+The fault controls are absent from release CLI parsing, and their boundary
+calls compile to no-ops in release builds. Native Windows is intentionally not
+part of this matrix.
 
 ## Adaptation boundary
 

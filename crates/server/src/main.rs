@@ -38,6 +38,14 @@ struct Args {
     max_concurrent_runs: usize,
     #[arg(long, default_value_t = 4)]
     max_parallel_actions: usize,
+    /// Debug-build-only durability boundary used by process recovery tests.
+    #[cfg(debug_assertions)]
+    #[arg(long, hide = true, requires = "process_fault_marker")]
+    process_fault_boundary: Option<String>,
+    /// Marker created when the armed debug durability boundary is reached.
+    #[cfg(debug_assertions)]
+    #[arg(long, hide = true, requires = "process_fault_boundary")]
+    process_fault_marker: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -56,6 +64,17 @@ async fn run_server() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    #[cfg(debug_assertions)]
+    if let (Some(boundary), Some(marker)) = (
+        args.process_fault_boundary.as_ref(),
+        args.process_fault_marker.as_ref(),
+    ) {
+        papermachine_store::process_fault::install_process_fault_injection(
+            boundary.clone(),
+            marker.clone(),
+        )
+        .map_err(anyhow::Error::msg)?;
+    }
     let resource_root = args.resource_root.canonicalize().with_context(|| {
         format!(
             "PaperMachine resource root does not exist: {}",

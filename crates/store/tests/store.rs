@@ -125,8 +125,7 @@ fn turn_creation_requires_the_attached_workspace_to_be_available() {
 #[test]
 fn interrupted_standalone_turn_can_create_exactly_one_new_resume_turn() {
     let directory = tempdir().expect("temporary directory should be created");
-    let store =
-        Store::open_in_memory(directory.path().join("managed")).expect("store should open");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Resume", "");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -165,7 +164,11 @@ fn interrupted_standalone_turn_can_create_exactly_one_new_resume_turn() {
         .expect("Resume should create a new Turn");
     assert_ne!(resumed.id, interrupted.id);
     assert_eq!(resumed.resumed_from_turn_id, Some(interrupted.id));
-    assert!(store.is_turn_resumed(interrupted.id).expect("resume should query"));
+    assert!(
+        store
+            .is_turn_resumed(interrupted.id)
+            .expect("resume should query")
+    );
 
     let error = store
         .create_resumed_turn(

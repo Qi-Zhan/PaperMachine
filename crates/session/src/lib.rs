@@ -887,6 +887,9 @@ async fn run_scheduled_turn(
         .unwrap_or(inner.model_context_window);
     match runtime.run(request, cancellation).await {
         Ok(result) => {
+            papermachine_store::process_fault::reach_process_fault_boundary(
+                papermachine_store::process_fault::TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT,
+            );
             inner
                 .store
                 .complete_turn(turn.id, result.final_message, result.usage)?;
@@ -1381,7 +1384,11 @@ impl AgentEventSink for SessionAgentEventSink {
                     .await
                     .insert(call.call_id.clone(), step.id);
                 self.charge_action_step().await?;
-                self.append(Some(step.id), SessionEventPayload::ToolCallStarted { call })
+                self.append(Some(step.id), SessionEventPayload::ToolCallStarted { call })?;
+                papermachine_store::process_fault::reach_process_fault_boundary(
+                    papermachine_store::process_fault::TOOL_PREPARED_BEFORE_EXECUTION,
+                );
+                Ok(())
             }
             AgentEvent::ToolExecutionStarted { call_id } => {
                 let step_id = self.tool_steps.lock().await.get(&call_id).copied();
@@ -1391,7 +1398,11 @@ impl AgentEventSink for SessionAgentEventSink {
                 self.store
                     .start_tool_execution(step_id)
                     .map(|_| ())
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                papermachine_store::process_fault::reach_process_fault_boundary(
+                    papermachine_store::process_fault::TOOL_EXECUTION_STARTED,
+                );
+                Ok(())
             }
             AgentEvent::ToolCallCompleted {
                 call_id,

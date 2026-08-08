@@ -3621,6 +3621,7 @@ dependencies = [
  "papermachine-store",
  "papermachine-tools",
  "papermachine-workflow",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

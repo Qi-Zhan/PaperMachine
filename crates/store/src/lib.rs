@@ -3,6 +3,8 @@
 mod artifact;
 mod catalog;
 mod database;
+#[doc(hidden)]
+pub mod process_fault;
 mod rollout;
 
 use papermachine_protocol::AccessPreset;

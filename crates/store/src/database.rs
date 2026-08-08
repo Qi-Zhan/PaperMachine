@@ -3258,6 +3258,9 @@ impl Store {
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?
             .insert(session_id, sequence);
+        crate::process_fault::reach_process_fault_boundary(
+            crate::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION,
+        );
         let projection = (|| -> Result<(), StoreError> {
             apply_rollout_record_tx(&transaction, &record)?;
             set_rollout_projection_tx(&transaction, session_id, sequence)?;
