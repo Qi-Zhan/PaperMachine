@@ -12,7 +12,6 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
-use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::HostedTool;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
@@ -29,6 +28,7 @@ use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
+use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkflowId;
@@ -63,14 +63,12 @@ pub struct AgentTurnRequest {
     pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
-    pub workspace_root: PathBuf,
     pub sandbox_root: PathBuf,
-    pub protected_root: PathBuf,
+    pub environment: TurnEnvironmentSnapshot,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub instructions: String,
     pub objective: String,
-    pub access: AgentAccessProfile,
     pub initial_history: Vec<ModelInputItem>,
     pub initial_usage: TokenUsage,
     pub completed_model_steps: u32,
@@ -90,9 +88,8 @@ impl AgentTurnRequest {
         project_id: ProjectId,
         session_id: SessionId,
         turn_id: TurnId,
-        workspace_root: PathBuf,
+        environment: TurnEnvironmentSnapshot,
         sandbox_root: PathBuf,
-        protected_root: PathBuf,
         model: impl Into<String>,
         instructions: impl Into<String>,
         objective: impl Into<String>,
@@ -104,14 +101,12 @@ impl AgentTurnRequest {
             workflow_id: None,
             action_invocation_id: None,
             action_attempt_id: None,
-            workspace_root,
             sandbox_root,
-            protected_root,
+            environment,
             model: model.into(),
             reasoning_effort: None,
             instructions: instructions.into(),
             objective: objective.into(),
-            access: AgentAccessProfile::Research,
             initial_history: Vec::new(),
             initial_usage: TokenUsage::default(),
             completed_model_steps: 0,
@@ -328,7 +323,7 @@ impl AgentRuntime {
         request: AgentTurnRequest,
         cancellation: CancellationToken,
     ) -> Result<AgentTurnResult, AgentError> {
-        let workspace = tokio::fs::canonicalize(&request.workspace_root)
+        let workspace = tokio::fs::canonicalize(&request.environment.cwd)
             .await
             .map_err(|error| ModelError::Configuration(error.to_string()))?;
         if !workspace.is_dir() {
@@ -356,11 +351,14 @@ impl AgentRuntime {
         let execution_gate = Arc::new(RwLock::new(()));
         let mut total_usage = request.initial_usage;
         let tool_definitions = if request.tools_enabled {
-            self.tools.definitions_for(request.access)
+            self.tools
+                .definitions_for(&request.environment.authorization)
         } else {
             Vec::new()
         };
-        let hosted_tools = if request.tools_enabled && request.access.allows_research_network() {
+        let hosted_tools = if request.tools_enabled
+            && request.environment.authorization.network.hosted_web_search
+        {
             request
                 .hosted_tools
                 .iter()
@@ -527,7 +525,8 @@ impl AgentRuntime {
             let model_step_input = json!({
                 "model": request.model.as_str(),
                 "reasoning_effort": request.reasoning_effort,
-                "access": request.access,
+                "access": request.environment.authorization.preset,
+                "authorization_sha256": request.environment.authorization_sha256,
                 "history_items": history.len(),
                 "estimated_history_tokens": estimated,
                 "history_budget_tokens": history_budget,
@@ -924,10 +923,8 @@ impl AgentRuntime {
                     workflow_id: request.workflow_id,
                     action_invocation_id: request.action_invocation_id,
                     action_attempt_id: request.action_attempt_id,
-                    workspace_root: request.workspace_root.clone(),
                     sandbox_root: request.sandbox_root.clone(),
-                    protected_root: request.protected_root.clone(),
-                    access: request.access,
+                    authorization: request.environment.authorization.clone(),
                     cancellation,
                 };
                 if self.tools.supports_parallel(&call.name).unwrap_or(false) {

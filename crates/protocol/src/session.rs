@@ -1,3 +1,4 @@
+use crate::AccessPreset;
 use crate::ModelInputItem;
 use crate::ModelResponseFormat;
 use crate::ProjectId;
@@ -6,6 +7,7 @@ use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::StepId;
 use crate::TokenUsage;
+use crate::TurnEnvironmentSnapshot;
 use crate::TurnId;
 use crate::WebSearchContextSize;
 use chrono::DateTime;
@@ -39,60 +41,6 @@ pub enum TurnOrigin {
     Workflow,
 }
 
-/// User-facing access profiles. The runtime expands these presets into
-/// concrete file, command, and network capabilities at every enforcement
-/// boundary.
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentAccessProfile {
-    ModelOnly,
-    ReadOnly,
-    Workspace,
-    #[default]
-    Research,
-    FullAccess,
-}
-
-impl AgentAccessProfile {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ModelOnly => "model_only",
-            Self::ReadOnly => "read_only",
-            Self::Workspace => "workspace",
-            Self::Research => "research",
-            Self::FullAccess => "full_access",
-        }
-    }
-
-    pub const fn allows_workspace_read(self) -> bool {
-        !matches!(self, Self::ModelOnly)
-    }
-
-    pub const fn allows_workspace_write(self) -> bool {
-        matches!(self, Self::Workspace | Self::Research | Self::FullAccess)
-    }
-
-    pub const fn allows_sandboxed_command(self) -> bool {
-        matches!(self, Self::Workspace | Self::Research)
-    }
-
-    pub const fn allows_research_network(self) -> bool {
-        matches!(self, Self::Research | Self::FullAccess)
-    }
-
-    pub const fn is_unrestricted(self) -> bool {
-        matches!(self, Self::FullAccess)
-    }
-}
-
-impl std::fmt::Display for AgentAccessProfile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Session {
     pub id: SessionId,
@@ -104,7 +52,7 @@ pub struct Session {
     pub system_prompt: String,
     pub model: String,
     #[serde(default)]
-    pub access: AgentAccessProfile,
+    pub access: AccessPreset,
     pub status: SessionStatus,
     #[serde(default)]
     pub enabled_skills: Vec<String>,
@@ -154,9 +102,9 @@ pub struct Turn {
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
     pub prompt: PromptSnapshot,
-    /// Access snapshot captured when this Turn is created.
-    #[serde(default)]
-    pub access: AgentAccessProfile,
+    /// Immutable Workspace and materialized authorization captured when this
+    /// Turn is created.
+    pub environment: TurnEnvironmentSnapshot,
     /// Internal Action policy used by finalization and JSON-repair Turns.
     /// Ordinary user and Workflow Turns enable tools according to `access`.
     #[serde(default = "default_tools_enabled")]

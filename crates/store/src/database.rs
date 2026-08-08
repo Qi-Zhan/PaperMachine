@@ -98,7 +98,7 @@ impl Store {
         ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
         let workspace_string = workspace_path.to_string_lossy().into_owned();
         let exists = self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace_path') = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace.roots[0]') = ?1)",
             [&workspace_string],
             |row| row.get::<_, bool>(0),
         )?;
@@ -113,7 +113,7 @@ impl Store {
             id,
             name: name.into(),
             description: description.into(),
-            workspace_path: workspace_string,
+            workspace: WorkspaceAttachment::single(workspace_string),
             created_at: now,
             updated_at: now,
         };
@@ -154,7 +154,13 @@ impl Store {
             .map_err(|error| StoreError::Io(error.to_string()))?;
         ensure_workspace_is_external(&workspace_path, &self.managed_root)?;
         let mut project = self.get_project(id)?;
-        project.workspace_path = workspace_path.to_string_lossy().into_owned();
+        project.workspace.roots = vec![workspace_path.to_string_lossy().into_owned()];
+        project.workspace.primary_root = 0;
+        project.workspace.revision = project
+            .workspace
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Invariant("Workspace revision overflow".to_string()))?;
         project.updated_at = Utc::now();
         self.update_document(
             "projects",
@@ -209,7 +215,7 @@ impl Store {
             system_prompt,
             model,
             enabled_skills,
-            AgentAccessProfile::Research,
+            AccessPreset::Research,
         )
     }
 
@@ -220,7 +226,7 @@ impl Store {
         system_prompt: impl Into<String>,
         model: impl Into<String>,
         enabled_skills: Vec<String>,
-        access: AgentAccessProfile,
+        access: AccessPreset,
     ) -> Result<Session, StoreError> {
         self.ensure_project(project_id)?;
         let system_prompt = system_prompt.into();
@@ -373,7 +379,7 @@ impl Store {
     pub fn set_session_access(
         &self,
         session_id: SessionId,
-        access: AgentAccessProfile,
+        access: AccessPreset,
     ) -> Result<Session, StoreError> {
         let mut session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
@@ -528,6 +534,13 @@ impl Store {
             ));
         }
         let now = Utc::now();
+        let project = self.get_project(session.project_id)?;
+        let environment = TurnEnvironmentSnapshot::materialize(
+            project.workspace,
+            self.managed_root.to_string_lossy().into_owned(),
+            session.access,
+        )
+        .map_err(StoreError::Invariant)?;
         let turn = Turn {
             id: TurnId::new(),
             session_id,
@@ -538,7 +551,7 @@ impl Store {
             model: model.into(),
             reasoning_effort,
             prompt,
-            access: session.access,
+            environment,
             tools_enabled,
             web_search_context_size,
             response_format,
@@ -1389,7 +1402,7 @@ impl Store {
         system_prompt: impl Into<String>,
         model: impl Into<String>,
         skills: Vec<String>,
-        access: AgentAccessProfile,
+        access: AccessPreset,
     ) -> Result<WorkflowParticipant, StoreError> {
         self.create_participant_with_ids(
             workflow_id,
@@ -1417,7 +1430,7 @@ impl Store {
         system_prompt: impl Into<String>,
         model: impl Into<String>,
         skills: Vec<String>,
-        access: AgentAccessProfile,
+        access: AccessPreset,
     ) -> Result<WorkflowParticipant, StoreError> {
         let mut run = self.get_workflow(workflow_id)?;
         if run.status.is_terminal() {

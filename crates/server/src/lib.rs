@@ -484,7 +484,11 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
             .into_iter()
             .map(|project| ProjectLibraryEntry {
                 available: available.contains(&project.id),
-                workspace_available: PathBuf::from(&project.workspace_path).is_dir(),
+                workspace_available: project
+                    .workspace
+                    .roots
+                    .iter()
+                    .all(|root| std::path::Path::new(root).is_dir()),
                 project,
             })
             .collect(),
@@ -497,7 +501,7 @@ struct CreateProjectRequest {
     name: String,
     #[serde(default)]
     description: String,
-    workspace_path: String,
+    workspace: WorkspaceSelection,
 }
 
 async fn create_project(
@@ -507,18 +511,14 @@ async fn create_project(
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("Project name must not be empty"));
     }
-    if request.workspace_path.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "Project Workspace path must not be empty",
-        ));
-    }
-    let workspace = canonical_workspace(&request.workspace_path, true)?;
-    if state
-        .library
-        .list()?
-        .iter()
-        .any(|project| PathBuf::from(&project.workspace_path) == workspace)
-    {
+    let workspace = canonical_workspace_selection(&request.workspace, true)?;
+    if state.library.list()?.iter().any(|project| {
+        project
+            .workspace
+            .roots
+            .iter()
+            .any(|root| std::path::Path::new(root) == workspace)
+    }) {
         return Err(StoreError::Invariant(format!(
             "Project Workspace is already registered: {}",
             workspace.display()
@@ -553,7 +553,7 @@ async fn create_project(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectPathRequest {
-    workspace_path: String,
+    workspace: WorkspaceSelection,
 }
 
 async fn relocate_project(
@@ -564,9 +564,14 @@ async fn relocate_project(
     let project_id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(project_id).await?;
     ensure_project_can_detach(&runtime)?;
-    let workspace = canonical_workspace(&request.workspace_path, false)?;
+    let workspace = canonical_workspace_selection(&request.workspace, false)?;
     if state.library.list()?.iter().any(|candidate| {
-        candidate.id != project_id && PathBuf::from(&candidate.workspace_path) == workspace
+        candidate.id != project_id
+            && candidate
+                .workspace
+                .roots
+                .iter()
+                .any(|root| std::path::Path::new(root) == workspace)
     }) {
         return Err(StoreError::Invariant(format!(
             "Project Workspace is already registered: {}",
@@ -614,6 +619,18 @@ fn canonical_workspace(value: &str, create: bool) -> ApiResult<PathBuf> {
     workspace.canonicalize().map_err(|error| {
         ApiError::bad_request(format!("Project Workspace is unavailable: {error}"))
     })
+}
+
+fn canonical_workspace_selection(
+    selection: &WorkspaceSelection,
+    create: bool,
+) -> ApiResult<PathBuf> {
+    if selection.roots.len() != 1 || selection.primary_root != 0 {
+        return Err(ApiError::bad_request(
+            "The current Project API requires exactly one primary Workspace root",
+        ));
+    }
+    canonical_workspace(&selection.roots[0], create)
 }
 
 fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {
@@ -928,7 +945,7 @@ async fn update_session_system_prompt(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateSessionAccessRequest {
-    access: AgentAccessProfile,
+    access: AccessPreset,
 }
 
 async fn update_session_access(
@@ -1103,13 +1120,13 @@ struct CreateWorkflowRequest {
     #[serde(default)]
     model: String,
     #[serde(default)]
-    access: AgentAccessProfile,
+    access: AccessPreset,
     #[serde(default)]
     enabled_skills: Vec<String>,
     #[serde(default)]
     context_mode: WorkflowContextMode,
     #[serde(default)]
-    agent_access_overrides: BTreeMap<String, AgentAccessProfile>,
+    agent_access_overrides: BTreeMap<String, AccessPreset>,
 }
 
 fn empty_object() -> Value {

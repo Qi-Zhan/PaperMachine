@@ -1,4 +1,5 @@
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AccessPreset;
+use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TurnId;
@@ -16,15 +17,28 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 fn context(root: &std::path::Path) -> ToolContext {
-    context_with_access(root, AgentAccessProfile::Research)
+    context_with_access(root, AccessPreset::Research)
 }
 
-fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> ToolContext {
+fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolContext {
     let fixture_root = root.parent().unwrap_or(root);
     let sandbox_root = fixture_root.join("agent-sandbox");
     let protected_root = fixture_root.join("managed-state");
     std::fs::create_dir_all(&sandbox_root).expect("sandbox fixture should be created");
     std::fs::create_dir_all(&protected_root).expect("managed fixture should be created");
+    let workspace_root = root
+        .canonicalize()
+        .expect("workspace fixture should canonicalize");
+    let protected_root = protected_root
+        .canonicalize()
+        .expect("managed fixture should canonicalize");
+    let authorization = AuthorizationContext::materialize(
+        access,
+        vec![workspace_root.to_string_lossy().into_owned()],
+        workspace_root.to_string_lossy().into_owned(),
+        vec![protected_root.to_string_lossy().into_owned()],
+    )
+    .expect("fixture policy should materialize");
     ToolContext {
         project_id: ProjectId::new(),
         session_id: SessionId::new(),
@@ -32,10 +46,8 @@ fn context_with_access(root: &std::path::Path, access: AgentAccessProfile) -> To
         workflow_id: Some(WorkflowId::new()),
         action_invocation_id: None,
         action_attempt_id: None,
-        workspace_root: root.to_path_buf(),
         sandbox_root,
-        protected_root,
-        access,
+        authorization,
         cancellation: CancellationToken::new(),
     }
 }
@@ -53,25 +65,27 @@ fn registry_exposes_exact_tools_for_each_access_profile() {
         .expect("fetch tool should register")
         .build();
     let names = |access| {
+        let directory = tempdir().expect("temporary workspace should be created");
+        let context = context_with_access(directory.path(), access);
         registry
-            .definitions_for(access)
+            .definitions_for(&context.authorization)
             .into_iter()
             .map(|definition| definition.name)
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(names(AgentAccessProfile::ModelOnly), Vec::<String>::new());
-    assert_eq!(names(AgentAccessProfile::ReadOnly), vec!["read_file"]);
+    assert_eq!(names(AccessPreset::ModelOnly), Vec::<String>::new());
+    assert_eq!(names(AccessPreset::ReadOnly), vec!["read_file"]);
     assert_eq!(
-        names(AgentAccessProfile::Workspace),
+        names(AccessPreset::Workspace),
         vec!["exec_command", "read_file", "write_file"]
     );
     assert_eq!(
-        names(AgentAccessProfile::Research),
+        names(AccessPreset::Research),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
     );
     assert_eq!(
-        names(AgentAccessProfile::FullAccess),
+        names(AccessPreset::FullAccess),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
     );
 }
@@ -88,7 +102,7 @@ async fn registry_rejects_a_hidden_tool_call() {
     let error = registry
         .execute(
             "read_file",
-            context_with_access(directory.path(), AgentAccessProfile::ModelOnly),
+            context_with_access(directory.path(), AccessPreset::ModelOnly),
             json!({"path": "evidence.txt"}),
         )
         .await
@@ -101,21 +115,21 @@ async fn builtins_recheck_access_without_the_registry() {
     let directory = tempdir().expect("temporary directory should be created");
     let write_error = WriteFileTool
         .execute(
-            context_with_access(directory.path(), AgentAccessProfile::ReadOnly),
+            context_with_access(directory.path(), AccessPreset::ReadOnly),
             json!({"path": "forbidden.txt", "content": "no"}),
         )
         .await
         .expect_err("read-only profile must reject direct writes");
     let command_error = ExecCommandTool
         .execute(
-            context_with_access(directory.path(), AgentAccessProfile::ReadOnly),
+            context_with_access(directory.path(), AccessPreset::ReadOnly),
             json!({"command": "true"}),
         )
         .await
         .expect_err("read-only profile must reject direct commands");
     let fetch_error = FetchUrlTool
         .execute(
-            context_with_access(directory.path(), AgentAccessProfile::Workspace),
+            context_with_access(directory.path(), AccessPreset::Workspace),
             json!({"url": "https://example.com"}),
         )
         .await
@@ -132,7 +146,7 @@ async fn full_access_can_read_and_write_outside_the_workspace() {
     std::fs::create_dir(&workspace).expect("workspace should be created");
     let outside = directory.path().join("outside.txt");
     std::fs::write(&outside, "host data").expect("outside probe should be written");
-    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
+    let access = context_with_access(&workspace, AccessPreset::FullAccess);
     let read = ReadFileTool
         .execute(access.clone(), json!({"path": outside}))
         .await
@@ -177,8 +191,10 @@ async fn full_access_still_excludes_papermachine_managed_state() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace should be created");
-    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
-    let managed_secret = access.protected_root.join("project.db");
+    let access = context_with_access(&workspace, AccessPreset::FullAccess);
+    let managed_secret =
+        std::path::PathBuf::from(access.authorization.filesystem.managed_roots[0].clone())
+            .join("project.db");
     std::fs::write(&managed_secret, "private state").expect("managed fixture should be written");
 
     let read_error = ReadFileTool
@@ -224,6 +240,37 @@ async fn parent_path_escape_is_rejected() {
         .await
         .expect_err("escape should fail");
     assert!(matches!(error, ToolError::PathOutsideWorkspace(_)));
+}
+
+#[tokio::test]
+async fn workspace_presets_cannot_read_credentials_or_write_protected_metadata() {
+    let directory = tempdir().expect("temporary directory should be created");
+    std::fs::write(directory.path().join(".env"), "API_KEY=secret")
+        .expect("credential fixture should be written");
+    std::fs::create_dir(directory.path().join(".git"))
+        .expect("Git metadata fixture should be created");
+
+    let read_error = ReadFileTool
+        .execute(
+            context_with_access(directory.path(), AccessPreset::Research),
+            json!({"path": ".env"}),
+        )
+        .await
+        .expect_err("research preset must not expose Workspace credentials");
+    let write_error = WriteFileTool
+        .execute(
+            context_with_access(directory.path(), AccessPreset::Workspace),
+            json!({"path": ".git/config", "content": "[malicious]"}),
+        )
+        .await
+        .expect_err("workspace preset must not mutate protected metadata");
+
+    assert!(matches!(read_error, ToolError::SensitiveWorkspacePath(_)));
+    assert!(matches!(
+        write_error,
+        ToolError::ProtectedWorkspaceMetadata(_)
+    ));
+    assert!(!directory.path().join(".git/config").exists());
 }
 
 #[tokio::test]
@@ -283,8 +330,10 @@ async fn full_access_command_cannot_read_papermachine_managed_state() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should be created");
-    let access = context_with_access(&workspace, AgentAccessProfile::FullAccess);
-    let managed_secret = access.protected_root.join("project.db");
+    let access = context_with_access(&workspace, AccessPreset::FullAccess);
+    let managed_secret =
+        std::path::PathBuf::from(access.authorization.filesystem.managed_roots[0].clone())
+            .join("project.db");
     std::fs::write(&managed_secret, "private state").expect("managed fixture should be written");
     let command = format!(
         "if /bin/cat '{}' >/dev/null 2>&1; then printf leaked; else printf denied; fi",

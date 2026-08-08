@@ -280,9 +280,9 @@ import { ChevronDown, LoaderCircle, Minus, Play, Plus, SlidersHorizontal, X } fr
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { useAppI18n } from '../i18n'
-import { AGENT_ACCESS_PROFILES } from '../types'
+import { ACCESS_PRESETS } from '../types'
 import type {
-  AgentAccessProfile,
+  AccessPreset,
   ModelProfile,
   Project,
   ProjectSkill,
@@ -313,9 +313,9 @@ const emit = defineEmits<{
     params: Record<string, unknown>
     contextMode: WorkflowContextMode
     model: string
-    access: AgentAccessProfile
+    access: AccessPreset
     enabledSkills: string[]
-    agentAccessOverrides: Record<string, AgentAccessProfile>
+    agentAccessOverrides: Record<string, AccessPreset>
   }]
 }>()
 
@@ -359,9 +359,9 @@ const validation = ref<WorkflowValidation | null>(null)
 const requestInput = ref<HTMLTextAreaElement | null>(null)
 const contextMode = ref<WorkflowContextMode>('project_snapshot')
 const model = ref('')
-const access = ref<AgentAccessProfile>('research')
+const access = ref<AccessPreset>('research')
 const enabledSkills = ref<string[]>([])
-const agentOverrides = reactive<Record<string, AgentAccessProfile | ''>>({})
+const agentOverrides = reactive<Record<string, AccessPreset | ''>>({})
 let programRequest = 0
 
 const keyOf = (workflow: WorkflowProgram) => workflow.manifest.slug
@@ -372,12 +372,12 @@ const originLabel = computed(() => {
   return props.session ? `${props.project.name} · ${props.session.title}` : props.project.name
 })
 const originAccessIndex = computed(() =>
-  props.session ? AGENT_ACCESS_PROFILES.indexOf(props.session.access) : AGENT_ACCESS_PROFILES.length - 1,
+  props.session ? ACCESS_PRESETS.indexOf(props.session.access) : ACCESS_PRESETS.length - 1,
 )
-const ceilingProfiles = computed(() => AGENT_ACCESS_PROFILES.slice(0, originAccessIndex.value + 1))
+const ceilingProfiles = computed(() => ACCESS_PRESETS.slice(0, originAccessIndex.value + 1))
 const agentOverrideProfiles = computed(() => {
-  const ceilingIndex = AGENT_ACCESS_PROFILES.indexOf(access.value)
-  return AGENT_ACCESS_PROFILES.slice(0, ceilingIndex + 1)
+  const ceilingIndex = ACCESS_PRESETS.indexOf(access.value)
+  return ACCESS_PRESETS.slice(0, ceilingIndex + 1)
 })
 const unknownSelectedModel = computed(
   () => Boolean(model.value && !props.modelProfiles.some((profile) => profile.id === model.value)),
@@ -446,9 +446,9 @@ watch(workflowKey, async () => {
   await loadSelectedProgram()
 })
 watch(access, (next) => {
-  const ceilingIndex = AGENT_ACCESS_PROFILES.indexOf(next)
+  const ceilingIndex = ACCESS_PRESETS.indexOf(next)
   for (const [className, value] of Object.entries(agentOverrides)) {
-    if (value && AGENT_ACCESS_PROFILES.indexOf(value) > ceilingIndex) agentOverrides[className] = ''
+    if (value && ACCESS_PRESETS.indexOf(value) > ceilingIndex) agentOverrides[className] = ''
   }
 })
 
@@ -511,7 +511,7 @@ function submit() {
   }
   if (access.value === 'full_access' && !window.confirm(t('dialog.workflowFullAccessConfirm'))) return
   const agentAccessOverrides = Object.fromEntries(
-    Object.entries(agentOverrides).filter((entry): entry is [string, AgentAccessProfile] => Boolean(entry[1])),
+    Object.entries(agentOverrides).filter((entry): entry is [string, AccessPreset] => Boolean(entry[1])),
   )
   localError.value = ''
   emit('submit', {
@@ -527,16 +527,16 @@ function submit() {
   })
 }
 
-function effectiveAgentAccess(agent: WorkflowAgentDeclaration): AgentAccessProfile {
+function effectiveAgentAccess(agent: WorkflowAgentDeclaration): AccessPreset {
   const requested = agentOverrides[agent.class_name] || agent.access
-  const requestedIndex = AGENT_ACCESS_PROFILES.indexOf(requested)
-  const ceilingIndex = AGENT_ACCESS_PROFILES.indexOf(access.value)
-  return AGENT_ACCESS_PROFILES[Math.min(requestedIndex, ceilingIndex)]
+  const requestedIndex = ACCESS_PRESETS.indexOf(requested)
+  const ceilingIndex = ACCESS_PRESETS.indexOf(access.value)
+  return ACCESS_PRESETS[Math.min(requestedIndex, ceilingIndex)]
 }
 
-function declaredAccessLabel(declared: AgentAccessProfile): string {
-  const declaredIndex = AGENT_ACCESS_PROFILES.indexOf(declared)
-  const ceilingIndex = AGENT_ACCESS_PROFILES.indexOf(access.value)
+function declaredAccessLabel(declared: AccessPreset): string {
+  const declaredIndex = ACCESS_PRESETS.indexOf(declared)
+  const ceilingIndex = ACCESS_PRESETS.indexOf(access.value)
   if (declaredIndex > ceilingIndex) {
     return t('dialog.declaredAccessCapped', {
       declared: accessLabel(declared),
@@ -568,14 +568,14 @@ function humanize(value: string): string {
   const text = value.replaceAll('_', ' ')
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
-function accessLabel(value: AgentAccessProfile): string {
+function accessLabel(value: AccessPreset): string {
   if (value === 'model_only') return t('access.modelOnly')
   if (value === 'read_only') return t('access.readOnly')
   if (value === 'workspace') return t('access.workspace')
   if (value === 'research') return t('access.research')
   return t('access.fullAccess')
 }
-function accessDescription(value: AgentAccessProfile): string {
+function accessDescription(value: AccessPreset): string {
   if (value === 'model_only') return t('access.modelOnlyDescription')
   if (value === 'read_only') return t('access.readOnlyDescription')
   if (value === 'workspace') return t('access.workspaceDescription')

@@ -46,7 +46,6 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -440,7 +439,6 @@ async fn run_scheduled_turn(
     } else {
         previous_history(&inner.store, &turn)?
     };
-    let workspace = session_workspace(&inner, &session)?;
     let workflow_id = workflow_context.as_ref().map(|context| context.workflow_id);
     let event_sink = Arc::new(SessionAgentEventSink::new(
         Arc::clone(&inner.store),
@@ -458,14 +456,13 @@ async fn run_scheduled_turn(
         session.project_id,
         session.id,
         turn.id,
-        workspace,
+        turn.environment.clone(),
         inner
             .store
             .managed_root()
             .join("runtime/sandboxes")
             .join(session.id.to_string())
             .join(turn.id.to_string()),
-        inner.store.managed_root().to_path_buf(),
         turn.model.clone(),
         turn.prompt.rendered.clone(),
         turn.input.clone(),
@@ -481,7 +478,6 @@ async fn run_scheduled_turn(
     request.hosted_search_calls_used = turn.hosted_search_calls_used;
     request.resume_current_turn = resume_current_turn;
     request.checkpoint_message = turn.checkpoint_message.clone();
-    request.access = turn.access;
     request.reasoning_effort = turn.reasoning_effort;
     request.tools_enabled = turn.tools_enabled;
     request.web_search_context_size = turn.web_search_context_size;
@@ -604,15 +600,6 @@ impl AgentControlPlane for StoreAgentControlPlane {
         }
         Ok(checkpoint)
     }
-}
-
-fn session_workspace(
-    inner: &SessionRuntimeInner,
-    session: &papermachine_protocol::Session,
-) -> Result<PathBuf, StoreError> {
-    Ok(PathBuf::from(
-        inner.store.get_project(session.project_id)?.workspace_path,
-    ))
 }
 
 fn previous_history(store: &Store, current: &Turn) -> Result<Vec<ModelInputItem>, StoreError> {

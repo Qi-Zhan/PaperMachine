@@ -60,7 +60,7 @@ DOM.
 
 ## Agent tools
 
-Every Session selects one of five access profiles. `model_only` has no resource
+Every Session selects one of five access presets. `model_only` has no resource
 tools; `read_only` can only read its Session workspace; `workspace` adds
 workspace writes and sandboxed commands; `research` adds hosted web search and
 controlled URL fetching; `full_access` allows host files and unrestricted
@@ -77,12 +77,20 @@ still requires a typed boolean HumanRequest. The Store and Workflow runtime
 both enforce these rules; hiding unavailable choices in the web UI is not the
 security boundary.
 
-The Turn snapshots the Session profile. Tool schemas are filtered before model
-sampling, and registry dispatch plus each built-in implementation rechecks that
-snapshot. Omitting a schema is therefore not the enforcement boundary.
+Turn creation materializes the Session preset with the exact Workspace
+attachment and revision, cwd, managed-state deny, filesystem scopes, tool
+capabilities, and network capabilities. The Turn persists that policy and its
+SHA-256. Tool schemas are filtered before model sampling, and registry dispatch
+plus each built-in implementation rechecks the same materialized context.
+Omitting a schema is therefore not the enforcement boundary.
 
-For every profile below `full_access`, `read_file` and `write_file` resolve paths
-and symlinks against one Session workspace. Sandboxed `exec_command` clears the
+For every preset below `full_access`, `read_file` and `write_file` resolve paths
+and symlinks against the snapshotted Workspace roots. Direct file operations
+also make credential-bearing files such as `.env` unreadable and Workspace-root
+`.git`, `.agents`, and `.codex` metadata read-only. The current command sandbox
+consumes the same broad filesystem scope and managed-root deny; exact metadata
+and credential-rule parity is part of the unified sandbox-manager cutover in
+the accepted runtime-kernel target. Sandboxed `exec_command` clears the
 host environment, redirects home/temp paths into that workspace, denies network
 access, denies writes outside the workspace, and blocks reads from common
 user-data roots with macOS Seatbelt. It fails closed when no sandbox backend

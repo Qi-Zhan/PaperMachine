@@ -1,4 +1,4 @@
-use crate::AgentAccessProfile;
+use crate::AccessPreset;
 use crate::ProjectId;
 use crate::WorkflowProgramId;
 use chrono::DateTime;
@@ -75,7 +75,7 @@ pub struct WorkflowAgentDeclaration {
     pub class_name: String,
     pub actions: Vec<String>,
     #[serde(default)]
-    pub access: AgentAccessProfile,
+    pub access: AccessPreset,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]

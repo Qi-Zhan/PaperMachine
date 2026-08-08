@@ -1,92 +1,68 @@
 use crate::ToolError;
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AuthorizationContext;
+use papermachine_protocol::PathAuthorizationFailure;
+use papermachine_protocol::PathOperation;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub(crate) async fn resolve_workspace_path(
-    workspace_root: &Path,
-    relative_path: &str,
-) -> Result<PathBuf, ToolError> {
-    let relative = Path::new(relative_path);
-    if relative.as_os_str().is_empty()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err(ToolError::PathOutsideWorkspace(relative_path.to_string()));
-    }
-
-    let canonical_root = tokio::fs::canonicalize(workspace_root)
-        .await
-        .map_err(|error| ToolError::Io(error.to_string()))?;
-    let candidate = canonical_root.join(relative);
-
-    let mut existing = candidate.as_path();
-    while tokio::fs::symlink_metadata(existing).await.is_err() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| ToolError::PathOutsideWorkspace(relative_path.to_string()))?;
-    }
-    let canonical_existing = tokio::fs::canonicalize(existing)
-        .await
-        .map_err(|error| ToolError::Io(error.to_string()))?;
-    if !canonical_existing.starts_with(&canonical_root) {
-        return Err(ToolError::PathOutsideWorkspace(relative_path.to_string()));
-    }
-    Ok(candidate)
-}
-
 pub(crate) async fn resolve_tool_path(
-    workspace_root: &Path,
-    protected_root: &Path,
+    authorization: &AuthorizationContext,
     requested_path: &str,
-    access: AgentAccessProfile,
+    operation: PathOperation,
 ) -> Result<PathBuf, ToolError> {
-    if !access.is_unrestricted() {
-        return resolve_workspace_path(workspace_root, requested_path).await;
+    let requested = Path::new(requested_path);
+    if requested.as_os_str().is_empty()
+        || requested
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(ToolError::PathOutsideWorkspace(requested_path.to_string()));
     }
-    let path = Path::new(requested_path);
-    if path.as_os_str().is_empty() {
-        return Err(ToolError::InvalidArguments {
-            tool: "file".to_string(),
-            message: "path must not be empty".to_string(),
-        });
-    }
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
     } else {
-        let workspace = tokio::fs::canonicalize(workspace_root)
-            .await
-            .map_err(|error| ToolError::Io(error.to_string()))?;
-        workspace.join(path)
+        Path::new(&authorization.cwd).join(requested)
     };
-    reject_managed_path(&candidate, protected_root, requested_path).await?;
-    Ok(candidate)
-}
-
-async fn reject_managed_path(
-    candidate: &Path,
-    protected_root: &Path,
-    original: &str,
-) -> Result<(), ToolError> {
-    let protected_root = tokio::fs::canonicalize(protected_root)
-        .await
-        .map_err(|error| ToolError::Io(error.to_string()))?;
-    let mut existing = candidate;
+    let mut existing = candidate.as_path();
+    let mut missing = Vec::new();
     while tokio::fs::symlink_metadata(existing).await.is_err() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_string()))?;
+        missing.push(name.to_os_string());
         existing = existing
             .parent()
-            .ok_or_else(|| ToolError::PathInsideManagedState(original.to_string()))?;
+            .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_string()))?;
     }
-    let canonical_existing = tokio::fs::canonicalize(existing)
+    let mut resolved = tokio::fs::canonicalize(existing)
         .await
         .map_err(|error| ToolError::Io(error.to_string()))?;
-    if canonical_existing.starts_with(&protected_root) {
-        return Err(ToolError::PathInsideManagedState(original.to_string()));
+    for name in missing.into_iter().rev() {
+        resolved.push(name);
     }
-    Ok(())
+    authorization
+        .authorize_path(&resolved, operation)
+        .map_err(|failure| map_authorization_failure(failure, requested_path))?;
+    Ok(resolved)
+}
+
+fn map_authorization_failure(failure: PathAuthorizationFailure, requested_path: &str) -> ToolError {
+    match failure {
+        PathAuthorizationFailure::ManagedState => {
+            ToolError::PathInsideManagedState(requested_path.to_string())
+        }
+        PathAuthorizationFailure::SensitiveWorkspacePath => {
+            ToolError::SensitiveWorkspacePath(requested_path.to_string())
+        }
+        PathAuthorizationFailure::ProtectedWorkspaceMetadata => {
+            ToolError::ProtectedWorkspaceMetadata(requested_path.to_string())
+        }
+        PathAuthorizationFailure::InvalidPath
+        | PathAuthorizationFailure::OutsideWorkspace
+        | PathAuthorizationFailure::ReadDenied
+        | PathAuthorizationFailure::WriteDenied => {
+            ToolError::PathOutsideWorkspace(requested_path.to_string())
+        }
+    }
 }

@@ -207,7 +207,7 @@ import { computed, reactive, ref } from 'vue'
 import { api } from '../api'
 import { useAppI18n } from '../i18n'
 import type {
-  AgentAccessProfile,
+  AccessPreset,
   WorkflowGenerationInput,
   WorkflowProgramManifest,
   WorkflowProgram,
@@ -246,7 +246,7 @@ const timerSummary = computed(() => {
   return timers.map((timer) => `${timer.callback}${timer.seconds ? ` · ${timer.seconds}s` : ''}`).join(', ')
 })
 
-function accessLabel(access: AgentAccessProfile): string {
+function accessLabel(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnly')
   if (access === 'read_only') return t('access.readOnly')
   if (access === 'workspace') return t('access.workspace')

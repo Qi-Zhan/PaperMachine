@@ -1,5 +1,5 @@
+use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocationId;
-use papermachine_protocol::AgentAccessProfile;
 use papermachine_protocol::ArtifactKind;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
@@ -39,7 +39,10 @@ fn project_creation_separates_managed_state_from_workspace_and_rejects_reuse() {
         .expect("project should be created");
 
     assert_eq!(
-        project.workspace_path,
+        project
+            .workspace
+            .primary_path()
+            .expect("primary Workspace root"),
         root.canonicalize()
             .expect("Project Workspace should be canonicalizable")
             .to_string_lossy()
@@ -165,7 +168,7 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AgentAccessProfile::Research,
+            access: AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -224,7 +227,7 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             "",
             "test-model",
             Vec::new(),
-            AgentAccessProfile::Workspace,
+            AccessPreset::Workspace,
         )
         .expect("origin Session should be created");
 
@@ -238,7 +241,7 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AgentAccessProfile::Research,
+            access: AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -260,12 +263,12 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AgentAccessProfile::Workspace,
+            access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: BTreeMap::from([(
                 "Researcher".to_string(),
-                AgentAccessProfile::Research,
+                AccessPreset::Research,
             )]),
         })
         .expect_err("an Agent override must not exceed its Workflow");
@@ -289,19 +292,19 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AgentAccessProfile::Workspace,
+            access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
             launch_context: launch_context.clone(),
             agent_access_overrides: BTreeMap::from([(
                 "Researcher".to_string(),
-                AgentAccessProfile::ReadOnly,
+                AccessPreset::ReadOnly,
             )]),
         })
         .expect("an override below the Workflow ceiling should be accepted");
     assert_eq!(created.launch_context, launch_context);
     assert_eq!(
         created.agent_access_overrides["Researcher"],
-        AgentAccessProfile::ReadOnly
+        AccessPreset::ReadOnly
     );
 }
 
@@ -346,7 +349,7 @@ fn workflow_for_session(
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AgentAccessProfile::Research,
+            access: AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -366,7 +369,7 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             "",
             "test-model",
             Vec::new(),
-            AgentAccessProfile::Workspace,
+            AccessPreset::Workspace,
         )
         .expect("session should be created");
     let first = store
@@ -383,25 +386,39 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             Vec::new(),
         )
         .expect("first turn should be created");
-    assert_eq!(first.access, AgentAccessProfile::Workspace);
+    assert_eq!(first.environment.workspace.id, research.workspace.id);
+    assert_eq!(first.environment.workspace.revision, 1);
+    assert_eq!(
+        first.environment.authorization.preset,
+        AccessPreset::Workspace
+    );
     assert!(
         store
-            .set_session_access(session.id, AgentAccessProfile::Research)
+            .set_session_access(session.id, AccessPreset::Research)
             .is_err(),
         "an active Turn must block access changes"
     );
 
     store.cancel_turn(first.id).expect("first turn should end");
     let updated = store
-        .set_session_access(session.id, AgentAccessProfile::Research)
+        .set_session_access(session.id, AccessPreset::Research)
         .expect("access should change between turns");
-    assert_eq!(updated.access, AgentAccessProfile::Research);
+    assert_eq!(updated.access, AccessPreset::Research);
+    let relocated_root = directory.path().join("relocated-workspace");
+    std::fs::create_dir_all(&relocated_root).expect("relocated Workspace should be created");
+    let relocated = store
+        .relocate_project(research.id, &relocated_root)
+        .expect("Project Workspace should relocate between Turns");
+    assert_eq!(relocated.workspace.id, research.workspace.id);
+    assert_eq!(relocated.workspace.revision, 2);
     assert_eq!(
         store
             .get_turn(first.id)
             .expect("first turn should remain")
-            .access,
-        AgentAccessProfile::Workspace
+            .environment
+            .authorization
+            .preset,
+        AccessPreset::Workspace
     );
     let second = store
         .create_turn(
@@ -417,7 +434,28 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             Vec::new(),
         )
         .expect("second turn should be created");
-    assert_eq!(second.access, AgentAccessProfile::Research);
+    assert_eq!(
+        second.environment.authorization.preset,
+        AccessPreset::Research
+    );
+    assert_eq!(second.environment.workspace.id, research.workspace.id);
+    assert_eq!(second.environment.workspace.revision, 2);
+    assert_eq!(
+        second.environment.workspace.primary_path(),
+        Some(
+            relocated_root
+                .canonicalize()
+                .expect("relocated Workspace should canonicalize")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+    let persisted_first = store.get_turn(first.id).expect("first Turn should remain");
+    assert_eq!(persisted_first.environment.workspace.revision, 1);
+    assert_eq!(
+        persisted_first.environment.authorization_sha256,
+        first.environment.authorization_sha256
+    );
 }
 
 #[test]
@@ -492,7 +530,7 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
             "Preserve provenance.",
             "",
             Vec::new(),
-            AgentAccessProfile::Research,
+            AccessPreset::Research,
         )
         .expect("researcher should be created");
     let reviewer = store
@@ -504,7 +542,7 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
             "Compare uncertainty.",
             "",
             Vec::new(),
-            AgentAccessProfile::ModelOnly,
+            AccessPreset::ModelOnly,
         )
         .expect("reviewer should be created");
     let team = store
@@ -734,7 +772,7 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             "",
             "test-model",
             Vec::new(),
-            AgentAccessProfile::Research,
+            AccessPreset::Research,
         )
         .expect("participant should be created");
     let invocation = store
@@ -803,7 +841,7 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
             "",
             "test-model",
             Vec::new(),
-            AgentAccessProfile::Research,
+            AccessPreset::Research,
         )
         .expect("participant should be created");
     let request = store

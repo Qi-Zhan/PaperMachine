@@ -1,5 +1,5 @@
 import type {
-  AgentAccessProfile,
+  AccessPreset,
   Artifact,
   ControlMessage,
   ControlMessageKind,
@@ -45,9 +45,9 @@ export const api = {
   health: () => request<Health>('/health'),
   listProjects: () => request<ProjectLibraryEntry[]>('/projects'),
   createProject: (name: string, description: string, workspacePath: string) =>
-    request<ProjectLibraryEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, workspace_path: workspacePath }) }),
+    request<ProjectLibraryEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, workspace: { roots: [workspacePath], primary_root: 0 } }) }),
   relocateProject: (projectId: string, workspacePath: string) =>
-    request<ProjectLibraryEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace_path: workspacePath }) }),
+    request<ProjectLibraryEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace: { roots: [workspacePath], primary_root: 0 } }) }),
   removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
   updateProjectSystemPrompt: (projectId: string, systemPrompt: string) =>
@@ -67,7 +67,7 @@ export const api = {
   cancelTurn: (turnId: string) => request<void>(`/turns/${turnId}/cancel`, { method: 'POST' }),
   updateSessionSkills: (sessionId: string, enabledSkills: string[]) =>
     request<Session>(`/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
-  updateSessionAccess: (sessionId: string, access: AgentAccessProfile) =>
+  updateSessionAccess: (sessionId: string, access: AccessPreset) =>
     request<Session>(`/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
   updateSessionSystemPrompt: (sessionId: string, systemPrompt: string) =>
     request<Session>(`/sessions/${sessionId}/system-prompt`, {

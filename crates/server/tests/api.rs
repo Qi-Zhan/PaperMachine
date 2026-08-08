@@ -83,7 +83,7 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
             json!({
                 "name": "Portable paper",
                 "description": "Project-owned research state",
-                "workspace_path": workspace,
+                "workspace": {"roots": [workspace], "primary_root": 0},
             }),
         ))
         .await
@@ -145,7 +145,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
             json!({
                 "name": "Movable project",
                 "description": "",
-                "workspace_path": original_root,
+                "workspace": {"roots": [original_root], "primary_root": 0},
             }),
         ))
         .await
@@ -174,7 +174,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .oneshot(json_request(
             "PUT",
             &format!("/api/projects/{project_id}"),
-            json!({"workspace_path": relocated_root}),
+            json!({"workspace": {"roots": [relocated_root], "primary_root": 0}}),
         ))
         .await
         .expect("Project relocation should complete");
@@ -183,7 +183,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
     assert_eq!(relocated["available"], true);
     assert_eq!(relocated["workspace_available"], true);
     assert_eq!(
-        relocated["workspace_path"],
+        relocated["workspace"]["roots"][0],
         relocated_root
             .canonicalize()
             .expect("relocated root should resolve")
@@ -330,7 +330,10 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             json!({
                 "name": name,
                 "description": "API test",
-                "workspace_path": workspace_path.to_string_lossy()
+                "workspace": {
+                    "roots": [workspace_path.to_string_lossy()],
+                    "primary_root": 0
+                }
             }),
         ))
         .await
@@ -1488,10 +1491,15 @@ async fn api_generates_validates_and_publishes_python_workflows() {
             .is_file()
     );
     assert!(
-        std::fs::read_dir(&project.workspace_path)
-            .expect("Workspace should list")
-            .next()
-            .is_none(),
+        std::fs::read_dir(
+            project
+                .workspace
+                .primary_path()
+                .expect("Project should have a primary Workspace root"),
+        )
+        .expect("Workspace should list")
+        .next()
+        .is_none(),
         "publishing a Workflow must not write PaperMachine state into the Workspace"
     );
 
@@ -1774,5 +1782,8 @@ async def main(ctx):
     assert_eq!(participant.status(), StatusCode::OK);
     let participant = response_json(participant).await;
     assert_eq!(participant["session"]["access"], "full_access");
-    assert_eq!(participant["turns"][0]["access"], "full_access");
+    assert_eq!(
+        participant["turns"][0]["environment"]["authorization"]["preset"],
+        "full_access"
+    );
 }

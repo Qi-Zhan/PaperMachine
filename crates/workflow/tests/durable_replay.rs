@@ -2,7 +2,7 @@
 
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
-    AgentAccessProfile, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowContextMode,
+    AccessPreset, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowContextMode,
     WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId, WorkflowProgramManifest,
     WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
 };
@@ -267,12 +267,12 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AgentAccessProfile::Workspace,
+            access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
             launch_context: launch_context.clone(),
             agent_access_overrides: BTreeMap::from([
-                ("Conservative".to_string(), AgentAccessProfile::ReadOnly),
-                ("Elevated".to_string(), AgentAccessProfile::Workspace),
+                ("Conservative".to_string(), AccessPreset::ReadOnly),
+                ("Elevated".to_string(), AccessPreset::Workspace),
             ]),
         })
         .expect("Workflow should be created");
@@ -321,8 +321,8 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             .get_session(participant.session_id)
             .expect("participant Session should load");
         let expected = match participant.class_name.as_str() {
-            "Conservative" => AgentAccessProfile::ReadOnly,
-            "Elevated" | "Clamped" => AgentAccessProfile::Workspace,
+            "Conservative" => AccessPreset::ReadOnly,
+            "Elevated" | "Clamped" => AccessPreset::Workspace,
             class_name => panic!("unexpected Agent class {class_name}"),
         };
         assert_eq!(session.access, expected);
@@ -366,7 +366,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AgentAccessProfile::Research,
+            access: AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -487,7 +487,7 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AgentAccessProfile::ModelOnly,
+            access: AccessPreset::ModelOnly,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -556,7 +556,7 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AgentAccessProfile::ModelOnly,
+            access: AccessPreset::ModelOnly,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -611,7 +611,7 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AgentAccessProfile::ModelOnly,
+            access: AccessPreset::ModelOnly,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),

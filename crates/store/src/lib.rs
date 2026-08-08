@@ -4,7 +4,7 @@ mod artifact;
 mod database;
 mod library;
 
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionId;
@@ -33,10 +33,10 @@ pub struct NewWorkflow {
     pub trigger: WorkflowTrigger,
     pub params: Value,
     pub default_model: String,
-    pub access: AgentAccessProfile,
+    pub access: AccessPreset,
     pub enabled_skills: Vec<String>,
     pub launch_context: WorkflowLaunchContext,
-    pub agent_access_overrides: BTreeMap<String, AgentAccessProfile>,
+    pub agent_access_overrides: BTreeMap<String, AccessPreset>,
 }
 
 #[derive(Debug, Error)]

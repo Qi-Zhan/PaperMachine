@@ -2,7 +2,7 @@ use crate::ToolContext;
 use crate::ToolError;
 use crate::ToolExecutor;
 use crate::ToolOutput;
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ToolDefinition;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -29,10 +29,10 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn definitions_for(&self, access: AgentAccessProfile) -> Vec<ToolDefinition> {
+    pub fn definitions_for(&self, authorization: &AuthorizationContext) -> Vec<ToolDefinition> {
         self.tools
             .iter()
-            .filter(|(name, _)| tool_is_allowed(access, name))
+            .filter(|(name, _)| authorization.tools.allows(name))
             .map(|(_, tool)| {
                 let mut definition = tool.definition();
                 definition.supports_parallel = tool.supports_parallel();
@@ -51,10 +51,10 @@ impl ToolRegistry {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !tool_is_allowed(context.access, name) {
+        if !context.authorization.tools.allows(name) {
             return Err(ToolError::PermissionDenied {
                 tool: name.to_string(),
-                access: context.access,
+                access: context.authorization.preset,
             });
         }
         let tool = self
@@ -63,19 +63,6 @@ impl ToolRegistry {
             .cloned()
             .ok_or_else(|| ToolError::UnknownTool(name.to_string()))?;
         tool.execute(context, arguments).await
-    }
-}
-
-fn tool_is_allowed(access: AgentAccessProfile, name: &str) -> bool {
-    if access.is_unrestricted() {
-        return true;
-    }
-    match name {
-        "read_file" => access.allows_workspace_read(),
-        "write_file" => access.allows_workspace_write(),
-        "exec_command" => access.allows_sandboxed_command(),
-        "fetch_url" => access.allows_research_network(),
-        _ => false,
     }
 }
 

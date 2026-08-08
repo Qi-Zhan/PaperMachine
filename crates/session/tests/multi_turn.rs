@@ -173,7 +173,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             trigger: Default::default(),
             params: serde_json::json!({}),
             default_model: "test-model".to_string(),
-            access: papermachine_protocol::AgentAccessProfile::Research,
+            access: papermachine_protocol::AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -191,7 +191,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             "",
             "",
             Vec::new(),
-            papermachine_protocol::AgentAccessProfile::Research,
+            papermachine_protocol::AccessPreset::Research,
         )
         .expect("participant should be created");
     let invocation = store
@@ -479,7 +479,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             trigger: Default::default(),
             params: serde_json::json!({}),
             default_model: "test-model".to_string(),
-            access: papermachine_protocol::AgentAccessProfile::Research,
+            access: papermachine_protocol::AccessPreset::Research,
             enabled_skills: Vec::new(),
             launch_context: Default::default(),
             agent_access_overrides: Default::default(),
@@ -497,7 +497,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             "",
             "",
             Vec::new(),
-            papermachine_protocol::AgentAccessProfile::Research,
+            papermachine_protocol::AccessPreset::Research,
         )
         .expect("participant should be created");
     let invocation = store

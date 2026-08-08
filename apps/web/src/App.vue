@@ -135,7 +135,7 @@
       :busy="dialogBusy"
       :error="dialogError"
       :project-name="projectPathDialogProject?.name"
-      :initial-path="projectPathDialogProject?.workspace_path"
+      :initial-path="projectPathDialogProject ? projectPathDialogProject.workspace.roots[projectPathDialogProject.workspace.primary_root] : undefined"
       @close="closeProjectPathDialog"
       @submit="submitProjectPath"
     />
@@ -201,7 +201,7 @@ import WorkflowLibrary from './components/WorkflowLibrary.vue'
 import StartWorkflowDialog from './components/StartWorkflowDialog.vue'
 import WorkflowOutputDialog from './components/WorkflowOutputDialog.vue'
 import type {
-  AgentAccessProfile,
+  AccessPreset,
   Artifact,
   CreateSessionInput,
   Health,
@@ -853,7 +853,7 @@ async function updateSessionSkills(slugs: string[]) {
   }
 }
 
-async function updateSessionAccess(access: AgentAccessProfile) {
+async function updateSessionAccess(access: AccessPreset) {
   const view = sessionView.value
   if (!view || accessBusy.value) return
   accessBusy.value = true
@@ -1000,9 +1000,9 @@ async function createWorkflow(input: {
   params: Record<string, unknown>
   contextMode: WorkflowContextMode
   model: string
-  access: AgentAccessProfile
+  access: AccessPreset
   enabledSkills: string[]
-  agentAccessOverrides: Record<string, AgentAccessProfile>
+  agentAccessOverrides: Record<string, AccessPreset>
 }) {
   const project = workflowDialogProject.value
   const origin = workflowDialogOriginSession.value

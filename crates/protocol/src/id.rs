@@ -72,6 +72,7 @@ macro_rules! entity_id {
 }
 
 entity_id!(ProjectId);
+entity_id!(WorkspaceId);
 entity_id!(WorkflowProgramId);
 entity_id!(WorkflowId);
 entity_id!(AgentInstanceId);

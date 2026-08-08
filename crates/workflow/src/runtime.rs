@@ -515,8 +515,8 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         participant: &WorkflowParticipant,
-        current: AgentAccessProfile,
-        requested: AgentAccessProfile,
+        current: AccessPreset,
+        requested: AccessPreset,
     ) -> Result<(), WorkflowRuntimeError> {
         let workflow = self.store.get_workflow(self.workflow_id)?;
         if requested > workflow.access {
@@ -1622,13 +1622,13 @@ struct CreateAgentEffect {
     #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
-    access: AgentAccessProfile,
+    access: AccessPreset,
 }
 
 #[derive(Debug, Deserialize)]
 struct SetAgentAccessEffect {
     agent_instance_id: String,
-    access: AgentAccessProfile,
+    access: AccessPreset,
 }
 
 #[derive(Debug, Deserialize)]

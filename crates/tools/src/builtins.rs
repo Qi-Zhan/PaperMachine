@@ -9,6 +9,8 @@ use papermachine_execution::FilesystemPolicy;
 use papermachine_execution::NetworkPolicy;
 use papermachine_execution::SandboxExecutor;
 use papermachine_execution::SandboxPolicy;
+use papermachine_protocol::FilesystemScope;
+use papermachine_protocol::PathOperation;
 use papermachine_protocol::ToolDefinition;
 use serde::Deserialize;
 use serde_json::Value;
@@ -58,10 +60,10 @@ impl ToolExecutor for ReadFileTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.access.allows_workspace_read() {
+        if !context.authorization.tools.read_file {
             return Err(ToolError::PermissionDenied {
                 tool: "read_file".to_string(),
-                access: context.access,
+                access: context.authorization.preset,
             });
         }
         let args: ReadFileArgs = parse_arguments("read_file", arguments)?;
@@ -69,13 +71,8 @@ impl ToolExecutor for ReadFileTool {
             .max_bytes
             .unwrap_or(DEFAULT_READ_BYTES)
             .clamp(1, MAX_FILE_BYTES);
-        let path = resolve_tool_path(
-            &context.workspace_root,
-            &context.protected_root,
-            &args.path,
-            context.access,
-        )
-        .await?;
+        let path =
+            resolve_tool_path(&context.authorization, &args.path, PathOperation::Read).await?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| ToolError::Io(error.to_string()))?;
@@ -139,10 +136,10 @@ impl ToolExecutor for WriteFileTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.access.allows_workspace_write() {
+        if !context.authorization.tools.write_file {
             return Err(ToolError::PermissionDenied {
                 tool: "write_file".to_string(),
-                access: context.access,
+                access: context.authorization.preset,
             });
         }
         let args: WriteFileArgs = parse_arguments("write_file", arguments)?;
@@ -152,13 +149,8 @@ impl ToolExecutor for WriteFileTool {
                 message: format!("content exceeds {MAX_FILE_BYTES} bytes"),
             });
         }
-        let path = resolve_tool_path(
-            &context.workspace_root,
-            &context.protected_root,
-            &args.path,
-            context.access,
-        )
-        .await?;
+        let path =
+            resolve_tool_path(&context.authorization, &args.path, PathOperation::Write).await?;
         if args.create_parents
             && let Some(parent) = path.parent()
         {
@@ -213,10 +205,10 @@ impl ToolExecutor for ExecCommandTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.access.allows_sandboxed_command() && !context.access.is_unrestricted() {
+        if !context.authorization.tools.exec_command {
             return Err(ToolError::PermissionDenied {
                 tool: "exec_command".to_string(),
-                access: context.access,
+                access: context.authorization.preset,
             });
         }
         let args: ExecCommandArgs = parse_arguments("exec_command", arguments)?;
@@ -227,20 +219,32 @@ impl ToolExecutor for ExecCommandTool {
             });
         }
         let timeout_seconds = args.timeout_seconds.unwrap_or(60).clamp(1, 600);
-        let (filesystem, network) = if context.access.is_unrestricted() {
-            (FilesystemPolicy::DangerFullAccess, NetworkPolicy::Allow)
+        let filesystem = if context.authorization.filesystem.write == FilesystemScope::Host {
+            FilesystemPolicy::DangerFullAccess
         } else {
-            (FilesystemPolicy::WorkspaceWrite, NetworkPolicy::Deny)
+            FilesystemPolicy::WorkspaceWrite
         };
+        let network = if context.authorization.network.child_process {
+            NetworkPolicy::Allow
+        } else {
+            NetworkPolicy::Deny
+        };
+        let protected_roots = context
+            .authorization
+            .filesystem
+            .managed_roots
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
         let output = SandboxExecutor
             .run(
-                &context.workspace_root,
+                std::path::Path::new(&context.authorization.cwd),
                 &context.sandbox_root,
                 &args.command,
                 SandboxPolicy {
                     filesystem,
                     network,
-                    protected_roots: vec![context.protected_root],
+                    protected_roots,
                     timeout: Duration::from_secs(timeout_seconds),
                     ..SandboxPolicy::default()
                 },

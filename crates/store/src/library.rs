@@ -37,18 +37,20 @@ impl ProjectLibrary {
     }
 
     pub fn register(&self, project: &Project) -> Result<(), StoreError> {
+        let workspace_path = project.workspace.primary_path().ok_or_else(|| {
+            StoreError::Invariant("Project Workspace has no primary root".to_string())
+        })?;
         let connection = self.connection()?;
         let duplicate_path: Option<String> = connection
             .query_row(
                 "SELECT id FROM projects WHERE workspace_path = ?1 AND id != ?2",
-                params![project.workspace_path, project.id.to_string()],
+                params![workspace_path, project.id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
         if duplicate_path.is_some() {
             return Err(StoreError::Invariant(format!(
-                "Project Workspace is already registered: {}",
-                project.workspace_path
+                "Project Workspace is already registered: {workspace_path}"
             )));
         }
         connection.execute(
@@ -60,7 +62,7 @@ impl ProjectLibrary {
                updated_at = excluded.updated_at",
             params![
                 project.id.to_string(),
-                project.workspace_path,
+                workspace_path,
                 serde_json::to_string(project)?,
                 project.updated_at.to_rfc3339(),
             ],
@@ -138,7 +140,7 @@ mod tests {
             id: ProjectId::new(),
             name: "Research".to_string(),
             description: String::new(),
-            workspace_path: root.to_string(),
+            workspace: papermachine_protocol::WorkspaceAttachment::single(root),
             created_at: now,
             updated_at: now,
         }

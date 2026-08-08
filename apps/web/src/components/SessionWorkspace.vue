@@ -639,7 +639,7 @@ import {
 import { useAppI18n } from '../i18n'
 import { liveAssistantOutput } from '../sessionEvents'
 import type {
-  AgentAccessProfile,
+  AccessPreset,
   AgentStep,
   Artifact,
   Project,
@@ -682,7 +682,7 @@ const emit = defineEmits<{
   'send-control': [input: { workflowId: string; sessionId: string; kind: 'guide' | 'interrupt' | 'finish'; content: string; actionInvocationId?: string }]
   'answer-human': [input: { requestId: string; answer: unknown; workflowId: string }]
   'update-skills': [slugs: string[]]
-  'update-access': [access: AgentAccessProfile]
+  'update-access': [access: AccessPreset]
   'update-system-prompt': [systemPrompt: string]
   'open-artifact': [artifact: Artifact]
   'open-workflow-output': [workflow: Workflow]
@@ -899,7 +899,7 @@ function submitBooleanHumanAnswer(request: HumanRequest, answer: boolean) {
 }
 function requestAccessChange(event: Event) {
   const select = event.target as HTMLSelectElement
-  const access = select.value as AgentAccessProfile
+  const access = select.value as AccessPreset
   if (access === props.view.session.access) return
   if (access === 'full_access' && !window.confirm(t('session.fullAccessConfirm'))) {
     select.value = props.view.session.access
@@ -907,10 +907,10 @@ function requestAccessChange(event: Event) {
   }
   emit('update-access', access)
 }
-function accessLabel(access: AgentAccessProfile): string {
+function accessLabel(access: AccessPreset): string {
   return accessProfiles.value.find((profile) => profile.value === access)?.label ?? access
 }
-function accessDescription(access: AgentAccessProfile): string {
+function accessDescription(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnlyDescription')
   if (access === 'read_only') return t('access.readOnlyDescription')
   if (access === 'workspace') return t('access.workspaceDescription')

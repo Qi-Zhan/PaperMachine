@@ -12,7 +12,7 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_model::ModelStream;
 use papermachine_model::ScriptedModelClient;
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AccessPreset;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
@@ -21,8 +21,10 @@ use papermachine_protocol::ProjectId;
 use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
+use papermachine_protocol::WorkspaceAttachment;
 use papermachine_tools::ReadFileTool;
 use papermachine_tools::ToolRegistry;
 use papermachine_tools::WriteFileTool;
@@ -36,6 +38,24 @@ fn managed_root(fixture_root: &std::path::Path) -> std::path::PathBuf {
     let path = fixture_root.join("managed");
     std::fs::create_dir_all(&path).expect("managed fixture should be created");
     path
+}
+
+fn turn_environment(
+    fixture_root: &std::path::Path,
+    preset: AccessPreset,
+) -> TurnEnvironmentSnapshot {
+    let workspace = fixture_root
+        .canonicalize()
+        .expect("workspace fixture should canonicalize");
+    let managed = managed_root(fixture_root)
+        .canonicalize()
+        .expect("managed fixture should canonicalize");
+    TurnEnvironmentSnapshot::materialize(
+        WorkspaceAttachment::single(workspace.to_string_lossy().into_owned()),
+        managed.to_string_lossy().into_owned(),
+        preset,
+    )
+    .expect("fixture environment should materialize")
 }
 
 #[derive(Clone, Copy)]
@@ -113,9 +133,8 @@ async fn agent_executes_a_tool_then_follows_up() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Use tools and report evidence.",
         "Write the evidence file.",
@@ -217,9 +236,8 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Read the evidence.",
@@ -270,9 +288,8 @@ async fn tools_enabled_false_omits_local_and_hosted_tools() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Find the answer.",
@@ -318,9 +335,8 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Research carefully.",
         "Continue researching.",
@@ -367,19 +383,16 @@ async fn model_only_access_omits_local_and_hosted_tools() {
         Arc::new(RecordingAgentEventSink::default()),
     );
     let directory = tempdir().expect("temporary workspace should be created");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::ModelOnly),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Answer without tools.",
         "Answer directly.",
     );
-    request.access = AgentAccessProfile::ModelOnly;
-
     runtime
         .run(request, CancellationToken::new())
         .await
@@ -432,9 +445,8 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         ProjectId::new(),
         session_id,
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Continue the research.",
         "Resolve the remaining question.",
@@ -588,9 +600,8 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Return valid JSON.",
         "Plan the research routes.",
@@ -637,9 +648,8 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Return valid JSON.",
         "Plan the research routes.",
@@ -709,9 +719,8 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Return a short response.",
         "Test stream recovery.",
@@ -782,9 +791,8 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
-        directory.path().to_path_buf(),
+        turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
-        managed_root(directory.path()),
         "test-model",
         "Return a short response.",
         "Test empty completion recovery.",

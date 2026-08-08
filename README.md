@@ -137,7 +137,7 @@ small packages owned by one Project.
   histories at 90% of the available context capacity.
 - Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
 - Enable Project-local skills per Session and snapshot them per Turn.
-- Assign each Session/Workflow Agent one of five access profiles. A Workflow
+- Assign each Session/Workflow Agent one of five access presets. A Workflow
   launch establishes a hard run ceiling, a Session-origin launch cannot exceed
   the source Session, and per-Agent class overrides cannot exceed the run.
   Profiles are snapshotted per Turn and enforced in model tool exposure,

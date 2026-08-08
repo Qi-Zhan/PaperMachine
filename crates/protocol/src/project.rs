@@ -16,6 +16,7 @@ use crate::TokenUsage;
 use crate::TurnId;
 use crate::WorkflowId;
 use crate::WorkflowProgramSnapshot;
+use crate::WorkspaceId;
 use chrono::DateTime;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -23,6 +24,65 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct WorkspaceAttachment {
+    pub id: WorkspaceId,
+    /// Monotonically increases whenever the user changes the attached roots.
+    pub revision: u64,
+    /// Canonical absolute user-owned filesystem roots. The current UI selects
+    /// one root, while the runtime representation deliberately supports more.
+    pub roots: Vec<String>,
+    /// Index into `roots` used as the default cwd for relative tool paths.
+    pub primary_root: usize,
+}
+
+impl WorkspaceAttachment {
+    pub fn single(path: impl Into<String>) -> Self {
+        Self {
+            id: WorkspaceId::new(),
+            revision: 1,
+            roots: vec![path.into()],
+            primary_root: 0,
+        }
+    }
+
+    pub fn primary_path(&self) -> Option<&str> {
+        self.roots.get(self.primary_root).map(String::as_str)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.roots.is_empty() {
+            return Err("Workspace must contain at least one root".to_string());
+        }
+        if self.primary_root >= self.roots.len() {
+            return Err("Workspace primary_root is outside roots".to_string());
+        }
+        if self.revision == 0 {
+            return Err("Workspace revision must be positive".to_string());
+        }
+        if self.roots.iter().any(|root| root.trim().is_empty()) {
+            return Err("Workspace roots must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct WorkspaceSelection {
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub primary_root: usize,
+}
+
+impl WorkspaceSelection {
+    pub fn single(path: impl Into<String>) -> Self {
+        Self {
+            roots: vec![path.into()],
+            primary_root: 0,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,9 +109,9 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub description: String,
-    /// Canonical absolute user directory attached to this managed Project.
-    /// PaperMachine runtime state is stored separately and is never placed here.
-    pub workspace_path: String,
+    /// User-owned filesystem attached to this managed Project. PaperMachine
+    /// runtime state is stored separately and is never placed in these roots.
+    pub workspace: WorkspaceAttachment,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -110,7 +170,7 @@ pub struct Workflow {
     pub trigger: WorkflowTrigger,
     pub default_model: String,
     #[serde(default)]
-    pub access: crate::AgentAccessProfile,
+    pub access: crate::AccessPreset,
     #[serde(default)]
     pub enabled_skills: Vec<String>,
     /// Immutable Project state captured when this Workflow was launched. It is
@@ -121,7 +181,7 @@ pub struct Workflow {
     /// Per-run overrides keyed by Python Agent class name. The Workflow access
     /// profile remains the hard upper bound.
     #[serde(default)]
-    pub agent_access_overrides: BTreeMap<String, crate::AgentAccessProfile>,
+    pub agent_access_overrides: BTreeMap<String, crate::AccessPreset>,
     pub status: WorkflowStatus,
     pub params: Value,
     pub output: Option<Value>,

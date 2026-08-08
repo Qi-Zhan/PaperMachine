@@ -11,9 +11,10 @@ mod path;
 mod registry;
 
 use async_trait::async_trait;
+use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
-use papermachine_protocol::AgentAccessProfile;
+use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
@@ -39,10 +40,8 @@ pub struct ToolContext {
     pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
-    pub workspace_root: PathBuf,
     pub sandbox_root: PathBuf,
-    pub protected_root: PathBuf,
-    pub access: AgentAccessProfile,
+    pub authorization: AuthorizationContext,
     pub cancellation: CancellationToken,
 }
 
@@ -56,17 +55,18 @@ pub struct ToolOutput {
 pub enum ToolError {
     #[error("unknown tool: {0}")]
     UnknownTool(String),
-    #[error("tool {tool} is not allowed by the {access} access profile")]
-    PermissionDenied {
-        tool: String,
-        access: AgentAccessProfile,
-    },
+    #[error("tool {tool} is not allowed by the {access} access preset")]
+    PermissionDenied { tool: String, access: AccessPreset },
     #[error("invalid arguments for {tool}: {message}")]
     InvalidArguments { tool: String, message: String },
     #[error("path must stay inside the Session workspace: {0}")]
     PathOutsideWorkspace(String),
     #[error("path is reserved for PaperMachine managed state: {0}")]
     PathInsideManagedState(String),
+    #[error("path is protected Workspace metadata: {0}")]
+    ProtectedWorkspaceMetadata(String),
+    #[error("path may contain Workspace credentials and is denied: {0}")]
+    SensitiveWorkspacePath(String),
     #[error("tool I/O failed: {0}")]
     Io(String),
     #[error("command timed out after {seconds} seconds")]

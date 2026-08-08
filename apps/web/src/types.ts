@@ -1,7 +1,7 @@
 export type Id = string
 
-export const AGENT_ACCESS_PROFILES = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
-export type AgentAccessProfile = (typeof AGENT_ACCESS_PROFILES)[number]
+export const ACCESS_PRESETS = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
+export type AccessPreset = (typeof ACCESS_PRESETS)[number]
 export type SessionStatus = 'ready' | 'running' | 'paused' | 'failed' | 'archived'
 export type SessionOrigin = 'user' | 'workflow_agent'
 export type TurnOrigin = 'user' | 'workflow'
@@ -36,9 +36,16 @@ export interface Project {
   id: Id
   name: string
   description: string
-  workspace_path: string
+  workspace: WorkspaceAttachment
   created_at: string
   updated_at: string
+}
+
+export interface WorkspaceAttachment {
+  id: Id
+  revision: number
+  roots: string[]
+  primary_root: number
 }
 
 export interface ProjectLibraryEntry extends Project {
@@ -53,7 +60,7 @@ export interface Session {
   title: string
   system_prompt: string
   model: string
-  access: AgentAccessProfile
+  access: AccessPreset
   status: SessionStatus
   enabled_skills: string[]
   created_at: string
@@ -87,7 +94,7 @@ export interface Turn {
   model: string
   reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   prompt: PromptSnapshot
-  access: AgentAccessProfile
+  environment: TurnEnvironmentSnapshot
   tools_enabled: boolean
   web_search_context_size: 'low' | 'medium' | 'high' | null
   response_format: unknown | null
@@ -100,6 +107,20 @@ export interface Turn {
   error: string | null
   created_at: string
   updated_at: string
+}
+
+export interface TurnEnvironmentSnapshot {
+  workspace: WorkspaceAttachment
+  cwd: string
+  authorization: {
+    preset: AccessPreset
+    workspace_roots: string[]
+    cwd: string
+    filesystem: unknown
+    tools: unknown
+    network: unknown
+  }
+  authorization_sha256: string
 }
 
 export interface AgentStep {
@@ -177,10 +198,10 @@ export interface Workflow {
   instructions: string
   trigger: WorkflowTrigger
   default_model: string
-  access: AgentAccessProfile
+  access: AccessPreset
   enabled_skills: string[]
   launch_context: WorkflowLaunchContext
-  agent_access_overrides: Record<string, AgentAccessProfile>
+  agent_access_overrides: Record<string, AccessPreset>
   status: WorkflowStatus
   params: Record<string, unknown>
   output: unknown | null
@@ -427,7 +448,7 @@ export interface WorkflowProgramSource {
   source: string
   validation: WorkflowValidation
 }
-export interface WorkflowAgentDeclaration { class_name: string; actions: string[]; access: AgentAccessProfile }
+export interface WorkflowAgentDeclaration { class_name: string; actions: string[]; access: AccessPreset }
 export interface WorkflowTimerDeclaration { callback: string; seconds: number | null; policy: string | null }
 export interface WorkflowFeatureSummary {
   parallel_blocks: number
@@ -456,7 +477,7 @@ export interface CreateSessionInput {
   system_prompt: string
   model: string
   enabled_skills: string[]
-  access: AgentAccessProfile
+  access: AccessPreset
 }
 export interface CreateWorkflowInput {
   program_slug: string
@@ -465,8 +486,8 @@ export interface CreateWorkflowInput {
   params: Record<string, unknown>
   started_from_session_id?: Id
   model: string
-  access: AgentAccessProfile
+  access: AccessPreset
   enabled_skills: string[]
   context_mode?: WorkflowContextMode
-  agent_access_overrides?: Record<string, AgentAccessProfile>
+  agent_access_overrides?: Record<string, AccessPreset>
 }

@@ -459,7 +459,7 @@ pub enum WorkflowSchedulerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use papermachine_protocol::AgentAccessProfile;
+    use papermachine_protocol::AccessPreset;
     use papermachine_protocol::Session;
     use papermachine_protocol::Workflow;
     use papermachine_protocol::WorkflowProgramId;
@@ -595,7 +595,7 @@ mod tests {
                 trigger: Default::default(),
                 params: json!({}),
                 default_model: "test-model".to_string(),
-                access: AgentAccessProfile::Research,
+                access: AccessPreset::Research,
                 enabled_skills: Vec::new(),
                 launch_context: Default::default(),
                 agent_access_overrides: Default::default(),

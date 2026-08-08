@@ -22,8 +22,10 @@
    state, applies controls, permissions, and sandbox boundaries.
 9. **A run snapshots its program.** Source, manifest, path, source owner, and
    SHA-256 are copied into the Workflow. Later files cannot change history.
-10. **Access is a Turn snapshot.** A Session chooses one of five profiles; a
-    Turn captures it at creation, and model/tool/execution layers all enforce it.
+10. **The execution environment is a Turn snapshot.** A Session chooses one of
+    five access presets. Turn creation materializes that preset with the
+    Workspace attachment, cwd, managed roots, tool capabilities, and network
+    policy; model/tool/execution layers consume the resulting immutable policy.
 11. **Prompt context is a Turn snapshot.** Runtime, Project, Workflow,
     Agent/Session, skill, and control layers retain content, source, and hashes;
     later edits affect only later Turns.
@@ -196,9 +198,10 @@ to stderr and captured with a size limit.
 
 A user Turn or workflow action follows the same core path:
 
-1. Persist the Turn with immutable access, Project-skill, and ordered prompt
-   snapshots. `Turn.origin` records whether input is a direct/verified human
-   message or program-generated Workflow work.
+1. Persist the Turn with its immutable Workspace/authorization environment,
+   Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
+   whether input is a direct/verified human message or program-generated
+   Workflow work.
 2. Rebuild history from completed prior Turns in that Session.
 3. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
    prompt layers into the exact provider instructions.

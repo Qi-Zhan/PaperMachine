@@ -64,7 +64,7 @@
             class="project-select"
             type="button"
             :disabled="!project.available"
-            :title="project.workspace_available ? project.workspace_path : t('sidebar.projectMissing')"
+            :title="project.workspace_available ? project.workspace.roots[project.workspace.primary_root] : t('sidebar.projectMissing')"
             @click="$emit('select-project', project.id)"
           >
             <ChevronDown :size="14" />

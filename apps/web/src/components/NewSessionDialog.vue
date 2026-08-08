@@ -90,8 +90,8 @@
 import { LoaderCircle, MessageSquarePlus, X } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAppI18n } from '../i18n'
-import { AGENT_ACCESS_PROFILES } from '../types'
-import type { AgentAccessProfile, CreateSessionInput, ModelProfile, Project, ProjectSkill } from '../types'
+import { ACCESS_PRESETS } from '../types'
+import type { AccessPreset, CreateSessionInput, ModelProfile, Project, ProjectSkill } from '../types'
 
 const props = defineProps<{
   open: boolean
@@ -108,10 +108,10 @@ const title = ref('')
 const { t } = useAppI18n()
 const systemPrompt = ref('')
 const model = ref('')
-const access = ref<AgentAccessProfile>('research')
+const access = ref<AccessPreset>('research')
 const enabledSkills = ref<string[]>([])
 const titleInput = ref<HTMLInputElement | null>(null)
-const accessProfiles = computed(() => AGENT_ACCESS_PROFILES.map((value) => ({
+const accessProfiles = computed(() => ACCESS_PRESETS.map((value) => ({
   value,
   label: accessLabel(value),
   description: accessDescription(value),
@@ -146,7 +146,7 @@ function submit() {
   })
 }
 
-function accessLabel(access: AgentAccessProfile): string {
+function accessLabel(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnly')
   if (access === 'read_only') return t('access.readOnly')
   if (access === 'workspace') return t('access.workspace')
@@ -154,7 +154,7 @@ function accessLabel(access: AgentAccessProfile): string {
   return t('access.fullAccess')
 }
 
-function accessDescription(access: AgentAccessProfile): string {
+function accessDescription(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnlyDescription')
   if (access === 'read_only') return t('access.readOnlyDescription')
   if (access === 'workspace') return t('access.workspaceDescription')
