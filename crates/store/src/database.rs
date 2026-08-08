@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -51,7 +51,7 @@ impl Store {
         initialize_new(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            shared: StoreShared::new(&managed_root)?,
             managed_root,
         })
     }
@@ -66,11 +66,13 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         verify_current(&connection)?;
-        Ok(Self {
+        let store = Self {
             connection: Arc::new(Mutex::new(connection)),
-            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            shared: StoreShared::new(&managed_root)?,
             managed_root,
-        })
+        };
+        store.replay_all_session_rollouts()?;
+        Ok(store)
     }
 
     pub fn open_in_memory(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -79,7 +81,7 @@ impl Store {
         initialize_new(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            shared: StoreShared::new(&managed_root)?,
             managed_root,
         })
     }
@@ -323,6 +325,9 @@ impl Store {
         status: SessionStatus,
         reason: Option<String>,
     ) -> Result<Session, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
         let mut session = self.get_session(session_id)?;
         session.status = status;
         session.updated_at = Utc::now();
@@ -353,6 +358,9 @@ impl Store {
         session_id: SessionId,
         enabled_skills: Vec<String>,
     ) -> Result<Session, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
         let mut session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
@@ -380,6 +388,9 @@ impl Store {
         session_id: SessionId,
         system_prompt: impl Into<String>,
     ) -> Result<Session, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
         let mut session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
@@ -409,6 +420,9 @@ impl Store {
         session_id: SessionId,
         access: AccessPreset,
     ) -> Result<Session, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
         let mut session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
@@ -518,6 +532,9 @@ impl Store {
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
         let input = input.into();
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(session_id)?;
         let session = self.get_session(session_id)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
@@ -584,7 +601,6 @@ impl Store {
             web_search_context_size,
             response_format,
             skill_snapshots,
-            history: Vec::new(),
             usage: TokenUsage::default(),
             completed_model_steps: 0,
             hosted_search_calls_used: 0,
@@ -593,32 +609,11 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO turns (id, session_id, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                turn.id.to_string(),
-                turn.session_id.to_string(),
-                enum_string(turn.status)?,
-                turn.updated_at.to_rfc3339(),
-                serde_json::to_string(&turn)?,
-            ],
-        )?;
         if let Some(attempt) = attempt.as_mut() {
             attempt.turn_id = Some(turn.id);
             attempt.updated_at = now;
-            update_status_document_tx(
-                &transaction,
-                "action_attempts",
-                &attempt.id.to_string(),
-                attempt.status,
-                attempt,
-            )?;
         }
-        let event = append_session_event_tx(
-            &transaction,
+        let event = pending_session_event(
             session_id,
             Some(turn.id),
             None,
@@ -627,10 +622,15 @@ impl Store {
                 input: turn.input.clone(),
                 model: turn.model.clone(),
             },
+        );
+        self.commit_session_rollout_item_locked(
+            session_id,
+            SessionRolloutItem::TurnCreated {
+                turn: turn.clone(),
+                action_attempt: attempt,
+                events: vec![event],
+            },
         )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_session(event);
         Ok(turn)
     }
 
@@ -666,14 +666,29 @@ impl Store {
         &self,
         id: TurnId,
         output: String,
-        history: Vec<ModelInputItem>,
         usage: TokenUsage,
     ) -> Result<Turn, StoreError> {
+        let existing = self.get_turn(id)?;
+        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(existing.session_id)?;
+        let records = crate::rollout::read(&self.shared.rollout_root, existing.session_id)?;
+        let active = crate::rollout::reconstruct(&records)?
+            .active_turn
+            .ok_or_else(|| {
+                StoreError::Invariant(format!(
+                    "cannot complete Turn {id} without active rollout state"
+                ))
+            })?;
+        if active.turn_id != id || active.checkpoint_message.as_deref() != Some(output.as_str()) {
+            return Err(StoreError::Invariant(format!(
+                "cannot complete Turn {id} without its matching terminal rollout checkpoint"
+            )));
+        }
         let mut turn = self.get_turn(id)?;
         turn.output = Some(output);
-        turn.history = history;
         turn.usage = usage;
-        self.persist_turn_status(turn, TurnStatus::Completed, None)
+        self.persist_turn_status_locked(turn, TurnStatus::Completed, None)
     }
 
     pub fn fail_turn(&self, id: TurnId, error: impl Into<String>) -> Result<Turn, StoreError> {
@@ -702,28 +717,45 @@ impl Store {
         status: TurnStatus,
         error: Option<String>,
     ) -> Result<Turn, StoreError> {
+        let existing = self.get_turn(id)?;
+        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(existing.session_id)?;
         let turn = self.get_turn(id)?;
-        self.persist_turn_status(turn, status, error)
+        self.persist_turn_status_locked(turn, status, error)
     }
 
-    pub fn checkpoint_turn_history(
+    pub fn checkpoint_turn_context(
         &self,
         id: TurnId,
-        history: Vec<ModelInputItem>,
+        mutation: ModelContextMutation,
         usage: TokenUsage,
         completed_model_steps: u32,
         hosted_search_calls_used: u32,
         checkpoint_message: Option<String>,
     ) -> Result<Turn, StoreError> {
-        let mut turn = self.get_turn(id)?;
-        turn.history = history;
-        turn.usage = usage;
-        turn.completed_model_steps = completed_model_steps;
-        turn.hosted_search_calls_used = hosted_search_calls_used;
-        turn.checkpoint_message = checkpoint_message;
-        turn.updated_at = Utc::now();
-        self.update_document("turns", &turn.id.to_string(), turn.updated_at, &turn)?;
-        Ok(turn)
+        let existing = self.get_turn(id)?;
+        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(existing.session_id)?;
+        let turn = self.get_turn(id)?;
+        if turn.status.is_terminal() {
+            return Err(StoreError::Invariant(format!(
+                "cannot checkpoint terminal Turn {id}"
+            )));
+        }
+        self.commit_session_rollout_item_locked(
+            turn.session_id,
+            SessionRolloutItem::ContextCheckpoint {
+                turn_id: id,
+                mutation,
+                usage,
+                completed_model_steps,
+                hosted_search_calls_used,
+                checkpoint_message,
+            },
+        )?;
+        self.get_turn(id)
     }
 
     pub fn cancel_running_steps_for_recovery(
@@ -731,6 +763,10 @@ impl Store {
         turn_id: TurnId,
         reason: &str,
     ) -> Result<usize, StoreError> {
+        let turn = self.get_turn(turn_id)?;
+        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(turn.session_id)?;
         let documents: Vec<String> = {
             let connection = self.connection()?;
             let mut statement = connection.prepare(
@@ -743,31 +779,33 @@ impl Store {
         if documents.is_empty() {
             return Ok(0);
         }
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let mut steps = Vec::with_capacity(documents.len());
         for document in &documents {
             let mut step: AgentStep = serde_json::from_str(document)?;
             step.status = StepStatus::Cancelled;
             step.output = Some(json!({"error": reason, "recovered": true}));
             step.updated_at = Utc::now();
-            update_status_document_tx(
-                &transaction,
-                "steps",
-                &step.id.to_string(),
-                step.status,
-                &step,
-            )?;
+            steps.push(step);
         }
-        transaction.commit()?;
+        self.commit_session_rollout_item_locked(
+            turn.session_id,
+            SessionRolloutItem::StepsUpdated { steps },
+        )?;
         Ok(documents.len())
     }
 
-    fn persist_turn_status(
+    fn persist_turn_status_locked(
         &self,
         mut turn: Turn,
         status: TurnStatus,
         error: Option<String>,
     ) -> Result<Turn, StoreError> {
+        if turn.status.is_terminal() {
+            return Err(StoreError::Invariant(format!(
+                "cannot change terminal Turn {} from {:?} to {:?}",
+                turn.id, turn.status, status
+            )));
+        }
         turn.status = status;
         turn.error = error.clone();
         turn.updated_at = Utc::now();
@@ -783,25 +821,13 @@ impl Store {
             };
         }
         session.updated_at = turn.updated_at;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        update_status_document_tx(&transaction, "turns", &turn.id.to_string(), status, &turn)?;
-        update_status_document_tx(
-            &transaction,
-            "sessions",
-            &session.id.to_string(),
-            session.status,
-            &session,
-        )?;
-        let turn_event = append_session_event_tx(
-            &transaction,
+        let turn_event = pending_session_event(
             session.id,
             Some(turn.id),
             None,
             SessionEventPayload::TurnStatusChanged { status, error },
-        )?;
-        let session_event = append_session_event_tx(
-            &transaction,
+        );
+        let session_event = pending_session_event(
             session.id,
             Some(turn.id),
             None,
@@ -809,11 +835,15 @@ impl Store {
                 status: session.status,
                 reason: None,
             },
+        );
+        self.commit_session_rollout_item_locked(
+            session.id,
+            SessionRolloutItem::TurnUpdated {
+                turn: turn.clone(),
+                session,
+                events: vec![turn_event, session_event],
+            },
         )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_session(turn_event);
-        self.shared.publish_session(session_event);
         Ok(turn)
     }
 
@@ -845,11 +875,12 @@ impl Store {
         tool_call_id: Option<String>,
         input: Value,
     ) -> Result<AgentStep, StoreError> {
-        self.get_turn(turn_id)?;
+        let turn = self.get_turn(turn_id)?;
+        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(turn.session_id)?;
         let now = Utc::now();
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let sequence = transaction.query_row(
+        let sequence = self.connection()?.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM steps WHERE turn_id = ?1",
             [turn_id.to_string()],
             |row| row.get::<_, u32>(0),
@@ -869,19 +900,12 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        transaction.execute(
-            "INSERT INTO steps (id, turn_id, sequence, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                step.id.to_string(),
-                step.turn_id.to_string(),
-                step.sequence,
-                enum_string(step.status)?,
-                step.updated_at.to_rfc3339(),
-                serde_json::to_string(&step)?,
-            ],
+        self.commit_session_rollout_item_locked(
+            turn.session_id,
+            SessionRolloutItem::StepsCreated {
+                steps: vec![step.clone()],
+            },
         )?;
-        transaction.commit()?;
         Ok(step)
     }
 
@@ -893,13 +917,23 @@ impl Store {
         usage: TokenUsage,
         duration_ms: Option<u64>,
     ) -> Result<AgentStep, StoreError> {
+        let existing = self.get_step(id)?;
+        let turn = self.get_turn(existing.turn_id)?;
+        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_session_rollout_locked(turn.session_id)?;
         let mut step = self.get_step(id)?;
         step.status = status;
         step.output = output;
         step.usage = usage;
         step.duration_ms = duration_ms;
         step.updated_at = Utc::now();
-        self.update_status_document("steps", &step.id.to_string(), status, &step)?;
+        self.commit_session_rollout_item_locked(
+            turn.session_id,
+            SessionRolloutItem::StepsUpdated {
+                steps: vec![step.clone()],
+            },
+        )?;
         Ok(step)
     }
 
@@ -922,13 +956,30 @@ impl Store {
         payload: SessionEventPayload,
     ) -> Result<SessionEvent, StoreError> {
         self.get_session(session_id)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let event = append_session_event_tx(&transaction, session_id, turn_id, step_id, payload)?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_session(event.clone());
-        Ok(event)
+        if !is_stable_rollout_event(&payload) {
+            let session_lock = self.shared.session_rollout_lock(session_id)?;
+            let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+            self.replay_session_rollout_locked(session_id)?;
+            let mut connection = self.connection()?;
+            let transaction = connection.transaction()?;
+            let event =
+                append_session_event_tx(&transaction, session_id, turn_id, step_id, payload)?;
+            transaction.commit()?;
+            drop(connection);
+            self.shared.publish_session(event.clone());
+            return Ok(event);
+        }
+        let pending = pending_session_event(session_id, turn_id, step_id, payload);
+        let record = self.commit_session_rollout_item(
+            session_id,
+            SessionRolloutItem::SessionEventAppended { event: pending },
+        )?;
+        match record.item {
+            SessionRolloutItem::SessionEventAppended { event } => Ok(event),
+            _ => Err(StoreError::Invariant(
+                "Session rollout returned the wrong item".to_string(),
+            )),
+        }
     }
 
     pub fn list_session_events(
@@ -3003,6 +3054,183 @@ impl Store {
         Ok(())
     }
 
+    pub fn session_rollout_path(&self, session_id: SessionId) -> PathBuf {
+        crate::rollout::path(&self.shared.rollout_root, session_id)
+    }
+
+    pub fn list_session_rollout_records(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<SessionRolloutRecord>, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        crate::rollout::read(&self.shared.rollout_root, session_id)
+    }
+
+    pub fn reconstruct_session_rollout(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionRolloutState, StoreError> {
+        let records = self.list_session_rollout_records(session_id)?;
+        crate::rollout::reconstruct(&records)
+    }
+
+    fn commit_session_rollout_item(
+        &self,
+        session_id: SessionId,
+        item: SessionRolloutItem,
+    ) -> Result<SessionRolloutRecord, StoreError> {
+        let session_lock = self.shared.session_rollout_lock(session_id)?;
+        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.commit_session_rollout_item_locked(session_id, item)
+    }
+
+    fn commit_session_rollout_item_locked(
+        &self,
+        session_id: SessionId,
+        mut item: SessionRolloutItem,
+    ) -> Result<SessionRolloutRecord, StoreError> {
+        self.replay_session_rollout_locked(session_id)?;
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        assign_rollout_event_sequences_tx(&transaction, session_id, &mut item)?;
+        let last_sequence = self
+            .shared
+            .rollout_sequences
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .get(&session_id)
+            .copied()
+            .unwrap_or(0);
+        let sequence = last_sequence.checked_add(1).ok_or_else(|| {
+            StoreError::Invariant("Session rollout sequence overflow".to_string())
+        })?;
+        let record = SessionRolloutRecord {
+            version: SESSION_ROLLOUT_VERSION,
+            session_id,
+            sequence,
+            occurred_at: Utc::now(),
+            item,
+        };
+
+        // Match Codex's live-writer ordering: the JSONL durability barrier
+        // must complete before SQLite is allowed to observe this sequence.
+        // A failed projection is immediately rebuilt from the canonical file.
+        crate::rollout::append(&self.shared.rollout_root, &record)?;
+        self.shared
+            .rollout_sequences
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .insert(session_id, sequence);
+        let projection = (|| -> Result<(), StoreError> {
+            apply_rollout_record_tx(&transaction, &record)?;
+            set_rollout_projection_tx(&transaction, session_id, sequence)?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        drop(connection);
+        if let Err(initial_error) = projection
+            && let Err(replay_error) = self.replay_session_rollout_locked(session_id)
+        {
+            return Err(StoreError::Invariant(format!(
+                "Session rollout is durable but projection failed ({initial_error}) and immediate replay failed ({replay_error})"
+            )));
+        }
+        for event in rollout_events(&record.item) {
+            self.shared.publish_session(event.clone());
+        }
+        Ok(record)
+    }
+
+    fn replay_all_session_rollouts(&self) -> Result<(), StoreError> {
+        let mut session_ids = Vec::new();
+        for entry in std::fs::read_dir(&*self.shared.rollout_root)
+            .map_err(|error| StoreError::Io(error.to_string()))?
+        {
+            let entry = entry.map_err(|error| StoreError::Io(error.to_string()))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| StoreError::Io(error.to_string()))?;
+            if !metadata.is_file() {
+                return Err(StoreError::Invariant(format!(
+                    "unexpected entry in Session rollout directory: {}",
+                    entry.path().display()
+                )));
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                return Err(StoreError::Invariant(format!(
+                    "unexpected entry in Session rollout directory: {}",
+                    path.display()
+                )));
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    StoreError::Invariant(format!(
+                        "invalid Session rollout path: {}",
+                        path.display()
+                    ))
+                })?;
+            session_ids.push(
+                SessionId::from_str(stem)
+                    .map_err(|error| StoreError::Invariant(error.to_string()))?,
+            );
+        }
+        session_ids.sort_unstable();
+        for session_id in session_ids {
+            let session_lock = self.shared.session_rollout_lock(session_id)?;
+            let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+            self.replay_session_rollout_locked(session_id)?;
+        }
+        Ok(())
+    }
+
+    fn replay_session_rollout_locked(&self, session_id: SessionId) -> Result<(), StoreError> {
+        let mut connection = self.connection()?;
+        let projected = connection
+            .query_row(
+                "SELECT last_sequence FROM session_rollout_projection WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let cached = self
+            .shared
+            .rollout_sequences
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .get(&session_id)
+            .copied();
+        if cached == Some(projected) {
+            return Ok(());
+        }
+        let records = crate::rollout::read(&self.shared.rollout_root, session_id)?;
+        let last_sequence = records.last().map_or(0, |record| record.sequence);
+        if projected > last_sequence {
+            return Err(StoreError::Invariant(format!(
+                "Session {session_id} projection sequence {projected} is ahead of rollout {last_sequence}"
+            )));
+        }
+        if projected < last_sequence {
+            let transaction = connection.transaction()?;
+            for record in records.iter().filter(|record| record.sequence > projected) {
+                apply_rollout_record_tx(&transaction, record)?;
+            }
+            set_rollout_projection_tx(&transaction, session_id, last_sequence)?;
+            transaction.commit()?;
+        }
+        self.shared
+            .rollout_sequences
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .insert(session_id, last_sequence);
+        Ok(())
+    }
+
     fn ensure_project(&self, id: ProjectId) -> Result<(), StoreError> {
         let exists = self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
@@ -3189,6 +3417,7 @@ fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
     std::fs::create_dir_all(root).map_err(|error| StoreError::Io(error.to_string()))?;
     for directory in [
         "prompts",
+        "rollouts",
         "workflows",
         "skills",
         "sources",
@@ -3216,6 +3445,7 @@ fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         .map_err(|error| StoreError::Io(error.to_string()))?;
     for relative in [
         "prompts",
+        "rollouts",
         "workflows",
         "skills",
         "sources",
@@ -3360,6 +3590,9 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            UNIQUE(session_id, sequence)
          );
          CREATE INDEX IF NOT EXISTS session_events_sequence ON session_events(session_id, sequence ASC);
+         CREATE TABLE IF NOT EXISTS session_rollout_projection (
+           session_id TEXT PRIMARY KEY REFERENCES sessions(id), last_sequence INTEGER NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS workflow_programs (
            owner_key TEXT NOT NULL, id TEXT NOT NULL, slug TEXT NOT NULL, source TEXT NOT NULL,
            definition_path TEXT NOT NULL, sha256 TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -3597,6 +3830,238 @@ fn append_session_event_tx(
         ],
     )?;
     Ok(event)
+}
+
+fn assign_rollout_event_sequences_tx(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    item: &mut SessionRolloutItem,
+) -> Result<(), StoreError> {
+    let mut sequence = transaction.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?1",
+        [session_id.to_string()],
+        |row| row.get::<_, u64>(0),
+    )?;
+    for event in rollout_events_mut(item) {
+        if event.session_id != session_id {
+            return Err(StoreError::Invariant(format!(
+                "Session rollout event belongs to {}, expected {session_id}",
+                event.session_id
+            )));
+        }
+        event.sequence = sequence;
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Invariant("Session event sequence overflow".to_string()))?;
+    }
+    Ok(())
+}
+
+fn rollout_events(item: &SessionRolloutItem) -> Vec<&SessionEvent> {
+    match item {
+        SessionRolloutItem::TurnCreated { events, .. }
+        | SessionRolloutItem::TurnUpdated { events, .. } => events.iter().collect(),
+        SessionRolloutItem::SessionEventAppended { event } => vec![event],
+        SessionRolloutItem::ContextCheckpoint { .. }
+        | SessionRolloutItem::StepsCreated { .. }
+        | SessionRolloutItem::StepsUpdated { .. } => Vec::new(),
+    }
+}
+
+fn rollout_events_mut(item: &mut SessionRolloutItem) -> Vec<&mut SessionEvent> {
+    match item {
+        SessionRolloutItem::TurnCreated { events, .. }
+        | SessionRolloutItem::TurnUpdated { events, .. } => events.iter_mut().collect(),
+        SessionRolloutItem::SessionEventAppended { event } => vec![event],
+        SessionRolloutItem::ContextCheckpoint { .. }
+        | SessionRolloutItem::StepsCreated { .. }
+        | SessionRolloutItem::StepsUpdated { .. } => Vec::new(),
+    }
+}
+
+fn apply_rollout_record_tx(
+    transaction: &Transaction<'_>,
+    record: &SessionRolloutRecord,
+) -> Result<(), StoreError> {
+    match &record.item {
+        SessionRolloutItem::TurnCreated {
+            turn,
+            action_attempt,
+            events,
+        } => {
+            transaction.execute(
+                "INSERT INTO turns (id, session_id, status, updated_at, document_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    turn.id.to_string(),
+                    turn.session_id.to_string(),
+                    enum_string(turn.status)?,
+                    turn.updated_at.to_rfc3339(),
+                    serde_json::to_string(turn)?,
+                ],
+            )?;
+            if let Some(attempt) = action_attempt {
+                update_status_document_tx(
+                    transaction,
+                    "action_attempts",
+                    &attempt.id.to_string(),
+                    attempt.status,
+                    attempt,
+                )?;
+            }
+            for event in events {
+                insert_session_event_exact_tx(transaction, event)?;
+            }
+        }
+        SessionRolloutItem::ContextCheckpoint {
+            turn_id,
+            usage,
+            completed_model_steps,
+            hosted_search_calls_used,
+            checkpoint_message,
+            ..
+        } => {
+            let document = transaction
+                .query_row(
+                    "SELECT document_json FROM turns WHERE id = ?1",
+                    [turn_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "turn",
+                    id: turn_id.to_string(),
+                })?;
+            let mut turn: Turn = serde_json::from_str(&document)?;
+            turn.usage = *usage;
+            turn.completed_model_steps = *completed_model_steps;
+            turn.hosted_search_calls_used = *hosted_search_calls_used;
+            turn.checkpoint_message.clone_from(checkpoint_message);
+            turn.updated_at = record.occurred_at;
+            update_status_document_tx(
+                transaction,
+                "turns",
+                &turn.id.to_string(),
+                turn.status,
+                &turn,
+            )?;
+        }
+        SessionRolloutItem::TurnUpdated {
+            turn,
+            session,
+            events,
+        } => {
+            update_status_document_tx(
+                transaction,
+                "turns",
+                &turn.id.to_string(),
+                turn.status,
+                turn,
+            )?;
+            update_status_document_tx(
+                transaction,
+                "sessions",
+                &session.id.to_string(),
+                session.status,
+                session,
+            )?;
+            for event in events {
+                insert_session_event_exact_tx(transaction, event)?;
+            }
+        }
+        SessionRolloutItem::StepsCreated { steps } => {
+            for step in steps {
+                transaction.execute(
+                    "INSERT INTO steps
+                     (id, turn_id, sequence, status, updated_at, document_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        step.id.to_string(),
+                        step.turn_id.to_string(),
+                        step.sequence,
+                        enum_string(step.status)?,
+                        step.updated_at.to_rfc3339(),
+                        serde_json::to_string(step)?,
+                    ],
+                )?;
+            }
+        }
+        SessionRolloutItem::StepsUpdated { steps } => {
+            for step in steps {
+                update_status_document_tx(
+                    transaction,
+                    "steps",
+                    &step.id.to_string(),
+                    step.status,
+                    step,
+                )?;
+            }
+        }
+        SessionRolloutItem::SessionEventAppended { event } => {
+            insert_session_event_exact_tx(transaction, event)?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_session_event_exact_tx(
+    transaction: &Transaction<'_>,
+    event: &SessionEvent,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO session_events
+         (id, session_id, turn_id, step_id, sequence, occurred_at, event_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            event.id.to_string(),
+            event.session_id.to_string(),
+            event.turn_id.map(|id| id.to_string()),
+            event.step_id.map(|id| id.to_string()),
+            event.sequence,
+            event.occurred_at.to_rfc3339(),
+            serde_json::to_string(event)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn set_rollout_projection_tx(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    sequence: u64,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO session_rollout_projection (session_id, last_sequence)
+         VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET last_sequence = excluded.last_sequence",
+        params![session_id.to_string(), sequence],
+    )?;
+    Ok(())
+}
+
+fn pending_session_event(
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    step_id: Option<StepId>,
+    payload: SessionEventPayload,
+) -> SessionEvent {
+    SessionEvent {
+        id: EventId::new(),
+        sequence: 0,
+        session_id,
+        turn_id,
+        step_id,
+        occurred_at: Utc::now(),
+        payload,
+    }
+}
+
+fn is_stable_rollout_event(payload: &SessionEventPayload) -> bool {
+    !matches!(
+        payload,
+        SessionEventPayload::AssistantMessageDelta { .. }
+            | SessionEventPayload::AssistantMessageReset
+    )
 }
 
 fn append_workflow_event_tx(

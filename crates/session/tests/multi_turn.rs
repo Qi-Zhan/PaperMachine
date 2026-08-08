@@ -255,12 +255,24 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             .expect("Turns should load")
             .into_iter()
             .find(|turn| turn.status == TurnStatus::Running);
-        if active_turn.is_some() {
+        if let Some(turn) = active_turn.as_ref()
+            && !store
+                .list_steps(turn.id)
+                .expect("Steps should load")
+                .is_empty()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let turn = active_turn.expect("Workflow Action Turn should be running");
+    assert!(
+        !store
+            .list_steps(turn.id)
+            .expect("Step should be running before cancellation")
+            .is_empty(),
+        "Workflow Action should reach its model Step before cancellation"
+    );
     runtime.cancel(turn.id).await.expect("Turn should cancel");
     let result = execution.await.expect("execution task should join");
     assert!(matches!(result, Err(SessionRuntimeError::Cancelled)));

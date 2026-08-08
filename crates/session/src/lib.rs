@@ -13,7 +13,9 @@ use papermachine_model::ModelClient;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::AgentStep;
+use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::ControlMessageKind;
+use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelResponseFormat;
 use papermachine_protocol::PromptLayer;
@@ -431,13 +433,26 @@ async fn run_scheduled_turn(
     let turn = inner.store.start_turn(turn_id)?;
     verify_prompt_snapshot(&turn.prompt)?;
     let session = inner.store.get_session(turn.session_id)?;
-    let resume_current_turn = !turn.history.is_empty()
-        || turn.completed_model_steps > 0
-        || turn.checkpoint_message.is_some();
+    let rollout = inner.store.reconstruct_session_rollout(session.id)?;
+    let active_rollout = rollout.active_turn.ok_or_else(|| {
+        StoreError::Invariant(format!(
+            "Session rollout has no active state for running Turn {}",
+            turn.id
+        ))
+    })?;
+    if active_rollout.turn_id != turn.id {
+        return Err(StoreError::Invariant(format!(
+            "Session rollout active Turn {} does not match running Turn {}",
+            active_rollout.turn_id, turn.id
+        ))
+        .into());
+    }
+    let resume_current_turn = active_rollout.has_checkpoint;
+    let rollout_context = active_rollout.context;
     let history = if resume_current_turn {
-        repair_interrupted_tool_calls(turn.history.clone(), &inner.store.list_steps(turn.id)?)
+        repair_interrupted_tool_calls(rollout_context.clone(), &inner.store.list_steps(turn.id)?)
     } else {
-        previous_history(&inner.store, &turn)?
+        rollout_context.clone()
     };
     let workflow_id = workflow_context.as_ref().map(|context| context.workflow_id);
     let event_sink = Arc::new(SessionAgentEventSink::new(
@@ -445,6 +460,7 @@ async fn run_scheduled_turn(
         session.id,
         turn.id,
         workflow_id,
+        rollout_context,
     ));
     let events: Arc<dyn AgentEventSink> = event_sink.clone();
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
@@ -473,11 +489,11 @@ async fn run_scheduled_turn(
         request.action_attempt_id = Some(context.action_attempt_id);
     }
     request.initial_history = history;
-    request.initial_usage = turn.usage;
-    request.completed_model_steps = turn.completed_model_steps;
-    request.hosted_search_calls_used = turn.hosted_search_calls_used;
+    request.initial_usage = active_rollout.usage;
+    request.completed_model_steps = active_rollout.completed_model_steps;
+    request.hosted_search_calls_used = active_rollout.hosted_search_calls_used;
     request.resume_current_turn = resume_current_turn;
-    request.checkpoint_message = turn.checkpoint_message.clone();
+    request.checkpoint_message = active_rollout.checkpoint_message;
     request.reasoning_effort = turn.reasoning_effort;
     request.tools_enabled = turn.tools_enabled;
     request.web_search_context_size = turn.web_search_context_size;
@@ -488,12 +504,9 @@ async fn run_scheduled_turn(
         .unwrap_or(inner.model_context_window);
     match runtime.run(request, cancellation).await {
         Ok(result) => {
-            inner.store.complete_turn(
-                turn.id,
-                result.final_message,
-                result.history,
-                result.usage,
-            )?;
+            inner
+                .store
+                .complete_turn(turn.id, result.final_message, result.usage)?;
             Ok(())
         }
         Err(AgentError::Cancelled) => {
@@ -600,16 +613,6 @@ impl AgentControlPlane for StoreAgentControlPlane {
         }
         Ok(checkpoint)
     }
-}
-
-fn previous_history(store: &Store, current: &Turn) -> Result<Vec<ModelInputItem>, StoreError> {
-    Ok(store
-        .list_turns(current.session_id)?
-        .into_iter()
-        .rev()
-        .find(|turn| turn.id != current.id && turn.status == TurnStatus::Completed)
-        .map(|turn| turn.history)
-        .unwrap_or_default())
 }
 
 fn repair_interrupted_tool_calls(
@@ -822,6 +825,12 @@ struct SessionAgentEventSink {
     model_steps: Mutex<HashMap<u32, StepId>>,
     tool_steps: Mutex<HashMap<String, StepId>>,
     compaction_steps: Mutex<Vec<StepId>>,
+    checkpoint: Mutex<RolloutCheckpointState>,
+}
+
+struct RolloutCheckpointState {
+    context: Vec<ModelInputItem>,
+    replacement_reason: Option<ContextReplacementReason>,
 }
 
 impl SessionAgentEventSink {
@@ -830,6 +839,7 @@ impl SessionAgentEventSink {
         session_id: SessionId,
         turn_id: TurnId,
         workflow_id: Option<WorkflowId>,
+        context: Vec<ModelInputItem>,
     ) -> Self {
         Self {
             store,
@@ -839,6 +849,10 @@ impl SessionAgentEventSink {
             model_steps: Mutex::new(HashMap::new()),
             tool_steps: Mutex::new(HashMap::new()),
             compaction_steps: Mutex::new(Vec::new()),
+            checkpoint: Mutex::new(RolloutCheckpointState {
+                context,
+                replacement_reason: None,
+            }),
         }
     }
 }
@@ -1036,6 +1050,11 @@ impl AgentEventSink for SessionAgentEventSink {
                 )
             }
             AgentEvent::ContextTrimmed { removed_items } => {
+                let mut checkpoint = self.checkpoint.lock().await;
+                if checkpoint.replacement_reason.is_none() {
+                    checkpoint.replacement_reason = Some(ContextReplacementReason::Trim);
+                }
+                drop(checkpoint);
                 self.append(None, SessionEventPayload::ContextTrimmed { removed_items })
             }
             AgentEvent::ContextCompactionStarted { before_tokens } => {
@@ -1088,6 +1107,8 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
+                self.checkpoint.lock().await.replacement_reason =
+                    Some(ContextReplacementReason::Compaction);
                 self.append(
                     step_id,
                     SessionEventPayload::ContextCompacted {
@@ -1106,18 +1127,38 @@ impl AgentEventSink for SessionAgentEventSink {
                 completed_model_steps,
                 hosted_search_calls_used,
                 message,
-            } => self
-                .store
-                .checkpoint_turn_history(
-                    self.turn_id,
-                    history,
-                    usage,
-                    completed_model_steps,
-                    hosted_search_calls_used,
-                    message,
-                )
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
+            } => {
+                let mut checkpoint = self.checkpoint.lock().await;
+                let mutation = if history == checkpoint.context {
+                    ModelContextMutation::Unchanged
+                } else if history.starts_with(&checkpoint.context) {
+                    ModelContextMutation::Append {
+                        items: history[checkpoint.context.len()..].to_vec(),
+                    }
+                } else {
+                    let reason = checkpoint.replacement_reason.ok_or_else(|| {
+                        "Agent replaced Session context without a compaction or trim event"
+                            .to_string()
+                    })?;
+                    ModelContextMutation::Replace {
+                        items: history.clone(),
+                        reason,
+                    }
+                };
+                self.store
+                    .checkpoint_turn_context(
+                        self.turn_id,
+                        mutation,
+                        usage,
+                        completed_model_steps,
+                        hosted_search_calls_used,
+                        message,
+                    )
+                    .map_err(|error| error.to_string())?;
+                checkpoint.context = history;
+                checkpoint.replacement_reason = None;
+                Ok(())
+            }
         }
     }
 }

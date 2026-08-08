@@ -78,6 +78,7 @@ Project database. PaperMachine owns all Project state below `data_dir`:
 <data_dir>/
   projects/<project-id>/
     state/project.db
+    rollouts/<session-id>.jsonl
     artifacts/
     workflow-runtime/
     runtime/
@@ -109,6 +110,7 @@ code for:
 - the sample/tool/follow-up agent loop and parallel tool calls;
 - cancellation, retry visibility, and context-window accounting;
 - process-group lifecycle and fail-closed sandbox execution;
+- one-live-writer Session rollouts with durable-write-before-projection ordering;
 - a conversation-first UI with execution details folded under each Turn.
 
 Codex is source material, not PaperMachine's runtime dependency. Skills are

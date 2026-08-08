@@ -92,6 +92,7 @@ data_dir/                       application-global state
   config.toml                   default provider configuration
   projects/<project-id>/        one Project's PaperMachine-owned state
     state/project.db
+    rollouts/<session-id>.jsonl
     artifacts/
     workflow-runtime/
     runtime/
@@ -204,18 +205,23 @@ to stderr and captured with a size limit.
 
 A user Turn or workflow action follows the same core path:
 
-1. Persist the Turn with its immutable Workspace/authorization environment,
+1. Append the Turn to its Session rollout, then project it with its immutable
+   Workspace/authorization environment,
    Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
    whether input is a direct/verified human message or program-generated
    Workflow work.
-2. Rebuild history from completed prior Turns in that Session.
+2. Reconstruct canonical model context by replaying that append-only rollout.
 3. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
    prompt layers into the exact provider instructions.
-4. Stream a Responses API sample and persist model-step events. Each Session
+4. Stream a Responses API sample. Deltas remain ephemeral; completed model
+   items and cursor checkpoints cross the rollout durability barrier before
+   their SQLite projections. Each Session
    retains one sequential WebSocket continuation chain; unsupported providers
    fall back to HTTP SSE.
-5. Execute requested tools, persist inputs/outputs, and sample again.
-6. Finish the Turn with output, usage, history, and terminal Step states. If a
+5. Execute requested tools, append stable call/result and Step lifecycle facts,
+   project them, and sample again.
+6. Finish the Turn by journaling its output, usage, and terminal state. SQLite
+   never stores a cumulative context copy in the Turn document. If a
    provider reports an incomplete response after consuming tokens, retry usage
    is accumulated; a terminal failure persists a failed model Step and charges
    those tokens before the Turn is failed. Output-limit and reasoning-only empty
@@ -355,10 +361,14 @@ the UI separately confirms `full_access`.
 ## Persistence and recovery
 
 Each Project's SQLite database stores its authoritative Project row, JSON domain
-documents, indexed ownership/status columns, and ordered Session and Workflow
-events. Its Artifacts are stored under that same Project's managed directory
-using content-hashed metadata records. The web client uses SSE for live deltas
-and refreshes durable views for lifecycle changes.
+documents, indexed ownership/status columns, ordered Session and Workflow
+events, and the last projected sequence for each Session. Each Session's JSONL
+rollout is the canonical model-context and execution history. One writer per
+Session flushes each stable record before applying its SQLite projection;
+startup repairs only an incomplete final line and replays any records newer
+than the projection cursor. Its Artifacts are stored under that same Project's
+managed directory using content-hashed metadata records. The web client uses
+SSE for live deltas and refreshes durable views for lifecycle changes.
 
 Unfinished standalone Session Turns and every non-terminal Workflow are
 recovered at startup. A recovered Workflow reruns its immutable Python source
@@ -368,10 +378,13 @@ error. A completed effect returns its stored result, while an effect that was
 started when the process disappeared is safely redispatched against
 deterministic resource IDs.
 
-Action Turns checkpoint model history, usage, completed-model-step and hosted
-search cursors, and a terminal candidate message. Recovery keeps the same
+Action Turns append context mutations, usage, completed-model-step and hosted
+search cursors, and a terminal candidate message to the Session rollout.
+Ordinary additions are append records; compaction and trimming are explicit
+replacement records that do not mutate prior entries. Recovery keeps the same
 ActionInvocation, ActionAttempt, and Turn, cancels only orphaned in-flight
-Steps, reconstructs a completed local-tool result from the Step's durable call
+Steps, reconstructs context from the rollout and a completed local-tool result
+from the Step's durable call
 ID, gives an execution-unknown tool an explicit restart result, and resumes at
 the next model sample. This avoids repeating a
 checkpointed completed sample or counting the Action start twice. The

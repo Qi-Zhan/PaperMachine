@@ -360,10 +360,11 @@ effect 仍是 started，runtime 会用 `(WorkflowId, effect path, resource kind)
 收敛到原有对象。同一路径若出现不同请求会 fail closed。
 
 未完成的 Action 会复用原 ActionInvocation、最新的非终态 Attempt 与关联 Turn。
-Turn checkpoint 保存 model history、累计 usage、已完成 model-step 与 hosted-search
-游标，以及可能已经得到的终态候选消息。每个本地 Tool Step 还会保存 provider
-call ID；恢复会复用 completed Tool Step 的真实输出，而进程消失时仍是 running 的
-Step 会得到明确的 execution-unknown restart 结果。workflow 级 `ask_human` 本身是
+对应 Session 的 append-only rollout 保存追加或显式替换的 model context、累计
+usage、已完成 model-step 与 hosted-search 游标，以及可能已经得到的终态候选消息；
+Turn 的 SQLite 文档不再复制累计 context。每个本地 Tool Step 还会保存 provider
+call ID；恢复会 replay rollout，并复用 completed Tool Step 的真实输出，而进程消失
+时仍是 running 的 Step 会得到明确的 execution-unknown restart 结果。workflow 级 `ask_human` 本身是
 journaled effect，因此会继续等待同一个确定性 HumanRequest。
 
 human、timer 与 signal wait 还支持不保留进程的挂起。Python effect client 会跟踪

@@ -99,7 +99,6 @@ export interface Turn {
   web_search_context_size: 'low' | 'medium' | 'high' | null
   response_format: unknown | null
   skill_snapshots: SkillSnapshot[]
-  history: unknown[]
   usage: TokenUsage
   completed_model_steps: number
   hosted_search_calls_used: number

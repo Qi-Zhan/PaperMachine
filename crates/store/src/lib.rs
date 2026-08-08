@@ -3,6 +3,7 @@
 mod artifact;
 mod catalog;
 mod database;
+mod rollout;
 
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ProjectId;
@@ -14,9 +15,11 @@ use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowTrigger;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -65,22 +68,43 @@ impl From<serde_json::Error> for StoreError {
 #[derive(Clone)]
 struct StoreShared {
     artifact_root: Arc<PathBuf>,
+    rollout_root: Arc<PathBuf>,
+    session_rollout_locks: Arc<Mutex<HashMap<SessionId, Arc<Mutex<()>>>>>,
+    rollout_sequences: Arc<Mutex<HashMap<SessionId, u64>>>,
     workflow_events: broadcast::Sender<WorkflowEvent>,
     session_events: broadcast::Sender<SessionEvent>,
 }
 
 impl StoreShared {
-    fn new(artifact_root: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let artifact_root = artifact_root.as_ref().to_path_buf();
+    fn new(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let artifact_root = managed_root.as_ref().join("artifacts");
+        let rollout_root = managed_root.as_ref().join("rollouts");
         std::fs::create_dir_all(&artifact_root)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        std::fs::create_dir_all(&rollout_root)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let (workflow_events, _) = broadcast::channel(4096);
         let (session_events, _) = broadcast::channel(4096);
         Ok(Self {
             artifact_root: Arc::new(artifact_root),
+            rollout_root: Arc::new(rollout_root),
+            session_rollout_locks: Arc::new(Mutex::new(HashMap::new())),
+            rollout_sequences: Arc::new(Mutex::new(HashMap::new())),
             workflow_events,
             session_events,
         })
+    }
+
+    fn session_rollout_lock(&self, session_id: SessionId) -> Result<Arc<Mutex<()>>, StoreError> {
+        let mut locks = self
+            .session_rollout_locks
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        Ok(Arc::clone(
+            locks
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        ))
     }
 
     fn publish_workflow(&self, event: WorkflowEvent) {

@@ -1,5 +1,4 @@
 use crate::AccessPreset;
-use crate::ModelInputItem;
 use crate::ModelResponseFormat;
 use crate::ProjectId;
 use crate::PromptSnapshot;
@@ -117,8 +116,6 @@ pub struct Turn {
     pub response_format: Option<ModelResponseFormat>,
     #[serde(default)]
     pub skill_snapshots: Vec<SkillSnapshot>,
-    #[serde(default)]
-    pub history: Vec<ModelInputItem>,
     #[serde(default)]
     pub usage: TokenUsage,
     /// Durable Agent loop cursor used to continue an interrupted Turn without
