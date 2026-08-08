@@ -90,7 +90,6 @@ resource_root/                  read-only shipped resources
 
 data_dir/                       application-global state
   config.toml                   default provider configuration
-  library.db                    Project references and display metadata
   projects/<project-id>/        one Project's PaperMachine-owned state
     state/project.db
     artifacts/
@@ -99,6 +98,8 @@ data_dir/                       application-global state
     prompts/
     workflows/
     skills/
+  staging/                      unpublished Project construction
+  trash/                        atomically retired managed state
 
 workspace/                      user-owned files attached to a Project
 ```
@@ -113,25 +114,30 @@ Python 3.11 or newer. It does not probe installation-specific absolute paths.
 The platform default `data_dir` is
 `~/Library/Application Support/PaperMachine` on macOS,
 `$XDG_DATA_HOME/papermachine` (or `~/.local/share/papermachine`) on Linux, and
-`%LOCALAPPDATA%\PaperMachine` on Windows. `--data-dir` selects another global
-library, and `--config` selects a provider file independently. No path is
+`%LOCALAPPDATA%\PaperMachine` on Windows. `--data-dir` selects another managed
+root, and `--config` selects a provider file independently. No path is
 derived from the selected Project, and application data is never inferred from
 the current repository.
 
-Creating a Project allocates an ID, initializes its managed state under
-`data_dir/projects/<project-id>`, and attaches a user-selected absolute
-Workspace. The two roots must not overlap. PaperMachine creates no hidden files
-inside the Workspace. Relocation changes only the Workspace attachment.
-Removing a Project deletes its managed state but never deletes Workspace files.
-Relocation or removal is rejected while that Project has resumable work.
+Creating a Project allocates an ID, initializes a fresh current-schema Store in
+`data_dir/staging/`, and atomically renames it to
+`data_dir/projects/<project-id>` before it becomes visible. It attaches a
+user-selected absolute Workspace; the Workspace and the entire managed root
+must not overlap. PaperMachine creates no hidden files inside the Workspace.
+Relocation changes only the Workspace attachment. Removal atomically renames
+managed state into `trash/` before asynchronous deletion and never deletes
+Workspace files. Relocation or removal is rejected while that Project has
+resumable work.
 
-At startup the server opens managed Project databases by ID and independently
-checks whether each attached Workspace is available. The web client renders
-this lightweight library first and requests a full overview only for the
-selected Project. A missing Workspace does not make the managed Project
-disappear; it can be reattached. Each Project has its own Store, catalog,
-Session runtime, and Workflow scheduler; process-wide semaphores still bound
-concurrent work across Projects.
+At startup the server scans `projects/`. Every directory name must be a
+ProjectId, every Store must use the one current schema, and its database must
+contain exactly one matching Project row. That row is authoritative; there is
+no second Project document or global SQLite catalog. The server builds an
+in-memory runtime catalog and independently checks whether each attached
+Workspace is available. A missing Workspace does not make the managed Project
+disappear; it can be reattached. Each Project has its own Store, Workflow
+catalog, Session runtime, and Workflow scheduler; process-wide semaphores still
+bound concurrent work across Projects.
 
 ## Workflow launch
 
@@ -185,7 +191,7 @@ PaperMachine server ------------+
                  |                         |
                  +-> execution sandbox     +-> SessionRuntime actions
                                |
-                 global Project library + per-Project Store/artifacts
+                 in-memory catalog + per-Project Store/artifacts
 ```
 
 The Python runner loads the snapshotted `workflow.py`, executes its async
@@ -348,13 +354,11 @@ the UI separately confirms `full_access`.
 
 ## Persistence and recovery
 
-Each Project's SQLite database stores its JSON documents, indexed
-ownership/status columns, and ordered append-only Session and Workflow event
-streams. Its Artifacts are stored under that same Project's managed directory
-using content-hashed metadata records. The separate global SQLite
-library stores no Session, Turn, Workflow, prompt, skill, or Artifact content.
-The web client uses SSE for live deltas and refreshes durable views for
-lifecycle changes.
+Each Project's SQLite database stores its authoritative Project row, JSON domain
+documents, indexed ownership/status columns, and ordered Session and Workflow
+events. Its Artifacts are stored under that same Project's managed directory
+using content-hashed metadata records. The web client uses SSE for live deltas
+and refreshes durable views for lifecycle changes.
 
 Unfinished standalone Session Turns and every non-terminal Workflow are
 recovered at startup. A recovered Workflow reruns its immutable Python source

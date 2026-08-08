@@ -34,7 +34,7 @@ use papermachine_session::SessionRuntimeError;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_skills::SkillError;
 use papermachine_store::NewWorkflow;
-use papermachine_store::ProjectLibrary;
+use papermachine_store::ProjectCatalog;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_tools::ExecCommandTool;
@@ -103,7 +103,7 @@ type InitializedModels = (
 
 #[derive(Clone)]
 pub struct AppState {
-    library: Arc<ProjectLibrary>,
+    catalog: Arc<ProjectCatalog>,
     projects: Arc<RwLock<HashMap<ProjectId, ProjectRuntime>>>,
     runtime_factory: Arc<ProjectRuntimeFactory>,
     generator: WorkflowGenerator,
@@ -168,7 +168,6 @@ struct ProjectRuntime {
 }
 
 struct ProjectRuntimeFactory {
-    projects_root: PathBuf,
     workflows_root: PathBuf,
     python_runtime_root: PathBuf,
     model: Arc<dyn ModelClient>,
@@ -180,14 +179,6 @@ struct ProjectRuntimeFactory {
 }
 
 impl ProjectRuntimeFactory {
-    fn managed_root(&self, project_id: ProjectId) -> PathBuf {
-        self.projects_root.join(project_id.to_string())
-    }
-
-    fn open_store(&self, project: &Project) -> Result<Arc<Store>, StoreError> {
-        Ok(Arc::new(Store::open(self.managed_root(project.id))?))
-    }
-
     async fn build(&self, project: &Project, store: Arc<Store>) -> anyhow::Result<ProjectRuntime> {
         let mut catalog =
             WorkflowProgramCatalog::scan(&self.workflows_root, &self.python_runtime_root, &store)
@@ -254,13 +245,13 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         "PaperMachine Python runtime is missing: {}",
         validator.display()
     );
-    let library = Arc::new(
-        ProjectLibrary::open(config.data_dir.join("library.db"))
-            .context("failed to open PaperMachine Project library")?,
+    let catalog = Arc::new(
+        ProjectCatalog::open(&config.data_dir)
+            .context("failed to open PaperMachine Project catalog")?,
     );
-    let projects_root = config.data_dir.join("projects");
-    std::fs::create_dir_all(&projects_root)
-        .context("failed to create PaperMachine managed Project directory")?;
+    catalog
+        .quarantine_staging()
+        .context("failed to quarantine incomplete Project staging state")?;
     let (model, default_model, model_context_window, mode, model_profiles, model_providers): InitializedModels = match &config.models {
         ServerModelConfig::Demo => (
             Arc::new(DemoModelClient),
@@ -298,7 +289,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         .context("failed to register exec_command")?
         .build();
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
-        projects_root,
         workflows_root,
         python_runtime_root,
         model: Arc::clone(&model),
@@ -314,23 +304,15 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         workflow_permits: Arc::new(Semaphore::new(config.max_concurrent_runs.max(1))),
     });
     let mut projects = HashMap::new();
-    for project in library.list()? {
-        let database = runtime_factory
-            .managed_root(project.id)
-            .join("state/project.db");
-        if !database.is_file() {
-            continue;
-        }
-        let store = runtime_factory.open_store(&project)?;
-        let stored_project = store.get_project(project.id)?;
-        projects.insert(
-            project.id,
-            runtime_factory.build(&stored_project, store).await?,
-        );
+    for entry in catalog.scan()? {
+        let project = entry.project;
+        let store = Arc::new(entry.store);
+        projects.insert(project.id, runtime_factory.build(&project, store).await?);
     }
+    schedule_trash_cleanup(Arc::clone(&catalog), catalog.trash_entries()?);
 
     Ok(AppState {
-        library,
+        catalog,
         projects: Arc::new(RwLock::new(projects)),
         runtime_factory,
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
@@ -462,37 +444,42 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 #[derive(Serialize)]
-struct ProjectLibraryEntry {
+struct ProjectCatalogEntry {
     #[serde(flatten)]
     project: Project,
     available: bool,
     workspace_available: bool,
 }
 
-async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<ProjectLibraryEntry>>> {
-    let available = state
+async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<ProjectCatalogEntry>>> {
+    let projects = state
         .projects
         .read()
         .await
-        .keys()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    Ok(Json(
-        state
-            .library
-            .list()?
-            .into_iter()
-            .map(|project| ProjectLibraryEntry {
-                available: available.contains(&project.id),
-                workspace_available: project
-                    .workspace
-                    .roots
-                    .iter()
-                    .all(|root| std::path::Path::new(root).is_dir()),
-                project,
-            })
-            .collect(),
-    ))
+        .iter()
+        .map(|(project_id, runtime)| runtime.store.get_project(*project_id))
+        .collect::<Vec<_>>();
+    let mut entries = Vec::with_capacity(projects.len());
+    for get_project in projects {
+        let project = get_project?;
+        entries.push(ProjectCatalogEntry {
+            available: true,
+            workspace_available: project
+                .workspace
+                .roots
+                .iter()
+                .all(|root| std::path::Path::new(root).is_dir()),
+            project,
+        });
+    }
+    entries.sort_by(|left, right| {
+        right
+            .project
+            .updated_at
+            .cmp(&left.project.updated_at)
+            .then_with(|| left.project.id.cmp(&right.project.id))
+    });
+    Ok(Json(entries))
 }
 
 #[derive(Deserialize)]
@@ -507,42 +494,30 @@ struct CreateProjectRequest {
 async fn create_project(
     State(state): State<AppState>,
     Json(request): Json<CreateProjectRequest>,
-) -> ApiResult<(StatusCode, Json<ProjectLibraryEntry>)> {
+) -> ApiResult<(StatusCode, Json<ProjectCatalogEntry>)> {
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("Project name must not be empty"));
     }
     let workspace = canonical_workspace_selection(&request.workspace, true)?;
-    if state.library.list()?.iter().any(|project| {
-        project
-            .workspace
-            .roots
-            .iter()
-            .any(|root| std::path::Path::new(root) == workspace)
-    }) {
-        return Err(StoreError::Invariant(format!(
-            "Project Workspace is already registered: {}",
-            workspace.display()
-        ))
-        .into());
-    }
-    let project_id = ProjectId::new();
-    let store = Arc::new(Store::open(state.runtime_factory.managed_root(project_id))?);
-    let project = store.create_project_with_id(
-        project_id,
+    let entry = state.catalog.create_project(
         request.name.trim(),
         request.description.trim(),
         &workspace,
     )?;
-    state.library.register(&project)?;
-    let runtime = state
-        .runtime_factory
-        .build(&project, store)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let project = entry.project;
+    let store = Arc::new(entry.store);
+    let runtime = match state.runtime_factory.build(&project, store).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let trash = state.catalog.retire_project(project.id)?;
+            schedule_trash_cleanup(Arc::clone(&state.catalog), vec![trash]);
+            return Err(ApiError::internal(error.to_string()));
+        }
+    };
     state.projects.write().await.insert(project.id, runtime);
     Ok((
         StatusCode::CREATED,
-        Json(ProjectLibraryEntry {
+        Json(ProjectCatalogEntry {
             project,
             available: true,
             workspace_available: true,
@@ -560,28 +535,15 @@ async fn relocate_project(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Json(request): Json<ProjectPathRequest>,
-) -> ApiResult<Json<ProjectLibraryEntry>> {
+) -> ApiResult<Json<ProjectCatalogEntry>> {
     let project_id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(project_id).await?;
     ensure_project_can_detach(&runtime)?;
     let workspace = canonical_workspace_selection(&request.workspace, false)?;
-    if state.library.list()?.iter().any(|candidate| {
-        candidate.id != project_id
-            && candidate
-                .workspace
-                .roots
-                .iter()
-                .any(|root| std::path::Path::new(root) == workspace)
-    }) {
-        return Err(StoreError::Invariant(format!(
-            "Project Workspace is already registered: {}",
-            workspace.display()
-        ))
-        .into());
-    }
-    let project = runtime.store.relocate_project(project_id, &workspace)?;
-    state.library.register(&project)?;
-    Ok(Json(ProjectLibraryEntry {
+    let project = state
+        .catalog
+        .relocate_project(&runtime.store, project_id, &workspace)?;
+    Ok(Json(ProjectCatalogEntry {
         project,
         available: true,
         workspace_available: true,
@@ -596,14 +558,21 @@ async fn remove_project(
     if let Some(runtime) = state.projects.read().await.get(&project_id).cloned() {
         ensure_project_can_detach(&runtime)?;
     }
-    state.library.remove(project_id)?;
+    let trash = state.catalog.retire_project(project_id)?;
     state.projects.write().await.remove(&project_id);
-    let managed_root = state.runtime_factory.managed_root(project_id);
-    if managed_root.exists() {
-        std::fs::remove_dir_all(&managed_root)
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-    }
+    schedule_trash_cleanup(Arc::clone(&state.catalog), vec![trash]);
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn schedule_trash_cleanup(catalog: Arc<ProjectCatalog>, paths: Vec<PathBuf>) {
+    for path in paths {
+        let catalog = Arc::clone(&catalog);
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = catalog.purge_trash_entry(&path) {
+                tracing::warn!(path = %path.display(), %error, "failed to purge Project trash entry");
+            }
+        });
+    }
 }
 
 fn canonical_workspace(value: &str, create: bool) -> ApiResult<PathBuf> {

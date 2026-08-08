@@ -1,8 +1,8 @@
 //! Durable metadata, append-only Workflow events, and content-addressed artifacts.
 
 mod artifact;
+mod catalog;
 mod database;
-mod library;
 
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ProjectId;
@@ -20,8 +20,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+pub use catalog::CatalogProject;
+pub use catalog::ProjectCatalog;
 pub use database::Store;
-pub use library::ProjectLibrary;
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflow {

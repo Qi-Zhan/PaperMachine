@@ -53,8 +53,9 @@ Project
     Teams, relations, scopes, timers, channels, human requests
 ```
 
-PaperMachine separates shipped resources, the global Project library, and each
-research directory. The repository is never used as an implicit data store.
+PaperMachine separates shipped resources, PaperMachine-managed Project worlds,
+and user-owned Workspace directories. The repository is never used as an
+implicit data store.
 
 ## Storage model
 
@@ -69,29 +70,35 @@ from the current working directory. `data_dir` contains only application-global 
 | Linux | `$XDG_DATA_HOME/papermachine`, or `~/.local/share/papermachine` |
 | Windows | `%LOCALAPPDATA%\PaperMachine` |
 
-`<data_dir>/library.db` is a small library of Project identities, display
-metadata, and absolute Workspace references. The default provider configuration
-is `<data_dir>/config.toml`; `--config` selects another file without changing
-where the library lives. PaperMachine owns all Project state below `data_dir`:
+The default provider configuration is `<data_dir>/config.toml`; `--config`
+selects another file without changing Project storage. There is no global
+Project database. PaperMachine owns all Project state below `data_dir`:
 
 ```text
-<data_dir>/projects/<project-id>/
-  state/project.db
-  artifacts/
-  workflow-runtime/
-  runtime/
-  prompts/
-  workflows/
-  skills/
+<data_dir>/
+  projects/<project-id>/
+    state/project.db
+    artifacts/
+    workflow-runtime/
+    runtime/
+    prompts/
+    workflows/
+    skills/
+  staging/
+  trash/
 ```
 
-Each Project separately references one user-selected absolute Workspace. Agents
-start in that Workspace, but PaperMachine never writes application metadata
-there and rejects a Workspace that overlaps its managed state. Relocating a
-Project only changes this attachment. Removing a Project deletes its managed
-state and leaves the Workspace untouched. A missing Workspace remains visible
-and can be reattached. The web client loads only the selected Project's full
-overview.
+At startup, PaperMachine scans `projects/<project-id>/state/project.db`; the
+directory ID and that database's single Project row must agree. Creation builds
+fresh state in `staging/` and atomically publishes it into `projects/`. Removal
+atomically moves managed state into `trash/` before asynchronous deletion.
+
+Each Project references one user-selected absolute Workspace. Agents start in
+that Workspace, but PaperMachine never writes application metadata there and
+rejects a Workspace that overlaps any managed state. Relocating a Project only
+changes this attachment. Removing a Project leaves the Workspace untouched. A
+missing Workspace remains visible and can be reattached. The web client loads
+only the selected Project's full overview.
 
 ## Codex relationship
 
@@ -190,7 +197,7 @@ pnpm server:demo
 Open <http://127.0.0.1:4310>. Demo mode exercises the full runtime and UI but
 does not perform substantive research. The development launcher uses the
 platform `data_dir` above with a dedicated `dev` suffix, so it cannot populate
-the normal Project library. It uses `CARGO` when explicitly set, otherwise
+the normal Project catalog. It uses `CARGO` when explicitly set, otherwise
 `cargo` from `PATH`; it does not guess a Rust installation directory.
 
 For real models, PaperMachine loads `config.toml` from its platform user-data

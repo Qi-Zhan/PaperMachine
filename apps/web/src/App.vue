@@ -205,7 +205,7 @@ import type {
   Artifact,
   CreateSessionInput,
   Health,
-  ProjectLibraryEntry,
+  ProjectCatalogEntry,
   ProjectOverview as ProjectOverviewType,
   ProjectSkill,
   Session,
@@ -217,7 +217,7 @@ import type {
   WorkflowView,
 } from './types'
 
-const projects = ref<ProjectLibraryEntry[]>([])
+const projects = ref<ProjectCatalogEntry[]>([])
 const { t } = useAppI18n()
 const workflowPrograms = ref<WorkflowProgram[]>([])
 const sessionsByProject = reactive<Record<string, Session[]>>({})

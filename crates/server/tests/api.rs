@@ -95,7 +95,8 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
         .path()
         .join("app-data/projects")
         .join(project["id"].as_str().expect("Project id should exist"));
-    assert!(directory.path().join("app-data/library.db").is_file());
+    assert!(directory.path().join("app-data/staging").is_dir());
+    assert!(directory.path().join("app-data/trash").is_dir());
     assert!(managed.join("state/project.db").is_file());
     assert!(managed.join("artifacts").is_dir());
     assert!(managed.join("workflow-runtime").is_dir());
@@ -113,7 +114,7 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
         .clone()
         .oneshot(empty_request("GET", "/api/projects"))
         .await
-        .expect("Project library should load after restart");
+        .expect("Project catalog should load after restart");
     let projects = response_json(projects).await;
     assert_eq!(projects.as_array().map(Vec::len), Some(1));
     assert_eq!(projects[0]["id"], project["id"]);
@@ -164,7 +165,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .clone()
         .oneshot(empty_request("GET", "/api/projects"))
         .await
-        .expect("Project library should load");
+        .expect("Project catalog should load");
     let projects = response_json(projects).await;
     assert_eq!(projects[0]["available"], true);
     assert_eq!(projects[0]["workspace_available"], false);

@@ -6,6 +6,7 @@ use chrono::Duration;
 use chrono::Utc;
 use papermachine_protocol::*;
 use rusqlite::Connection;
+use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use rusqlite::params;
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -34,10 +35,37 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let managed_root = initialize_managed_root(managed_root.as_ref())?;
+    /// Create one fresh current-schema Project store. Existing managed state is
+    /// never opened or upgraded through this path.
+    pub fn create(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let requested_root = managed_root.as_ref();
+        let database = requested_root.join("state/project.db");
+        if database.exists() {
+            return Err(StoreError::Invariant(format!(
+                "Project database already exists: {}",
+                database.display()
+            )));
+        }
+        let managed_root = create_managed_root(requested_root)?;
         let connection = Connection::open(managed_root.join("state/project.db"))?;
-        initialize(&connection)?;
+        initialize_new(&connection)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            shared: StoreShared::new(managed_root.join("artifacts"))?,
+            managed_root,
+        })
+    }
+
+    /// Open one existing current-schema Project store. This path never creates
+    /// directories, databases, tables, or compatibility state.
+    pub fn open(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let managed_root = open_managed_root(managed_root.as_ref())?;
+        let database = managed_root.join("state/project.db");
+        let connection = Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        verify_current(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             shared: StoreShared::new(managed_root.join("artifacts"))?,
@@ -46,9 +74,9 @@ impl Store {
     }
 
     pub fn open_in_memory(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let managed_root = initialize_managed_root(managed_root.as_ref())?;
+        let managed_root = create_managed_root(managed_root.as_ref())?;
         let connection = Connection::open_in_memory()?;
-        initialize(&connection)?;
+        initialize_new(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             shared: StoreShared::new(managed_root.join("artifacts"))?,
@@ -3157,7 +3185,7 @@ fn ensure_workspace_is_external(workspace: &Path, managed_root: &Path) -> Result
     Ok(())
 }
 
-fn initialize_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
+fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
     std::fs::create_dir_all(root).map_err(|error| StoreError::Io(error.to_string()))?;
     for directory in [
         "prompts",
@@ -3180,6 +3208,53 @@ fn initialize_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
     }
     root.canonicalize()
         .map_err(|error| StoreError::Io(error.to_string()))
+}
+
+fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    for relative in [
+        "prompts",
+        "workflows",
+        "skills",
+        "sources",
+        "state",
+        "artifacts",
+        "workflow-runtime",
+        "runtime/sandboxes",
+        "runtime/temp",
+        "runtime/skill-snapshots",
+    ] {
+        let directory = root.join(relative);
+        let metadata = std::fs::symlink_metadata(&directory)
+            .map_err(|error| StoreError::Io(error.to_string()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(StoreError::Invariant(format!(
+                "Project managed directory is missing or not a real directory: {}",
+                directory.display()
+            )));
+        }
+    }
+    let system_prompt = root.join(PROJECT_SYSTEM_PROMPT_PATH);
+    let prompt_metadata = std::fs::symlink_metadata(&system_prompt)
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    if !prompt_metadata.is_file() || prompt_metadata.file_type().is_symlink() {
+        return Err(StoreError::Invariant(format!(
+            "Project system prompt is missing or not a real file: {}",
+            system_prompt.display()
+        )));
+    }
+    let database = root.join("state/project.db");
+    let database_metadata =
+        std::fs::symlink_metadata(&database).map_err(|error| StoreError::Io(error.to_string()))?;
+    if !database_metadata.is_file() || database_metadata.file_type().is_symlink() {
+        return Err(StoreError::Invariant(format!(
+            "Project database is missing or not a real file: {}",
+            database.display()
+        )));
+    }
+    Ok(root)
 }
 
 fn validate_system_prompt(content: &str) -> Result<(), StoreError> {
@@ -3249,11 +3324,11 @@ fn workflow_effect_hash(kind: &str, payload: &Value) -> Result<String, StoreErro
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn initialize(connection: &Connection) -> Result<(), StoreError> {
+fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current != 0 && current != SCHEMA_VERSION {
+    if current != 0 {
         return Err(StoreError::Invariant(format!(
-            "database schema {current} is not supported; create a fresh PaperMachine state database"
+            "fresh Project database unexpectedly has schema {current}"
         )));
     }
     connection.execute_batch(&format!(
@@ -3375,6 +3450,27 @@ fn initialize(connection: &Connection) -> Result<(), StoreError> {
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );"
     ))?;
+    reconcile_terminal_workflow_resources(connection)?;
+    Ok(())
+}
+
+fn verify_current(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;",
+    )?;
+    let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current != SCHEMA_VERSION {
+        return Err(StoreError::Invariant(format!(
+            "Project database schema {current} is not current schema {SCHEMA_VERSION}; create fresh PaperMachine state"
+        )));
+    }
+    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(StoreError::Invariant(format!(
+            "Project database integrity check failed: {integrity}"
+        )));
+    }
     reconcile_terminal_workflow_resources(connection)?;
     Ok(())
 }

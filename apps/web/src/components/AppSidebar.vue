@@ -145,10 +145,10 @@ import { AlertTriangle, ChevronDown, Folder, FolderPlus, GitBranch, MapPin, More
 import { computed, ref } from 'vue'
 import { formatDate } from '../format'
 import { useAppI18n } from '../i18n'
-import type { ProjectLibraryEntry, Session } from '../types'
+import type { ProjectCatalogEntry, Session } from '../types'
 
 const props = defineProps<{
-  projects: ProjectLibraryEntry[]
+  projects: ProjectCatalogEntry[]
   sessionsByProject: Record<string, Session[]>
   selectedProjectId: string | null
   selectedSessionId: string | null

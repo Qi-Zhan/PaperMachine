@@ -48,7 +48,7 @@ export interface WorkspaceAttachment {
   primary_root: number
 }
 
-export interface ProjectLibraryEntry extends Project {
+export interface ProjectCatalogEntry extends Project {
   available: boolean
   workspace_available: boolean
 }

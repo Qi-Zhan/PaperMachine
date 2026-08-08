@@ -630,7 +630,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
     let managed = directory.path().join("managed");
     let artifacts = managed.join("artifacts");
     let (project_id, workflow_id) = {
-        let store = Store::open(&managed).expect("store should open");
+        let store = Store::create(&managed).expect("store should be created");
         let research = project(&store, &directory, "Persistent", "Reopen test");
         let session = store
             .create_session(research.id, "Persistence", "", "test-model", Vec::new())
