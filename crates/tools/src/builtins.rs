@@ -5,11 +5,8 @@ use crate::ToolOutput;
 use crate::path::resolve_tool_path;
 use async_trait::async_trait;
 use papermachine_execution::ExecutionError;
-use papermachine_execution::FilesystemPolicy;
-use papermachine_execution::NetworkPolicy;
 use papermachine_execution::SandboxExecutor;
 use papermachine_execution::SandboxPolicy;
-use papermachine_protocol::FilesystemScope;
 use papermachine_protocol::PathOperation;
 use papermachine_protocol::ToolDefinition;
 use serde::Deserialize;
@@ -219,35 +216,17 @@ impl ToolExecutor for ExecCommandTool {
             });
         }
         let timeout_seconds = args.timeout_seconds.unwrap_or(60).clamp(1, 600);
-        let filesystem = if context.authorization.filesystem.write == FilesystemScope::Host {
-            FilesystemPolicy::DangerFullAccess
-        } else {
-            FilesystemPolicy::WorkspaceWrite
-        };
-        let network = if context.authorization.network.child_process {
-            NetworkPolicy::Allow
-        } else {
-            NetworkPolicy::Deny
-        };
-        let protected_roots = context
-            .authorization
-            .filesystem
-            .managed_roots
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
+        let policy = SandboxPolicy::from_authorization(
+            &context.authorization,
+            Duration::from_secs(timeout_seconds),
+        )
+        .map_err(|error| map_execution_error(error, timeout_seconds))?;
         let output = SandboxExecutor
-            .run(
+            .run_shell(
                 std::path::Path::new(&context.authorization.cwd),
                 &context.sandbox_root,
                 &args.command,
-                SandboxPolicy {
-                    filesystem,
-                    network,
-                    protected_roots,
-                    timeout: Duration::from_secs(timeout_seconds),
-                    ..SandboxPolicy::default()
-                },
+                policy,
                 context.cancellation,
             )
             .await

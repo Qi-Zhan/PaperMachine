@@ -1154,14 +1154,13 @@ fn validate_model_profile(state: &AppState, model: &str) -> ApiResult<()> {
 }
 
 fn validate_model_profile_params(state: &AppState, schema: &Value, value: &Value) -> ApiResult<()> {
-    if schema.get("format").and_then(Value::as_str) == Some("model-profile") {
-        if let Some(model) = value
+    if schema.get("format").and_then(Value::as_str) == Some("model-profile")
+        && let Some(model) = value
             .as_str()
             .map(str::trim)
             .filter(|model| !model.is_empty())
-        {
-            validate_model_profile(state, model)?;
-        }
+    {
+        validate_model_profile(state, model)?;
     }
 
     if let (Some(properties), Some(values)) = (

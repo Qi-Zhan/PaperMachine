@@ -69,8 +69,10 @@ One sandbox manager prepares every untrusted child process. Command tools and
 Workflow Python do not maintain separate policy builders.
 
 - macOS uses Seatbelt.
-- Linux and WSL use the adapted Codex bubblewrap/Landlock path.
-- Native Windows uses the adapted Codex Windows backend.
+- Linux and WSL2 use the adapted Codex bubblewrap path; WSL1 fails closed.
+- Native Windows uses the pinned Codex elevated restricted-token backend. The
+  source path is implemented, but Windows is not a release-tested platform
+  until it passes the same policy matrix on a real MSVC host.
 - A requested restricted profile fails closed when no backend is available.
 - The child environment starts empty. Rust constructs a small explicit
   environment, provides synthetic home and temporary directories, and never
@@ -161,7 +163,8 @@ source where the semantics match this document:
 | --- | --- |
 | filesystem and network policy | `codex-rs/protocol/src/permissions.rs` |
 | sandbox selection and request transformation | `codex-rs/sandboxing/src/manager.rs` |
-| macOS, Linux/WSL, and Windows backends | `codex-rs/sandboxing/src/{seatbelt,bwrap,landlock,windows}.rs` |
+| macOS and Linux/WSL backends | `codex-rs/sandboxing/src/{seatbelt,bwrap}.rs` |
+| native Windows backend | `codex-rs/windows-sandbox-rs` |
 | child environment construction | `codex-rs/core/src/exec_env.rs` |
 | append-only live writer | `codex-rs/thread-store/src/local/live_writer.rs` |
 | context reconstruction | `codex-rs/core/src/session/rollout_reconstruction.rs` |

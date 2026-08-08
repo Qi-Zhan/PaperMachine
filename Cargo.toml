@@ -15,7 +15,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 version = "0.1.0"
 
 [workspace.dependencies]
@@ -57,3 +57,13 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "warn"
 unwrap_used = "warn"
+
+# The pinned Codex Windows sandbox uses these exact audited forks. Cargo does
+# not inherit a Git dependency's workspace-level patches, so PaperMachine must
+# repeat them at its own workspace root.
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

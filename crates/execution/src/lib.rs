@@ -1,60 +1,56 @@
-//! Fail-closed process execution adapted from Codex's sandbox and exec layers.
+//! Unified fail-closed child-process sandboxing.
 //!
-//! The execution layer owns process lifetime, environment isolation, output
-//! limits, and platform sandbox selection. Model-visible tools only translate
-//! their JSON protocol into this API.
+//! The manager/transform boundary, core-only child environment, platform
+//! selection, and descendant cleanup are adapted from OpenAI Codex at commit
+//! `b2dc8b3e4be4fe3a453d50e13835f707b258f15b`. PaperMachine owns the smaller
+//! authorization model and uses this crate for both Agent commands and
+//! Workflow Python.
 
+mod environment;
+mod manager;
+mod platform;
+mod policy;
+mod process;
+
+use std::ffi::OsString;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+pub use manager::PreparedSandboxCommand;
+pub use manager::SandboxManager;
+pub use manager::SandboxRequest;
+pub use policy::FilesystemPolicy;
+pub use policy::NetworkPolicy;
+pub use policy::SandboxPolicy;
+pub use process::configure_process_group;
+pub use process::terminate_process_tree;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkPolicy {
-    Deny,
-    Allow,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FilesystemPolicy {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-}
-
-#[derive(Clone, Debug)]
-pub struct SandboxPolicy {
-    pub filesystem: FilesystemPolicy,
-    pub network: NetworkPolicy,
-    pub protected_roots: Vec<PathBuf>,
-    pub timeout: Duration,
-    pub max_output_bytes: usize,
-}
-
-impl Default for SandboxPolicy {
-    fn default() -> Self {
-        Self {
-            filesystem: FilesystemPolicy::WorkspaceWrite,
-            network: NetworkPolicy::Deny,
-            protected_roots: Vec::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-        }
+/// Dispatch the hidden same-executable Windows sandbox wrapper before the
+/// server creates its own Tokio runtime. Other platforms return immediately.
+pub fn run_windows_sandbox_wrapper_if_requested() {
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1,
+        ))
+    {
+        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxBackend {
     MacOsSeatbelt,
+    LinuxBubblewrap,
+    WindowsRestrictedToken,
     Unrestricted,
 }
 
@@ -62,6 +58,8 @@ impl SandboxBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MacOsSeatbelt => "macos_seatbelt",
+            Self::LinuxBubblewrap => "linux_bubblewrap",
+            Self::WindowsRestrictedToken => "windows_restricted_token",
             Self::Unrestricted => "unrestricted",
         }
     }
@@ -82,9 +80,9 @@ pub struct CommandOutput {
 pub struct SandboxExecutor;
 
 impl SandboxExecutor {
-    pub async fn run(
+    pub async fn run_shell(
         &self,
-        workspace_root: &Path,
+        cwd: &Path,
         sandbox_root: &Path,
         shell_command: &str,
         policy: SandboxPolicy,
@@ -95,41 +93,25 @@ impl SandboxExecutor {
                 "command must not be empty".to_string(),
             ));
         }
-        let workspace = tokio::fs::canonicalize(workspace_root).await?;
-        if !workspace.is_dir() {
-            return Err(ExecutionError::InvalidWorkspace(
-                workspace.display().to_string(),
-            ));
-        }
-        tokio::fs::create_dir_all(sandbox_root).await?;
-        let sandbox_root = tokio::fs::canonicalize(sandbox_root).await?;
-        let sandbox_home = sandbox_root.join("home");
-        let sandbox_tmp = sandbox_root.join("tmp");
-        tokio::fs::create_dir_all(&sandbox_home).await?;
-        tokio::fs::create_dir_all(&sandbox_tmp).await?;
+        let (program, args) = shell_program(shell_command);
+        self.run(
+            SandboxRequest::new(program, args, cwd, sandbox_root, policy),
+            cancellation,
+        )
+        .await
+    }
 
-        let protected_roots = policy
-            .protected_roots
-            .iter()
-            .map(std::fs::canonicalize)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut policy = policy;
-        policy.protected_roots = protected_roots;
-        let (mut command, backend) =
-            sandboxed_shell_command(&workspace, &sandbox_root, shell_command, &policy)?;
-        configure_process_group(&mut command);
+    pub async fn run(
+        &self,
+        request: SandboxRequest,
+        cancellation: CancellationToken,
+    ) -> Result<CommandOutput, ExecutionError> {
+        let timeout = request.policy.timeout;
+        let max_output_bytes = request.policy.max_output_bytes;
+        let prepared = SandboxManager.prepare(request).await?;
+        let backend = prepared.backend();
+        let mut command = prepared.into_command();
         let mut child = command
-            .current_dir(&workspace)
-            .env_clear()
-            .env(
-                "PATH",
-                "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            )
-            .env("HOME", &sandbox_home)
-            .env("TMPDIR", &sandbox_tmp)
-            .env("TMPPREFIX", sandbox_tmp.join("zsh"))
-            .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -145,8 +127,8 @@ impl SandboxExecutor {
             .stderr
             .take()
             .ok_or(ExecutionError::MissingPipe("stderr"))?;
-        let stdout_task = tokio::spawn(drain_limited(stdout, policy.max_output_bytes));
-        let stderr_task = tokio::spawn(drain_limited(stderr, policy.max_output_bytes));
+        let stdout_task = tokio::spawn(drain_limited(stdout, max_output_bytes));
+        let stderr_task = tokio::spawn(drain_limited(stderr, max_output_bytes));
 
         let status = tokio::select! {
             result = child.wait() => result?,
@@ -154,13 +136,51 @@ impl SandboxExecutor {
                 terminate_process_tree(&mut child).await;
                 return Err(ExecutionError::Cancelled);
             },
-            _ = tokio::time::sleep(policy.timeout) => {
+            _ = tokio::time::sleep(timeout) => {
                 terminate_process_tree(&mut child).await;
-                return Err(ExecutionError::Timeout(policy.timeout));
+                return Err(ExecutionError::Timeout(timeout));
             },
         };
         finish_output(status, backend, stdout_task, stderr_task).await
     }
+}
+
+#[cfg(target_os = "windows")]
+fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+    let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
+    (
+        shell,
+        vec![
+            OsString::from("/D"),
+            OsString::from("/S"),
+            OsString::from("/C"),
+            OsString::from(shell_command),
+        ],
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+    (
+        OsString::from("/bin/zsh"),
+        vec![OsString::from("-c"), OsString::from(shell_command)],
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+    (
+        OsString::from("/bin/sh"),
+        vec![OsString::from("-c"), OsString::from(shell_command)],
+    )
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+    (
+        OsString::from("sh"),
+        vec![OsString::from("-c"), OsString::from(shell_command)],
+    )
 }
 
 async fn finish_output(
@@ -184,116 +204,6 @@ async fn finish_output(
         stderr_truncated: stderr.truncated,
         backend,
     })
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.as_std_mut().process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
-
-async fn terminate_process_tree(child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(process_id) = child.id() {
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &format!("-{process_id}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-    }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-}
-
-#[cfg(target_os = "macos")]
-fn sandboxed_shell_command(
-    workspace: &Path,
-    sandbox_root: &Path,
-    shell_command: &str,
-    policy: &SandboxPolicy,
-) -> Result<(Command, SandboxBackend), ExecutionError> {
-    if policy.filesystem == FilesystemPolicy::DangerFullAccess && policy.protected_roots.is_empty()
-    {
-        let mut command = Command::new("/bin/zsh");
-        command.args(["-c", shell_command]);
-        return Ok((command, SandboxBackend::Unrestricted));
-    }
-    let sandbox = Path::new("/usr/bin/sandbox-exec");
-    if !sandbox.is_file() {
-        return Err(ExecutionError::SandboxUnavailable(
-            "macOS sandbox-exec is not installed".to_string(),
-        ));
-    }
-    let workspace = seatbelt_literal(workspace);
-    let sandbox_root = seatbelt_literal(sandbox_root);
-    let mut rules = Vec::new();
-    if policy.filesystem != FilesystemPolicy::DangerFullAccess {
-        rules.push("(deny file-write*)".to_string());
-        if policy.network == NetworkPolicy::Deny {
-            rules.push("(deny network*)".to_string());
-        }
-        for root in [
-            "/Volumes",
-            "/private/tmp",
-            "/tmp",
-            "/var/tmp",
-            "/private/var/folders",
-        ] {
-            rules.push(format!("(deny file-read* (subpath \"{root}\"))"));
-        }
-        if let Some(home) = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|path| seatbelt_literal(&path))
-        {
-            rules.push(format!("(deny file-read* (subpath \"{home}\"))"));
-        }
-    }
-    for protected_root in &policy.protected_roots {
-        let protected_root = seatbelt_literal(protected_root);
-        rules.push(format!("(deny file-read* (subpath \"{protected_root}\"))"));
-        rules.push(format!("(deny file-write* (subpath \"{protected_root}\"))"));
-    }
-    rules.push(format!("(allow file-read* (subpath \"{workspace}\"))"));
-    rules.push(format!("(allow file-read* (subpath \"{sandbox_root}\"))"));
-    if policy.filesystem == FilesystemPolicy::WorkspaceWrite {
-        rules.push(format!("(allow file-write* (subpath \"{workspace}\"))"));
-    }
-    rules.push(format!("(allow file-write* (subpath \"{sandbox_root}\"))"));
-    rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
-    let profile = format!("(version 1)\n(allow default)\n{}", rules.join("\n"));
-    let mut command = Command::new(sandbox);
-    command.args(["-p", &profile, "/bin/zsh", "-c", shell_command]);
-    Ok((command, SandboxBackend::MacOsSeatbelt))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sandboxed_shell_command(
-    _workspace: &Path,
-    _sandbox_root: &Path,
-    shell_command: &str,
-    policy: &SandboxPolicy,
-) -> Result<(Command, SandboxBackend), ExecutionError> {
-    if policy.filesystem == FilesystemPolicy::DangerFullAccess && policy.protected_roots.is_empty()
-    {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", shell_command]);
-        return Ok((command, SandboxBackend::Unrestricted));
-    }
-    Err(ExecutionError::SandboxUnavailable(
-        "no fail-closed sandbox backend is implemented for this platform".to_string(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn seatbelt_literal(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
 }
 
 struct LimitedOutput {
@@ -328,7 +238,9 @@ where
 pub enum ExecutionError {
     #[error("invalid command: {0}")]
     InvalidCommand(String),
-    #[error("Session Workspace is not a directory: {0}")]
+    #[error("invalid sandbox policy: {0}")]
+    InvalidPolicy(String),
+    #[error("sandbox cwd is not a directory: {0}")]
     InvalidWorkspace(String),
     #[error("sandbox is unavailable: {0}")]
     SandboxUnavailable(String),

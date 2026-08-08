@@ -1,5 +1,9 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use papermachine_execution::SandboxManager;
+use papermachine_execution::SandboxPolicy;
+use papermachine_execution::SandboxRequest;
+use papermachine_execution::terminate_process_tree;
 use papermachine_protocol::*;
 use papermachine_session::PromptLayerInput;
 use papermachine_session::SessionRuntime;
@@ -21,8 +25,6 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
-use tokio::process::Child;
-use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -75,7 +77,28 @@ impl PythonWorkflowRuntime {
             &run.program.source_code,
         )
         .await?;
-        let mut command = sandboxed_python_command(&self.python, &workspace)?;
+        let policy = SandboxPolicy::workflow_runtime(&workspace)
+            .map_err(|error| WorkflowRuntimeError::Sandbox(error.to_string()))?;
+        let prepared = SandboxManager
+            .prepare(
+                SandboxRequest::new(
+                    self.python.as_os_str().to_owned(),
+                    [
+                        "-B".into(),
+                        "-m".into(),
+                        "papermachine._runner".into(),
+                        "workflow.py".into(),
+                        "main".into(),
+                    ],
+                    &workspace,
+                    workspace.join(".sandbox"),
+                    policy,
+                )
+                .with_environment_override("PYTHONDONTWRITEBYTECODE", "1"),
+            )
+            .await
+            .map_err(|error| WorkflowRuntimeError::Sandbox(error.to_string()))?;
+        let mut command = prepared.into_command();
         let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -144,7 +167,7 @@ impl PythonWorkflowRuntime {
             let next = tokio::select! {
                 line = lines.next_line() => line,
                 _ = cancellation.cancelled() => {
-                    terminate_child(&mut child).await;
+                    terminate_process_tree(&mut child).await;
                     protocol_error = Some(WorkflowRuntimeError::Cancelled);
                     break;
                 }
@@ -156,18 +179,18 @@ impl PythonWorkflowRuntime {
                     protocol_error = Some(WorkflowRuntimeError::Protocol(format!(
                         "invalid effect request: {error}; line={line}"
                     )));
-                    terminate_child(&mut child).await;
+                    terminate_process_tree(&mut child).await;
                     break;
                 }
             };
             if request.kind == "runtime_suspend" {
                 match context.aggregate_suspension().await {
                     Ok(suspension) => {
-                        terminate_child(&mut child).await;
+                        terminate_process_tree(&mut child).await;
                         protocol_error = Some(WorkflowRuntimeError::Suspended(suspension));
                     }
                     Err(error) => {
-                        terminate_child(&mut child).await;
+                        terminate_process_tree(&mut child).await;
                         protocol_error = Some(error);
                     }
                 }
@@ -1293,104 +1316,6 @@ async fn copy_directory(source: &Path, destination: &Path) -> Result<(), Workflo
         }
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn sandboxed_python_command(
-    python: &Path,
-    workspace: &Path,
-) -> Result<Command, WorkflowRuntimeError> {
-    let sandbox = Path::new("/usr/bin/sandbox-exec");
-    if !sandbox.is_file() {
-        return Err(WorkflowRuntimeError::Sandbox(
-            "macOS sandbox-exec is unavailable".to_string(),
-        ));
-    }
-    let workspace = workspace.canonicalize()?;
-    let workspace_literal = seatbelt_literal(&workspace);
-    let mut rules = vec![
-        "(deny file-write*)".to_string(),
-        "(deny network*)".to_string(),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        rules.push(format!(
-            "(deny file-read* (subpath \"{}\"))",
-            seatbelt_literal(Path::new(&home))
-        ));
-    }
-    for root in [
-        "/Volumes",
-        "/private/tmp",
-        "/tmp",
-        "/var/tmp",
-        "/private/var/folders",
-    ] {
-        rules.push(format!("(deny file-read* (subpath \"{root}\"))"));
-    }
-    rules.push(format!(
-        "(allow file-read* (subpath \"{workspace_literal}\"))"
-    ));
-    rules.push(format!(
-        "(allow file-write* (subpath \"{workspace_literal}\"))"
-    ));
-    rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
-    let profile = format!("(version 1)\n(allow default)\n{}", rules.join("\n"));
-    let mut command = Command::new(sandbox);
-    command
-        .arg("-p")
-        .arg(profile)
-        .arg(python)
-        .args(["-B", "-m", "papermachine._runner", "workflow.py"])
-        .arg("main")
-        .current_dir(&workspace)
-        .env_clear()
-        .env(
-            "PATH",
-            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        )
-        .env("HOME", workspace.join(".home"))
-        .env("TMPDIR", workspace.join(".tmp"))
-        .env("LANG", "C.UTF-8")
-        .env("LC_ALL", "C.UTF-8")
-        .env("PYTHONDONTWRITEBYTECODE", "1");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
-    Ok(command)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sandboxed_python_command(
-    _python: &Path,
-    _workspace: &Path,
-) -> Result<Command, WorkflowRuntimeError> {
-    Err(WorkflowRuntimeError::Sandbox(
-        "no fail-closed interactive Python sandbox is implemented for this platform".to_string(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn seatbelt_literal(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-}
-
-async fn terminate_child(child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(process_id) = child.id() {
-        let _ = Command::new("/bin/kill")
-            .args(["-TERM", &format!("-{process_id}")])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
-    }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
 }
 
 async fn drain_limited<R: AsyncRead + Unpin>(

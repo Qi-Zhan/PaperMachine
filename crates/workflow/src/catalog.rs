@@ -142,10 +142,10 @@ impl WorkflowProgramCatalog {
         })?;
         let key = (Some(project.id), manifest.slug.clone());
         let sha256 = encode(Sha256::digest(source.as_bytes()));
-        if let Some(existing) = self.entries.get(&key) {
-            if existing.registration.sha256 == sha256 {
-                return Ok(existing.clone());
-            }
+        if let Some(existing) = self.entries.get(&key)
+            && existing.registration.sha256 == sha256
+        {
+            return Ok(existing.clone());
         }
         let directory = project_workflows_root(store).join(&manifest.slug);
         fs::create_dir_all(&directory)?;

@@ -326,6 +326,29 @@ async fn command_cannot_read_or_write_outside_its_workspace() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn command_obeys_the_same_credential_and_metadata_policy_as_direct_tools() {
+    let directory = tempdir().expect("temporary directory should be created");
+    std::fs::write(directory.path().join(".env.local"), "API_KEY=must-not-leak")
+        .expect("credential fixture should be written");
+    std::fs::create_dir(directory.path().join(".git"))
+        .expect("Git metadata fixture should be created");
+    std::fs::write(directory.path().join(".git/config"), "original")
+        .expect("Git config fixture should be written");
+    let command = "if /bin/cat .env.local >/dev/null 2>&1; then printf credential-leaked; else printf credential-denied; fi; if printf changed >.git/config 2>/dev/null; then printf metadata-written; else printf metadata-denied; fi";
+    let output = ExecCommandTool
+        .execute(context(directory.path()), json!({"command": command}))
+        .await
+        .expect("sandboxed command should run");
+    assert_eq!(output.value["stdout"], "credential-deniedmetadata-denied");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join(".git/config"))
+            .expect("Git config should remain readable"),
+        "original"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn full_access_command_cannot_read_papermachine_managed_state() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("workspace");

@@ -119,6 +119,7 @@ export interface TurnEnvironmentSnapshot {
     filesystem: unknown
     tools: unknown
     network: unknown
+    environment: unknown
   }
   authorization_sha256: string
 }

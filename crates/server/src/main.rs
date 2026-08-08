@@ -40,8 +40,16 @@ struct Args {
     max_parallel_actions: usize,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    papermachine_execution::run_windows_sandbox_wrapper_if_requested();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the PaperMachine runtime")?
+        .block_on(run_server())
+}
+
+async fn run_server() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

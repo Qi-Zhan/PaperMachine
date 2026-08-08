@@ -24,6 +24,11 @@ surface.
 - `codex-rs/thread-store/src/local/live_writer.rs`
 - `codex-rs/core/src/session/rollout_reconstruction.rs`
 
+On native Windows, PaperMachine directly compiles `codex-protocol`,
+`codex-utils-absolute-path`, and `codex-windows-sandbox` from that exact commit.
+The Git revision and upstream transport forks are pinned in Cargo metadata;
+PaperMachine does not launch or depend on the Codex CLI or app-server.
+
 ## codex-mobile
 
 The web interface uses interaction and layout ideas from codex-mobile at commit

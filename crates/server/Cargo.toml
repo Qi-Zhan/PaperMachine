@@ -13,6 +13,7 @@ clap.workspace = true
 futures.workspace = true
 mime_guess.workspace = true
 papermachine-model = { path = "../model" }
+papermachine-execution = { path = "../execution" }
 papermachine-protocol = { path = "../protocol" }
 papermachine-workflow = { path = "../workflow" }
 papermachine-session = { path = "../session" }

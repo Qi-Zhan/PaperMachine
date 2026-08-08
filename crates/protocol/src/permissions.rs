@@ -103,6 +103,17 @@ pub struct NetworkCapabilities {
     pub hosted_web_search: bool,
 }
 
+/// Environment variables available to untrusted child processes. The runtime
+/// starts from an empty environment, copies only platform core variables, then
+/// applies the case-insensitive deny fragments before its own HOME/TMP
+/// overrides. This follows Codex's core-inherit plus default-secret-exclude
+/// model without importing its configuration surface.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct EnvironmentAuthorization {
+    pub inherit_core: bool,
+    pub deny_name_fragments: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct AuthorizationContext {
     pub preset: AccessPreset,
@@ -111,6 +122,7 @@ pub struct AuthorizationContext {
     pub filesystem: FilesystemAuthorization,
     pub tools: ToolCapabilities,
     pub network: NetworkCapabilities,
+    pub environment: EnvironmentAuthorization,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -229,6 +241,13 @@ impl AuthorizationContext {
             },
             tools,
             network,
+            environment: EnvironmentAuthorization {
+                inherit_core: true,
+                deny_name_fragments: ["KEY", "SECRET", "TOKEN"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
         })
     }
 

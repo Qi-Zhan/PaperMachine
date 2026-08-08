@@ -17,11 +17,11 @@ server process. Before catalog registration, the AST validator:
 - extracts Agent/action and coordination summaries for inspection.
 
 Validation is a usability and defense-in-depth layer, not the isolation
-boundary. The validated source runs in a separate Python process. On macOS,
-Seatbelt denies network access, denies writes outside that run's runtime
-workspace, and denies reads from the user's home and common temporary/user-data
-roots. The environment is cleared and `HOME`/`TMPDIR` point inside the workspace.
-The runtime fails closed on platforms without an implemented Python sandbox.
+boundary. The validated source runs in a separate Python process prepared by
+the same sandbox manager used for Agent commands. Workflow Python gets only its
+materialized run directory, synthetic home and temporary directories, a small
+core environment, no provider credentials, and no child-process network. The
+runtime fails closed when the current platform cannot enforce that policy.
 
 The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
@@ -61,12 +61,13 @@ DOM.
 ## Agent tools
 
 Every Session selects one of five access presets. `model_only` has no resource
-tools; `read_only` can only read its Session workspace; `workspace` adds
-workspace writes and sandboxed commands; `research` adds hosted web search and
-controlled URL fetching; `full_access` allows host files and unrestricted
-commands/network after explicit human grant, while PaperMachine's managed state
-remains excluded. `ask_human` is not a model-visible
-tool and is available only as an explicit Workflow DSL effect.
+tools; `read_only` can only read its Session Workspace; `workspace` adds
+Workspace writes and sandboxed commands; `research` adds hosted web search and
+controlled URL fetching; `full_access` allows host files and child-process
+network after explicit human grant. Even `full_access` commands remain inside a
+platform sandbox so PaperMachine-managed state can stay unreadable and
+unwritable. `ask_human` is not a model-visible tool and is available only as an
+explicit Workflow DSL effect.
 
 Run creation applies access bounds before Python starts. The Workflow profile
 is a hard ceiling; a Session-origin Workflow cannot choose a profile above the
@@ -86,16 +87,28 @@ Omitting a schema is therefore not the enforcement boundary.
 
 For every preset below `full_access`, `read_file` and `write_file` resolve paths
 and symlinks against the snapshotted Workspace roots. Direct file operations
-also make credential-bearing files such as `.env` unreadable and Workspace-root
-`.git`, `.agents`, and `.codex` metadata read-only. The current command sandbox
-consumes the same broad filesystem scope and managed-root deny; exact metadata
-and credential-rule parity is part of the unified sandbox-manager cutover in
-the accepted runtime-kernel target. Sandboxed `exec_command` clears the
-host environment, redirects home/temp paths into that workspace, denies network
-access, denies writes outside the workspace, and blocks reads from common
-user-data roots with macOS Seatbelt. It fails closed when no sandbox backend
-exists. `full_access` deliberately bypasses this filesystem/command sandbox and
-must be treated as equivalent to granting the Agent the server user's authority.
+make credential-bearing files such as `.env` unreadable and Workspace-root
+`.git`, `.agents`, and `.codex` metadata read-only. `exec_command` consumes the
+same materialized filesystem, metadata, credential, managed-root, environment,
+and child-network policy. It starts with an empty environment, redirects
+home/temp paths into a Session sandbox, denies writes outside the Workspace,
+and denies child-process network below `full_access`.
+
+One manager performs request validation, policy resolution, environment
+construction, platform transformation, output limiting, timeout/cancellation,
+and descendant cleanup for both Agent commands and Workflow Python:
+
+- macOS uses Seatbelt;
+- Linux and WSL2 use bubblewrap with user, PID, mount, and optional network
+  namespaces;
+- native Windows uses the elevated restricted-token backend from the pinned
+  Codex source; and
+- unsupported platforms, WSL1, or a missing required backend fail closed.
+
+The macOS and Linux paths are build-validated in this repository. The Windows
+source integration targets Rust's MSVC ABI and retains Codex's on-demand
+elevated provisioning/ACL refresh behavior; it was not exercised during the
+2026-08-08 cutover because no Windows host was in scope.
 
 `fetch_url` is the only built-in research tool with outbound network access. It
 accepts public HTTPS destinations only, rejects credentials and nonstandard
@@ -126,10 +139,11 @@ not silently rewrite the endpoint.
 
 ## Remaining limitations
 
-- `sandbox-exec` is a deprecated macOS interface. Linux and a future macOS
-  backend require separate implementations.
-- Read confinement is not a VM: system files and installed programs remain
-  readable to sandboxed commands unless denied by the profile.
+- `sandbox-exec` is a deprecated macOS interface.
+- Read confinement is not a VM: the platform runtime and explicitly mounted
+  executable/library roots remain readable to sandboxed commands.
+- Windows elevated-sandbox behavior still requires validation on a real MSVC
+  Windows host before Windows is treated as a release-tested platform.
 - The AST policy is intentionally small and should not be treated as a proof
   that Python code is harmless; OS isolation remains mandatory.
 - Workflow recovery relies on deterministic effect paths. Replaying the same

@@ -11,6 +11,7 @@ chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
 papermachine-agent = { path = "../agent" }
+papermachine-execution = { path = "../execution" }
 papermachine-model = { path = "../model" }
 papermachine-protocol = { path = "../protocol" }
 papermachine-session = { path = "../session" }
