@@ -32,13 +32,15 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                 }
             if kind == "project_snapshot":
                 self.assertTrue(payload["include_artifact_content"])
-                self.assertIsNone(payload["updated_after"])
+                self.assertIsNone(payload["after_cursor"])
                 self.assertEqual(payload["max_workflows"], 200)
                 self.assertEqual(payload["max_text_chars"], 500_000)
                 return {
-                    "captured_at": "2026-08-06T12:00:00Z",
+                    "cursor": 12,
+                    "has_more": False,
+                    "changed": True,
                     "mode": "full",
-                    "updated_after": None,
+                    "after_cursor": None,
                     "project": {"name": "PaperMachine"},
                     "sessions": [{"title": "Research route"}],
                     "workflows": [],
@@ -109,19 +111,6 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         prompt = agent_type.system_prompt
         self.assertIn("as many editing and inspection passes as needed", prompt)
         self.assertNotIn("complete or continue", prompt.lower())
-
-    def test_delta_change_detection_ignores_an_empty_tick(self) -> None:
-        self.assertFalse(
-            WORKFLOW["_has_project_changes"](
-                {"sessions": [], "workflows": [], "artifacts": []}
-            )
-        )
-        self.assertTrue(
-            WORKFLOW["_has_project_changes"](
-                {"sessions": [{"id": "changed"}], "workflows": [], "artifacts": []}
-            )
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

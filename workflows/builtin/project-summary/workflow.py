@@ -88,15 +88,17 @@ async def main(ctx):
 
     while True:
         snapshot = await ctx.project.snapshot(
-            updated_after=snapshot_cursor,
+            after_cursor=snapshot_cursor,
             max_sessions=max_sessions,
             max_turns_per_session=turns_per_session,
             max_artifacts=max_artifacts,
             include_artifact_content=True,
         )
-        next_cursor = snapshot["captured_at"]
-        if snapshot_cursor is not None and not _has_project_changes(snapshot):
+        next_cursor = snapshot["cursor"]
+        if snapshot_cursor is not None and not snapshot["changed"]:
             snapshot_cursor = next_cursor
+            if snapshot["has_more"]:
+                continue
             await wait(
                 minutes=interval_minutes,
                 name="project-summary-refresh",
@@ -108,9 +110,9 @@ async def main(ctx):
         artifact = await publish_project_home(
             agent=summarizer,
             metadata={
-                "captured_at": snapshot["captured_at"],
+                "snapshot_cursor": snapshot["cursor"],
                 "snapshot_mode": snapshot["mode"],
-                "updated_after": snapshot["updated_after"],
+                "after_cursor": snapshot["after_cursor"],
                 "refresh_count": next_refresh_count,
                 "scheduled": interval_minutes > 0,
             },
@@ -120,12 +122,10 @@ async def main(ctx):
         snapshot_cursor = next_cursor
         if interval_minutes <= 0:
             return {"artifact_id": artifact_id, "refresh_count": refresh_count}
+        if snapshot["has_more"]:
+            continue
         await wait(
             minutes=interval_minutes,
             name="project-summary-refresh",
             policy="coalesce",
         )
-
-
-def _has_project_changes(snapshot):
-    return bool(snapshot["sessions"] or snapshot["workflows"] or snapshot["artifacts"])

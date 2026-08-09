@@ -175,8 +175,8 @@ small packages owned by one Project.
   process or global execution permit; replay wakes on an answer, due timer, or
   durable Signal, including concurrent background-timer plus human-wait flows.
 - Read bounded Project state from Workflow code with `ctx.project.snapshot()`;
-  long-lived Workflows can pass `captured_at` back as `updated_after` to receive
-  only later changes. Publish deterministic text/HTML Artifacts with
+  long-lived Workflows can pass `cursor` back as `after_cursor` to receive only
+  later committed changes. Publish deterministic text/HTML Artifacts with
   `publish_artifact(...)`.
 - Declare every Action's local tools with `@action(tools=[...])`. Rust validates
   names, filters Workspace tools against the Turn access ceiling, and atomically

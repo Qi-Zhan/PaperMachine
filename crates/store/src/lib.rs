@@ -28,6 +28,8 @@ use tokio::sync::broadcast;
 
 pub use catalog::CatalogProject;
 pub use catalog::ProjectCatalog;
+pub use database::ProjectChange;
+pub use database::ProjectChangeBatch;
 pub use database::Store;
 pub use project_home::PROJECT_HOME_MEDIA_TYPE;
 pub use project_home::PROJECT_HOME_ROLE;

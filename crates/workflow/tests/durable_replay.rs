@@ -245,7 +245,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
     let launch_context = WorkflowLaunchContext {
         mode: WorkflowContextMode::ProjectSnapshot,
         snapshot: Some(json!({
-            "captured_at": "2026-08-07T00:00:00Z",
+            "cursor": 7,
             "project": {
                 "id": project.id,
                 "name": project.name,

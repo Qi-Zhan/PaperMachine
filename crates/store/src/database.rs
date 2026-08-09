@@ -24,9 +24,24 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectChange {
+    pub sequence: u64,
+    pub kind: String,
+    pub entity_id: String,
+    pub workflow_id: Option<WorkflowId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectChangeBatch {
+    pub captured_cursor: u64,
+    pub changes: Vec<ProjectChange>,
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -313,6 +328,80 @@ impl Store {
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
         )
+    }
+
+    /// All Sessions that belong to a Project, including archived history.
+    pub fn list_project_sessions(&self, project_id: ProjectId) -> Result<Vec<Session>, StoreError> {
+        self.query_documents(
+            "SELECT document_json FROM sessions WHERE project_id = ?1
+             ORDER BY updated_at DESC, id ASC",
+            [project_id.to_string()],
+        )
+    }
+
+    pub fn project_changes_after(
+        &self,
+        project_id: ProjectId,
+        after_cursor: Option<u64>,
+    ) -> Result<ProjectChangeBatch, StoreError> {
+        self.get_project(project_id)?;
+        let connection = self.connection()?;
+        let captured_cursor = connection.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM project_changes WHERE project_id = ?1",
+            [project_id.to_string()],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let Some(after_cursor) = after_cursor else {
+            return Ok(ProjectChangeBatch {
+                captured_cursor,
+                changes: Vec::new(),
+            });
+        };
+        if after_cursor > captured_cursor {
+            return Err(StoreError::Invariant(format!(
+                "Project snapshot cursor {after_cursor} is ahead of current cursor {captured_cursor}"
+            )));
+        }
+        let mut statement = connection.prepare(
+            "SELECT sequence, entity_kind, entity_id, workflow_id
+             FROM project_changes
+             WHERE project_id = ?1 AND sequence > ?2 AND sequence <= ?3
+             ORDER BY sequence ASC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                project_id.to_string(),
+                after_cursor,
+                captured_cursor,
+                MAX_PROJECT_CHANGES_PER_READ,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )?;
+        let mut changes = Vec::new();
+        for row in rows {
+            let (sequence, kind, entity_id, workflow_id) = row?;
+            changes.push(ProjectChange {
+                sequence,
+                kind,
+                entity_id,
+                workflow_id: workflow_id
+                    .map(|id| WorkflowId::from_str(&id))
+                    .transpose()
+                    .map_err(|error| StoreError::Invariant(error.to_string()))?,
+            });
+        }
+        Ok(ProjectChangeBatch {
+            captured_cursor,
+            changes,
+        })
     }
 
     pub fn set_session_status(
@@ -3867,7 +3956,77 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            artifact_id TEXT NOT NULL REFERENCES artifacts(id),
            source_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
            revision TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );"
+         );
+         CREATE TABLE IF NOT EXISTS project_changes (
+           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+           project_id TEXT NOT NULL REFERENCES projects(id),
+           entity_kind TEXT NOT NULL,
+           entity_id TEXT NOT NULL,
+           workflow_id TEXT
+         );
+         CREATE INDEX IF NOT EXISTS project_changes_project_sequence
+           ON project_changes(project_id, sequence);
+
+         CREATE TRIGGER IF NOT EXISTS project_change_project_insert
+         AFTER INSERT ON projects BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.id, 'project', NEW.id, NULL);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_project_update
+         AFTER UPDATE ON projects BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.id, 'project', NEW.id, NULL);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_session_insert
+         AFTER INSERT ON sessions BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.project_id, 'session', NEW.id, NULL);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_session_update
+         AFTER UPDATE ON sessions BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.project_id, 'session', NEW.id, NULL);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_turn_insert
+         AFTER INSERT ON turns BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           SELECT project_id, 'session', NEW.session_id, NULL
+           FROM sessions WHERE id = NEW.session_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_turn_update
+         AFTER UPDATE ON turns BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           SELECT project_id, 'session', NEW.session_id, NULL
+           FROM sessions WHERE id = NEW.session_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_workflow_insert
+         AFTER INSERT ON workflows BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.project_id, 'workflow', NEW.id, NEW.id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_workflow_update
+         AFTER UPDATE ON workflows BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           VALUES (NEW.project_id, 'workflow', NEW.id, NEW.id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_artifact_insert
+         AFTER INSERT ON artifacts BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           SELECT project_id, 'artifact', NEW.id, NEW.workflow_id
+           FROM workflows WHERE id = NEW.workflow_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_home_insert
+         AFTER INSERT ON project_homes BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           SELECT NEW.project_id, 'project_home', NEW.project_id, workflow_id
+           FROM artifacts WHERE id = NEW.artifact_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_home_update
+         AFTER UPDATE ON project_homes BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           SELECT NEW.project_id, 'project_home', NEW.project_id, workflow_id
+           FROM artifacts WHERE id = NEW.artifact_id;
+         END;"
     ))?;
     reconcile_terminal_workflow_resources(connection)?;
     Ok(())

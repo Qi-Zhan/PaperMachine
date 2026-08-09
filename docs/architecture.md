@@ -184,6 +184,15 @@ prompt into the new Agents. The instruction stack remains Runtime -> Project ->
 Run instructions/Action contract -> Agent -> Skills -> Control; request
 and Action arguments remain Turn data.
 
+Live snapshots use an append-only Project change journal populated by SQLite
+triggers in the same transaction as Project, Session, Turn, Workflow, Artifact,
+and canonical-home mutations. A delta cursor therefore denotes a committed
+database boundary rather than wall-clock time. Limits apply to a journal
+prefix: `cursor` stops before an omitted change and `has_more` remains true.
+Archived Sessions remain Project history. Text budgets reserve capacity for
+later sections, and requested Artifact content errors fail the snapshot instead
+of being converted to null.
+
 ## Runtime layers
 
 ```text
@@ -435,8 +444,9 @@ external media, and renders the remaining semantic markup directly as the
 Project home page. There is no fixed Project dashboard and no iframe boundary.
 Manual refreshes are one-shot runs, while an active refresh policy is simply a
 non-terminal scheduled Workflow. Its first refresh is full; later timer firings
-request only changes since the prior `captured_at` cursor and skip model work
-when that delta is empty. The same summary Agent Session retains prior Turns and
+request only committed changes since the prior monotonic Project cursor and
+skip model work when that delta is empty. The same summary Agent Session retains
+prior Turns and
 the next draft starts from the canonical block source. The canonical reference
 is Project state, not a summary Agent instance or privileged daemon. Historical
 home Artifacts do not consume the ordinary Project snapshot Artifact quota.
