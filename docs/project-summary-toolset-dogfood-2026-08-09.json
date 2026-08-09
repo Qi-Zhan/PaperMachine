@@ -1,0 +1,374 @@
+{
+  "schema": "papermachine.project-summary-toolset-dogfood.v1",
+  "started_at": "2026-08-09T05:01:10.769353+00:00",
+  "git_commit": "c24474ff4c45e4e1384e783982bd11c82ca112ba",
+  "run_root": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-summary-toolset-dogfood-17tdlbwg",
+  "finished_at": "2026-08-09T05:01:39.858100+00:00",
+  "project_id": "019fe4e5-750a-7301-b85e-e72042e1a094",
+  "first_write_glm": {
+    "workflow_id": "019fe4e5-763a-7670-afcb-b9b44fd19fb9",
+    "session_id": "e1e1ffa1-1742-5e69-acdb-c13d9758d291",
+    "action_invocation_id": "692c3cd0-f078-54b9-b66e-d4abe3c9a279",
+    "action_attempt_id": "019fe4e5-767d-7231-bdcf-961fcf027c65",
+    "turn_id": "019fe4e5-767f-73b2-b360-9705a4107ff9",
+    "tool_set": {
+      "definitions": [
+        {
+          "name": "patch_project_home",
+          "description": "Incrementally edit the staged Project home page. Use upsert with id and html, remove with id, or reorder with an order containing every current block ID. Use the revision returned by read_project_home or the preceding patch.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "base_revision": {
+                "type": "string"
+              },
+              "operations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "html": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "upsert",
+                        "remove",
+                        "reorder"
+                      ],
+                      "type": "string"
+                    },
+                    "order": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 128,
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "base_revision",
+              "operations"
+            ],
+            "type": "object"
+          },
+          "supports_parallel": false
+        },
+        {
+          "name": "preview_project_home",
+          "description": "Inspect the complete materialized Project home page after edits. Returns the exact semantic HTML that will be published, a rendered text view, block order, and validation diagnostics.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "supports_parallel": false
+        },
+        {
+          "name": "read_project_home",
+          "description": "Read the current staged Project home page as stable semantic blocks. Call this before editing so patches use the current revision.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "supports_parallel": false
+        }
+      ],
+      "sha256": "785c8cc1064f4db53f99614a5f706f183e28547e0a63e6c61ab3657abc4c0ef5"
+    },
+    "tool_steps": [
+      {
+        "name": "read_project_home",
+        "status": "completed",
+        "tool_call_id": "call_5d96b261e9fd4f0ea3756d00",
+        "execution_state": "completed"
+      },
+      {
+        "name": "patch_project_home",
+        "status": "completed",
+        "tool_call_id": "call_231d0abaa93b43299331843d",
+        "execution_state": "completed"
+      },
+      {
+        "name": "preview_project_home",
+        "status": "completed",
+        "tool_call_id": "call_42b5102bf5e444218a94724e",
+        "execution_state": "completed"
+      }
+    ],
+    "tool_trial_failures": 0,
+    "base_artifact_id": null,
+    "page_artifact_id": "90c30dba-f73a-5871-abb2-763617070351",
+    "source_artifact_id": "9593a5cb-dba2-5444-b973-4e0b96c898c4",
+    "page_sha256": "12375debfa982473690e1192783e8e3c0c6303e834ed4e4d1db8dbbbfdf17ce6",
+    "provider_requests": [
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "glm-5-2",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "aeroides",
+        "transport": "http_sse",
+        "upstream_model": "glm-5.2",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "glm-5-2",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "aeroides",
+        "transport": "http_sse",
+        "upstream_model": "glm-5.2",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "glm-5-2",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "aeroides",
+        "transport": "http_sse",
+        "upstream_model": "glm-5.2",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "glm-5-2",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "aeroides",
+        "transport": "http_sse",
+        "upstream_model": "glm-5.2",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      }
+    ],
+    "usage": {
+      "agents_created": 1,
+      "actions_started": 1,
+      "actions_completed": 1,
+      "action_steps": 7,
+      "timer_fires": 0,
+      "hosted_search_calls": 0,
+      "tokens": {
+        "input_tokens": 7071,
+        "output_tokens": 1068,
+        "cached_input_tokens": 5952,
+        "cache_write_input_tokens": 0
+      },
+      "wall_time_seconds": 5,
+      "estimated_cost_usd": null
+    }
+  },
+  "existing_page_refresh_deepseek": {
+    "workflow_id": "019fe4e5-8d71-7f20-ae15-4cf45d03336f",
+    "session_id": "83ba3373-a41e-5e59-9867-b710b415939a",
+    "action_invocation_id": "f495c8b0-ece2-5ee3-9581-f67bdb2483c5",
+    "action_attempt_id": "019fe4e5-8dcf-7f62-b9b4-8cc36dcecdac",
+    "turn_id": "019fe4e5-8dd0-73d1-8636-5e54c63659e7",
+    "tool_set": {
+      "definitions": [
+        {
+          "name": "patch_project_home",
+          "description": "Incrementally edit the staged Project home page. Use upsert with id and html, remove with id, or reorder with an order containing every current block ID. Use the revision returned by read_project_home or the preceding patch.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "base_revision": {
+                "type": "string"
+              },
+              "operations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "html": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "upsert",
+                        "remove",
+                        "reorder"
+                      ],
+                      "type": "string"
+                    },
+                    "order": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 128,
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "base_revision",
+              "operations"
+            ],
+            "type": "object"
+          },
+          "supports_parallel": false
+        },
+        {
+          "name": "preview_project_home",
+          "description": "Inspect the complete materialized Project home page after edits. Returns the exact semantic HTML that will be published, a rendered text view, block order, and validation diagnostics.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "supports_parallel": false
+        },
+        {
+          "name": "read_project_home",
+          "description": "Read the current staged Project home page as stable semantic blocks. Call this before editing so patches use the current revision.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "supports_parallel": false
+        }
+      ],
+      "sha256": "785c8cc1064f4db53f99614a5f706f183e28547e0a63e6c61ab3657abc4c0ef5"
+    },
+    "tool_steps": [
+      {
+        "name": "read_project_home",
+        "status": "completed",
+        "tool_call_id": "call_00_QNudbKQ8fqBF2ebrLPSw7674",
+        "execution_state": "completed"
+      },
+      {
+        "name": "preview_project_home",
+        "status": "completed",
+        "tool_call_id": "call_01_b8hgK9I5GApP0nojnkeu0534",
+        "execution_state": "completed"
+      },
+      {
+        "name": "patch_project_home",
+        "status": "completed",
+        "tool_call_id": "call_00_fiZVU5agnV1EoZBHJcU17287",
+        "execution_state": "completed"
+      },
+      {
+        "name": "preview_project_home",
+        "status": "completed",
+        "tool_call_id": "call_00_ET_QE3gnpdFlzvn1sl4bi1d9752",
+        "execution_state": "completed"
+      }
+    ],
+    "tool_trial_failures": 0,
+    "base_artifact_id": "90c30dba-f73a-5871-abb2-763617070351",
+    "page_artifact_id": "70af2163-8686-50d3-9e51-e9cd16c8a6b5",
+    "source_artifact_id": "adfdfebc-b803-5c8f-81ca-f7433e3e79a3",
+    "page_sha256": "7061805a84adfd955fca84d58271981b6ebfdea096224f7853b654d1bfeef638",
+    "provider_requests": [
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "deepseek-flash",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "deepseek",
+        "transport": "http_sse",
+        "upstream_model": "deepseek-v4-flash",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "deepseek-flash",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "deepseek",
+        "transport": "http_sse",
+        "upstream_model": "deepseek-v4-flash",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "deepseek-flash",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "deepseek",
+        "transport": "http_sse",
+        "upstream_model": "deepseek-v4-flash",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      },
+      {
+        "continuation_miss_reason": "http_transport",
+        "model_profile": "deepseek-flash",
+        "prompt_cache_breakpoint": false,
+        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_mode": "implicit",
+        "provider": "deepseek",
+        "transport": "http_sse",
+        "upstream_model": "deepseek-v4-flash",
+        "used_previous_response_id": false,
+        "websocket_fallback_reason": null
+      }
+    ],
+    "usage": {
+      "agents_created": 1,
+      "actions_started": 1,
+      "actions_completed": 1,
+      "action_steps": 8,
+      "timer_fires": 0,
+      "hosted_search_calls": 0,
+      "tokens": {
+        "input_tokens": 16033,
+        "output_tokens": 2535,
+        "cached_input_tokens": 11776,
+        "cache_write_input_tokens": 0
+      },
+      "wall_time_seconds": 22,
+      "estimated_cost_usd": null
+    }
+  },
+  "project_artifact_count": 5,
+  "assertions": {
+    "fresh_data_dir": true,
+    "one_attempt_per_summary": true,
+    "no_model_or_terminal_failure": true,
+    "final_preview_diagnostics": 0,
+    "no_workspace_tools": true,
+    "same_exact_tool_set": true,
+    "refresh_used_first_page_as_base": true
+  }
+}

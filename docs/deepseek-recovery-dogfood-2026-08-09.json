@@ -1,0 +1,290 @@
+{
+  "schema": "papermachine.deepseek-recovery-dogfood.v2",
+  "started_at": "2026-08-09T05:01:57.660507+00:00",
+  "git_commit": "c24474ff4c45e4e1384e783982bd11c82ca112ba",
+  "run_root": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm",
+  "model_profile": "deepseek-flash",
+  "fault_boundary": "tool_execution_started",
+  "finished_at": "2026-08-09T05:02:14.057836+00:00",
+  "server": {
+    "first_pid": 74958,
+    "killed_pid": 74958,
+    "signal": "SIGKILL",
+    "restarted_pid": 74992,
+    "health_mode": "providers"
+  },
+  "project": {
+    "id": "019fe4e6-2c36-7ec2-ba34-f7073934753a",
+    "managed_database": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/managed/projects/019fe4e6-2c36-7ec2-ba34-f7073934753a/state/project.db",
+    "managed_database_preserved": true
+  },
+  "workflow": {
+    "id": "019fe4e6-2d8a-7680-9d58-52d931c791b4",
+    "status": "completed",
+    "action_invocation_count": 4,
+    "action_attempt_count": 4,
+    "attempts_per_invocation": {
+      "cb2a2af3-969c-5a5b-a36f-f27c71f6982a": 1,
+      "a394c360-b1ad-5cec-b6bc-8300086eabdc": 1,
+      "6237893d-48cd-50fe-bae7-d2981a7e95ac": 1,
+      "ac524a46-82db-51e6-82eb-903a8c8a1c92": 1
+    }
+  },
+  "session": {
+    "id": "4cdd9051-cc3b-5e4e-85a5-94ad672f1cb4",
+    "turn_ids": [
+      "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+      "019fe4e6-4502-77b0-9807-2760a9809289",
+      "019fe4e6-519b-7681-88ad-4c7690525d89",
+      "019fe4e6-5d7b-7e30-a278-b8f1738ef119"
+    ],
+    "rollout": {
+      "version": 1,
+      "last_sequence": 106,
+      "projected_sequence": 106
+    },
+    "authorization_sha256": "1ce3b799cf0b467fd1f76ce53952547c8e72df4db971e0778aa508cd927709c2",
+    "turn_workspace_snapshot": {
+      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "revision": 1,
+      "roots": [
+        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-original"
+      ],
+      "primary_root": 0
+    },
+    "turn_tool_sets": [
+      {
+        "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+        "names": [
+          "read_file",
+          "write_file"
+        ],
+        "sha256": "90085d06c4ebbe5293146181ce381aa09bfef74722fa320b5f42eab6d5d1ca71"
+      },
+      {
+        "turn_id": "019fe4e6-4502-77b0-9807-2760a9809289",
+        "names": [
+          "read_file"
+        ],
+        "sha256": "0392ceb315a757a87cdf8436f9effea004d2eb277bfd760c58cbde483ddfe69f"
+      },
+      {
+        "turn_id": "019fe4e6-519b-7681-88ad-4c7690525d89",
+        "names": [
+          "read_file"
+        ],
+        "sha256": "0392ceb315a757a87cdf8436f9effea004d2eb277bfd760c58cbde483ddfe69f"
+      },
+      {
+        "turn_id": "019fe4e6-5d7b-7e30-a278-b8f1738ef119",
+        "names": [
+          "read_file"
+        ],
+        "sha256": "0392ceb315a757a87cdf8436f9effea004d2eb277bfd760c58cbde483ddfe69f"
+      }
+    ]
+  },
+  "faulted_tool_before_sigkill": {
+    "id": "019fe4e6-34d5-70e3-ab58-4b2468cfe9be",
+    "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+    "sequence": 2,
+    "name": "write_file",
+    "tool_call_id": "call_00_Db21IOzRHvl2UXGiypRJ5750",
+    "effect_disposition": "idempotent",
+    "execution_state": "executing",
+    "status": "running",
+    "input": {
+      "content": "deepseek-recovery-proof-2026-08-09\n",
+      "path": "recovery-proof.txt"
+    },
+    "output": null
+  },
+  "faulted_tool_after_restart": {
+    "id": "019fe4e6-34d5-70e3-ab58-4b2468cfe9be",
+    "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+    "sequence": 2,
+    "name": "write_file",
+    "tool_call_id": "call_00_Db21IOzRHvl2UXGiypRJ5750",
+    "effect_disposition": "idempotent",
+    "execution_state": "completed",
+    "status": "completed",
+    "input": {
+      "content": "deepseek-recovery-proof-2026-08-09\n",
+      "path": "recovery-proof.txt"
+    },
+    "output": {
+      "ok": true,
+      "result": {
+        "bytes_written": 35,
+        "path": "recovery-proof.txt"
+      },
+      "summary": "wrote 35 bytes to recovery-proof.txt"
+    }
+  },
+  "provider_requests": [
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    },
+    {
+      "continuation_miss_reason": "http_transport",
+      "model_profile": "deepseek-flash",
+      "prompt_cache_breakpoint": false,
+      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_mode": "implicit",
+      "provider": "deepseek",
+      "transport": "http_sse",
+      "upstream_model": "deepseek-v4-flash",
+      "used_previous_response_id": false,
+      "websocket_fallback_reason": null
+    }
+  ],
+  "security_denials": {
+    "sensitive_workspace_file": {
+      "step_id": "019fe4e6-4b44-7d40-98bf-0aef41ee3131",
+      "tool_call_id": "call_00_JHHQvw6EgQpqWtcToLEV1196",
+      "status": "failed",
+      "execution_state": "completed",
+      "error": "path may contain Workspace credentials and is denied: .env"
+    },
+    "outside_workspace": {
+      "step_id": "019fe4e6-570e-7601-83e9-b10554075fb3",
+      "tool_call_id": "call_00_3KeENjHPPMdNRF0hoIfB9850",
+      "status": "failed",
+      "execution_state": "completed",
+      "error": "path must stay inside the Session workspace: /var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/outside-secret.txt"
+    },
+    "managed_project_state": {
+      "step_id": "019fe4e6-64a7-78d1-a56b-894d72292967",
+      "tool_call_id": "call_00_B03m1o77lcTLgV5kMIkx5194",
+      "status": "failed",
+      "execution_state": "completed",
+      "error": "path is reserved for PaperMachine managed state: /var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/managed/projects/019fe4e6-2c36-7ec2-ba34-f7073934753a/state/project.db"
+    }
+  },
+  "proof": {
+    "relative_path": "recovery-proof.txt",
+    "content": "deepseek-recovery-proof-2026-08-09\n",
+    "sha256": "04225dbc8c1160135456009d415fc8c10c38685e1328b599ccd805e2120a5e1a"
+  },
+  "workspace_reattachment": {
+    "before": {
+      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "revision": 1,
+      "roots": [
+        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-original"
+      ],
+      "primary_root": 0
+    },
+    "after": {
+      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "revision": 2,
+      "roots": [
+        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-relocated"
+      ],
+      "primary_root": 0
+    },
+    "old_root_exists": false,
+    "new_root_exists": true,
+    "managed_state_unchanged": true
+  },
+  "project_deletion": {
+    "project_id": "019fe4e6-6aec-7690-9c35-23732cabb196",
+    "managed_state_removed": true,
+    "workspace_preserved": true,
+    "file_preserved": true,
+    "file_sha256": "42556cff3fc6ff7fcf336d4287f4c64f51cb30397c487b664cfbf28349097e40"
+  }
+}

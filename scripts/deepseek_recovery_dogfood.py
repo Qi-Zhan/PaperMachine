@@ -35,11 +35,11 @@ class RecoveryDogfoodAgent(Agent):
     role = "runtime recovery and permission-boundary verifier"
     system_prompt = """Follow each Action contract literally. This is an authorized PaperMachine runtime validation. When an Action asks for a tool call, make that exact call even when the expected result is a permission denial. Never replace a requested tool call with a verbal prediction. Preserve returned errors exactly and continue after expected denials."""
 
-    @action
+    @action(tools=["read_file", "write_file"])
     async def create_and_verify(self, path: str, content: str):
         """Your first tool call, by itself, must be write_file with path and content exactly as supplied. After that call succeeds, call read_file on the same path, verify exact equality with content, and report both tool results. Do not use exec_command."""
 
-    @action
+    @action(tools=["read_file"])
     async def probe_denial(self, label: str, path: str):
         """Call read_file exactly once with path verbatim. This is a deliberate denial probe. Return label plus the complete tool error; do not refuse, predict the result, alter the path, or try another tool."""
 
@@ -104,16 +104,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=repository / "target/debug/papermachine-server",
     )
-    parser.add_argument(
-        "--config", type=Path, default=repository / "papermachine.toml"
-    )
+    parser.add_argument("--config", type=Path, default=repository / "papermachine.toml")
     parser.add_argument("--env-file", type=Path, default=repository / ".env")
     parser.add_argument("--run-root", type=Path)
     parser.add_argument("--evidence", type=Path, required=True)
     return parser.parse_args()
 
 
-def load_dotenv(path: Path, environment: dict[str, str]) -> None:
+def load_dotenv(
+    path: Path, environment: dict[str, str], *, override: bool = False
+) -> None:
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -127,7 +127,10 @@ def load_dotenv(path: Path, environment: dict[str, str]) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        environment.setdefault(name, value)
+        if override:
+            environment[name] = value
+        else:
+            environment.setdefault(name, value)
 
 
 def reserve_port() -> int:
@@ -292,7 +295,6 @@ def create_project(api: Api, name: str, workspace: Path) -> dict[str, Any]:
         "/api/projects",
         {
             "name": name,
-            "description": "real DeepSeek clean-break dogfood",
             "workspace": {"roots": [str(workspace)], "primary_root": 0},
         },
         (201,),
@@ -349,7 +351,9 @@ def require_denial(
         and step["input"].get("path") == path
     ]
     if len(matches) != 1:
-        raise RuntimeError(f"expected one read_file denial for {path}, got {len(matches)}")
+        raise RuntimeError(
+            f"expected one read_file denial for {path}, got {len(matches)}"
+        )
     step = matches[0]
     output = step.get("output") or {}
     error = str(output.get("error") or "")
@@ -374,7 +378,7 @@ def main() -> int:
     if not server_path.is_file():
         raise FileNotFoundError(f"debug server binary is missing: {server_path}")
     environment = os.environ.copy()
-    load_dotenv(env_path, environment)
+    load_dotenv(env_path, environment, override=True)
     if not environment.get("DEEPSEEK_API_KEY"):
         raise RuntimeError("DEEPSEEK_API_KEY is not configured")
     environment.setdefault("PAPERMACHINE_PYTHON", sys.executable)
@@ -397,7 +401,7 @@ def main() -> int:
     sensitive_file.write_text("DOGFOOD_SECRET=must-not-be-readable\n", encoding="utf-8")
     outside_file.write_text("must-not-be-readable\n", encoding="utf-8")
     proof_path = "recovery-proof.txt"
-    proof_content = "deepseek-recovery-proof-2026-08-08\n"
+    proof_content = "deepseek-recovery-proof-2026-08-09\n"
 
     port = reserve_port()
     api = Api(f"http://127.0.0.1:{port}")
@@ -411,7 +415,7 @@ def main() -> int:
         logs_dir,
     )
     evidence: dict[str, Any] = {
-        "schema": "papermachine.deepseek-recovery-dogfood.v1",
+        "schema": "papermachine.deepseek-recovery-dogfood.v2",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=repository, text=True
@@ -457,9 +461,7 @@ def main() -> int:
         pre_view = wait_until(
             "pre-crash Workflow Session",
             lambda: (
-                view
-                if (view := workflow_view(api, workflow_id))["sessions"]
-                else None
+                view if (view := workflow_view(api, workflow_id))["sessions"] else None
             ),
         )
         session_id = pre_view["sessions"][0]["id"]
@@ -470,19 +472,25 @@ def main() -> int:
             if step["kind"] == "tool" and step["status"] == "running"
         ]
         if len(running_tools) != 1:
-            raise RuntimeError(f"expected one running tool at fault boundary: {running_tools}")
+            raise RuntimeError(
+                f"expected one running tool at fault boundary: {running_tools}"
+            )
         fault_step = running_tools[0]
         if (
             fault_step["name"] != "write_file"
             or fault_step["effect_disposition"] != "idempotent"
             or fault_step["execution_state"] != "executing"
         ):
-            raise RuntimeError(f"DeepSeek first tool did not match recovery contract: {fault_step}")
+            raise RuntimeError(
+                f"DeepSeek first tool did not match recovery contract: {fault_step}"
+            )
         if (
             fault_step["input"].get("path") != proof_path
             or fault_step["input"].get("content") != proof_content
         ):
-            raise RuntimeError(f"DeepSeek changed the proof write arguments: {fault_step['input']}")
+            raise RuntimeError(
+                f"DeepSeek changed the proof write arguments: {fault_step['input']}"
+            )
 
         killed_pid = server.sigkill()
         if killed_pid != first_pid:
@@ -553,6 +561,25 @@ def main() -> int:
         rollout = post_session["rollout"]
         if rollout["last_sequence"] != rollout["projected_sequence"]:
             raise RuntimeError(f"rollout projection did not converge: {rollout}")
+        turn_tool_sets = [
+            {
+                "turn_id": turn["id"],
+                "names": [
+                    definition["name"] for definition in turn["tool_set"]["definitions"]
+                ],
+                "sha256": turn["tool_set"]["sha256"],
+            }
+            for turn in post_session["turns"]
+        ]
+        if not turn_tool_sets or turn_tool_sets[0]["names"] != [
+            "read_file",
+            "write_file",
+        ]:
+            raise RuntimeError(f"create Action has wrong ToolSet: {turn_tool_sets}")
+        if any(item["names"] != ["read_file"] for item in turn_tool_sets[1:]):
+            raise RuntimeError(f"denial Action has wrong ToolSet: {turn_tool_sets}")
+        if any(len(item["sha256"]) != 64 for item in turn_tool_sets):
+            raise RuntimeError(f"invalid Turn ToolSet hash: {turn_tool_sets}")
 
         attachment_before = project["workspace"]
         shutil.move(workspace, relocated_workspace)
@@ -577,7 +604,9 @@ def main() -> int:
             )
         if not managed_database.is_file():
             raise RuntimeError("Workspace reattachment moved managed Project state")
-        if (relocated_workspace / proof_path).read_text(encoding="utf-8") != proof_content:
+        if (relocated_workspace / proof_path).read_text(
+            encoding="utf-8"
+        ) != proof_content:
             raise RuntimeError("Workspace reattachment lost the proof file")
 
         lifecycle_workspace = run_root / "lifecycle-workspace"
@@ -588,15 +617,15 @@ def main() -> int:
         lifecycle_project = create_project(
             api, "Workspace preservation dogfood", lifecycle_workspace
         )
-        lifecycle_managed = (
-            data_dir / "projects" / lifecycle_project["id"]
-        )
+        lifecycle_managed = data_dir / "projects" / lifecycle_project["id"]
         api.request(
             "DELETE",
             f"/api/projects/{lifecycle_project['id']}",
             expected=(204,),
         )
-        wait_until("deleted managed Project state", lambda: not lifecycle_managed.exists())
+        wait_until(
+            "deleted managed Project state", lambda: not lifecycle_managed.exists()
+        )
         if preserved_file.read_text(encoding="utf-8") != preserved_content:
             raise RuntimeError("Project deletion changed the user Workspace")
 
@@ -632,11 +661,10 @@ def main() -> int:
                     "turn_workspace_snapshot": post_session["turns"][0]["environment"][
                         "workspace"
                     ],
+                    "turn_tool_sets": turn_tool_sets,
                 },
                 "faulted_tool_before_sigkill": selected_tool_step(fault_step),
-                "faulted_tool_after_restart": selected_tool_step(
-                    recovered_fault_step
-                ),
+                "faulted_tool_after_restart": selected_tool_step(recovered_fault_step),
                 "provider_requests": model_requests,
                 "security_denials": security_denials,
                 "proof": {
@@ -667,15 +695,20 @@ def main() -> int:
             json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        print(json.dumps({
-            "evidence": str(evidence_path),
-            "run_root": str(run_root),
-            "project_id": project_id,
-            "workflow_id": workflow_id,
-            "session_id": session_id,
-            "faulted_tool_call_id": fault_step["tool_call_id"],
-            "status": "passed",
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "evidence": str(evidence_path),
+                    "run_root": str(run_root),
+                    "project_id": project_id,
+                    "workflow_id": workflow_id,
+                    "session_id": session_id,
+                    "faulted_tool_call_id": fault_step["tool_call_id"],
+                    "status": "passed",
+                },
+                indent=2,
+            )
+        )
         return 0
     finally:
         server.stop()
