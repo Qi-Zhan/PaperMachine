@@ -115,7 +115,6 @@ pub fn build_project_snapshot(
             Ok::<_, StoreError>(json!({
                 "id": session.id,
                 "title": session.title,
-                "origin": session.origin,
                 "status": session.status,
                 "updated_at": session.updated_at,
                 "turns": turns,

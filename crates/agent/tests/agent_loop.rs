@@ -65,10 +65,10 @@ fn read_tools() -> ToolRegistry {
         .expect("read tool should register")
         .build();
     let snapshot = catalog
-        .materialize_session_tools(AccessPreset::Research, true)
+        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Research, true)
         .expect("read tool set should materialize");
     catalog
-        .registry_for_snapshot(&snapshot, false)
+        .registry_for_snapshot(&snapshot)
         .expect("read registry should rebuild")
 }
 
@@ -80,10 +80,14 @@ fn read_write_tools() -> ToolRegistry {
         .expect("write tool should register")
         .build();
     let snapshot = catalog
-        .materialize_session_tools(AccessPreset::Research, true)
+        .materialize_action_tools(
+            &["read_file".to_string(), "write_file".to_string()],
+            AccessPreset::Research,
+            true,
+        )
         .expect("read-write tool set should materialize");
     catalog
-        .registry_for_snapshot(&snapshot, false)
+        .registry_for_snapshot(&snapshot)
         .expect("read-write registry should rebuild")
 }
 

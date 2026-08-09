@@ -29,13 +29,6 @@ pub enum SessionStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionOrigin {
-    User,
-    WorkflowAgent,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
     User,
     Workflow,
@@ -45,7 +38,6 @@ pub enum TurnOrigin {
 pub struct Session {
     pub id: SessionId,
     pub project_id: ProjectId,
-    pub origin: SessionOrigin,
     pub title: String,
     /// User-configurable system prompt. Project, Workflow, Agent, skill, and
     /// runtime layers are snapshotted separately for each Turn.
@@ -92,9 +84,6 @@ pub struct Turn {
     pub session_id: SessionId,
     pub status: TurnStatus,
     pub origin: TurnOrigin,
-    /// Present only on a new user-directed Turn created by explicitly resuming
-    /// one terminal interrupted standalone Turn.
-    pub resumed_from_turn_id: Option<TurnId>,
     pub input: String,
     pub output: Option<String>,
     pub model: String,

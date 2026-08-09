@@ -88,7 +88,7 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
 }
 
 #[test]
-fn catalog_materializes_exact_session_tools_for_each_access_profile() {
+fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
     let catalog = ToolCatalog::builder()
         .register_workspace(ReadFileTool)
         .expect("read tool should register")
@@ -103,8 +103,17 @@ fn catalog_materializes_exact_session_tools_for_each_access_profile() {
         .build();
     let names = |access| {
         catalog
-            .materialize_session_tools(access, true)
-            .expect("Session tools should materialize")
+            .materialize_action_tools(
+                &[
+                    "read_file".to_string(),
+                    "write_file".to_string(),
+                    "exec_command".to_string(),
+                    "fetch_url".to_string(),
+                ],
+                access,
+                true,
+            )
+            .expect("Action tools should materialize")
             .definitions
             .into_iter()
             .map(|definition| definition.name)
@@ -139,16 +148,16 @@ async fn project_tools_are_admitted_only_for_declared_workflow_actions() {
         .expect("Project tool should register")
         .build();
 
-    let standalone = catalog
-        .materialize_session_tools(AccessPreset::FullAccess, true)
-        .expect("standalone tools should materialize");
+    let undeclared = catalog
+        .materialize_action_tools(&[], AccessPreset::FullAccess, true)
+        .expect("empty Action tools should materialize");
     assert_eq!(
-        standalone
+        undeclared
             .definitions
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["read_file"]
+        Vec::<&str>::new()
     );
     let snapshot = catalog
         .materialize_action_tools(
@@ -165,9 +174,8 @@ async fn project_tools_are_admitted_only_for_declared_workflow_actions() {
             .collect::<Vec<_>>(),
         vec!["project_probe"]
     );
-    assert!(catalog.registry_for_snapshot(&snapshot, false).is_err());
     let registry = catalog
-        .registry_for_snapshot(&snapshot, true)
+        .registry_for_snapshot(&snapshot)
         .expect("Workflow registry should rebuild");
     let output = registry
         .execute("project_probe", context.clone(), json!({"value": 7}))
@@ -214,17 +222,17 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
         .expect("snapshot should materialize");
     assert!(
         ToolCatalog::default()
-            .registry_for_snapshot(&snapshot, true)
+            .registry_for_snapshot(&snapshot)
             .is_err()
     );
     let mut corrupt = snapshot.clone();
     corrupt.sha256 = "0".repeat(64);
-    assert!(catalog.registry_for_snapshot(&corrupt, true).is_err());
+    assert!(catalog.registry_for_snapshot(&corrupt).is_err());
     let changed = ToolCatalog::builder()
         .register_project(ProjectProbeTool("version two"))
         .expect("changed Project tool should register")
         .build();
-    assert!(changed.registry_for_snapshot(&snapshot, true).is_err());
+    assert!(changed.registry_for_snapshot(&snapshot).is_err());
 }
 
 #[test]
@@ -245,7 +253,7 @@ fn one_persistent_agent_can_receive_different_exact_registries_per_action() {
     assert_ne!(read_turn.sha256, write_turn.sha256);
     assert_eq!(
         catalog
-            .registry_for_snapshot(&read_turn, true)
+            .registry_for_snapshot(&read_turn)
             .expect("read Registry should rebuild")
             .definitions()
             .into_iter()
@@ -255,7 +263,7 @@ fn one_persistent_agent_can_receive_different_exact_registries_per_action() {
     );
     assert_eq!(
         catalog
-            .registry_for_snapshot(&write_turn, true)
+            .registry_for_snapshot(&write_turn)
             .expect("write Registry should rebuild")
             .definitions()
             .into_iter()

@@ -32,7 +32,7 @@
     Workspace attachment, cwd, managed roots, tool capabilities, and network
     policy; model/tool/execution layers consume the resulting immutable policy.
 11. **Prompt context is a Turn snapshot.** Runtime, Project, Workflow,
-    Agent/Session, skill, and control layers retain content, source, and hashes;
+    Agent, skill, and control layers retain content, source, and hashes;
     later edits affect only later Turns.
 12. **New Session is a built-in Workflow.** The UI starts
     `interactive-agent`; its persistent Agent Session waits for a verified human
@@ -133,7 +133,7 @@ must not overlap. PaperMachine creates no hidden files inside the Workspace.
 Relocation changes only the Workspace attachment. Removal atomically renames
 managed state into `trash/` before asynchronous deletion and never deletes
 Workspace files. Relocation or removal is rejected while that Project has
-resumable work.
+non-terminal Workflow work.
 
 At startup the server scans `projects/`. Every directory name must be a
 ProjectId, every Store must use the one current schema, and its database must
@@ -181,7 +181,7 @@ change the instruction prefix of an already-running Agent Session. A
 Session-origin launch prioritizes that
 Session's history in the snapshot, but does not copy its mutable Session system
 prompt into the new Agents. The instruction stack remains Runtime -> Project ->
-Run instructions/Action contract -> Agent/Session -> Skills -> Control; request
+Run instructions/Action contract -> Agent -> Skills -> Control; request
 and Action arguments remain Turn data.
 
 ## Runtime layers
@@ -217,12 +217,11 @@ to stderr and captured with a size limit.
 
 ## Session execution
 
-A user Turn or workflow action follows the same core path:
+A Workflow Action Turn follows one core path:
 
 1. Verify that every attached Workspace root is still a real directory at its
    recorded canonical path. If not, fail before creating a Turn.
-2. Resolve the local tools before the Turn exists. A standalone user Turn gets
-   all Workspace tools allowed by access; a Workflow Action starts from its
+2. Resolve the local tools before the Turn exists. The Action starts from its
    static `tools=[...]` declaration, filters Workspace tools by access, and may
    receive declared Project tools. Atomically append the Turn with the sorted
    definitions and SHA-256 ToolSetSnapshot, immutable Workspace/authorization
@@ -230,7 +229,7 @@ A user Turn or workflow action follows the same core path:
    whether input is a direct/verified human message or program-generated
    Workflow work.
 3. Reconstruct canonical model context by replaying that append-only rollout.
-4. Render runtime, Project, Workflow, Agent/Session, enabled-skill, and control
+4. Render runtime, Project, Workflow, Agent, enabled-skill, and control
    prompt layers into the exact provider instructions.
 5. Stream a Responses API sample. Deltas remain ephemeral; completed model
    items and cursor checkpoints cross the rollout durability barrier before
@@ -391,18 +390,10 @@ than the projection cursor. Its Artifacts are stored under that same Project's
 managed directory using content-hashed metadata records. The web client uses
 SSE for live deltas and refreshes durable views for lifecycle changes.
 
-At startup, unfinished standalone Session Turns are settled and every
-non-terminal Workflow is recovered. A standalone Turn with a durable terminal
-candidate is committed without another provider sample. Otherwise it becomes
-`interrupted`; its partial rollout context, recovered tool outputs, and an
-explicit process-restart marker are committed for the next user-directed Turn.
-It is never automatically sampled again. The Session view exposes the canonical
-rollout version/sequence, its SQLite projection sequence, and the IDs of
-standalone interrupted Turns that may be resumed. Explicit Resume creates a
-new user Turn in the same Session over the committed context; the interrupted
-Turn remains terminal and is never reopened. Workflow-owned Turns are recovered
-only by their Workflow runtime and are not user-resumable through this endpoint.
-A recovered Workflow reruns its
+At startup, every non-terminal Workflow is recovered. All Turns belong to a
+Workflow Action, so their recovery is driven by the immutable Workflow program
+and ActionAttempt rather than by a second Session-level submit/resume path. A
+recovered Workflow reruns its
 immutable Python source from the entrypoint. DSL operations use deterministic
 logical effect paths; SQLite journals each path with the exact request hash,
 status, result, and error. A completed effect returns its stored result, while

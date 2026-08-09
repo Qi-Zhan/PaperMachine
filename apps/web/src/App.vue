@@ -99,9 +99,8 @@
         @select-project="selectProject"
         @select-session="selectSession"
         @close-session="closeSession"
-        @send="createTurn"
+        @send="sendSessionMessage"
         @cancel-turn="cancelTurn"
-        @resume-turn="resumeTurn"
         @open-workflow="openSessionWorkflowDialog"
         @inspect-workflow="inspectWorkflow"
         @pause-workflow="pauseWorkflow"
@@ -873,7 +872,7 @@ async function waitForWorkflowSession(workflowId: string): Promise<Session> {
   throw new Error(t('app.sessionWorkflowTimeout'))
 }
 
-async function createTurn(input: string) {
+async function sendSessionMessage(input: string) {
   const view = sessionView.value
   if (!view) return
   try {
@@ -883,26 +882,19 @@ async function createTurn(input: string) {
         request.session_id === view.session.id &&
         (!request.response_schema.type || request.response_schema.type === 'string'),
     )
-    if (humanRequest) {
-      const answered = await api.answerHumanRequest(humanRequest.id, input)
-      if (sessionView.value?.session.id === view.session.id) {
-        sessionView.value = {
-          ...sessionView.value,
-          human_requests: sessionView.value.human_requests.map((request) =>
-            request.id === answered.id ? answered : request,
-          ),
-        }
-      }
-      await inspectWorkflow(humanRequest.workflow_id, true)
-      scheduleSessionRefresh(view.session.id)
-      syncPoll()
-      return
-    }
-    const turn = await api.createTurn(view.session.id, input)
+    if (!humanRequest) return
+    const answered = await api.answerHumanRequest(humanRequest.id, input)
     if (sessionView.value?.session.id === view.session.id) {
-      sessionView.value = { ...sessionView.value, turns: [...sessionView.value.turns, turn] }
-      syncPoll()
+      sessionView.value = {
+        ...sessionView.value,
+        human_requests: sessionView.value.human_requests.map((request) =>
+          request.id === answered.id ? answered : request,
+        ),
+      }
     }
+    await inspectWorkflow(humanRequest.workflow_id, true)
+    scheduleSessionRefresh(view.session.id)
+    syncPoll()
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -927,24 +919,6 @@ async function cancelTurn(turnId: string) {
   try {
     await api.cancelTurn(turnId)
     if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function resumeTurn(turnId: string) {
-  const view = sessionView.value
-  if (!view) return
-  try {
-    const turn = await api.resumeTurn(turnId)
-    if (sessionView.value?.session.id === view.session.id) {
-      sessionView.value = {
-        ...sessionView.value,
-        turns: [...sessionView.value.turns, turn],
-        resumable_turn_ids: sessionView.value.resumable_turn_ids.filter((id) => id !== turnId),
-      }
-      syncPoll()
-    }
   } catch (error) {
     globalError.value = messageOf(error)
   }

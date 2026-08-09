@@ -3,9 +3,8 @@ export type Id = string
 export const ACCESS_PRESETS = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
 export type AccessPreset = (typeof ACCESS_PRESETS)[number]
 export type SessionStatus = 'ready' | 'running' | 'paused' | 'failed' | 'archived'
-export type SessionOrigin = 'user' | 'workflow_agent'
 export type TurnOrigin = 'user' | 'workflow'
-export type PromptLayerKind = 'runtime' | 'project' | 'workflow' | 'agent' | 'session' | 'skills' | 'control'
+export type PromptLayerKind = 'runtime' | 'project' | 'workflow' | 'agent' | 'skills' | 'control'
 export type TurnStatus =
   | 'queued'
   | 'running'
@@ -56,7 +55,6 @@ export interface ProjectCatalogEntry extends Project {
 export interface Session {
   id: Id
   project_id: Id
-  origin: SessionOrigin
   title: string
   system_prompt: string
   model: string
@@ -96,7 +94,6 @@ export interface Turn {
   session_id: Id
   status: TurnStatus
   origin: TurnOrigin
-  resumed_from_turn_id: Id | null
   input: string
   output: string | null
   model: string
@@ -393,7 +390,6 @@ export interface SessionView {
   turns: Turn[]
   steps: AgentStep[]
   rollout: SessionRolloutStatus
-  resumable_turn_ids: Id[]
   workflows: Workflow[]
   workflow_memberships: WorkflowParticipant[]
   human_requests: HumanRequest[]

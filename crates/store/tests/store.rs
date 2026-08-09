@@ -129,77 +129,6 @@ fn turn_creation_requires_the_attached_workspace_to_be_available() {
 }
 
 #[test]
-fn interrupted_standalone_turn_can_create_exactly_one_new_resume_turn() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
-    let project = project(&store, &directory, "Resume");
-    let session = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
-    let interrupted = store
-        .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
-            "Original objective",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
-            AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
-        )
-        .expect("Turn should be created");
-    store
-        .interrupt_turn(interrupted.id, "process stopped")
-        .expect("Turn should be interrupted");
-
-    let resumed = store
-        .create_resumed_turn(
-            interrupted.id,
-            session.id,
-            "Resume interrupted work",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
-            AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
-        )
-        .expect("Resume should create a new Turn");
-    assert_ne!(resumed.id, interrupted.id);
-    assert_eq!(resumed.resumed_from_turn_id, Some(interrupted.id));
-    assert!(
-        store
-            .is_turn_resumed(interrupted.id)
-            .expect("resume should query")
-    );
-
-    let error = store
-        .create_resumed_turn(
-            interrupted.id,
-            session.id,
-            "Resume again",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
-            AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
-        )
-        .expect_err("one interrupted Turn must not be resumed twice");
-    assert!(error.to_string().contains("already resumed"));
-}
-
-#[test]
 fn archived_session_stays_hidden_when_its_active_turn_finishes() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
@@ -930,13 +859,6 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             .expect("Attempt should load")
             .turn_id,
         Some(turn.id)
-    );
-    assert!(
-        store
-            .list_resumable_standalone_turns()
-            .expect("standalone Turns should load")
-            .iter()
-            .all(|candidate| candidate.id != turn.id)
     );
 }
 

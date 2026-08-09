@@ -197,11 +197,8 @@ small packages owned by one Project.
   journal; unfinished Agent actions resume the same checkpointed Turn. Local
   tool calls persist a `prepared`/`executing` boundary plus a `pure`,
   `idempotent`, `reconcilable`, or `unknown` effect disposition, so recovery
-  replays only safe work. Standalone user Turns are never sampled again merely
-  because the server restarted: a durable terminal candidate is committed,
-  otherwise the Turn becomes `interrupted` with any uncertain effect exposed.
-  Explicit Resume creates a new user-directed Turn over the committed context;
-  it never reopens or resamples the interrupted Turn.
+  replays only safe work. Every Turn belongs to a Workflow Action, and recovery
+  resumes it only through that ActionAttempt and the immutable Workflow program.
 - Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every

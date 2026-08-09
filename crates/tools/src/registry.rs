@@ -38,21 +38,6 @@ impl ToolCatalog {
         ToolCatalogBuilder::default()
     }
 
-    /// Materialize the ordinary Session tool surface from its access policy.
-    /// Project-owned tools are never admitted to a standalone Turn.
-    pub fn materialize_session_tools(
-        &self,
-        access: AccessPreset,
-        tools_enabled: bool,
-    ) -> Result<ToolSetSnapshot, ToolError> {
-        if !tools_enabled {
-            return empty_snapshot();
-        }
-        self.snapshot_from_entries(self.tools.iter().filter(|(name, entry)| {
-            entry.domain == ToolDomain::Workspace && access.tool_capabilities().allows(name)
-        }))
-    }
-
     /// Materialize a Workflow Action's declared local tool surface.
     /// Workspace tools are filtered by the Turn access ceiling; Project tools
     /// are admitted only through this Workflow-only path.
@@ -87,7 +72,6 @@ impl ToolCatalog {
     pub fn registry_for_snapshot(
         &self,
         snapshot: &ToolSetSnapshot,
-        allow_project_tools: bool,
     ) -> Result<ToolRegistry, ToolError> {
         snapshot.validate().map_err(ToolError::Execution)?;
         let mut selected = BTreeMap::new();
@@ -96,12 +80,6 @@ impl ToolCatalog {
                 .tools
                 .get(&saved.name)
                 .ok_or_else(|| ToolError::UnknownTool(saved.name.clone()))?;
-            if entry.domain == ToolDomain::Project && !allow_project_tools {
-                return Err(ToolError::Execution(format!(
-                    "Project tool {} is not valid for a standalone Turn",
-                    saved.name
-                )));
-            }
             let current = definition_for(entry.executor.as_ref());
             if &current != saved {
                 return Err(ToolError::Execution(format!(
@@ -134,10 +112,6 @@ impl ToolCatalog {
             .collect();
         ToolSetSnapshot::materialize(definitions).map_err(ToolError::Execution)
     }
-}
-
-fn empty_snapshot() -> Result<ToolSetSnapshot, ToolError> {
-    ToolSetSnapshot::materialize(Vec::new()).map_err(ToolError::Execution)
 }
 
 fn definition_for(tool: &dyn ToolExecutor) -> ToolDefinition {

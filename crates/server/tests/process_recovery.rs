@@ -548,21 +548,6 @@ context_window = 128000
         assert_eq!(status, StatusCode::OK, "Session view: {view}");
         view
     }
-
-    async fn seed_session(&self, project_name: &str) -> (String, String) {
-        self.mock.enqueue_text("seed complete").await;
-        let project_id = self.create_project(project_name).await;
-        self.publish_workflow(&project_id).await;
-        let workflow_id = self
-            .launch_workflow(&project_id, "Create a durable Session.")
-            .await;
-        let view = self.wait_workflow_terminal(&workflow_id).await;
-        let session_id = view["sessions"][0]["id"]
-            .as_str()
-            .expect("seed Session id should exist")
-            .to_string();
-        (project_id, session_id)
-    }
 }
 
 fn reserve_port() -> u16 {
@@ -669,37 +654,31 @@ async fn rollout_ahead_of_projection_is_replayed_after_sigkill() {
 async fn terminal_checkpoint_commits_without_resampling_after_sigkill() {
     let mut scenario = Scenario::new().await;
     let (mut server, _) = scenario.start(None).await;
-    let (_project_id, session_id) = scenario.seed_session("Terminal checkpoint crash").await;
-    assert_eq!(scenario.mock.call_count().await, 1);
+    let project_id = scenario.create_project("Terminal checkpoint crash").await;
+    scenario.publish_workflow(&project_id).await;
     server.stop().await;
 
     let (mut faulted, marker) = scenario
         .start(Some(TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT))
         .await;
     scenario.mock.enqueue_text("durable terminal answer").await;
-    let (status, turn) = scenario
-        .request(
-            Method::POST,
-            &format!("/api/sessions/{session_id}/turns"),
-            Some(json!({"input": "Persist this final answer."})),
-        )
+    let workflow_id = scenario
+        .launch_workflow(&project_id, "Persist this final answer.")
         .await;
-    assert_eq!(status, StatusCode::CREATED, "Turn creation: {turn}");
-    let turn_id = turn["id"]
-        .as_str()
-        .expect("Turn id should exist")
-        .to_string();
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     faulted.sigkill().await;
 
     let calls_before_restart = scenario.mock.call_count().await;
     let (mut restarted, _) = scenario.start(None).await;
-    let view = scenario.session_view(&session_id).await;
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
     let recovered = view["turns"]
         .as_array()
         .expect("Turns should exist")
-        .iter()
-        .find(|item| item["id"] == turn_id)
+        .first()
         .expect("checkpointed Turn should remain");
     assert_eq!(recovered["status"], "completed");
     assert_eq!(recovered["output"], "durable terminal answer");
@@ -708,83 +687,38 @@ async fn terminal_checkpoint_commits_without_resampling_after_sigkill() {
     restarted.stop().await;
 }
 
-async fn standalone_inflight_sample_becomes_explicitly_resumable_after_sigkill() {
+async fn workflow_inflight_sample_resumes_automatically_after_sigkill() {
     let mut scenario = Scenario::new().await;
     let (mut server, _) = scenario.start(None).await;
-    let (_project_id, session_id) = scenario.seed_session("Standalone sample crash").await;
+    let project_id = scenario.create_project("Workflow sample crash").await;
+    scenario.publish_workflow(&project_id).await;
     let gate = scenario
         .mock
         .enqueue_blocked_text("response from the dead server")
         .await;
-    let (status, turn) = scenario
-        .request(
-            Method::POST,
-            &format!("/api/sessions/{session_id}/turns"),
-            Some(json!({"input": "Interrupt this model sample."})),
-        )
+    let workflow_id = scenario
+        .launch_workflow(&project_id, "Interrupt this model sample.")
         .await;
-    assert_eq!(status, StatusCode::CREATED, "Turn creation: {turn}");
-    let interrupted_id = turn["id"]
-        .as_str()
-        .expect("Turn id should exist")
-        .to_string();
-    scenario.mock.wait_for_calls(2).await;
+    scenario.mock.wait_for_calls(1).await;
     server.sigkill().await;
     gate.release();
 
+    scenario.mock.enqueue_text("recovered model answer").await;
     let (mut restarted, _) = scenario.start(None).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let view = scenario.session_view(&session_id).await;
-    let interrupted = view["turns"]
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
+    let recovered = view["turns"]
         .as_array()
         .expect("Turns should exist")
-        .iter()
-        .find(|item| item["id"] == interrupted_id)
-        .expect("interrupted Turn should remain");
-    assert_eq!(interrupted["status"], "interrupted");
-    assert!(
-        view["resumable_turn_ids"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == &interrupted_id))
-    );
+        .first()
+        .expect("recovered Turn should remain");
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["output"], "recovered model answer");
     assert_eq!(scenario.mock.call_count().await, 2);
     assert_rollout_projected(&view);
-
-    scenario
-        .mock
-        .enqueue_text("explicit resume completed")
-        .await;
-    let (status, resumed) = scenario
-        .request(
-            Method::POST,
-            &format!("/api/turns/{interrupted_id}/resume"),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "Resume request: {resumed}");
-    assert_eq!(resumed["resumed_from_turn_id"], interrupted_id);
-    let resumed_id = resumed["id"]
-        .as_str()
-        .expect("resumed Turn id should exist")
-        .to_string();
-    wait_until("resumed Turn completion", || async {
-        let view = scenario.session_view(&session_id).await;
-        view["turns"]
-            .as_array()
-            .and_then(|turns| turns.iter().find(|item| item["id"] == resumed_id))
-            .filter(|item| item["status"] == "completed")
-            .cloned()
-    })
-    .await;
-    let (second_status, _) = scenario
-        .request(
-            Method::POST,
-            &format!("/api/turns/{interrupted_id}/resume"),
-            None,
-        )
-        .await;
-    assert_eq!(second_status, StatusCode::CONFLICT);
-    assert_eq!(scenario.mock.call_count().await, 3);
     restarted.stop().await;
 }
 
@@ -884,7 +818,7 @@ async fn executing_unknown_tool_is_not_replayed_after_sigkill() {
 async fn process_sigkill_recovery_matrix_preserves_durable_boundaries() {
     rollout_ahead_of_projection_is_replayed_after_sigkill().await;
     terminal_checkpoint_commits_without_resampling_after_sigkill().await;
-    standalone_inflight_sample_becomes_explicitly_resumable_after_sigkill().await;
+    workflow_inflight_sample_resumes_automatically_after_sigkill().await;
     prepared_unknown_tool_executes_once_after_sigkill().await;
     executing_unknown_tool_is_not_replayed_after_sigkill().await;
 }

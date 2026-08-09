@@ -21,7 +21,7 @@
           <ArrowLeft :size="17" />
         </button>
         <div class="session-heading-copy">
-          <p class="eyebrow">{{ project.name }}<template v-if="view.session.origin === 'workflow_agent'"> · {{ t('session.workflowAgent') }}</template></p>
+          <p class="eyebrow">{{ project.name }}</p>
           <h1 :title="view.session.title">{{ view.session.title }}</h1>
         </div>
       </div>
@@ -73,10 +73,6 @@
 
           <article v-for="turn in view.turns" :key="turn.id" class="turn-block">
             <div :class="turn.origin === 'user' ? 'user-message' : 'workflow-message'">
-              <span v-if="turn.resumed_from_turn_id" class="message-origin">
-                <Play :size="12" />
-                {{ t('session.resumedFrom', { id: shortId(turn.resumed_from_turn_id) }) }}
-              </span>
               <span v-if="turn.origin === 'workflow'" class="message-origin">
                 <GitBranch :size="12" />
                 {{ t('session.workflowTask') }}
@@ -258,14 +254,6 @@
             <div v-else-if="turn.error" class="turn-error" role="alert">
               <CircleAlert :size="15" />
               <span>{{ turn.error }}</span>
-              <button
-                v-if="isResumable(turn.id)"
-                class="secondary-button"
-                type="button"
-                @click="$emit('resume-turn', turn.id)"
-              >
-                <Play :size="13" /> {{ t('session.resumeInterruptedTurn') }}
-              </button>
             </div>
           </article>
         </div>
@@ -371,7 +359,7 @@
 
         <section class="inspector-section session-prompt-control">
           <div class="inspector-title-row">
-            <h3>{{ view.session.origin === 'workflow_agent' ? t('prompt.agentSystemPrompt') : t('prompt.sessionSystemPrompt') }}</h3>
+            <h3>{{ t('prompt.agentSystemPrompt') }}</h3>
             <button
               class="icon-button"
               type="button"
@@ -475,7 +463,7 @@
                   <Play :size="12" fill="currentColor" />
                 </button>
               <button
-                v-if="workflowIsActive && workflowView.workflow.program.manifest.slug !== 'interactive-agent'"
+                v-if="workflowIsActive"
                 class="icon-button danger-hover"
                 type="button"
                 :title="t('session.cancelWorkflow')"
@@ -716,7 +704,6 @@ const emit = defineEmits<{
   'close-session': []
   send: [input: string]
   'cancel-turn': [turnId: string]
-  'resume-turn': [turnId: string]
   'open-workflow': []
   'inspect-workflow': [workflowId: string]
   'pause-workflow': [workflowId: string]
@@ -761,24 +748,14 @@ const composerHumanRequest = computed(() =>
       (!request.response_schema.type || request.response_schema.type === 'string'),
   ),
 )
-const interactiveWorkflow = computed(() => {
-  const memberships = new Set(props.view.workflow_memberships.map((membership) => membership.workflow_id))
-  return props.view.workflows.find(
-    (workflow) => memberships.has(workflow.id) && workflow.program.manifest.slug === 'interactive-agent',
-  )
-})
-const interactiveComposerLocked = computed(
-  () => Boolean(interactiveWorkflow.value && !workflowIsTerminal(interactiveWorkflow.value)) && !composerHumanRequest.value,
-)
 const composerDisabled = computed(
-  () => !props.workspaceAvailable || sessionIsArchived.value || Boolean(activeTurn.value && !composerHumanRequest.value) || interactiveComposerLocked.value,
+  () => !props.workspaceAvailable || sessionIsArchived.value || !composerHumanRequest.value,
 )
 const composerPlaceholder = computed(() => {
   if (!props.workspaceAvailable) return t('session.workspaceUnavailable')
   if (sessionIsArchived.value) return t('session.closed')
   if (composerHumanRequest.value) return composerHumanRequest.value.question
-  if (interactiveComposerLocked.value) return t('session.preparingNextTurn')
-  return activeTurn.value ? t('session.running') : t('session.message')
+  return activeTurn.value ? t('session.running') : t('session.preparingNextTurn')
 })
 const workflowIsActive = computed(() =>
   ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(
@@ -881,9 +858,6 @@ function noticesFor(turnId: string) {
 }
 function liveOutput(turnId: string): string {
   return liveAssistantOutput(props.events, turnId)
-}
-function isResumable(turnId: string): boolean {
-  return props.view.resumable_turn_ids.includes(turnId)
 }
 function noticeText(event: SessionEvent): string {
   if (event.type === 'context_trimmed') return t('session.contextCompacted', { count: String(event.removed_items ?? 0) })

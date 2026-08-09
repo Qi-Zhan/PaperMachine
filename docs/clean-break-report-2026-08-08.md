@@ -60,9 +60,9 @@ Responses-compatible provider，在以下磁盘边界暂停进程并由父进程
 | --- | --- |
 | rollout 已 fsync、SQLite projection 尚未提交 | 重启后 journal replay 与 projection sequence 收敛 |
 | terminal answer 已 checkpoint、Turn 尚未 terminal commit | 不重新 sample，直接提交原答案 |
+| Workflow model sample 在飞行中 | 恢复同一个 ActionAttempt 并重新 sample |
 | unknown-effect tool 仍为 `prepared` | 重启后跨 execution boundary 并且只执行一次 |
 | unknown-effect tool 已为 `executing` | 标记 `execution_unknown`，绝不自动重放 |
-| standalone model sample 在飞行中 | 原 Turn 变为 `interrupted`；仅显式 resume 创建一个新 Turn |
 
 ## 真实 DeepSeek 强制重启
 

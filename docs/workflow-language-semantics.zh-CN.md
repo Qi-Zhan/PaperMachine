@@ -79,18 +79,13 @@ context 传给哪个 Agent Action；`request_mode="none"` 的程序得到空的
 timer-backed run 不会创建新 Workflow，也不会改变它的 trigger。
 run 的输出就是 Python entrypoint 的返回值，runner 通过 `complete` effect 把它交给 Rust。
 
-Workflow 进入终态并不会终止、归档或把其 Agent Sessions 变成只读。只要没有
-Workflow Action 或 HumanRequest 占用下一个 Turn，用户就可以从普通输入框继续其中
-任意 Session。这会沿用该 Session 的历史、model、system prompt、skills、权限和
-cache 状态，创建普通的 `origin=user` Turn，但不会恢复或修改已经结束的 Workflow。
-如果要继续多 Agent 编排，应从 Project 或 Session 启动一个新的 Workflow。
+Workflow 进入终态并不会删除或归档其 Agent Sessions；它们仍是持久的 Project 历史。
+但每个新 Turn 都必须由 Workflow Action 创建。继续工作时应从 Project 或 Session
+启动新的 Workflow，不存在独立的 Session submit 路径。
 
-关闭 Session 是独立且显式的生命周期操作：它会取消仍在运行的
-`interactive-agent` 和独立 active Turn，把 Session 记为 `archived`，并从普通 Project
-列表隐藏，但不会删除 Turn 或 provenance。若 Session 仍由其他 active Workflow
-拥有，必须先完成或取消该 Workflow，才能关闭 Session。
-通用 Workflow cancel 接口不会取消 `interactive-agent`；Session close 是它唯一的正常
-生命周期终止操作。
+关闭 Session 是独立且显式的生命周期操作：它会取消所有仍拥有该 Session 的 active
+Workflow，把 Session 记为 `archived`，并从普通 UI 列表隐藏，但不会删除 Turn 或
+provenance。通用 Workflow cancel 对 `interactive-agent` 与其他 Workflow 具有相同语义。
 
 ## 4. Agent 语义
 

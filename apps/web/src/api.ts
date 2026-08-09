@@ -14,7 +14,6 @@ import type {
   Session,
   SessionEvent,
   SessionView,
-  Turn,
   WorkflowGenerationInput,
   WorkflowProgram,
   Workflow,
@@ -75,10 +74,7 @@ export const api = {
   ) => request<ProjectSkill>(`/projects/${projectId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
   getSession: (sessionId: string) => request<SessionView>(`/sessions/${sessionId}`),
   closeSession: (sessionId: string) => request<void>(`/sessions/${sessionId}`, { method: 'DELETE' }),
-  createTurn: (sessionId: string, input: string) =>
-    request<Turn>(`/sessions/${sessionId}/turns`, { method: 'POST', body: JSON.stringify({ input }) }),
   cancelTurn: (turnId: string) => request<void>(`/turns/${turnId}/cancel`, { method: 'POST' }),
-  resumeTurn: (turnId: string) => request<Turn>(`/turns/${turnId}/resume`, { method: 'POST' }),
   updateSessionSkills: (sessionId: string, enabledSkills: string[]) =>
     request<Session>(`/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
   updateSessionAccess: (sessionId: string, access: AccessPreset) =>

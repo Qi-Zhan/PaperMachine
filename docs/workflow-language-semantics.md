@@ -85,21 +85,16 @@ a new Workflow or change its trigger.
 The run's output is the value returned by the Python entrypoint and sent through
 the `complete` effect.
 
-A terminal Workflow does not terminate, archive, or make its Agent Sessions
-read-only. Once no Workflow Action or HumanRequest owns the next Turn, the user
-may continue any of those Sessions from the normal composer. That creates an
-ordinary `origin=user` Turn with the Session's existing history, model, system
-prompt, skills, access, and cache state; it does not resume or mutate the
-terminal Workflow. Continuing multi-Agent orchestration requires starting a new
-Workflow from the Project or Session.
+A terminal Workflow does not delete or archive its Agent Sessions. They remain
+durable Project history, but every new Turn must still be created by a Workflow
+Action. Continuing work therefore starts another Workflow from the Project or
+Session; there is no independent Session submit path.
 
-Closing a Session is a separate, explicit lifecycle operation. It cancels an
-active `interactive-agent`, cancels any standalone active Turn, records the
-Session as `archived`, and removes it from normal Project listings without
-deleting its Turns or provenance. A Session owned by another active Workflow
-must finish or cancel that Workflow before it can be closed.
-The generic Workflow-cancel endpoint does not cancel `interactive-agent`;
-Session close is its sole normal lifecycle control.
+Closing a Session is a separate, explicit lifecycle operation. It cancels every
+active Workflow that owns the Session, records the Session as `archived`, and
+removes it from normal UI listings without deleting its Turns or provenance.
+The generic Workflow-cancel endpoint works uniformly for every Workflow,
+including `interactive-agent`.
 
 ## 4. Agent semantics
 
@@ -208,7 +203,7 @@ context become an inspectable Workflow layer clearly marked as data. The
 ActionInvocation retains the source HumanRequest ID.
 
 Every Turn snapshots the exact ordered prompt layers: runtime, Project,
-Workflow, Agent/Session, Skills, and runtime control. The Workflow layer may
+Workflow, Agent, Skills, and runtime control. The Workflow layer may
 contain the run `instructions`, Action contract, and relevant directed
 relations. It never implicitly contains the run request or launch-context
 snapshot. Interruption/retry guidance belongs to the control layer. See
@@ -328,10 +323,8 @@ Every Action declares its complete local-tool request with
 static Workflow metadata and the requested names are stored on the durable
 ActionInvocation. Before creating its Turn, Rust rejects unknown names, filters
 Workspace tools against the materialized access ceiling, and admits Project
-tools only on this Workflow Action path. It then stores the final sorted
-definitions and SHA-256 as the Turn's ToolSetSnapshot. Standalone user Turns
-have no Action declaration and receive all Workspace tools allowed by their
-access; they never receive Project tools. Hosted web search remains a separate
+tools only through explicit Action declaration. It then stores the final sorted
+definitions and SHA-256 as the Turn's ToolSetSnapshot. Hosted web search remains a separate
 provider capability controlled by access and `search_context_size`.
 
 Sampling, dispatch, pause/resume, and recovery rebuild the same exact Registry
@@ -420,11 +413,8 @@ protocol error.
 
 All authoritative entities, effect outcomes, and ordered events are durable.
 Workflow source is snapshotted. Every non-terminal Workflow is scheduled for
-restart recovery. An unfinished standalone Session Turn is instead settled: a
-durable terminal candidate is committed, or the Turn becomes `interrupted`
-without another provider sample and waits for explicit user direction. Resume
-creates a new user Turn over the committed Session rollout; it never reopens the
-interrupted Turn. Workflow-owned Turns are not manually resumable.
+restart recovery, and its ActionAttempt is the sole owner and recovery path for
+an unfinished Turn. Turns are never manually resumed outside their Workflow.
 
 The Python program restarts at its entrypoint rather than serializing a Python
 instruction pointer. Each DSL operation has a deterministic logical effect path.

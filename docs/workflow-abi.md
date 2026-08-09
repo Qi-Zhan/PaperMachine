@@ -169,7 +169,7 @@ Agent classes may declare `system_prompt`; a constructor override takes
 precedence. A run's `instructions`, the Agent system prompt, and the Action
 contract are instruction layers. The concrete `request` and bound Action
 arguments are Turn data only when the Workflow passes them. Project, Workflow,
-Agent/Session, skill, and control layers are snapshotted on every Turn. See
+Agent, skill, and control layers are snapshotted on every Turn. See
 [prompt model](prompt-model.md).
 
 The Project and Session launchers share this run contract. They supply the
@@ -257,11 +257,8 @@ execution was only prepared or may have begun. Recovery replays only safe
 effects, reconciles where supported, and turns an uncertain unknown effect into
 an explicit model-visible `execution_unknown` result.
 
-Standalone Session Turns have a different owner. After process loss, a durable
-terminal candidate is committed; otherwise the old Turn becomes terminal
-`interrupted`. The user-facing Resume operation creates a new Turn over the
-committed Session rollout. It never redispatches the old Turn or exposes a
-Workflow-owned Turn to manual resume.
+Every Turn is owned by one ActionAttempt. It is recovered only by replaying the
+owning Workflow; no independent Session submit/resume path exists.
 
 When every live Python branch is waiting on replayable effects such as
 `ask_human`, `wait_timer`, or `wait_signal`, the runner reports a quiescent

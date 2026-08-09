@@ -87,8 +87,7 @@ roots 与权限 SHA-256。
 At the same boundary, the host ToolCatalog creates one exact ToolRegistry. For
 a Workflow Action, `@action(tools=[...])` supplies the candidates and access
 filters its Workspace tools; declared Project tools are admitted only on that
-path. A standalone user Turn receives all access-allowed Workspace tools and no
-Project tools. Sorted definitions and a SHA-256 are persisted in the Turn's
+path. Sorted definitions and a SHA-256 are persisted in the Turn's
 `ToolSetSnapshot`. Model exposure, dispatch, pause/resume, and recovery rebuild
 from that immutable snapshot; direct tools and process sandboxes still enforce
 the authorization context internally. Prompt text cannot change either
@@ -97,21 +96,17 @@ later Turns.
 
 在同一创建边界，host ToolCatalog 会生成一个精确 ToolRegistry。Workflow Action
 以 `@action(tools=[...])` 提供候选工具，再由 access 过滤其中的 Workspace 工具；
-Project 工具只允许通过这条路径进入。普通用户 Turn 获得 access 允许的全部 Workspace
-工具，但不获得 Project 工具。排序后的 definitions 与 SHA-256 固化在 Turn 的
+Project 工具只允许通过这条路径进入。排序后的 definitions 与 SHA-256 固化在 Turn 的
 `ToolSetSnapshot` 中。model exposure、dispatch、pause/resume 和 recovery 都从这份
 不可变快照重建；direct tool 与 process sandbox 仍在内部执行 authorization 检查。
 prompt 文本无法改变任一边界，后续 relocation、权限变化或 Action 调用只影响后续 Turn。
 
 ## Recovery and inspection
 
-The Session API exposes each Turn environment and ToolSetSnapshot, Tool Step effect disposition and
-execution state, canonical rollout sequence, SQLite projection sequence, and
-standalone interrupted Turns eligible for explicit Resume. Resume creates a new
-Turn over committed Session context. The old Turn remains `interrupted`; a
-Workflow-owned Turn is recovered only by its Workflow runtime.
+The Session API exposes each Turn environment and ToolSetSnapshot, Tool Step
+effect disposition and execution state, canonical rollout sequence, and SQLite
+projection sequence. Every Turn is recovered only through its owning Workflow.
 
-Session API 会暴露每个 Turn 的 environment 与 ToolSetSnapshot、Tool Step effect disposition 与
-execution state、canonical rollout 序号、SQLite projection 序号，以及可以显式
-Resume 的独立 interrupted Turn。Resume 基于已提交 Session context 创建新 Turn；
-旧 Turn 保持 `interrupted`，Workflow-owned Turn 只由其 Workflow runtime 恢复。
+Session API 会暴露每个 Turn 的 environment 与 ToolSetSnapshot、Tool Step effect
+disposition 与 execution state、canonical rollout 序号和 SQLite projection 序号。
+每个 Turn 只通过其所属 Workflow 恢复。

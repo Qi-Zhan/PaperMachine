@@ -100,9 +100,8 @@ attachment and revision, cwd, managed-state deny, filesystem scopes, tool
 capabilities, and network capabilities. Independently, the host ToolCatalog
 constructs one exact ToolRegistry. A Workflow Action starts from its static
 `@action(tools=[...])` declaration and filters Workspace tools through that
-materialized access policy; a standalone user Turn starts from every Workspace
-tool allowed by the policy. Project tools are available only on the Workflow
-Action path. The Turn atomically persists the sorted tool definitions and their
+materialized access policy. Project tools also require explicit Action
+declaration. The Turn atomically persists the sorted tool definitions and their
 SHA-256 beside the authorization snapshot.
 
 Model exposure, dispatch, pause/resume, and crash recovery all rebuild from
@@ -192,10 +191,9 @@ not silently rewrite the endpoint.
   tools must inspect external state first. An arbitrary command is `unknown`,
   because PaperMachine cannot prove whether its external effect happened before
   the process disappeared, and is therefore surfaced without automatic replay.
-- A standalone interrupted Turn is terminal. The explicit Resume API creates a
-  new Turn in the same Session and consumes the already committed context; it
-  cannot reopen the old Turn. Workflow-owned Turns are recovered only by their
-  Workflow runtime.
+- Every Turn is owned by one ActionAttempt and is recovered only by its
+  Workflow runtime. There is no separate Session submit or manual Turn-resume
+  capability.
 - An Action continues until the model returns a terminal answer, the user
   finishes/interrupts/cancels it, or an infrastructure/provider error occurs.
   Provider request and stream-idle timeouts protect broken connections, and

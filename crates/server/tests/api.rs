@@ -11,6 +11,7 @@ use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
+use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_server::ServerConfig;
@@ -450,6 +451,67 @@ async fn start_interactive_session(
     panic!("interactive Workflow did not create its Session")
 }
 
+async fn send_interactive_message(app: &Router, session_id: SessionId, message: &str) -> Value {
+    let initial = app
+        .clone()
+        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .await
+        .expect("Session view should load before answering");
+    let initial = response_json(initial).await;
+    let prior_turns = initial["turns"].as_array().map_or(0, Vec::len);
+
+    let request_id = loop {
+        let response = app
+            .clone()
+            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .await
+            .expect("Session view should load while waiting for human input");
+        let view = response_json(response).await;
+        if let Some(request_id) = view["human_requests"]
+            .as_array()
+            .and_then(|requests| {
+                requests.iter().find(|request| {
+                    request["status"] == "open" && request["session_id"] == session_id.to_string()
+                })
+            })
+            .and_then(|request| request["id"].as_str())
+        {
+            break request_id.to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let answered = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/human-requests/{request_id}/answer"),
+            json!({"answer": message}),
+        ))
+        .await
+        .expect("human answer should complete");
+    assert_eq!(answered.status(), StatusCode::OK);
+
+    for _ in 0..400 {
+        let response = app
+            .clone()
+            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .await
+            .expect("Session view should load while waiting for the Turn");
+        let view = response_json(response).await;
+        if let Some(turn) = view["turns"]
+            .as_array()
+            .filter(|turns| turns.len() > prior_turns)
+            .and_then(|turns| turns.last())
+            && turn["status"] == "completed"
+        {
+            return turn.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("interactive message did not produce a completed Turn")
+}
+
 #[tokio::test]
 async fn workflow_request_mode_matches_the_program_contract() {
     let directory = tempdir().expect("temporary directory should be created");
@@ -561,17 +623,7 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         "Answer in a compact evidence table."
     );
 
-    let turn = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/sessions/{}/turns", session.id),
-            json!({"input": "Compare the sources."}),
-        ))
-        .await
-        .expect("Turn request should complete");
-    assert_eq!(turn.status(), StatusCode::CREATED);
-    let turn = response_json(turn).await;
+    let turn = send_interactive_message(&app, session.id, "Compare the sources.").await;
     assert_eq!(turn["origin"], "user");
     let kinds = turn["prompt"]["layers"]
         .as_array()
@@ -579,7 +631,7 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         .iter()
         .map(|layer| layer["kind"].as_str().expect("kind should be a string"))
         .collect::<Vec<_>>();
-    assert_eq!(kinds, vec!["runtime", "project", "agent"]);
+    assert_eq!(kinds, vec!["runtime", "project", "workflow", "agent"]);
 
     let overview = app
         .oneshot(empty_request(
@@ -750,7 +802,7 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         ))
         .await
         .expect("interactive Workflow cancellation should be validated");
-    assert_eq!(direct_cancel.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(direct_cancel.status(), StatusCode::ACCEPTED);
 
     let close = app
         .clone()
@@ -796,16 +848,6 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
             .as_array()
             .is_some_and(|requests| requests.iter().all(|request| request["status"] != "open"))
     );
-
-    let rejected_turn = app
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/sessions/{}/turns", session.id),
-            json!({"input": "This Session is closed."}),
-        ))
-        .await
-        .expect("closed Session Turn should be rejected");
-    assert_eq!(rejected_turn.status(), StatusCode::CONFLICT);
 }
 
 #[cfg(target_os = "macos")]
@@ -826,16 +868,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Parallel project").await;
-    let turn = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/sessions/{}/turns", origin.id),
-            json!({"input": "Frame the comparison."}),
-        ))
-        .await
-        .expect("Turn request should complete");
-    assert_eq!(turn.status(), StatusCode::CREATED);
+    send_interactive_message(&app, origin.id, "Frame the comparison.").await;
 
     let response = app
         .clone()
@@ -936,7 +969,6 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
         .await
         .expect("participant Session should load");
     let participant_view = response_json(participant_view).await;
-    assert_eq!(participant_view["session"]["origin"], "workflow_agent");
     assert_eq!(participant_view["turns"].as_array().map(Vec::len), Some(1));
     assert_eq!(participant_view["turns"][0]["origin"], "workflow");
     let layers = participant_view["turns"][0]["prompt"]["layers"]
@@ -1199,16 +1231,12 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
     let app = test_app(&directory).await;
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Configured launch").await;
-    let turn = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/sessions/{}/turns", origin.id),
-            json!({"input": "Reuse this prior evidence instead of restarting."}),
-        ))
-        .await
-        .expect("origin Turn request should complete");
-    assert_eq!(turn.status(), StatusCode::CREATED);
+    send_interactive_message(
+        &app,
+        origin.id,
+        "Reuse this prior evidence instead of restarting.",
+    )
+    .await;
 
     let unknown_agent = app
         .clone()

@@ -9,7 +9,6 @@ pub enum PromptLayerKind {
     Project,
     Workflow,
     Agent,
-    Session,
     Skills,
     Control,
 }
@@ -21,7 +20,6 @@ impl PromptLayerKind {
             Self::Project => "project",
             Self::Workflow => "workflow",
             Self::Agent => "agent",
-            Self::Session => "session",
             Self::Skills => "skills",
             Self::Control => "control",
         }

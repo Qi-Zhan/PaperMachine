@@ -9,7 +9,6 @@ use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::PromptLayerKind;
-use papermachine_protocol::SessionStatus;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnOrigin;
@@ -19,6 +18,7 @@ use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
 use papermachine_protocol::WorkflowStatus;
+use papermachine_protocol::{ProjectId, Turn, Workflow, WorkflowParticipant};
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
 use papermachine_session::SessionRuntimeError;
@@ -67,6 +67,89 @@ fn response(text: &str) -> Vec<ModelEvent> {
     ]
 }
 
+fn workflow_agent(
+    store: &Store,
+    project_id: ProjectId,
+    system_prompt: &str,
+) -> (Workflow, WorkflowParticipant) {
+    let run = store
+        .create_workflow(NewWorkflow {
+            project_id,
+            started_from_session_id: None,
+            program: workflow_snapshot(),
+            request: "Exercise one persistent Agent Session".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: serde_json::json!({}),
+            default_model: "test-model".to_string(),
+            access: papermachine_protocol::AccessPreset::Research,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect("Workflow should be created");
+    store
+        .set_workflow_status(run.id, WorkflowStatus::Running, None)
+        .expect("Workflow should start");
+    let participant = store
+        .create_participant(
+            run.id,
+            "Agent",
+            "Agent",
+            "test",
+            system_prompt,
+            "test-model",
+            Vec::new(),
+            papermachine_protocol::AccessPreset::Research,
+        )
+        .expect("Agent should be created");
+    (run, participant)
+}
+
+async fn execute_action(
+    runtime: &SessionRuntime,
+    store: &Store,
+    run: &Workflow,
+    participant: &WorkflowParticipant,
+    input: &str,
+) -> Turn {
+    let invocation = store
+        .create_action_invocation(
+            run.id,
+            None,
+            participant.id,
+            "respond",
+            "Respond",
+            serde_json::json!({"message": input}),
+            Vec::new(),
+        )
+        .expect("Action should be created");
+    let attempt = store
+        .start_action_attempt(invocation.id)
+        .expect("Action attempt should start");
+    runtime
+        .execute_workflow_action(
+            participant.session_id,
+            TurnOrigin::Workflow,
+            input,
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+            true,
+            None,
+            None,
+            WorkflowTurnContext {
+                workflow_id: run.id,
+                action_invocation_id: invocation.id,
+                action_attempt_id: attempt.id,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("Action Turn should complete")
+}
+
 #[derive(Clone, Copy)]
 struct BlockingModelClient;
 
@@ -78,73 +161,6 @@ impl ModelClient for BlockingModelClient {
     ) -> Result<ModelStream, ModelError> {
         Ok(stream::pending().boxed())
     }
-}
-
-#[tokio::test]
-async fn cancelling_a_turn_closes_its_running_model_step() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
-    );
-    let research = store
-        .create_project("Cancellation", directory.path().join("project"))
-        .expect("research should be created");
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
-    skills
-        .ensure_project(research.id)
-        .expect("research directories should exist");
-    let session = store
-        .create_session(research.id, "Session", "", "test-model", Vec::new())
-        .expect("session should be created");
-    let runtime = SessionRuntime::new(
-        Arc::clone(&store),
-        Arc::new(BlockingModelClient),
-        ToolCatalog::default(),
-        skills,
-        SessionRuntimeConfig {
-            default_model: "test-model".to_string(),
-            model_context_window: 128_000,
-            max_concurrent_turns: 1,
-        },
-    );
-
-    let turn = runtime
-        .submit(session.id, "Wait indefinitely")
-        .await
-        .expect("turn should submit");
-    for _ in 0..100 {
-        if store
-            .list_steps(turn.id)
-            .expect("steps should load")
-            .iter()
-            .any(|step| step.status == StepStatus::Running)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    runtime.cancel(turn.id).await.expect("turn should cancel");
-    for _ in 0..100 {
-        if store.get_turn(turn.id).expect("turn should load").status == TurnStatus::Cancelled {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    assert_eq!(
-        store.get_turn(turn.id).expect("turn should load").status,
-        TurnStatus::Cancelled
-    );
-    assert_eq!(
-        store
-            .get_session(session.id)
-            .expect("session should load")
-            .status,
-        SessionStatus::Ready
-    );
-    let steps = store.list_steps(turn.id).expect("steps should load");
-    assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0].status, StepStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -297,9 +313,7 @@ async fn later_turns_reuse_the_completed_session_history() {
     skills
         .ensure_project(research.id)
         .expect("research directories should exist");
-    let session = store
-        .create_session(research.id, "Session", "", "test-model", Vec::new())
-        .expect("session should be created");
+    let (run, participant) = workflow_agent(&store, research.id, "");
     let model = ScriptedModelClient::new([
         response("First answer."),
         response("Second answer using context."),
@@ -316,20 +330,12 @@ async fn later_turns_reuse_the_completed_session_history() {
         },
     );
 
-    let first = runtime
-        .submit(session.id, "First question")
-        .await
-        .expect("first turn should submit");
-    wait_for_completion(&store, first.id).await;
-    let second = runtime
-        .submit(session.id, "Follow-up question")
-        .await
-        .expect("second turn should submit");
-    wait_for_completion(&store, second.id).await;
+    execute_action(&runtime, &store, &run, &participant, "First question").await;
+    execute_action(&runtime, &store, &run, &participant, "Follow-up question").await;
 
     let requests = model.requests().expect("requests should be captured");
     assert_eq!(requests.len(), 2);
-    let expected_transport_key = session.id.to_string();
+    let expected_transport_key = participant.session_id.to_string();
     let first_cache = requests[0]
         .prompt_cache
         .as_ref()
@@ -372,15 +378,7 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
     store
         .set_project_system_prompt(project.id, "Project prompt one.")
         .expect("Project prompt should update");
-    let session = store
-        .create_session(
-            project.id,
-            "Session",
-            "Session prompt one.",
-            "test-model",
-            Vec::new(),
-        )
-        .expect("Session should be created");
+    let (run, participant) = workflow_agent(&store, project.id, "Agent prompt one.");
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     let model = ScriptedModelClient::new([response("First."), response("Second.")]);
     let runtime = SessionRuntime::new(
@@ -395,13 +393,8 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
         },
     );
 
-    let first = runtime
-        .submit(session.id, "First question")
-        .await
-        .expect("first Turn should submit");
-    wait_for_completion(&store, first.id).await;
-    let first = store.get_turn(first.id).expect("first Turn should load");
-    assert_eq!(first.origin, TurnOrigin::User);
+    let first = execute_action(&runtime, &store, &run, &participant, "First question").await;
+    assert_eq!(first.origin, TurnOrigin::Workflow);
     assert_eq!(
         first
             .prompt
@@ -412,7 +405,7 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
         vec![
             PromptLayerKind::Runtime,
             PromptLayerKind::Project,
-            PromptLayerKind::Session,
+            PromptLayerKind::Agent,
         ]
     );
     assert!(
@@ -427,14 +420,9 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
         .set_project_system_prompt(project.id, "Project prompt two.")
         .expect("Project prompt should update");
     store
-        .set_session_system_prompt(session.id, "Session prompt two.")
-        .expect("Session prompt should update");
-    let second = runtime
-        .submit(session.id, "Second question")
-        .await
-        .expect("second Turn should submit");
-    wait_for_completion(&store, second.id).await;
-    let second = store.get_turn(second.id).expect("second Turn should load");
+        .set_session_system_prompt(participant.session_id, "Agent prompt two.")
+        .expect("Agent prompt should update");
+    let second = execute_action(&runtime, &store, &run, &participant, "Second question").await;
 
     assert_ne!(first.prompt.sha256, second.prompt.sha256);
     assert!(
@@ -449,7 +437,7 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
             .prompt
             .layers
             .iter()
-            .any(|layer| layer.content == "Session prompt two.")
+            .any(|layer| layer.content == "Agent prompt two.")
     );
     assert!(
         first
@@ -565,15 +553,4 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
         .expect("run should load after the model step");
     assert_eq!(updated.usage.tokens.input_tokens, 10);
     assert_eq!(updated.usage.tokens.output_tokens, 3);
-}
-
-async fn wait_for_completion(store: &Store, turn_id: papermachine_protocol::TurnId) {
-    for _ in 0..100 {
-        let turn = store.get_turn(turn_id).expect("turn should load");
-        if turn.status == TurnStatus::Completed {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("turn did not complete");
 }

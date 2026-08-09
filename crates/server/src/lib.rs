@@ -235,10 +235,6 @@ impl ProjectRuntimeFactory {
             executor,
             Arc::clone(&self.workflow_permits),
         );
-        sessions
-            .recover()
-            .await
-            .context("failed to recover unfinished standalone Session Turns")?;
         scheduler
             .recover()
             .await
@@ -369,7 +365,6 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/sessions/{session_id}",
             get(get_session_view).delete(close_session),
         )
-        .route("/sessions/{session_id}/turns", post(create_turn))
         .route("/sessions/{session_id}/skills", put(update_session_skills))
         .route(
             "/sessions/{session_id}/system-prompt",
@@ -386,7 +381,6 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             get(stream_session_events),
         )
         .route("/turns/{turn_id}/cancel", post(cancel_turn))
-        .route("/turns/{turn_id}/resume", post(resume_turn))
         .route(
             "/projects/{project_id}/workflow-programs",
             get(list_workflow_programs).post(save_workflow_program),
@@ -692,9 +686,7 @@ fn canonical_workspace_selection(
 }
 
 fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {
-    if !runtime.store.list_recoverable_workflows()?.is_empty()
-        || !runtime.store.list_resumable_standalone_turns()?.is_empty()
-    {
+    if !runtime.store.list_recoverable_workflows()?.is_empty() {
         return Err(StoreError::Invariant(
             "Project has active work; finish or cancel it before changing its Workspace attachment"
                 .to_string(),
@@ -827,7 +819,6 @@ struct SessionView {
     turns: Vec<Turn>,
     steps: Vec<AgentStep>,
     rollout: SessionRolloutStatus,
-    resumable_turn_ids: Vec<TurnId>,
     workflows: Vec<Workflow>,
     workflow_memberships: Vec<WorkflowParticipant>,
     human_requests: Vec<HumanRequest>,
@@ -848,19 +839,6 @@ async fn get_session_view(
     for turn in &turns {
         steps.extend(runtime.store.list_steps(turn.id)?);
     }
-    let resumable_turn_ids = turns
-        .iter()
-        .filter(|turn| turn.status == TurnStatus::Interrupted)
-        .filter_map(|turn| match runtime.store.is_workflow_turn(turn.id) {
-            Ok(false) => match runtime.store.is_turn_resumed(turn.id) {
-                Ok(false) => Some(Ok(turn.id)),
-                Ok(true) => None,
-                Err(error) => Some(Err(error)),
-            },
-            Ok(true) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, StoreError>>()?;
     let rollout = runtime.store.session_rollout_status(session_id)?;
     let workflows = runtime.store.list_session_workflows(session_id)?;
     let mut memberships = Vec::new();
@@ -886,7 +864,6 @@ async fn get_session_view(
         turns,
         steps,
         rollout,
-        resumable_turn_ids,
         workflows,
         workflow_memberships: memberships,
         human_requests: requests,
@@ -907,7 +884,7 @@ async fn close_session(
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    let mut interactive_workflows = Vec::new();
+    let mut owning_workflows = Vec::new();
     for workflow in runtime.store.list_session_workflows(session_id)? {
         let owns_session = runtime
             .store
@@ -917,16 +894,10 @@ async fn close_session(
         if !owns_session || workflow.status.is_terminal() {
             continue;
         }
-        if workflow.program.manifest.slug != "interactive-agent" {
-            return Err(ApiError::bad_request(format!(
-                "Session is still owned by active Workflow {:?}; finish or cancel it first",
-                workflow.program.manifest.name
-            )));
-        }
-        interactive_workflows.push(workflow.id);
+        owning_workflows.push(workflow.id);
     }
 
-    for workflow_id in interactive_workflows {
+    for workflow_id in owning_workflows {
         match runtime.scheduler.cancel(workflow_id).await {
             Ok(()) | Err(WorkflowSchedulerError::TerminalWorkflow { .. }) => {}
             Err(error) => return Err(error.into()),
@@ -947,33 +918,6 @@ async fn close_session(
         Some("closed by user".to_string()),
     )?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateTurnRequest {
-    input: String,
-}
-
-async fn create_turn(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-    Json(request): Json<CreateTurnRequest>,
-) -> ApiResult<(StatusCode, Json<Turn>)> {
-    if request.input.trim().is_empty() {
-        return Err(ApiError::bad_request("Turn input must not be empty"));
-    }
-    let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &session_id.to_string(), |store| {
-            store.get_session(session_id)
-        })
-        .await?;
-    let turn = runtime
-        .sessions
-        .submit(session_id, request.input.trim())
-        .await?;
-    Ok((StatusCode::CREATED, Json(turn)))
 }
 
 #[derive(Deserialize)]
@@ -1054,30 +998,6 @@ async fn cancel_turn(
         .await?;
     runtime.sessions.cancel(turn_id).await?;
     Ok(StatusCode::ACCEPTED)
-}
-
-async fn resume_turn(
-    State(state): State<AppState>,
-    Path(turn_id): Path<String>,
-) -> ApiResult<(StatusCode, Json<Turn>)> {
-    let turn_id: TurnId = parse_id(&turn_id, "Turn")?;
-    let (runtime, interrupted) = state
-        .locate("turn", &turn_id.to_string(), |store| {
-            store.get_turn(turn_id)
-        })
-        .await?;
-    if interrupted.status != TurnStatus::Interrupted {
-        return Err(ApiError::bad_request(format!(
-            "Turn {turn_id} is not interrupted"
-        )));
-    }
-    if runtime.store.is_workflow_turn(turn_id)? {
-        return Err(ApiError::bad_request(
-            "Workflow-owned Turns are recovered by their Workflow runtime",
-        ));
-    }
-    let turn = runtime.sessions.resume_interrupted(turn_id).await?;
-    Ok((StatusCode::CREATED, Json(turn)))
 }
 
 async fn list_workflow_programs(
@@ -1492,16 +1412,11 @@ async fn cancel_workflow(
     Path(workflow_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, workflow) = state
+    let (runtime, _) = state
         .locate("workflow", &workflow_id.to_string(), |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
-    if workflow.program.manifest.slug == "interactive-agent" {
-        return Err(ApiError::bad_request(
-            "Close the Session to stop its interactive Workflow",
-        ));
-    }
     runtime.scheduler.cancel(workflow_id).await?;
     Ok(StatusCode::ACCEPTED)
 }

@@ -47,9 +47,8 @@ TurnEnvironmentSnapshot
 Local-tool selection is a separate host-owned surface. At Turn creation a
 trusted ToolCatalog constructs an exact immutable ToolRegistry. Workflow
 Actions supply a static `tools=[...]` candidate list; access filters Workspace
-tools, while Project tools can enter only through this Action path. Standalone
-user Turns receive every Workspace tool allowed by access and no Project tools.
-The Turn stores the sorted definitions and SHA-256 as a ToolSetSnapshot.
+tools, while Project tools also require explicit Action declaration. The Turn
+stores the sorted definitions and SHA-256 as a ToolSetSnapshot.
 
 Every enforcement boundary consumes one or both immutable snapshots:
 
@@ -153,11 +152,8 @@ Tools declare an effect disposition:
 - `reconcilable`: inspect durable external state before deciding; or
 - `unknown`: never replay automatically after an execution-unknown crash.
 
-Workflow-owned Turns resume automatically because the Workflow is the durable
-control-flow owner. This includes the ordinary built-in `goal` Workflow.
-Standalone user Turns interrupted by process loss become explicitly
-`interrupted` and wait for a user resume decision. Resume creates a new Turn
-over committed Session context; it never reopens the interrupted Turn. An
+Turns resume automatically because their Workflow is the durable control-flow
+owner. This includes the ordinary built-in `goal` Workflow. An
 execution-unknown command is surfaced to the model and user; it is never
 silently treated as either failed or completed.
 
@@ -170,9 +166,9 @@ data. The matrix verifies:
 | --- | --- |
 | rollout appended, SQLite projection pending | replay reaches the exact rollout sequence |
 | terminal model answer checkpointed, Turn commit pending | commit the answer without another sample |
+| Workflow model sample in flight | resume the same ActionAttempt and sample again |
 | unknown-effect tool prepared, execution not started | execute exactly once |
 | unknown-effect tool marked executing | surface `execution_unknown`, never replay |
-| standalone model sample in flight | interrupt without resampling; require one explicit new resume Turn |
 
 The fault controls are absent from release CLI parsing, and their boundary
 calls compile to no-ops in release builds. Native Windows is intentionally not

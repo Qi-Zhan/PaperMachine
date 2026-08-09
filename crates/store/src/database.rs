@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -261,7 +261,6 @@ impl Store {
         self.insert_session(Session {
             id: SessionId::new(),
             project_id,
-            origin: SessionOrigin::User,
             title: title.into(),
             system_prompt,
             model: model.into(),
@@ -277,12 +276,11 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions (id, project_id, origin, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.id.to_string(),
                 session.project_id.to_string(),
-                enum_string(session.origin)?,
                 enum_string(session.status)?,
                 session.updated_at.to_rfc3339(),
                 serde_json::to_string(&session)?,
@@ -472,43 +470,8 @@ impl Store {
     ) -> Result<Turn, StoreError> {
         self.create_turn_inner(
             None,
-            None,
             session_id,
             origin,
-            input,
-            model,
-            prompt,
-            reasoning_effort,
-            tools_enabled,
-            expected_access,
-            tool_set,
-            web_search_context_size,
-            response_format,
-            skill_snapshots,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_resumed_turn(
-        &self,
-        resumed_from_turn_id: TurnId,
-        session_id: SessionId,
-        input: impl Into<String>,
-        model: impl Into<String>,
-        prompt: PromptSnapshot,
-        reasoning_effort: Option<ReasoningEffort>,
-        tools_enabled: bool,
-        expected_access: AccessPreset,
-        tool_set: papermachine_protocol::ToolSetSnapshot,
-        web_search_context_size: Option<WebSearchContextSize>,
-        response_format: Option<ModelResponseFormat>,
-        skill_snapshots: Vec<SkillSnapshot>,
-    ) -> Result<Turn, StoreError> {
-        self.create_turn_inner(
-            None,
-            Some(resumed_from_turn_id),
-            session_id,
-            TurnOrigin::User,
             input,
             model,
             prompt,
@@ -541,7 +504,6 @@ impl Store {
     ) -> Result<Turn, StoreError> {
         self.create_turn_inner(
             Some(attempt_id),
-            None,
             session_id,
             origin,
             input,
@@ -561,7 +523,6 @@ impl Store {
     fn create_turn_inner(
         &self,
         attempt_id: Option<ActionAttemptId>,
-        resumed_from_turn_id: Option<TurnId>,
         session_id: SessionId,
         origin: TurnOrigin,
         input: impl Into<String>,
@@ -594,28 +555,6 @@ impl Store {
         let mut attempt = attempt_id
             .map(|id| self.get_action_attempt(id))
             .transpose()?;
-        if attempt_id.is_some() && resumed_from_turn_id.is_some() {
-            return Err(StoreError::Invariant(
-                "A Workflow Action Turn cannot resume a standalone Turn".to_string(),
-            ));
-        }
-        if let Some(interrupted_id) = resumed_from_turn_id {
-            let interrupted = self.get_turn(interrupted_id)?;
-            if interrupted.session_id != session_id
-                || interrupted.status != TurnStatus::Interrupted
-                || self.is_workflow_turn(interrupted_id)?
-            {
-                return Err(StoreError::Invariant(
-                    "Resume source must be an interrupted standalone Turn in the same Session"
-                        .to_string(),
-                ));
-            }
-            if self.is_turn_resumed(interrupted_id)? {
-                return Err(StoreError::Invariant(format!(
-                    "Interrupted Turn {interrupted_id} was already resumed"
-                )));
-            }
-        }
         if let Some(attempt) = attempt.as_ref() {
             let invocation = self.get_action_invocation(attempt.invocation_id)?;
             let valid_origin = match (origin, invocation.source_human_request_id) {
@@ -664,7 +603,6 @@ impl Store {
             session_id,
             status: TurnStatus::Queued,
             origin,
-            resumed_from_turn_id,
             input,
             output: None,
             model: model.into(),
@@ -718,47 +656,6 @@ impl Store {
             "SELECT document_json FROM turns WHERE session_id = ?1 ORDER BY created_at ASC, id ASC",
             [session_id.to_string()],
         )
-    }
-
-    pub fn list_resumable_standalone_turns(&self) -> Result<Vec<Turn>, StoreError> {
-        self.query_documents(
-            "SELECT t.document_json FROM turns t
-             WHERE t.status IN ('queued', 'running')
-             AND NOT EXISTS (
-               SELECT 1 FROM action_attempts a
-               WHERE json_extract(a.document_json, '$.turn_id') = t.id
-             )
-             ORDER BY t.updated_at ASC, t.id ASC",
-            [],
-        )
-    }
-
-    pub fn is_workflow_turn(&self, turn_id: TurnId) -> Result<bool, StoreError> {
-        self.get_turn(turn_id)?;
-        self.connection()?
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM action_attempts
-                   WHERE json_extract(document_json, '$.turn_id') = ?1
-                 )",
-                [turn_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
-
-    pub fn is_turn_resumed(&self, turn_id: TurnId) -> Result<bool, StoreError> {
-        self.get_turn(turn_id)?;
-        self.connection()?
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM turns
-                   WHERE json_extract(document_json, '$.resumed_from_turn_id') = ?1
-                 )",
-                [turn_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
     }
 
     pub fn start_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
@@ -1660,7 +1557,6 @@ impl Store {
         let session = Session {
             id: session_id,
             project_id: run.project_id,
-            origin: SessionOrigin::WorkflowAgent,
             title: name.clone(),
             system_prompt,
             model,
@@ -1693,12 +1589,11 @@ impl Store {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions (id, project_id, origin, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.id.to_string(),
                 session.project_id.to_string(),
-                enum_string(session.origin)?,
                 enum_string(session.status)?,
                 now.to_rfc3339(),
                 serde_json::to_string(&session)?,
@@ -3757,7 +3652,7 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS sessions (
            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-           origin TEXT NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
+           status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS sessions_project_updated ON sessions(project_id, updated_at DESC);
          CREATE TABLE IF NOT EXISTS turns (
