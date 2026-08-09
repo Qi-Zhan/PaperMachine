@@ -219,6 +219,53 @@ async fn agent_executes_a_tool_then_follows_up() {
 }
 
 #[tokio::test]
+async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_execution() {
+    let duplicate_call = || ModelEvent::ResponseItemCompleted {
+        item: serde_json::json!({
+            "type": "function_call",
+            "call_id": "duplicate-call",
+            "name": "write_file",
+            "arguments": r#"{"path":"must-not-exist.txt","content":"unsafe"}"#
+        }),
+    };
+    let model = ScriptedModelClient::new([vec![
+        duplicate_call(),
+        duplicate_call(),
+        ModelEvent::Completed {
+            usage: TokenUsage::default(),
+        },
+    ]]);
+    let events = RecordingAgentEventSink::default();
+    let runtime = AgentRuntime::new(
+        Arc::new(model),
+        read_write_tools(),
+        Arc::new(events.clone()),
+    );
+    let directory = tempdir().expect("temporary workspace should be created");
+    let request = AgentTurnRequest::new(
+        ProjectId::new(),
+        SessionId::new(),
+        TurnId::new(),
+        turn_environment(directory.path(), AccessPreset::Research),
+        directory.path().join("sandbox"),
+        "test-model",
+        "Use tools safely.",
+        "Write one file.",
+    );
+
+    let error = runtime
+        .run(request, CancellationToken::new())
+        .await
+        .expect_err("duplicate tool-call IDs must fail closed");
+    assert!(error.to_string().contains("duplicate call ID"));
+    assert!(!directory.path().join("must-not-exist.txt").exists());
+    assert!(!events.events().await.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolExecutionStarted { .. }
+    )));
+}
+
+#[tokio::test]
 async fn hosted_search_usage_is_observed_across_a_turn() {
     let model = ScriptedModelClient::new([
         vec![

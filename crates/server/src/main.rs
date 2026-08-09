@@ -1,10 +1,18 @@
 use anyhow::Context;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::http::header::HOST;
+use axum::http::uri::Authority;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::response::Response;
 use clap::Parser;
 use papermachine_model::ConfiguredModels;
 use papermachine_server::ServerConfig;
 use papermachine_server::ServerModelConfig;
 use papermachine_server::paths::default_data_dir;
 use papermachine_server::paths::default_workspace_root;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,8 +33,6 @@ struct Args {
     /// Durable PaperMachine application data. Uses the platform user-data directory by default.
     #[arg(long, env = "PAPERMACHINE_DATA_DIR")]
     data_dir: Option<PathBuf>,
-    #[arg(long, env = "PAPERMACHINE_HOST", default_value = "127.0.0.1")]
-    host: String,
     #[arg(long, env = "PAPERMACHINE_PORT", default_value_t = 4310)]
     port: u16,
     /// PaperMachine-owned provider and model-profile configuration. Defaults
@@ -116,10 +122,9 @@ async fn run_server() -> anyhow::Result<()> {
     };
     let state = papermachine_server::initialize(&config).await?;
     let mode = state.mode();
-    let app = papermachine_server::router(state, resource_root.join("apps/web/dist"));
-    let address = format!("{}:{}", args.host, args.port)
-        .parse::<SocketAddr>()
-        .context("invalid server address")?;
+    let app = papermachine_server::router(state, resource_root.join("apps/web/dist"))
+        .layer(axum::middleware::from_fn(require_loopback_host));
+    let address = SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("failed to bind PaperMachine server")?;
@@ -150,6 +155,50 @@ async fn run_server() -> anyhow::Result<()> {
     }
 }
 
+async fn require_loopback_host(request: Request, next: Next) -> Response {
+    let allowed = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_authority);
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            "PaperMachine accepts only loopback Host headers",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn is_loopback_authority(value: &str) -> bool {
+    value.parse::<Authority>().is_ok_and(|authority| {
+        let host = authority.host();
+        let address = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        host.eq_ignore_ascii_case("localhost")
+            || address
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_authority;
+
+    #[test]
+    fn local_host_boundary_accepts_only_loopback_authorities() {
+        assert!(is_loopback_authority("127.0.0.1:4310"));
+        assert!(is_loopback_authority("localhost:4310"));
+        assert!(is_loopback_authority("[::1]:4310"));
+        assert!(!is_loopback_authority("example.com:4310"));
+        assert!(!is_loopback_authority("0.0.0.0:4310"));
+    }
 }

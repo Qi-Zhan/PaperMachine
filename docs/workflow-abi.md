@@ -252,7 +252,9 @@ restart, the snapshotted Python program starts at its entrypoint: completed
 effects replay their stored results, while a journal entry left `started` is
 redispatched to deterministic domain-resource IDs. Unfinished Agent actions
 resume the same checkpointed Turn rather than sampling their first model step
-again. Local Tool Steps additionally persist a stable call/effect ID, an effect
+again. The source SHA-256 and snapshotted Python DSL ABI SHA-256 are verified
+before this replay begins; drift fails closed. Local Tool Steps additionally
+persist a stable call/effect ID, an effect
 disposition (`pure`, `idempotent`, `reconcilable`, or `unknown`), and whether
 execution was only prepared or may have begun. Recovery replays only safe
 effects, reconciles where supported, and turns an uncertain unknown effect into

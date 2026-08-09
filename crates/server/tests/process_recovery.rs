@@ -405,8 +405,6 @@ context_window = 128000
             .arg(&self.data_dir)
             .arg("--config")
             .arg(&self.config_path)
-            .arg("--host")
-            .arg("127.0.0.1")
             .arg("--port")
             .arg(self.server_port.to_string())
             .arg("--max-concurrent-runs")

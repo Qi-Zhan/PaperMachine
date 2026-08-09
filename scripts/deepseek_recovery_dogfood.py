@@ -206,8 +206,6 @@ class Server:
             str(self.data_dir),
             "--config",
             str(self.config),
-            "--host",
-            "127.0.0.1",
             "--port",
             str(self.port),
             "--max-concurrent-runs",

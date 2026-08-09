@@ -5,6 +5,7 @@ use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowEventPayload;
@@ -90,4 +91,22 @@ fn turn_created_event_preserves_message_origin() {
     let value = serde_json::to_value(event).expect("event should serialize");
     assert_eq!(value["type"], "turn_created");
     assert_eq!(value["origin"], "workflow");
+}
+
+#[test]
+fn tool_definition_wire_shape_uses_input_schema() {
+    let definition = ToolDefinition {
+        name: "read_file".to_string(),
+        description: "Read one file".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        supports_parallel: true,
+    };
+    let value = serde_json::to_value(&definition).expect("ToolDefinition should serialize");
+
+    assert_eq!(value["input_schema"]["type"], "object");
+    assert!(value.get("parameters").is_none());
+    assert_eq!(
+        serde_json::from_value::<ToolDefinition>(value).expect("ToolDefinition should deserialize"),
+        definition
+    );
 }

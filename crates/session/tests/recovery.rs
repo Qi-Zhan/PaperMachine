@@ -417,6 +417,7 @@ fn workflow_snapshot() -> WorkflowProgramSnapshot {
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/recovery-test/workflow.py".to_string(),
         sha256: "recovery-test".to_string(),
+        runtime_sha256: "test-runtime".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }

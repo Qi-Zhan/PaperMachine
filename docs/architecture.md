@@ -25,8 +25,9 @@
 8. **Python owns control flow; Rust owns effects.** Workflow code may decide what
    to do next, but only Rust creates Sessions, calls models/tools, persists
    state, applies controls, permissions, and sandbox boundaries.
-9. **A run snapshots its program.** Source, manifest, path, source owner, and
-   SHA-256 are copied into the Workflow. Later files cannot change history.
+9. **A run snapshots its program and DSL ABI.** Source, manifest, path, source
+   owner, source SHA-256, and Python runtime SHA-256 are copied into the
+   Workflow. Execution and recovery fail if either hash differs.
 10. **The execution environment is a Turn snapshot.** A Session chooses one of
     five access presets. Turn creation materializes that preset with the
     Workspace attachment, cwd, managed roots, tool capabilities, and network
@@ -218,7 +219,9 @@ PaperMachine server ------------+
                  in-memory catalog + per-Project Store/artifacts
 ```
 
-The Python runner loads the snapshotted `workflow.py`, executes its async
+Before materialization, Rust verifies the source hash and the hash of every
+Python DSL source file against the durable Run snapshot. The Python runner then
+loads that exact `workflow.py`, executes its async
 entrypoint, and sends JSONL effect requests over stdin/stdout. Requests may be
 handled concurrently, while per-Agent gates serialize actions in the same
 Session. Python stdout is reserved for the protocol; ordinary prints are sent
@@ -245,8 +248,9 @@ A Workflow Action Turn follows one core path:
    their SQLite projections. Each Session
    retains one sequential WebSocket continuation chain; unsupported providers
    fall back to HTTP SSE.
-6. Execute requested tools, append stable call/result and Step lifecycle facts,
-   project them, and sample again.
+6. Validate that every provider tool-call ID is bounded and unique across the
+   Turn. Only then execute requested tools, append stable call/result and Step
+   lifecycle facts, project them, and sample again.
 7. Finish the Turn by journaling its output, usage, and terminal state. SQLite
    never stores a cumulative context copy in the Turn document. If a
    provider reports an incomplete response after consuming tokens, retry usage

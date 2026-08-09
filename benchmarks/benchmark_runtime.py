@@ -58,8 +58,6 @@ def server_command(
         str(server_data_dir(run_dir)),
         "--config",
         str(config_path.resolve()),
-        "--host",
-        "127.0.0.1",
         "--port",
         str(port),
     ]

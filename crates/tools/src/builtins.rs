@@ -2,7 +2,9 @@ use crate::ToolContext;
 use crate::ToolError;
 use crate::ToolExecutor;
 use crate::ToolOutput;
+use crate::path::read_resolved_file;
 use crate::path::resolve_tool_path;
+use crate::path::write_resolved_file;
 use async_trait::async_trait;
 use papermachine_execution::ExecutionError;
 use papermachine_execution::SandboxExecutor;
@@ -75,19 +77,29 @@ impl ToolExecutor for ReadFileTool {
             .clamp(1, MAX_FILE_BYTES);
         let path =
             resolve_tool_path(&context.authorization, &args.path, PathOperation::Read).await?;
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|error| ToolError::Io(error.to_string()))?;
-        let truncated = bytes.len() > max_bytes;
-        let visible = &bytes[..bytes.len().min(max_bytes)];
-        let content = String::from_utf8(visible.to_vec()).map_err(|error| {
-            ToolError::Execution(format!("{} is not valid UTF-8: {error}", args.path))
-        })?;
+        let (visible, total_bytes, truncated) =
+            tokio::task::spawn_blocking(move || read_resolved_file(&path, max_bytes))
+                .await
+                .map_err(|error| ToolError::Execution(error.to_string()))??;
+        let content = match std::str::from_utf8(&visible) {
+            Ok(content) => content.to_string(),
+            Err(error) if truncated && error.error_len().is_none() => {
+                std::str::from_utf8(&visible[..error.valid_up_to()])
+                    .map_err(|error| ToolError::Execution(error.to_string()))?
+                    .to_string()
+            }
+            Err(error) => {
+                return Err(ToolError::Execution(format!(
+                    "{} is not valid UTF-8: {error}",
+                    args.path
+                )));
+            }
+        };
         Ok(ToolOutput {
             value: json!({
                 "path": args.path,
                 "content": content,
-                "bytes": bytes.len(),
+                "bytes": total_bytes,
                 "truncated": truncated,
             }),
             summary: format!("read {} bytes from {}", visible.len(), args.path),
@@ -157,22 +169,18 @@ impl ToolExecutor for WriteFileTool {
         }
         let path =
             resolve_tool_path(&context.authorization, &args.path, PathOperation::Write).await?;
-        if args.create_parents
-            && let Some(parent) = path.parent()
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| ToolError::Io(error.to_string()))?;
-        }
-        tokio::fs::write(&path, args.content.as_bytes())
+        let bytes_written = args.content.len();
+        let content = args.content.into_bytes();
+        let create_parents = args.create_parents;
+        tokio::task::spawn_blocking(move || write_resolved_file(&path, &content, create_parents))
             .await
-            .map_err(|error| ToolError::Io(error.to_string()))?;
+            .map_err(|error| ToolError::Execution(error.to_string()))??;
         Ok(ToolOutput {
             value: json!({
                 "path": args.path,
-                "bytes_written": args.content.len(),
+                "bytes_written": bytes_written,
             }),
-            summary: format!("wrote {} bytes to {}", args.content.len(), args.path),
+            summary: format!("wrote {bytes_written} bytes to {}", args.path),
         })
     }
 }

@@ -435,6 +435,7 @@ mod tests {
             source: WorkflowProgramSource::Builtin,
             definition_path: "builtin/context-test/workflow.py".to_string(),
             sha256: "context-test".to_string(),
+            runtime_sha256: "test-runtime".to_string(),
             source_code: "async def main(ctx): return {}\n".to_string(),
         }
     }

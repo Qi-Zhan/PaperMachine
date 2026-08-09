@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 futures.workspace = true
 html2text.workspace = true
 papermachine-execution = { path = "../execution" }

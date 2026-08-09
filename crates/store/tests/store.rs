@@ -363,6 +363,7 @@ fn workflow() -> WorkflowProgramSnapshot {
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/parallel-review/workflow.py".to_string(),
         sha256: "test-source".to_string(),
+        runtime_sha256: "test-runtime".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }

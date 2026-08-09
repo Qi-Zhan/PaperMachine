@@ -12,9 +12,11 @@ use papermachine_store::{NewWorkflow, Store};
 use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
     PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
-    resolve_python_executable,
+    python_runtime_sha256, resolve_python_executable,
 };
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -175,9 +177,15 @@ fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: format!("builtin/{slug}/workflow.py"),
-        sha256: "durable-replay-test".to_string(),
+        sha256: hex::encode(Sha256::digest(source_code.as_bytes())),
+        runtime_sha256: python_runtime_sha256(&python_runtime_root())
+            .expect("Python runtime should hash"),
         source_code: source_code.to_string(),
     }
+}
+
+fn python_runtime_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python")
 }
 
 fn runtime_with(
@@ -202,7 +210,7 @@ fn runtime_with(
         store,
         sessions,
         resolve_python_executable().expect("Python 3.11 or newer should be available"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python"),
+        python_runtime_root(),
         work_root,
     )
 }
@@ -230,6 +238,51 @@ fn completed_response(text: &str, input_tokens: u64, output_tokens: u64) -> Vec<
             },
         },
     ]
+}
+
+#[tokio::test]
+async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("artifacts"))
+            .expect("store should open in memory"),
+    );
+    let project = store
+        .create_project("ABI mismatch", directory.path().join("project"))
+        .expect("Project should be created");
+    let mut program = program_with_source("abi-mismatch", TIMER_SOURCE);
+    program.runtime_sha256 = "0".repeat(64);
+    let workflow = store
+        .create_workflow(NewWorkflow {
+            project_id: project.id,
+            started_from_session_id: None,
+            program,
+            request: "Do not run with a different ABI.".to_string(),
+            instructions: String::new(),
+            trigger: Default::default(),
+            params: json!({}),
+            default_model: "scripted".to_string(),
+            access: AccessPreset::ModelOnly,
+            enabled_skills: Vec::new(),
+            launch_context: Default::default(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect("Workflow should be created");
+    store
+        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .expect("Workflow should be runnable");
+
+    let error = runtime(Arc::clone(&store), &directory.path().join("runtime"))
+        .execute(workflow.id, CancellationToken::new())
+        .await
+        .expect_err("ABI mismatch must fail before Python starts");
+    assert!(error.contains("Python Workflow ABI differs"));
+    assert!(
+        store
+            .list_workflow_effects(workflow.id)
+            .expect("effects should load")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

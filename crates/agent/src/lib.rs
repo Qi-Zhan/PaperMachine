@@ -40,6 +40,7 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,6 +57,7 @@ const COMPACTION_PROMPT: &str = "You are performing a context checkpoint compact
 const SUMMARY_PREFIX: &str = "Another model worked on this research session and produced the following checkpoint. Use it to continue without repeating completed work:";
 const CONTROL_FINISH_PROMPT: &str = "Do not call tools. Synthesize the best self-contained answer supported by the evidence already gathered, follow the control-plane instruction above, and state any remaining limitations.";
 const PROMPT_CACHE_KEY_NAMESPACE: &str = "papermachine-session";
+const MAX_TOOL_CALL_ID_BYTES: usize = 512;
 
 #[derive(Clone, Debug)]
 pub struct AgentTurnRequest {
@@ -283,6 +285,8 @@ pub enum AgentError {
     IncompleteModelStream,
     #[error("model completed without a message or tool call")]
     EmptyModelResponse,
+    #[error("model returned an invalid tool-call identity: {0}")]
+    InvalidToolCallIdentity(String),
     #[error(
         "model context window is too small: {window} tokens configured, {reserved} tokens reserved for instructions, tools, and output"
     )]
@@ -354,6 +358,7 @@ impl AgentRuntime {
                 content: request.objective.clone(),
             });
         }
+        let mut tool_call_ids = tool_call_ids_from_history(&history);
         let execution_gate = Arc::new(RwLock::new(()));
         let mut total_usage = request.initial_usage;
         let tool_definitions = if request.tools_enabled {
@@ -652,6 +657,23 @@ impl AgentRuntime {
                     _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
                 }
             };
+            if let Err(error) = reserve_tool_call_ids(&calls, &mut tool_call_ids) {
+                step_usage.saturating_add_assign(retry_usage);
+                total_usage.saturating_add_assign(step_usage);
+                self.events
+                    .emit(AgentEvent::ModelStepFailed {
+                        step,
+                        error: error.to_string(),
+                        usage: step_usage,
+                        duration_ms: sample_started
+                            .elapsed()
+                            .as_millis()
+                            .min(u128::from(u64::MAX)) as u64,
+                    })
+                    .await
+                    .map_err(AgentError::EventSink)?;
+                return Err(error);
+            }
             step_usage.saturating_add_assign(retry_usage);
             total_usage.saturating_add_assign(step_usage);
             hosted_search_calls_used = hosted_search_calls_used.saturating_add(
@@ -1188,6 +1210,51 @@ fn tool_call_from_response_item(item: &Value) -> Result<Option<ModelToolCall>, M
         name: field("name")?,
         arguments: field("arguments")?,
     }))
+}
+
+fn tool_call_ids_from_history(history: &[ModelInputItem]) -> HashSet<String> {
+    history
+        .iter()
+        .filter_map(|item| match item {
+            ModelInputItem::FunctionCall { call_id, .. }
+            | ModelInputItem::FunctionCallOutput { call_id, .. } => Some(call_id.clone()),
+            ModelInputItem::ResponseItem { item }
+                if item.get("type").and_then(Value::as_str) == Some("function_call") =>
+            {
+                item.get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn reserve_tool_call_ids(
+    calls: &[ModelToolCall],
+    used: &mut HashSet<String>,
+) -> Result<(), AgentError> {
+    let mut current = HashSet::new();
+    for call in calls {
+        if call.call_id.trim().is_empty() {
+            return Err(AgentError::InvalidToolCallIdentity(
+                "call ID is empty".to_string(),
+            ));
+        }
+        if call.call_id.len() > MAX_TOOL_CALL_ID_BYTES {
+            return Err(AgentError::InvalidToolCallIdentity(format!(
+                "call ID exceeds {MAX_TOOL_CALL_ID_BYTES} bytes"
+            )));
+        }
+        if used.contains(&call.call_id) || !current.insert(call.call_id.clone()) {
+            return Err(AgentError::InvalidToolCallIdentity(format!(
+                "duplicate call ID {:?}",
+                call.call_id
+            )));
+        }
+    }
+    used.extend(current);
+    Ok(())
 }
 
 #[cfg(test)]

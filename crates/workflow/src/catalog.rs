@@ -31,6 +31,7 @@ pub struct LoadedWorkflowProgram {
     pub source_code: String,
     pub path: PathBuf,
     pub validation: WorkflowValidation,
+    pub runtime_sha256: String,
 }
 
 impl LoadedWorkflowProgram {
@@ -41,6 +42,7 @@ impl LoadedWorkflowProgram {
             source: self.registration.source,
             definition_path: self.registration.definition_path.clone(),
             sha256: self.registration.sha256.clone(),
+            runtime_sha256: self.runtime_sha256.clone(),
             source_code: self.source_code.clone(),
         }
     }
@@ -51,6 +53,7 @@ pub struct WorkflowProgramCatalog {
     builtins_root: PathBuf,
     python_runtime_root: PathBuf,
     python: PathBuf,
+    runtime_sha256: String,
     known_tools: BTreeSet<String>,
     entries: BTreeMap<WorkflowKey, LoadedWorkflowProgram>,
 }
@@ -71,10 +74,12 @@ impl WorkflowProgramCatalog {
             )));
         }
         let python = resolve_python_executable()?;
+        let runtime_sha256 = python_runtime_sha256(&python_runtime_root)?;
         let mut catalog = Self {
             builtins_root,
             python_runtime_root,
             python,
+            runtime_sha256,
             known_tools: known_tools.into_iter().collect(),
             entries: BTreeMap::new(),
         };
@@ -209,6 +214,7 @@ impl WorkflowProgramCatalog {
             source_code: source.to_string(),
             path,
             validation,
+            runtime_sha256: self.runtime_sha256.clone(),
         };
         store.register_workflow_program(&loaded.registration)?;
         self.entries.insert(key, loaded.clone());
@@ -281,6 +287,7 @@ impl WorkflowProgramCatalog {
             source_code,
             path: path.to_path_buf(),
             validation,
+            runtime_sha256: self.runtime_sha256.clone(),
         })
     }
 
@@ -358,6 +365,59 @@ fn workflow_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     visit(root, &mut files)?;
     files.sort();
     Ok(files)
+}
+
+pub fn python_runtime_sha256(runtime_root: &Path) -> Result<String, std::io::Error> {
+    let package = runtime_root.join("papermachine");
+    for required in ["__init__.py", "_runner.py", "_validate.py"] {
+        if !package.join(required).is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Python runtime file is missing: {required}"),
+            ));
+        }
+    }
+    fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Python runtime may not contain symlinks: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            if file_type.is_dir() {
+                if entry.file_name() != "__pycache__" {
+                    visit(&path, files)?;
+                }
+            } else if file_type.is_file() && path.extension().is_some_and(|value| value == "py") {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(&package, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"papermachine-python-runtime-v1\0");
+    for path in files {
+        let relative = path
+            .strip_prefix(runtime_root)
+            .map_err(std::io::Error::other)?;
+        let name = relative.as_os_str().as_encoded_bytes();
+        let content = fs::read(&path)?;
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name);
+        hasher.update((content.len() as u64).to_be_bytes());
+        hasher.update(content);
+    }
+    Ok(encode(hasher.finalize()))
 }
 
 pub fn resolve_python_executable() -> Result<PathBuf, WorkflowProgramCatalogError> {

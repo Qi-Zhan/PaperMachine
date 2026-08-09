@@ -55,6 +55,8 @@ pub struct WorkflowProgramSnapshot {
     pub source: WorkflowProgramSource,
     pub definition_path: String,
     pub sha256: String,
+    /// Exact PaperMachine Python DSL ABI used to validate and execute the Run.
+    pub runtime_sha256: String,
     pub source_code: String,
 }
 

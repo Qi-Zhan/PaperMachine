@@ -580,6 +580,7 @@ mod tests {
             source: WorkflowProgramSource::Builtin,
             definition_path: "builtin/scheduler-test/workflow.py".to_string(),
             sha256: "test".to_string(),
+            runtime_sha256: "test-runtime".to_string(),
             source_code: String::new(),
         }
     }

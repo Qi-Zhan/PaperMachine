@@ -23,6 +23,8 @@ anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "ws"] }
 bytes = "1.10"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 eventsource-stream = "0.2"

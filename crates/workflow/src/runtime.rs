@@ -16,6 +16,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,6 +39,7 @@ use crate::WorkflowExecution;
 use crate::WorkflowRuntime;
 use crate::WorkflowSuspension;
 use crate::build_project_snapshot;
+use crate::python_runtime_sha256;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
 
@@ -72,6 +75,18 @@ impl PythonWorkflowRuntime {
         cancellation: CancellationToken,
     ) -> Result<Value, WorkflowRuntimeError> {
         let run = self.store.get_workflow(workflow_id)?;
+        let source_sha256 = hex::encode(Sha256::digest(run.program.source_code.as_bytes()));
+        if source_sha256 != run.program.sha256 {
+            return Err(WorkflowRuntimeError::Snapshot(
+                "Workflow source hash does not match its durable snapshot".to_string(),
+            ));
+        }
+        let runtime_sha256 = python_runtime_sha256(&self.python_runtime_root)?;
+        if runtime_sha256 != run.program.runtime_sha256 {
+            return Err(WorkflowRuntimeError::Snapshot(
+                "Python Workflow ABI differs from the durable Run snapshot".to_string(),
+            ));
+        }
         let workspace = self.work_root.join(run.id.to_string());
         materialize_runtime(
             &workspace,
@@ -1400,11 +1415,11 @@ async fn materialize_runtime(
     tokio::fs::create_dir_all(workspace.join(".home")).await?;
     tokio::fs::create_dir_all(workspace.join(".tmp")).await?;
     tokio::fs::write(workspace.join("workflow.py"), source).await?;
-    copy_directory(
-        &python_runtime_root.join("papermachine"),
-        &workspace.join("papermachine"),
-    )
-    .await
+    let package = workspace.join("papermachine");
+    if tokio::fs::try_exists(&package).await? {
+        tokio::fs::remove_dir_all(&package).await?;
+    }
+    copy_directory(&python_runtime_root.join("papermachine"), &package).await
 }
 
 async fn copy_directory(source: &Path, destination: &Path) -> Result<(), WorkflowRuntimeError> {
@@ -1415,9 +1430,18 @@ async fn copy_directory(source: &Path, destination: &Path) -> Result<(), Workflo
         while let Some(entry) = entries.next_entry().await? {
             let from = entry.path();
             let to = destination.join(entry.file_name());
-            if entry.file_type().await?.is_dir() {
+            let file_type = entry.file_type().await?;
+            if file_type.is_symlink() {
+                return Err(WorkflowRuntimeError::Snapshot(format!(
+                    "Python Workflow ABI contains a symlink: {}",
+                    from.display()
+                )));
+            }
+            if file_type.is_dir() && entry.file_name() != "__pycache__" {
                 stack.push((from, to));
-            } else {
+            } else if file_type.is_file()
+                && from.extension().is_some_and(|extension| extension == "py")
+            {
                 tokio::fs::copy(from, to).await?;
             }
         }
@@ -1850,6 +1874,8 @@ pub enum WorkflowRuntimeError {
     Io(#[from] std::io::Error),
     #[error("workflow runtime failed to spawn: {0}")]
     Spawn(String),
+    #[error("workflow snapshot validation failed: {0}")]
+    Snapshot(String),
     #[error("workflow runtime is missing its {0} pipe")]
     MissingPipe(&'static str),
     #[error("workflow effect protocol failed: {0}")]

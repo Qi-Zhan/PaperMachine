@@ -47,7 +47,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4310)
     return parser.parse_args()
 
@@ -66,8 +65,6 @@ def main() -> int:
         str(repository_root),
         "--data-dir",
         str(data_dir),
-        "--host",
-        args.host,
         "--port",
         str(args.port),
     ]

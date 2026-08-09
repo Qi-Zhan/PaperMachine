@@ -78,7 +78,7 @@ export interface ProjectSystemPrompt { relative_path: string; content: string; s
 export interface ToolDefinition {
   name: string
   description: string
-  parameters: unknown
+  input_schema: unknown
   supports_parallel: boolean
 }
 export interface ToolSetSnapshot { definitions: ToolDefinition[]; sha256: string }
@@ -180,6 +180,7 @@ export interface WorkflowProgram {
 }
 
 export interface WorkflowProgramSnapshot extends WorkflowProgram {
+  runtime_sha256: string
   source_code: string
 }
 

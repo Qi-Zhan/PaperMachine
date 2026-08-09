@@ -221,6 +221,9 @@ platform `data_dir` above with a dedicated `dev` suffix, so it cannot populate
 the normal Project catalog. It uses `CARGO` when explicitly set, otherwise
 `cargo` from `PATH`; it does not guess a Rust installation directory.
 
+The server is loopback-only and rejects non-loopback Host headers. It is a local
+desktop service, not an authenticated network deployment.
+
 For real models, PaperMachine loads `config.toml` from its platform user-data
 directory by default, or the file passed to `--config`. The committed
 development config contains ordinary Responses-compatible profiles for GLM 5.2

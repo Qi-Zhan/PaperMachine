@@ -1,7 +1,8 @@
 # Security boundaries
 
 PaperMachine is local-first software, not a hardened multi-tenant service. The
-server binds to loopback by default and currently has no authentication layer.
+server has no authentication layer, so the binary binds only to `127.0.0.1`
+and rejects Host headers other than literal loopback addresses or `localhost`.
 
 ## Workflow source
 
@@ -52,7 +53,9 @@ Turn; the ActionInvocation retains the source HumanRequest ID for inspection.
 
 Saving the same Project-local slug replaces the editable program source. Every
 Workflow stores an immutable snapshot of the exact source and SHA-256 it started
-with, so later edits cannot change execution history.
+with, together with the SHA-256 of the Python DSL package used to validate it.
+Before every initial execution or recovery, Rust re-hashes both source and DSL
+runtime; a mismatch fails before Python starts or any effect is dispatched.
 
 The `project-summary` Agent does not receive PaperMachine's managed directory as
 a Workspace. Its Action declares exactly `read_project_home`,
@@ -113,14 +116,21 @@ remain inside each implementation as defense in depth. Thus declaring a
 Workspace tool never expands the Session's filesystem or network policy, while
 declaring a Project tool never grants access to its managed files.
 
+Provider tool-call IDs are opaque effect identities, but they must be non-empty,
+bounded, and unique across the whole Turn. The Agent validates the complete
+batch against prior history before emitting a tool-call event or beginning any
+execution; duplicates fail the model Step and cannot alias a durable effect.
+
 Before creating that Turn, the Store verifies that every attached root still
 exists as a real directory at the canonical path recorded by the attachment.
 A removed root or a path replaced by a symlink fails before model sampling.
 Relocation is an explicit Project operation that creates a later attachment
 revision; it never mutates the immutable environment of an earlier Turn.
 
-For every preset below `full_access`, `read_file` and `write_file` resolve paths
-and symlinks against the snapshotted Workspace roots. Direct file operations
+`read_file` and `write_file` first resolve and authorize the requested target,
+then reopen every component through directory handles without following
+symlinks. A rename or symlink swap after authorization therefore fails instead
+of redirecting the operation. Direct file operations
 make credential-bearing files such as `.env` unreadable and Workspace-root
 `.git`, `.agents`, and `.codex` metadata read-only. `exec_command` consumes the
 same materialized filesystem, metadata, credential, managed-root, environment,
