@@ -69,7 +69,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use tokio::sync::OwnedRwLockReadGuard;
 use tokio::sync::OwnedRwLockWriteGuard;
 use tokio::sync::RwLock;
@@ -123,7 +123,7 @@ const LOCAL_TOOL_NAMES: [&str; 7] = [
 pub struct AppState {
     catalog: Arc<ProjectCatalog>,
     default_workspace_root: PathBuf,
-    projects: Arc<RwLock<HashMap<ProjectId, ProjectSlot>>>,
+    projects: Arc<RwLock<HashMap<ProjectId, ProjectHandle>>>,
     runtime_factory: Arc<ProjectRuntimeFactory>,
     generator: WorkflowGenerator,
     default_model: String,
@@ -139,17 +139,19 @@ impl AppState {
     }
 
     async fn project_lease(&self, project_id: ProjectId) -> Result<ProjectReadLease, StoreError> {
-        let slot = self
-            .projects
-            .read()
-            .await
+        let projects = Arc::clone(&self.projects).read_owned().await;
+        let project = projects
             .get(&project_id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound {
                 entity: "Project runtime",
                 id: project_id.to_string(),
             })?;
-        slot.read(project_id).await
+        Ok(ProjectReadLease {
+            _projects: projects,
+            project,
+            project_id,
+        })
     }
 
     async fn runtime_from_lease(
@@ -176,75 +178,58 @@ impl AppState {
         self.project_lease(project_id).await
     }
 
-    async fn project_write(&self, project_id: ProjectId) -> Result<ProjectWriteLease, StoreError> {
-        let slot = self
-            .projects
-            .read()
-            .await
-            .get(&project_id)
-            .cloned()
-            .ok_or_else(|| StoreError::NotFound {
+    async fn project_write(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<OwnedRwLockWriteGuard<HashMap<ProjectId, ProjectHandle>>, StoreError> {
+        let projects = Arc::clone(&self.projects).write_owned().await;
+        if !projects.contains_key(&project_id) {
+            return Err(StoreError::NotFound {
                 entity: "Project",
                 id: project_id.to_string(),
-            })?;
-        slot.write().await
+            });
+        }
+        Ok(projects)
     }
 }
 
 #[derive(Clone)]
-struct ProjectSlot {
-    lifecycle: Arc<RwLock<ProjectLifecycle>>,
-    resources: Arc<Mutex<ProjectResources>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProjectLifecycle {
-    Open,
-    Closing,
-    Retired,
-}
-
-struct ProjectResources {
-    store: Option<StoreHandle>,
-    runtime: Option<ProjectRuntime>,
+struct ProjectHandle {
+    store: StoreHandle,
+    runtime: Arc<OnceCell<ProjectRuntime>>,
 }
 
 struct ProjectReadLease {
-    slot: ProjectSlot,
+    _projects: OwnedRwLockReadGuard<HashMap<ProjectId, ProjectHandle>>,
+    project: ProjectHandle,
     project_id: ProjectId,
-    store: StoreHandle,
-    _lifecycle: OwnedRwLockReadGuard<ProjectLifecycle>,
 }
 
 impl ProjectReadLease {
     fn store(&self) -> StoreHandle {
-        self.store.clone()
+        self.project.store.clone()
     }
 
     async fn runtime(
         &self,
         factory: Arc<ProjectRuntimeFactory>,
     ) -> Result<ProjectRuntime, StoreError> {
-        let mut resources = self.slot.resources.lock().await;
-        if let Some(runtime) = resources.runtime.as_ref() {
-            return Ok(runtime.clone());
-        }
         let project_id = self.project_id;
-        let project = self
-            .store
-            .call(move |store| store.get_project(project_id))
-            .await?;
-        let project_id = project.id;
-        let runtime = factory
-            .build(&project, self.store.clone())
+        let store = self.project.store.clone();
+        self.project
+            .runtime
+            .get_or_try_init(|| async move {
+                let project = store
+                    .call(move |store| store.get_project(project_id))
+                    .await?;
+                factory.build(&project, store).await.map_err(|error| {
+                    StoreError::Invariant(format!(
+                        "Project {project_id} runtime is unavailable: {error:#}"
+                    ))
+                })
+            })
             .await
-            .map_err(|error| {
-                StoreError::Invariant(format!(
-                    "Project {project_id} runtime is unavailable: {error:#}"
-                ))
-            })?;
-        resources.runtime = Some(runtime.clone());
-        Ok(runtime)
+            .cloned()
     }
 }
 
@@ -261,117 +246,24 @@ impl std::ops::Deref for ProjectRuntimeLease {
     }
 }
 
-struct ProjectWriteLease {
-    slot: ProjectSlot,
-    lifecycle: OwnedRwLockWriteGuard<ProjectLifecycle>,
-}
-
-impl ProjectWriteLease {
-    async fn store(&self) -> Result<StoreHandle, StoreError> {
-        self.slot
-            .resources
-            .lock()
-            .await
-            .store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| StoreError::Invariant("Project Store is not loaded".to_string()))
-    }
-
-    async fn reset_runtime(&self) {
-        self.slot.resources.lock().await.runtime.take();
-    }
-
-    async fn detach(&self) -> Result<ProjectResources, StoreError> {
-        let mut resources = self.slot.resources.lock().await;
-        if resources.store.is_none() {
-            return Err(StoreError::Invariant(
-                "Project resources are already detached".to_string(),
-            ));
-        }
-        Ok(ProjectResources {
-            store: resources.store.take(),
-            runtime: resources.runtime.take(),
-        })
-    }
-
-    async fn restore(&self, restored: ProjectResources) {
-        *self.slot.resources.lock().await = restored;
-    }
-
-    fn reopen(mut self) {
-        *self.lifecycle = ProjectLifecycle::Open;
-    }
-
-    fn retire(mut self) {
-        *self.lifecycle = ProjectLifecycle::Retired;
-    }
-}
-
-impl Drop for ProjectWriteLease {
-    fn drop(&mut self) {
-        if *self.lifecycle == ProjectLifecycle::Closing {
-            *self.lifecycle = ProjectLifecycle::Open;
-        }
-    }
-}
-
-impl ProjectSlot {
+impl ProjectHandle {
     fn unloaded(store: StoreHandle) -> Self {
         Self {
-            lifecycle: Arc::new(RwLock::new(ProjectLifecycle::Open)),
-            resources: Arc::new(Mutex::new(ProjectResources {
-                store: Some(store),
-                runtime: None,
-            })),
+            store,
+            runtime: Arc::new(OnceCell::new()),
         }
     }
 
     fn loaded(store: StoreHandle, runtime: ProjectRuntime) -> Self {
+        let cell = OnceCell::new();
+        assert!(
+            cell.set(runtime).is_ok(),
+            "a fresh Project runtime cell must be empty"
+        );
         Self {
-            lifecycle: Arc::new(RwLock::new(ProjectLifecycle::Open)),
-            resources: Arc::new(Mutex::new(ProjectResources {
-                store: Some(store),
-                runtime: Some(runtime),
-            })),
-        }
-    }
-
-    async fn read(&self, project_id: ProjectId) -> Result<ProjectReadLease, StoreError> {
-        let lifecycle = Arc::clone(&self.lifecycle).read_owned().await;
-        if *lifecycle != ProjectLifecycle::Open {
-            return Err(StoreError::Invariant(
-                "Project is closing or retired".to_string(),
-            ));
-        }
-        let store = self
-            .resources
-            .lock()
-            .await
-            .store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| StoreError::Invariant("Project Store is not loaded".to_string()))?;
-        Ok(ProjectReadLease {
-            slot: self.clone(),
-            project_id,
             store,
-            _lifecycle: lifecycle,
-        })
-    }
-
-    async fn write(&self) -> Result<ProjectWriteLease, StoreError> {
-        let mut lifecycle = Arc::clone(&self.lifecycle).write_owned().await;
-        if *lifecycle != ProjectLifecycle::Open {
-            return Err(StoreError::Invariant(
-                "Project is closing or retired".to_string(),
-            ));
+            runtime: Arc::new(cell),
         }
-        *lifecycle = ProjectLifecycle::Closing;
-        Ok(ProjectWriteLease {
-            slot: self.clone(),
-            lifecycle,
-        })
     }
 }
 
@@ -595,7 +487,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
             }
         }
         let store = StoreHandle::spawn(store)?;
-        projects.insert(project.id, ProjectSlot::unloaded(store));
+        projects.insert(project.id, ProjectHandle::unloaded(store));
     }
     schedule_trash_cleanup(Arc::clone(&catalog), catalog.trash_entries()?);
 
@@ -861,7 +753,7 @@ async fn create_project(
         .projects
         .write()
         .await
-        .insert(project.id, ProjectSlot::loaded(store, runtime));
+        .insert(project.id, ProjectHandle::loaded(store, runtime));
     Ok((
         StatusCode::CREATED,
         Json(ProjectCatalogEntry {
@@ -969,9 +861,12 @@ async fn relocate_project(
 ) -> ApiResult<Json<ProjectCatalogEntry>> {
     let project_id = parse_id(&project_id, "Project")?;
     let workspace = canonical_workspace_selection(&request.workspace, false)?;
-    let lease = state.project_write(project_id).await?;
-    let store = lease.store().await?;
-    lease.reset_runtime().await;
+    let projects = state.project_write(project_id).await?;
+    let store = projects
+        .get(&project_id)
+        .expect("project_write verifies membership")
+        .store
+        .clone();
     let catalog = Arc::clone(&state.catalog);
     let project = store
         .call::<_, StoreError, _>(move |core| {
@@ -979,7 +874,7 @@ async fn relocate_project(
             catalog.relocate_project(core, project_id, &workspace)
         })
         .await?;
-    lease.reopen();
+    drop(projects);
     Ok(Json(ProjectCatalogEntry {
         project,
         workspace_available: true,
@@ -991,27 +886,26 @@ async fn remove_project(
     Path(project_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let project_id = parse_id(&project_id, "Project")?;
-    let lease = state.project_write(project_id).await?;
-    let store = lease.store().await?;
-    store.call(ensure_project_can_detach).await?;
-    let mut resources = lease.detach().await?;
-    resources.runtime.take();
-    let store = resources.store.take().ok_or_else(|| {
-        StoreError::Invariant("Project Store disappeared while retiring".to_string())
-    })?;
-    let managed_root = store.managed_root().to_path_buf();
-    store.shutdown().await?;
+    let mut projects = state.project_write(project_id).await?;
+    let project = projects
+        .get(&project_id)
+        .expect("project_write verifies membership")
+        .clone();
+    project.store.call(ensure_project_can_detach).await?;
+    let project = projects
+        .remove(&project_id)
+        .expect("verified Project must still exist");
+    let managed_root = project.store.managed_root().to_path_buf();
+    project.store.shutdown().await?;
     let trash = match retire_catalog_project(Arc::clone(&state.catalog), project_id).await {
         Ok(trash) => trash,
         Err(error) => {
             let reopened = StoreHandle::spawn(Store::open(&managed_root)?)?;
-            resources.store = Some(reopened);
-            lease.restore(resources).await;
+            projects.insert(project_id, ProjectHandle::unloaded(reopened));
             return Err(error);
         }
     };
-    lease.retire();
-    state.projects.write().await.remove(&project_id);
+    drop(projects);
     schedule_trash_cleanup(Arc::clone(&state.catalog), vec![trash]);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2551,44 +2445,5 @@ impl From<SkillError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({"error": self.message}))).into_response()
-    }
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn project_write_lease_waits_for_readers_and_retirement_is_final() {
-        let fixture = tempdir().expect("fixture should be created");
-        let managed = fixture.path().join("managed");
-        let workspace = fixture.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("Workspace should be created");
-        let store = Store::create(&managed).expect("Store should be created");
-        let project = store
-            .create_project("Lease test", &workspace)
-            .expect("Project should be created");
-        let slot =
-            ProjectSlot::unloaded(StoreHandle::spawn(store).expect("Store thread should start"));
-        let reader = slot.read(project.id).await.expect("Project should be open");
-        let waiting_slot = slot.clone();
-        let mut writer = tokio::spawn(async move { waiting_slot.write().await });
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), &mut writer)
-                .await
-                .is_err(),
-            "write lease must wait for existing readers"
-        );
-        drop(reader);
-        let writer = tokio::time::timeout(Duration::from_secs(1), writer)
-            .await
-            .expect("write lease should proceed after the reader exits")
-            .expect("writer task should join")
-            .expect("write lease should be granted");
-        writer.retire();
-
-        assert!(slot.read(project.id).await.is_err());
     }
 }
