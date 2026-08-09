@@ -114,16 +114,11 @@ All commands passed after the final code changes:
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s python/tests -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/deep-research-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/browsecomp-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/live-dr-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 benchmarks/test_benchmark_runtime.py
+PYTHONPATH=python python3 -m unittest discover -s python/tests -p 'test_*.py'
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 git diff --check
 ```
 
-Observed Python counts were 37 DSL/built-in tests, 12 DeepResearch mini tests,
-4 BrowseComp mini tests, 13 LiveDR mini tests, and 8 shared benchmark-runtime
-tests. Web validation was 9 tests plus a successful production build.
+Observed Python count was 37 DSL/built-in tests. Web validation was 9 tests plus
+a successful production build.

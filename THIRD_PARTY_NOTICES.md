@@ -38,15 +38,3 @@ The web interface uses interaction and layout ideas from codex-mobile at commit
 - License: MIT
 
 No codex-mobile source has been copied at this stage.
-
-## Microsoft LiveDRBench
-
-The LiveDR benchmark adapter and benchmark-owned grader Workflow adapt claim-matching
-semantics and evaluation rubrics from LiveDRBench at commit
-`6ff85b67b35fa303907f6f275417622338acd1f6`.
-
-- Source: https://github.com/microsoft/LiveDRBench
-- License: MIT (evaluation code); CDLA v2 (dataset)
-
-PaperMachine keeps the released benchmark answers encrypted at rest and uses
-them only in isolated post-write grading Sessions.

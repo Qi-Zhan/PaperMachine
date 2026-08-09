@@ -24,7 +24,6 @@
 # PaperMachine runtime state
 /data/
 /workspaces/
-benchmarks/*/runs/
 *.db
 *.db-shm
 *.db-wal

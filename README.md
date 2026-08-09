@@ -246,8 +246,8 @@ AEROIDES_API_KEY=... DEEPSEEK_API_KEY=... pnpm server:dev
 
 `pnpm server:dev --config /absolute/path/config.toml` selects a different
 development provider file. A packaged or direct server invocation may omit
-`--data-dir` to use the normal platform location; development and benchmark
-commands always provide an isolated directory explicitly.
+`--data-dir` to use the normal platform location; development commands provide
+an isolated directory explicitly.
 
 The configuration shape supports several providers and model profiles in one
 server process:
@@ -332,11 +332,7 @@ provider is known not to implement Responses WebSocket mode.
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s python/tests -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/deep-research-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/browsecomp-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/live-dr-mini -p 'test_*.py'
-PYTHONPATH=python:benchmarks python3 benchmarks/test_benchmark_runtime.py
+PYTHONPATH=python python3 -m unittest discover -s python/tests -p 'test_*.py'
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 git diff --check

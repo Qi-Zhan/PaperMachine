@@ -136,7 +136,7 @@ scheduler permit; terminal scheduler handles are removed.
 The kernel is releasable only when:
 
 - Rust format, tests, and Clippy pass for the full workspace;
-- Python DSL, built-ins, and benchmark mini tests pass;
+- Python DSL and built-in tests pass;
 - Web tests and production build pass;
 - direct tools and command sandboxes agree on permissions;
 - Project tools cannot enter normal Sessions;
