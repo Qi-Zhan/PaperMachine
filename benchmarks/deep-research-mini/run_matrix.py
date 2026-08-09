@@ -58,7 +58,6 @@ CONDITIONS = {
         "program_slug": "evidence-loop",
         "params": {
             "route_count": 3,
-            "minimum_route_count": 3,
             "max_rounds": 3,
             "max_followups_per_round": 3,
         },
@@ -67,7 +66,6 @@ CONDITIONS = {
         "program_slug": "evidence-loop",
         "params": {
             "route_count": 4,
-            "minimum_route_count": 4,
             "max_rounds": 4,
             "max_followups_per_round": 4,
         },
