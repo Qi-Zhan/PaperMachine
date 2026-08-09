@@ -197,14 +197,6 @@ pub struct WorkflowUsage {
     pub estimated_cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParticipantStatus {
-    Active,
-    Retired,
-    Failed,
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowParticipant {
     pub id: AgentInstanceId,
@@ -216,9 +208,7 @@ pub struct WorkflowParticipant {
     pub system_prompt: String,
     pub model: String,
     pub skills: Vec<String>,
-    pub status: ParticipantStatus,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

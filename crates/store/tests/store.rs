@@ -219,15 +219,11 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
     let project = project(&store, &directory, "Permission ceiling");
     let origin = store
-        .create_session_with_access(
-            project.id,
-            "Workspace origin",
-            "",
-            "test-model",
-            Vec::new(),
-            AccessPreset::Workspace,
-        )
+        .create_session(project.id, "Workspace origin", "", "test-model", Vec::new())
         .expect("origin Session should be created");
+    let origin = store
+        .set_session_access(origin.id, AccessPreset::Workspace)
+        .expect("origin access should update");
 
     let above_origin = store
         .create_workflow(NewWorkflow {

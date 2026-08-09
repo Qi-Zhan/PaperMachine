@@ -734,7 +734,7 @@ fn reconcile_step_projections(
     }
 
     for call in calls {
-        if by_call.contains_key(&call.call_id) || outputs.contains_key(&call.call_id) {
+        if by_call.contains_key(&call.call_id) {
             continue;
         }
         let input = serde_json::from_str(&call.arguments)

@@ -1,9 +1,6 @@
 use crate::ActionAttempt;
-use crate::AgentStep;
 use crate::ControlMessageId;
 use crate::ModelInputItem;
-use crate::Session;
-use crate::SessionEvent;
 use crate::SessionId;
 use crate::TokenUsage;
 use crate::Turn;
@@ -14,7 +11,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub const SESSION_ROLLOUT_VERSION: u32 = 2;
+pub const SESSION_ROLLOUT_VERSION: u32 = 3;
 
 /// Observable relationship between the canonical JSONL rollout and its
 /// SQLite query projection.
@@ -66,8 +63,7 @@ pub enum ModelContextMutation {
 pub enum SessionRolloutItem {
     TurnCreated {
         turn: Turn,
-        action_attempt: Option<ActionAttempt>,
-        events: Vec<SessionEvent>,
+        action_attempt: ActionAttempt,
     },
     ContextCheckpoint {
         turn_id: TurnId,
@@ -80,18 +76,7 @@ pub enum SessionRolloutItem {
     },
     TurnUpdated {
         turn: Turn,
-        session: Session,
-        events: Vec<SessionEvent>,
         acknowledged_control_ids: Vec<ControlMessageId>,
-    },
-    StepsCreated {
-        steps: Vec<AgentStep>,
-    },
-    StepsUpdated {
-        steps: Vec<AgentStep>,
-    },
-    SessionEventAppended {
-        event: SessionEvent,
     },
 }
 

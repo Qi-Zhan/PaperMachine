@@ -105,7 +105,7 @@ async fn workflow_restart_creates_an_aborted_projection_for_a_canonical_call() {
 #[tokio::test]
 async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
     let output = json!({"ok": true, "result": {"durable": true}});
-    let fixture = workflow_recovery_fixture(true, Some(output.clone()));
+    let fixture = workflow_recovery_fixture(false, Some(output.clone()));
     fixture
         .runtime()
         .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
@@ -115,8 +115,11 @@ async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
     let step = fixture
         .store
-        .get_step(fixture.step_id.expect("fixture should create a Step"))
-        .expect("Step should load");
+        .list_steps(fixture.turn_id)
+        .expect("Steps should load")
+        .into_iter()
+        .find(|step| step.tool_call_id.as_deref() == Some("call-recovery"))
+        .expect("canonical output should rebuild its Step projection");
     assert_eq!(step.status, StepStatus::Completed);
     assert_eq!(step.output, Some(output.clone()));
     let requests = fixture.model.requests().expect("requests should load");

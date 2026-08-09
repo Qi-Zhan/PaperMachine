@@ -51,9 +51,6 @@ pub enum WorkflowEventPayload {
         name: String,
         role: String,
     },
-    ParticipantRetired {
-        agent_instance_id: AgentInstanceId,
-    },
     ActionChanged {
         action_invocation_id: ActionInvocationId,
         action_attempt_id: Option<ActionAttemptId>,

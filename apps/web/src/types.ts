@@ -26,7 +26,6 @@ export type WorkflowStatus =
   | 'failed'
   | 'cancelled'
 export type WorkflowContextMode = 'fresh' | 'project_snapshot'
-export type ParticipantStatus = 'active' | 'retired' | 'failed'
 export type ActionStatus = 'scheduled' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
 export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
@@ -247,9 +246,7 @@ export interface WorkflowParticipant {
   system_prompt: string
   model: string
   skills: string[]
-  status: ParticipantStatus
   created_at: string
-  updated_at: string
 }
 
 export interface ActionInvocation {

@@ -549,7 +549,6 @@
                   <strong>{{ participant.name }}</strong>
                   <small>{{ participant.role }}</small>
                 </span>
-                <span class="status-pin" :data-status="participant.status" />
               </button>
             </div>
 

@@ -290,13 +290,6 @@ class Agent:
         )
         self.access = result["access"]
 
-    async def retire(self) -> None:
-        remote = await self._ensure_remote()
-        await _effect(
-            "retire_agent", {"agent_instance_id": remote["agent_instance_id"]}
-        )
-
-
 def _json_return_kind(function: Callable[..., Any]) -> str | None:
     try:
         annotation = inspect.get_annotations(function, eval_str=True).get("return")

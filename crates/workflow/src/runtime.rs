@@ -508,7 +508,6 @@ impl RunEffectContext {
         match kind {
             "create_agent" => self.create_agent(effect_key, payload).await,
             "set_agent_access" => self.set_agent_access(effect_key, payload).await,
-            "retire_agent" => self.retire_agent(payload).await,
             "invoke_action" => self.invoke_action(effect_key, payload).await,
             "wait" => self.wait(effect_key, payload).await,
             "ask_human" => self.ask_human(effect_key, payload).await,
@@ -597,23 +596,8 @@ impl RunEffectContext {
             ));
         }
         if current_access < effective_access {
-            match self
-                .request_access_grant(effect_key, &participant, current_access, effective_access)
-                .await
-            {
-                Ok(()) => {}
-                Err(error @ WorkflowRuntimeError::Suspended(_)) => return Err(error),
-                Err(error) => {
-                    let participant_id = participant.id;
-                    let _ = self
-                        .store
-                        .call::<_, StoreError, _>(move |store| {
-                            store.retire_participant(participant_id)
-                        })
-                        .await;
-                    return Err(error);
-                }
-            }
+            self.request_access_grant(effect_key, &participant, current_access, effective_access)
+                .await?;
         }
         let participant_session_id = participant.session_id;
         let access = self
@@ -726,14 +710,6 @@ impl RunEffectContext {
             .call(move |store| store.set_session_access(participant_session_id, requested))
             .await?;
         Ok(())
-    }
-
-    async fn retire_agent(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
-        let agent_id = id_field::<AgentInstanceId>(&payload, "agent_instance_id")?;
-        self.store
-            .call(move |store| store.retire_participant(agent_id))
-            .await?;
-        Ok(Value::Null)
     }
 
     async fn invoke_action(
@@ -1595,18 +1571,6 @@ fn effect_resource_uuid(workflow_id: WorkflowId, effect_key: &str, resource: &st
         workflow_id.as_uuid(),
         format!("{effect_key}:{resource}").as_bytes(),
     )
-}
-
-fn id_field<T: FromStr>(value: &Value, field: &str) -> Result<T, WorkflowRuntimeError>
-where
-    T::Err: std::fmt::Display,
-{
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkflowRuntimeError::Protocol(format!("missing string field {field}")))?
-        .parse()
-        .map_err(|error: T::Err| WorkflowRuntimeError::Protocol(error.to_string()))
 }
 
 fn validate_effect_key(key: &str) -> Result<(), WorkflowRuntimeError> {

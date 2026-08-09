@@ -74,7 +74,7 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let rollout_status = store
         .session_rollout_status(session.id)
         .expect("rollout status should load");
-    assert_eq!(rollout_status.version, 2);
+    assert_eq!(rollout_status.version, 3);
     assert!(rollout_status.last_sequence > 0);
     assert_eq!(
         rollout_status.projected_sequence,
@@ -188,19 +188,21 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
     let project = store
         .create_project("Tail repair", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
-    store
-        .append_session_event(
-            session.id,
-            None,
-            None,
-            SessionEventPayload::Warning {
-                message: "durable".to_string(),
-            },
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session = store
+        .get_session(harness.participant.session_id)
+        .expect("participant Session should load");
+    harness
+        .create_turn(
+            &store,
+            TurnOrigin::Workflow,
+            "durable",
+            AccessPreset::Research,
         )
-        .expect("stable event should append");
+        .expect("Turn should create a canonical record");
     let rollout_path = store.session_rollout_path(session.id);
     let expected_len = std::fs::metadata(&rollout_path)
         .expect("rollout metadata should load")
@@ -392,6 +394,11 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
+    let before = store
+        .list_session_events(session.id, 0)
+        .expect("initial events should load")
+        .last()
+        .map_or(0, |event| event.sequence);
     let mut writers = Vec::new();
     for index in 0..16 {
         let store = Arc::clone(&store);
@@ -412,14 +419,14 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
         writer.join().expect("writer should join");
     }
     let records = store
-        .list_session_rollout_records(session.id)
-        .expect("records should load");
+        .list_session_events(session.id, before)
+        .expect("events should load");
     assert_eq!(records.len(), 16);
     assert!(
         records
             .iter()
             .enumerate()
-            .all(|(index, record)| record.sequence == index as u64 + 1)
+            .all(|(index, record)| record.sequence == before + index as u64 + 1)
     );
 }
 

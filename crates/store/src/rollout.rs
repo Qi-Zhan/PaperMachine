@@ -273,9 +273,6 @@ fn apply_record(
                 TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {}
             }
         }
-        SessionRolloutItem::StepsCreated { .. }
-        | SessionRolloutItem::StepsUpdated { .. }
-        | SessionRolloutItem::SessionEventAppended { .. } => {}
     }
     Ok(())
 }
