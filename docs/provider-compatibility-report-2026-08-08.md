@@ -10,9 +10,9 @@ grading 全部完成，没有整条 Workflow retry、ActionAttempt retry 或 ter
 
 兼容性不能只用“OpenAI-compatible”一个布尔值描述。Aeroides 端点支持 Responses、流式
 文本、函数工具、并发和隐式 prompt cache，但没有返回可审计的 Responses
-`web_search_call`；因此它的 `hosted_web_search=false`。DeepSeek profile 则显式声明
-`hosted_web_search=true`。Agent runtime 根据本次 Session 选择的 model profile 过滤 hosted
-tools，URL 获取等本地函数工具仍由权限快照独立控制。
+`web_search_call`；因此 GLM profile 不声明 `hosted_web_search` capability。DeepSeek
+profile 的 `capabilities` 则显式包含它。Agent runtime 根据本次 Session 选择的精确
+model profile 过滤 hosted tools，URL 获取等本地函数工具仍由权限快照独立控制。
 
 ## Provider 探针
 
@@ -28,7 +28,7 @@ key。Aeroides profile 使用官方模型配置所列的 1,048,576 context windo
 | 4 路并发 | 四次请求均成功 | 可并发运行不同 Agent Session |
 | 隐式 prompt cache | 12,608-token 重复前缀首次 cached=0，随后两次 cached=12,608 | 使用 provider telemetry，不伪造 cache hit |
 | 并发 cache 正确性 | 共享前缀、不同后缀均返回正确 marker，cached=9,920 | routing key 保持 Session 隔离；缓存命中仍取决于 provider 的前缀策略 |
-| Hosted web search | 未观察到真实 `web_search_call`；强制调用会被拒绝或退化成文本中的伪调用 | 明确配置为 false，不向模型暴露该 hosted tool |
+| Hosted web search | 未观察到真实 `web_search_call`；强制调用会被拒绝或退化成文本中的伪调用 | profile 不声明该 capability，不向模型暴露 hosted tool |
 
 一个实际 PaperMachine 单 Agent dogfood 在项目 workspace 中读取文件、获取一个明确 URL、
 写出报告并完成 Workflow：5 秒、6 个步骤、4,670 input、1,277 output，其中 3,264 input
@@ -98,7 +98,7 @@ provider 都走 HTTP SSE + implicit cache；continuation 与 cached input 是两
 ### 1. Provider capability 必须显式化
 
 接受 Responses 请求或 function-tool schema，不代表实现了 OpenAI hosted tools。能力应
-属于 provider 配置，并在 model route 后检查；不能从 URL、provider 名字或请求成功推断。
+属于精确 model profile，并在 model route 后检查；不能从 URL、provider 名字或请求成功推断。
 本轮已先实现 `hosted_web_search`，后续出现新的 hosted tool 时沿用同一模式。
 
 ### 2. 按 Agent 选模型应该只是 DSL 的普通参数

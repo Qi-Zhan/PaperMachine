@@ -2,8 +2,9 @@
 
 PaperMachine is a local-first auto-research workbench. A **Project** owns all
 of its durable, Codex-like **Sessions** and **Workflows**. A Session is the
-main workbench: each user message creates a Turn, and model samples, tool calls,
-retries, context trims, usage, and output remain inspectable under that Turn.
+main workbench: every Workflow Action creates a Turn, and an interactive Action
+uses the verified user message as that Turn's input. Model samples, tool calls,
+retries, context trims, usage, and output remain inspectable under the Turn.
 
 > A Project is a research world persistently managed by PaperMachine; a
 > Workspace is the user filesystem an Agent is authorized to operate;
@@ -90,8 +91,9 @@ Project database. PaperMachine owns all Project state below `data_dir`:
     state/project.db
     rollouts/<session-id>.jsonl
     artifacts/
-    workflow-runtime/
-    runtime/
+    workflow-runtime/           disposable Python process scratch
+    runtime/sandboxes/          disposable per-Turn process scratch
+    runtime/skill-snapshots/    immutable Turn-referenced skill packages
     prompts/
     workflows/
     skills/
@@ -109,7 +111,12 @@ that Workspace, but PaperMachine never writes application metadata there and
 rejects a Workspace that overlaps any managed state. Relocating a Project only
 changes this attachment. Removing a Project leaves the Workspace untouched. A
 missing Workspace remains visible and can be reattached. The web client loads
-only the selected Project's full overview.
+the small Project overview separately from its bounded Session list.
+
+Before a Project runtime accepts work, Artifact files are reconciled with the
+database: uncommitted orphan files are removed, while missing or modified
+durable Artifacts fail closed. Workflow process directories and Turn sandboxes
+are reconstructed scratch and are removed after use.
 
 ## Codex relationship
 
@@ -321,6 +328,11 @@ provider is known not to implement Responses WebSocket mode.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+PYTHONPATH=python:benchmarks python3 -m unittest discover -s python/tests -p 'test_*.py'
+PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/deep-research-mini -p 'test_*.py'
+PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/browsecomp-mini -p 'test_*.py'
+PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/live-dr-mini -p 'test_*.py'
+PYTHONPATH=python:benchmarks python3 benchmarks/test_benchmark_runtime.py
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 ```

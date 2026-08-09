@@ -31,12 +31,12 @@ and all managed history remain inspectable.
 ## Workspace
 
 A Workspace attachment has a stable `WorkspaceId`, a monotonically increasing
-revision, canonical absolute roots, and one primary root used as cwd. It
+revision, and one canonical absolute directory used as cwd. It
 contains user files only. PaperMachine writes no hidden application state,
 database, journal, prompt, or Skill package into it.
 
-Workspace attachment 包含稳定的 `WorkspaceId`、单调递增的 revision、canonical
-绝对根目录，以及作为 cwd 的 primary root。它只保存用户文件；PaperMachine 不会
+Workspace attachment 包含稳定的 `WorkspaceId`、单调递增的 revision，以及一个
+作为 cwd 的 canonical 绝对目录。它只保存用户文件；PaperMachine 不会
 在其中写入隐藏应用状态、数据库、journal、prompt 或 Skill package。
 
 When the user does not choose a Workspace during Project creation, PaperMachine
@@ -58,30 +58,30 @@ An explicitly selected Workspace is represented by the structural payload:
 
 The local UI can open the operating system directory picker, and also accepts
 an absolute path directly. The server canonicalizes and validates the path,
-rejects overlap with managed state or another Project attachment, and returns
+rejects equality or nesting with managed state or another Project attachment, and returns
 the attachment object plus `workspace_available`. Relocation updates only the
 attachment and its revision; it does not move either managed Project state or
 user files.
 
 本地 UI 可以唤起操作系统目录选择器，也允许直接输入绝对路径。server 会
 canonicalize 并校验该路径，拒绝它与 managed state 或其他 Project attachment
-重叠，并返回 attachment object 与 `workspace_available`。Relocation 只更新
+相同或互相嵌套，并返回 attachment object 与 `workspace_available`。Relocation 只更新
 attachment 及 revision，不移动 managed Project state，也不移动用户文件。
 
 ## Runtime connection
 
 Before a Turn is created, the Store verifies that the attached path still
-exist as real directories at their recorded canonical paths. It then
+exists as a real directory at its recorded canonical path. It then
 materializes the Session access preset into a `TurnEnvironmentSnapshot`:
 
-- Workspace attachment ID, revision, roots, and cwd;
+- Workspace attachment ID, revision, path, and cwd;
 - exact filesystem, tool, network, and child-environment policy;
 - protected PaperMachine-managed roots; and
 - a SHA-256 authorization hash.
 
-创建 Turn 前，Store 会确认挂载 root 仍是 recorded canonical path 上的真实目录，
+创建 Turn 前，Store 会确认挂载路径仍是 recorded canonical path 上的真实目录，
 再把 Session access preset 实体化成 `TurnEnvironmentSnapshot`，包括 Workspace
-ID/revision/roots/cwd、精确的文件/工具/网络/子进程环境策略、受保护的 managed
+ID/revision/path/cwd、精确的文件/工具/网络/子进程环境策略、受保护的 managed
 roots 与权限 SHA-256。
 
 At the same boundary, the host ToolCatalog creates one exact ToolRegistry. For

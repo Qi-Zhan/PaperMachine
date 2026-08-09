@@ -12,7 +12,8 @@
 2. **Project is the research entity.** It is the sole ownership concept for a
    research effort.
 3. **Session is the main workbench.** It is a durable multi-turn conversation;
-   its Turns may be verified human messages or workflow-dispatched work.
+   every Turn is owned by a Workflow Action, and interactive Actions preserve a
+   verified human message as that Turn's user input.
 4. **Turn is the model-execution boundary.** Model samples and tool calls are
    Steps folded under the Turn in the UI.
 5. **Workflow belongs to Project.** `started_from_session_id` optionally records
@@ -100,8 +101,9 @@ data_dir/                       application-global state
     state/project.db
     rollouts/<session-id>.jsonl
     artifacts/
-    workflow-runtime/
-    runtime/
+    workflow-runtime/           disposable Python process scratch
+    runtime/sandboxes/          disposable per-Turn process scratch
+    runtime/skill-snapshots/    immutable Turn-referenced skill packages
     prompts/
     workflows/
     skills/
@@ -129,8 +131,9 @@ the current repository.
 Creating a Project allocates an ID, initializes a fresh current-schema Store in
 `data_dir/staging/`, and atomically renames it to
 `data_dir/projects/<project-id>` before it becomes visible. It attaches a
-user-selected absolute Workspace; the Workspace and the entire managed root
-must not overlap. PaperMachine creates no hidden files inside the Workspace.
+user-selected absolute Workspace; it may not equal, contain, or be contained by
+managed state or another Project Workspace. PaperMachine creates no hidden
+files inside the Workspace.
 Relocation changes only the Workspace attachment. Removal atomically renames
 managed state into `trash/` before asynchronous deletion and never deletes
 Workspace files. Relocation or removal is rejected while that Project has
@@ -145,6 +148,12 @@ Workspace is available. A missing Workspace does not make the managed Project
 disappear; it can be reattached. Each Project has its own Store, Workflow
 catalog, Session runtime, and Workflow scheduler; process-wide semaphores still
 bound concurrent work across Projects.
+
+When a Project runtime is loaded, Artifact files are reconciled against its
+database before work is accepted: uncommitted orphan files are removed, while a
+missing or hash-mismatched durable Artifact fails closed. Workflow process
+directories and Turn sandboxes are recreated from durable state and removed
+after use; they never participate in recovery.
 
 The HTTP representation keeps this boundary structural. Project creation and
 relocation accept `workspace: { path }`; Project listings expose that attachment
@@ -231,7 +240,7 @@ to stderr and captured with a size limit.
 
 A Workflow Action Turn follows one core path:
 
-1. Verify that every attached Workspace root is still a real directory at its
+1. Verify that the attached Workspace path is still a real directory at its
    recorded canonical path. If not, fail before creating a Turn.
 2. Resolve the local tools before the Turn exists. The Action starts from its
    static `tools=[...]` declaration, filters Workspace tools by access, and may
@@ -401,8 +410,11 @@ rollout is the canonical model-context and execution history. One writer per
 Session flushes each stable record before applying its SQLite projection;
 startup repairs only an incomplete final line and replays any records newer
 than the projection cursor. Its Artifacts are stored under that same Project's
-managed directory using content-hashed metadata records. The web client uses
-SSE for live deltas and refreshes durable views for lifecycle changes.
+managed directory using content-hashed metadata records. Durable SSE events
+carry entity references plus authoritative snapshots and the web client applies
+them incrementally. Assistant text deltas are broadcast-only and never enter
+SQLite or rollouts; a lagged subscriber explicitly resynchronizes from bounded
+authoritative views.
 
 At startup, every non-terminal Workflow is recovered. All Turns belong to a
 Workflow Action, so their recovery is driven by the immutable Workflow program

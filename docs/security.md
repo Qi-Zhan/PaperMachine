@@ -57,8 +57,8 @@ with, together with the SHA-256 of the Python DSL package used to validate it.
 Before every initial execution or recovery, Rust re-hashes both source and DSL
 runtime; a mismatch fails before Python starts or any effect is dispatched.
 
-The `project-summary` Agent does not receive PaperMachine's managed directory as
-a Workspace. Its Action declares exactly `read_project_home`,
+The ordinary `project-summary` Agent does not receive PaperMachine's managed
+directory as a Workspace. Its Action declares exactly `read_project_home`,
 `patch_project_home`, and `preview_project_home`; the host materializes those
 Project tools into that Action Turn's immutable ToolSet. They operate on a
 bounded managed draft keyed to that exact Workflow Action. Semantic patches use revision checks and stable block IDs;
@@ -83,8 +83,9 @@ into the parent Vue DOM.
 
 Every Session selects one of five access presets. `model_only` has no resource
 tools; `read_only` can only read the attached Workspace authorized for the
-Turn; `workspace` adds writes there and sandboxed commands; `research` adds hosted web search and
-controlled URL fetching; `full_access` allows host files and child-process
+Turn; `workspace` adds writes there and sandboxed commands; `research` authorizes
+controlled URL fetching and hosted web search when the selected model profile
+declares that capability; `full_access` allows host files and child-process
 network after explicit human grant. Even `full_access` commands remain inside a
 platform sandbox so PaperMachine-managed state can stay unreadable and
 unwritable. `ask_human` is not a model-visible tool and is available only as an
@@ -121,9 +122,9 @@ bounded, and unique across the whole Turn. The Agent validates the complete
 batch against prior history before emitting a tool-call event or beginning any
 execution; duplicates fail the model Step and cannot alias a durable effect.
 
-Before creating that Turn, the Store verifies that every attached root still
+Before creating that Turn, the Store verifies that the attached path still
 exists as a real directory at the canonical path recorded by the attachment.
-A removed root or a path replaced by a symlink fails before model sampling.
+A removed directory or a path replaced by a symlink fails before model sampling.
 Relocation is an explicit Project operation that creates a later attachment
 revision; it never mutates the immutable environment of an earlier Turn.
 

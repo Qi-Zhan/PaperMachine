@@ -3,7 +3,7 @@
 //! `b2dc8b3e4be4fe3a453d50e13835f707b258f15b`.
 //!
 //! PaperMachine keeps its own Project/Session records and compact JSONL item
-//! schema; it does not preserve Codex thread-store compatibility.
+//! schema with PaperMachine-owned entity and durability semantics.
 
 use crate::StoreError;
 use papermachine_protocol::ActiveTurnRolloutState;

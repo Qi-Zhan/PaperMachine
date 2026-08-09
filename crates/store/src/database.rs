@@ -77,8 +77,8 @@ impl Store {
         })
     }
 
-    /// Open one existing current-schema Project store. This path never creates
-    /// directories, databases, tables, or compatibility state.
+    /// Open one existing Project store only when its schema and managed layout
+    /// exactly match the current contract.
     pub fn open(managed_root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let managed_root = open_managed_root(managed_root.as_ref())?;
         let database = managed_root.join("state/project.db");

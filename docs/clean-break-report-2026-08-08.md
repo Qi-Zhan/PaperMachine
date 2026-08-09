@@ -66,8 +66,6 @@ Responses-compatible provider，在以下磁盘边界暂停进程并由父进程
 
 ## 真实 DeepSeek 强制重启
 
-完整机器可读证据见
-[`deepseek-recovery-dogfood-2026-08-08.json`](deepseek-recovery-dogfood-2026-08-08.json)。
 可重复入口为 `scripts/deepseek_recovery_dogfood.py`；脚本只从 ignored `.env` 向 server
 子进程传递凭证，不输出或写入凭证。
 

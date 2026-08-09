@@ -20,8 +20,8 @@ PaperMachine 已删除 Agent 级工具旁路，改为由 host 在每个 Turn 创
 - ToolRegistry 只处理 membership、dispatch、parallel policy 与 reconciliation，文件、
   网络、managed-state deny 和 sandbox 检查仍留在工具内部形成 defense in depth。
 
-当前数据库 schema 为 5。本轮没有迁移或兼容读取；旧 data dir 未改动，全部真实验证
-使用新建的临时 data dir。
+该发布点的数据库 schema 为 5；这是带日期的历史验证记录，不表示当前 schema 编号。
+本轮没有迁移或兼容读取；旧 data dir 未改动，全部真实验证使用新建的临时 data dir。
 
 ## Clean break
 

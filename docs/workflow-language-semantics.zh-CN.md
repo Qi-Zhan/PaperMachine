@@ -8,9 +8,9 @@
 | 术语 | 标识 | 语义 |
 |---|---|---|
 | `Project` | `ProjectId` | 由 PaperMachine 持久管理的研究世界，也是 Session、Workflow、skill、artifact、prompt 与 journal 的所有权根；它不是暴露给 Agent 的文件目录。 |
-| `Workspace` | `WorkspaceId` + revision | 挂载到 Project 的用户自有 canonical 文件系统根；Turn 只能通过实体化 runtime 权限操作它。Workspace 不是 Project 存储。 |
+| `Workspace` | `WorkspaceId` + revision | 挂载到 Project 的一个用户自有 canonical 文件系统目录；Turn 只能通过实体化 runtime 权限操作它。Workspace 不是 Project 存储。 |
 | `Session` | `SessionId` | 持久的多轮对话。来源为 `user` 或 `workflow_agent`，不存在 parent Session。 |
-| `Turn` | `TurnId` | Session 中的一次用户/模型交互。 |
+| `Turn` | `TurnId` | Session 中一次 Workflow Action 的模型执行边界；交互式 Action 可以把一条已验证的人类消息作为输入。 |
 | `AgentStep` | `StepId` | Turn 下可检查的 model、tool、workflow 或 system 步骤。 |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | 通过校验的 Python 源码及字面量 manifest；无 Project 表示 built-in。 |
 | `Workflow` | `WorkflowId` | Project 内对某个不可变 workflow 快照的一次执行，包含一份具体 `request`、校验后的 `params`、可选 run `instructions`、trigger 来源和启动上下文。 |
@@ -43,7 +43,7 @@
 | I10 | Python 可以请求 effect，但不能直接、权威地修改领域状态。 |
 | I11 | 在同一个 Workflow 内，一个逻辑 effect path 永久绑定到一种精确的 kind 与 payload。 |
 | I12 | Workflow 的 `request`、`params`、`instructions`、trigger、启动配置与启动上下文在 run 创建后不可变。 |
-| I13 | Project managed path 与挂载的 Workspace root 永不重叠；删除 Project 永不删除 Workspace 文件。 |
+| I13 | Project managed path 与各 Project Workspace 目录永不重叠或互相嵌套；删除 Project 永不删除 Workspace 文件。 |
 | I14 | 每个 Turn 都快照一个 Workspace attachment revision 和实体化权限 hash；后续 relocation 或权限修改只影响之后的 Turn。 |
 
 UI 可以在视觉上把 Agent Session 分组到某个 Workflow 下面，但这不会
@@ -106,8 +106,8 @@ provenance。通用 Workflow cancel 对 `interactive-agent` 与其他 Workflow �
 | `model_only` | 无 | 无 | 无 | 无。 |
 | `read_only` | 只读该 Turn 获准操作的挂载 Workspace | 无 | 无 | `read_file`。 |
 | `workspace` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | 无 | `read_file`、`write_file`、`exec_command`。 |
-| `research` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | server-hosted web search 与受控公共 HTTPS fetch | Workspace 工具、`fetch_url`、托管 web search。 |
-| `full_access` | 除 PaperMachine managed state 外的宿主机文件系统 | 仍使用平台 sandbox | 子进程网络及 server-hosted 工具 | 所有已注册工具与托管 web search。 |
+| `research` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | 受控公共 HTTPS fetch；仅所选 model profile 声明能力时提供 hosted web search | Workspace 工具、`fetch_url` 与按能力开放的 hosted web search。 |
+| `full_access` | 除 PaperMachine managed state 外的宿主机文件系统 | 仍使用平台 sandbox | 子进程网络及 server-hosted 工具 | 所有 access 允许的 Workspace 工具与按能力开放的 hosted web search。 |
 
 Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
 `access=` 覆盖；默认值是 `research`。启动器选择的 Workflow 档位是整个 run

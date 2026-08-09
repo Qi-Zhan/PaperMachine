@@ -8,9 +8,9 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | Term | Identity | Semantics |
 |---|---|---|
 | `Project` | `ProjectId` | PaperMachine-managed persistent research world and ownership root for Sessions, Workflows, skills, artifacts, prompts, and journals. It is not a filesystem directory exposed to an Agent. |
-| `Workspace` | `WorkspaceId` + revision | User-owned canonical filesystem roots attached to a Project. A Turn may operate them only through its materialized runtime authorization. Workspace is not Project storage. |
+| `Workspace` | `WorkspaceId` + revision | One user-owned canonical filesystem directory attached to a Project. A Turn may operate it only through its materialized runtime authorization. Workspace is not Project storage. |
 | `Session` | `SessionId` | Durable multi-turn conversation. It has `user` or `workflow_agent` origin, never a parent Session. |
-| `Turn` | `TurnId` | One user/model interaction inside a Session. |
+| `Turn` | `TurnId` | One Workflow Action model-execution boundary inside a Session. An interactive Action may carry a verified human message as its input. |
 | `AgentStep` | `StepId` | Inspectable model, tool, workflow, or system step under a Turn. |
 | `WorkflowProgram` | `(project_id?, slug, sha256)` | Validated Python source plus literal manifest. A missing Project denotes a built-in. |
 | `Workflow` | `WorkflowId` | One execution of an immutable workflow snapshot inside a Project, with one concrete `request`, validated `params`, optional run `instructions`, trigger provenance, and launch context. |
@@ -43,7 +43,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | I10 | Python may request effects but cannot authoritatively mutate domain state. |
 | I11 | Within one Workflow, a logical effect path is permanently bound to one exact kind and payload. |
 | I12 | Workflow `request`, `params`, `instructions`, trigger, launch configuration, and launch context never mutate after run creation. |
-| I13 | Project-managed paths and attached Workspace roots never overlap; deleting a Project never deletes Workspace files. |
+| I13 | Project-managed paths and Project Workspace directories never overlap or nest; deleting a Project never deletes Workspace files. |
 | I14 | Every Turn snapshots one Workspace attachment revision and one materialized authorization hash; later relocation or permission changes affect only later Turns. |
 
 The UI may visually group Agent Sessions beneath a Workflow. This does not
@@ -117,8 +117,8 @@ capabilities:
 | `model_only` | None | None | None | None. |
 | `read_only` | Read the attached Workspace authorized by the Turn | None | None | `read_file`. |
 | `workspace` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | None | `read_file`, `write_file`, `exec_command`. |
-| `research` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | Server-hosted web search and controlled public-HTTPS fetch | Workspace tools, `fetch_url`, hosted web search. |
-| `full_access` | Read/write host filesystem except PaperMachine-managed state | Platform sandbox remains active | Child network plus server-hosted tools | All registered tools and hosted web search. |
+| `research` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | Controlled public-HTTPS fetch; hosted web search only when the selected model profile declares it | Workspace tools, `fetch_url`, and capability-gated hosted web search. |
+| `full_access` | Read/write host filesystem except PaperMachine-managed state | Platform sandbox remains active | Child network plus server-hosted tools | All access-permitted Workspace tools and capability-gated hosted web search. |
 
 The profile is declared with `access = "research"` on an Agent class or with an
 `access=` constructor override. `research` is the default. The launcher's

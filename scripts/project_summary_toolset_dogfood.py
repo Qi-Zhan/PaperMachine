@@ -87,8 +87,10 @@ def model_request_metadata(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def project_artifacts(api: Api, project_id: str) -> list[dict[str, Any]]:
-    return api.request("GET", f"/api/projects/{project_id}")["artifacts"]
+def canonical_project_home(api: Api, project_id: str) -> dict[str, Any] | None:
+    return api.request("GET", f"/api/projects/{project_id}").get(
+        "project_home_artifact"
+    )
 
 
 def artifact_content(api: Api, artifact_id: str) -> str:
@@ -315,6 +317,9 @@ def main() -> int:
             raise RuntimeError(
                 "same Summary declaration produced different ToolSet hashes"
             )
+        canonical_home = canonical_project_home(api, project["id"])
+        if not canonical_home or canonical_home["id"] != second["page_artifact_id"]:
+            raise RuntimeError("Project overview does not reference the refreshed page")
 
         evidence.update(
             {
@@ -322,7 +327,7 @@ def main() -> int:
                 "project_id": project["id"],
                 "first_write_glm": first,
                 "existing_page_refresh_deepseek": second,
-                "project_artifact_count": len(project_artifacts(api, project["id"])),
+                "canonical_page_artifact_id": canonical_home["id"],
                 "assertions": {
                     "fresh_data_dir": True,
                     "one_attempt_per_summary": True,

@@ -18,8 +18,8 @@ deleted or rewritten as part of Project-state replacement.
 - Project is the sole ownership root for Sessions, Workflows, Artifacts,
   prompts, skills, human requests, and runtime journals.
 - Project state lives only below PaperMachine's managed data directory.
-- Workspace is an attachment containing one or more canonical filesystem
-  roots. PaperMachine creates no hidden state inside those roots.
+- Workspace is an attachment containing one canonical filesystem directory.
+  PaperMachine creates no hidden state inside it.
 - Removing Project state never removes Workspace files. A missing Workspace
   makes execution unavailable but does not make the Project disappear.
 - `goal` is an ordinary built-in Python Workflow. The Rust server, scheduler,
@@ -36,11 +36,11 @@ capabilities. The Turn persists the environment and its policy hash.
 ```text
 TurnEnvironmentSnapshot
   workspace attachment ID and revision
-  canonical roots and cwd
+  canonical Workspace path and cwd
   materialized filesystem policy
   local-process network policy
   Workspace tool and hosted-search capability ceilings
-  immutable protected roots
+  immutable protected managed paths
   environment-variable policy
 ```
 
@@ -67,7 +67,7 @@ unwritable by Agent tools. Below `full_access`, writes to `.git`, `.agents`, and
 not readable. `research` authorizes controlled server tools such as
 `fetch_url`; it does not give child processes unrestricted network access.
 
-Path authorization must be anchored to a Workspace root and remain valid at
+Path authorization must be anchored to the Workspace path and remain valid at
 the file operation, not only during an earlier string or canonical-path check.
 Absolute-path escape, parent traversal, symlink escape, and replacement races
 must fail closed.
@@ -103,7 +103,9 @@ data_dir/
     state/project.db
     rollouts/
     artifacts/
-    runtime/
+    workflow-runtime/           disposable Python process scratch
+    runtime/sandboxes/          disposable per-Turn process scratch
+    runtime/skill-snapshots/    immutable Turn-referenced skill packages
   staging/
   trash/
 ```
@@ -111,11 +113,14 @@ data_dir/
 Startup scans managed Project directories and builds an in-memory catalog.
 Project creation initializes state under `staging/` and atomically renames it
 into `projects/`. Project removal atomically renames managed state into
-`trash/` before asynchronous deletion. Workspace roots are never targets of
+`trash/` before asynchronous deletion. The Workspace path is never a target of
 those operations.
 
-The Store has one current schema. Integrity checks and backups protect that
-current-format state.
+The Store has one current schema. Artifact files are written and synced before
+their database records commit. Runtime startup removes unreferenced Artifact
+files and fails closed if a durable Artifact is missing or its hash changed.
+Python Workflow directories and per-Turn sandboxes are disposable scratch;
+durable recovery state remains in SQLite, rollouts, and immutable snapshots.
 
 ## Session journal and projection
 
