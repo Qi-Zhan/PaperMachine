@@ -4727,8 +4727,11 @@ fn terminalize_workflow_resources_tx(
     let now = now.to_rfc3339();
     transaction.execute(
         "UPDATE control_messages
-         SET status = 'cancelled', updated_at = ?2,
-             document_json = json_set(document_json, '$.status', 'cancelled')
+         SET status = 'applied', updated_at = ?2,
+             document_json = json_set(
+                 json_set(document_json, '$.status', 'applied'),
+                 '$.applied_at', ?2
+             )
          WHERE workflow_id = ?1 AND status IN ('pending', 'claimed')",
         params![workflow_id.to_string(), now],
     )?;

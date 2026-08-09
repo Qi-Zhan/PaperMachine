@@ -103,7 +103,6 @@ data_dir/                       application-global state
     artifacts/
     workflow-runtime/           disposable Python process scratch
     runtime/sandboxes/          disposable per-Turn process scratch
-    runtime/skill-snapshots/    immutable Turn-referenced skill packages
     prompts/
     workflows/
     skills/
@@ -137,23 +136,33 @@ files inside the Workspace.
 Relocation changes only the Workspace attachment. Removal atomically renames
 managed state into `trash/` before asynchronous deletion and never deletes
 Workspace files. Relocation or removal is rejected while that Project has
-non-terminal Workflow work.
+non-terminal Workflow work. Project runtime slots use `Open`, `Closing`, and
+`Retired` states plus read/write leases so work cannot race a second active-work
+check or a Store shutdown.
 
-At startup the server scans `projects/`. Every directory name must be a
-ProjectId, every Store must use the one current schema, and its database must
-contain exactly one matching Project row. That row is authoritative; there is
-no second Project document or global SQLite catalog. The server builds an
-in-memory runtime catalog and independently checks whether each attached
-Workspace is available. A missing Workspace does not make the managed Project
-disappear; it can be reattached. Each Project has its own Store, Workflow
-catalog, Session runtime, and Workflow scheduler; process-wide semaphores still
-bound concurrent work across Projects.
+At startup the server scans `projects/`. A valid directory name is a ProjectId,
+its Store uses the one current schema, and its database contains exactly one
+matching Project row. That row is authoritative; there is no second Project
+document or global SQLite catalog. A damaged unrelated Project is reported and
+skipped rather than blocking the valid catalog. Each loaded Project gets one
+bounded asynchronous StoreHandle backed by a dedicated blocking thread, plus
+its Workflow catalog, Session runtime, and scheduler. The server builds an
+entity-to-Project index once and updates it from Store ownership events; API
+routing never falls back to scanning every Project. A missing Workspace does
+not make managed history disappear and can be reattached. Process-wide
+semaphores still bound work across Projects.
 
 When a Project runtime is loaded, Artifact files are reconciled against its
 database before work is accepted: uncommitted orphan files are removed, while a
 missing or hash-mismatched durable Artifact fails closed. Workflow process
 directories and Turn sandboxes are recreated from durable state and removed
 after use; they never participate in recovery.
+
+Managed prompt, Workflow, Skill, Project-home, and Artifact paths use one
+capability-rooted ManagedFs implementation. It performs bounded nofollow
+regular-file reads, bounded directory traversal, atomic replace, directory
+fsync, and root-confined deletion instead of repeating path logic at each call
+site.
 
 The HTTP representation keeps this boundary structural. Project creation and
 relocation accept `workspace: { path }`; Project listings expose that attachment
@@ -225,7 +234,7 @@ PaperMachine server ------------+
             host ToolCatalog               |
                  +-> execution sandbox ----+
                                |
-                 in-memory catalog + per-Project Store/artifacts
+                 ownership index + per-Project StoreHandle/artifacts
 ```
 
 Before materialization, Rust verifies the source hash and the hash of every
@@ -233,8 +242,10 @@ Python DSL source file against the durable Run snapshot. The Python runner then
 loads that exact `workflow.py`, executes its async
 entrypoint, and sends JSONL effect requests over stdin/stdout. Requests may be
 handled concurrently, while per-Agent gates serialize actions in the same
-Session. Python stdout is reserved for the protocol; ordinary prints are sent
-to stderr and captured with a size limit.
+Session. Frames are bounded to 16 MiB, at most 64 effects may be in flight, and
+both response channel and dispatch concurrency are bounded. Python stdout is
+reserved for the protocol; ordinary prints are sent to stderr and captured
+with a size limit. Reader, writer, or handler failure fails the run immediately.
 
 ## Session execution
 
@@ -242,24 +253,24 @@ A Workflow Action Turn follows one core path:
 
 1. Verify that the attached Workspace path is still a real directory at its
    recorded canonical path. If not, fail before creating a Turn.
-2. Resolve the local tools before the Turn exists. The Action starts from its
-   static `tools=[...]` declaration, filters Workspace tools by access, and may
-   receive declared Project tools. Atomically append the Turn with the sorted
-   definitions and SHA-256 ToolSetSnapshot, immutable Workspace/authorization
-   environment, Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
-   whether input is a direct/verified human message or program-generated
-   Workflow work.
+2. Resolve the model route and local tools before the Turn exists. Atomically
+   append the Turn with one immutable ModelRouteSnapshot, sorted definitions
+   and SHA-256 ToolSetSnapshot, Workspace/authorization environment, and
+   ordered PromptSnapshot. Enabled Skills contribute their complete resolved
+   instructions to that prompt snapshot. `Turn.origin` records whether input is
+   a verified human message or program-generated Workflow work.
 3. Reconstruct canonical model context by replaying that append-only rollout.
 4. Render runtime, Project, Workflow, Agent, enabled-skill, and control
    prompt layers into the exact provider instructions.
-5. Stream a Responses API sample. Deltas remain ephemeral; completed model
-   items and cursor checkpoints cross the rollout durability barrier before
-   their SQLite projections. Each Session
+5. Stream and validate a Responses API sample. Deltas and ModelStepStarted are
+   ephemeral. Stable response items, usage, model-step cursor, and any terminal
+   candidate cross the rollout durability barrier before completed Step/UI
+   projection or tool dispatch. Each Session
    retains one sequential WebSocket continuation chain; unsupported providers
    fall back to HTTP SSE.
 6. Validate that every provider tool-call ID is bounded and unique across the
-   Turn. Only then execute requested tools, append stable call/result and Step
-   lifecycle facts, project them, and sample again.
+   Turn. Persist each FunctionCall before dispatch. After execution, persist its
+   FunctionCallOutput before Tool Step/UI completion and the next sample.
 7. Finish the Turn by journaling its output, usage, and terminal state. SQLite
    never stores a cumulative context copy in the Turn document. If a
    provider reports an incomplete response after consuming tokens, retry usage
@@ -283,9 +294,12 @@ it is `<data_dir>/config.toml`; development may pass the repository's
 `papermachine.toml` explicitly. A provider owns
 the endpoint, credential environment-variable name, transport policy, cache
 mode, and default reasoning policy. A model profile maps a stable user-facing
-ID to one provider's concrete model ID and context window. Sessions and workflow
-Agents store the profile ID; `ModelRouter` resolves it immediately before the
-request and records profile, provider, and upstream model in Step metadata.
+ID to one provider's concrete model ID and context window. Before Turn creation,
+`ModelRouter` resolves an immutable ModelRouteSnapshot containing profile,
+provider, upstream model, context window, capabilities, final reasoning effort,
+and a SHA-256 over relevant non-secret provider/model configuration. Every
+sample and hosted-tool decision uses that snapshot. Recovery fails closed if
+the configured route no longer matches; API keys are never snapshotted.
 
 This keeps workflow source portable: an Agent can inherit the Workflow's
 profile or explicitly select another configured profile, while the same server
@@ -375,6 +389,11 @@ interruption text in an inspectable `control` prompt layer.
 hosted tool definitions from that request instead of relying only on
 `tool_choice=none`.
 
+Each control moves from `pending` to `claimed` for one target Turn. It becomes
+`applied` only in the canonical context or terminal transaction that consumes
+it. If the process disappears before that checkpoint, recovery lets the same
+Turn reclaim it rather than dropping or duplicating the instruction.
+
 Only explicit Workflow code can create a typed HumanRequest through the
 `ask_human` DSL effect. Models do not receive an `ask_human` tool. An Action may
 recommend escalation in its typed result, but the Workflow decides whether to
@@ -400,6 +419,13 @@ A later `set_access` upgrade within the fixed Workflow ceiling suspends on a
 boolean HumanRequest; an attempt above the ceiling fails. Downgrades do not
 require approval. Direct Session changes are accepted only between Turns, and
 the UI separately confirms `full_access`.
+
+`read_only`, `workspace`, and `research` may read ordinary host files;
+`workspace` and `research` may write only inside the Workspace. `model_only`
+has no filesystem access. `full_access` may write ordinary host paths after
+confirmation. Managed PaperMachine roots remain unreadable and unwritable for
+every profile, and non-full profiles additionally deny credential paths. Direct
+file tools and command sandboxes consume the same materialized policy.
 
 ## Persistence and recovery
 
@@ -430,16 +456,14 @@ Action Turns append context mutations, usage, completed-model-step and hosted
 search cursors, and a terminal candidate message to the Session rollout.
 Ordinary additions are append records; compaction and trimming are explicit
 replacement records that do not mutate prior entries. Every local Tool Step
-persists its provider call ID, effect disposition, and the durability boundary
-between `prepared` and `executing`. Recovery keeps the same ActionInvocation,
-ActionAttempt, and Turn. It reuses completed results; executes a still-prepared
-call after durably marking it `executing`; replays an executing `pure` or
-`idempotent` call with the same effect ID; asks a `reconcilable` tool to inspect
-external state first; and never automatically replays an executing `unknown`
-call. The last case becomes `execution_unknown` and is supplied to the next
-model sample as a real function-call output. This avoids repeating a
-checkpointed completed sample or counting the Action start twice. The effect
-journal is returned in Workflow views and is visible in the Session inspector.
+uses only the provider `tool_call_id` to pair canonical call and output.
+Recovery keeps the same ActionInvocation, ActionAttempt, and Turn. A call with
+an output repairs any incomplete Step/UI projection. A call without an output
+receives the stable JSON string output `"aborted"`, its running Step becomes
+aborted, and it is never dispatched. The same Agent then continues and must
+observe durable reality before choosing whether to make a new call. Workflow
+host effects retain their separate deterministic effect journal and replay
+contracts; model tools do not use it.
 
 The Project Page is itself backed by ordinary Workflow data. A built-in
 `project-summary` run reads a bounded Rust-produced Project snapshot and
@@ -452,8 +476,9 @@ draft for as many model/tool steps as it needs and ends naturally when it is
 satisfied; no Workflow-level review state machine or evaluator Action decides
 for it.
 
-After that Action completes, one replay-safe publication effect compares the
-draft base to the Project's canonical home revision and atomically stores the
+After that Action completes, the awaited `_ActionCall` carries its exact first
+ActionInvocation ID. One replay-safe `publish_project_home(action=call)` effect
+compares the draft base to the Project's canonical home revision and atomically stores the
 block source, semantic HTML Artifact, and canonical pointer. A stale concurrent
 draft fails closed; an unchanged draft reuses the current revision. The UI fetches
 that canonical page Artifact, removes active content, inline styles, forms, and
@@ -475,6 +500,10 @@ Project-local skills live at:
 ```text
 <data-dir>/projects/<project-id>/skills/<slug>/SKILL.md
 ```
+
+They are instructions-only. Turn creation resolves the full `SKILL.md` text
+into PromptSnapshot; recovery does not read the live file, and no skill package,
+script, or asset directory is copied into runtime state.
 
 The user-editable Project system prompt lives at:
 

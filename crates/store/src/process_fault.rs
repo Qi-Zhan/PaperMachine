@@ -6,7 +6,13 @@
 //! terminates the server.
 
 pub const ROLLOUT_APPENDED_BEFORE_PROJECTION: &str = "rollout_appended_before_projection";
+pub const FUNCTION_CALL_RECEIVED_BEFORE_CHECKPOINT: &str =
+    "function_call_received_before_checkpoint";
 pub const FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH: &str = "function_call_committed_before_dispatch";
+pub const TOOL_EFFECT_COMPLETED_BEFORE_OUTPUT_CHECKPOINT: &str =
+    "tool_effect_completed_before_output_checkpoint";
+pub const FUNCTION_CALL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION: &str =
+    "function_call_output_committed_before_step_projection";
 pub const MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION: &str =
     "model_output_committed_before_step_projection";
 pub const TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT: &str =

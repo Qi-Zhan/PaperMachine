@@ -1232,6 +1232,31 @@ impl AgentEventSink for SessionAgentEventSink {
                     }
                 };
                 let model_advanced = completed_model_steps > checkpoint.completed_model_steps;
+                let (contains_function_call, contains_function_call_output) = match &mutation {
+                    ModelContextMutation::Append { items }
+                    | ModelContextMutation::Replace { items, .. } => (
+                        items.iter().any(|item| {
+                            matches!(item, ModelInputItem::FunctionCall { .. })
+                                || matches!(item, ModelInputItem::ResponseItem { item }
+                                    if item.get("type").and_then(Value::as_str)
+                                        == Some("function_call"))
+                        }),
+                        items
+                            .iter()
+                            .any(|item| matches!(item, ModelInputItem::FunctionCallOutput { .. })),
+                    ),
+                    ModelContextMutation::Unchanged => (false, false),
+                };
+                if contains_function_call {
+                    papermachine_store::process_fault::reach_process_fault_boundary(
+                        papermachine_store::process_fault::FUNCTION_CALL_RECEIVED_BEFORE_CHECKPOINT,
+                    );
+                }
+                if contains_function_call_output {
+                    papermachine_store::process_fault::reach_process_fault_boundary(
+                        papermachine_store::process_fault::TOOL_EFFECT_COMPLETED_BEFORE_OUTPUT_CHECKPOINT,
+                    );
+                }
                 let turn_id = self.turn_id;
                 self.store
                     .call(move |store| {
@@ -1256,6 +1281,11 @@ impl AgentEventSink for SessionAgentEventSink {
                 if model_advanced {
                     papermachine_store::process_fault::reach_process_fault_boundary(
                         papermachine_store::process_fault::MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION,
+                    );
+                }
+                if contains_function_call_output {
+                    papermachine_store::process_fault::reach_process_fault_boundary(
+                        papermachine_store::process_fault::FUNCTION_CALL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION,
                     );
                 }
                 Ok(())

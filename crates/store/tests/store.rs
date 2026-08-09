@@ -742,16 +742,14 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
             .status,
         HumanRequestStatus::Cancelled
     );
-    assert_eq!(
-        store
-            .list_control_messages(run.id)
-            .expect("controls should load")
-            .into_iter()
-            .find(|item| item.id == control.id)
-            .expect("control should exist")
-            .status,
-        ControlMessageStatus::Cancelled
-    );
+    let terminal_control = store
+        .list_control_messages(run.id)
+        .expect("controls should load")
+        .into_iter()
+        .find(|item| item.id == control.id)
+        .expect("control should exist");
+    assert_eq!(terminal_control.status, ControlMessageStatus::Applied);
+    assert!(terminal_control.applied_at.is_some());
     assert_eq!(
         store.get_timer(timer.id).expect("timer should load").status,
         TimerStatus::Cancelled

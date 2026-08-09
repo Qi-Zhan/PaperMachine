@@ -22,7 +22,7 @@ Python DSL. It describes what the runtime does, not a future graphical syntax.
 | `Team` | `TeamId` | Named mutable set of Agent instances. |
 | `AgentRelation` | `RelationId` | Directed typed relation used as action context. |
 | `TaskScope` | `TaskScopeId` | Durable nested grouping for related action invocations. |
-| `WorkflowTimer` | `TimerId` | Periodic trigger state: interval, policy, status, fire count, and deadlines. |
+| `WorkflowTimer` | `TimerId` | Coalescing periodic trigger state: interval, status, fire count, and deadlines. |
 | `Channel` / `Signal` | `ChannelId` / `SignalId` | Named stream and ordered durable values. |
 | `HumanRequest` | `HumanRequestId` | Typed question created by Workflow control flow; its answer resumes the suspended workflow. |
 | `ControlMessage` | `ControlMessageId` | Pending `guide`, `finish`, or `interrupt` targeted at a Session/action boundary. |
@@ -115,9 +115,9 @@ capabilities:
 | Profile | Files | Commands | Network | Model-visible resource tools |
 |---|---|---|---|---|
 | `model_only` | None | None | None | None. |
-| `read_only` | Read the attached Workspace authorized by the Turn | None | None | `read_file`. |
-| `workspace` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | None | `read_file`, `write_file`, `exec_command`. |
-| `research` | Read/write the attached Workspace authorized by the Turn | Sandboxed, child network denied | Controlled public-HTTPS fetch; hosted web search only when the selected model profile declares it | Workspace tools, `fetch_url`, and capability-gated hosted web search. |
+| `read_only` | Read ordinary host files except managed/credential denies | None | None | `read_file`. |
+| `workspace` | Read ordinary host files; write only the Workspace | Sandboxed, child network denied | None | `read_file`, `write_file`, `exec_command`. |
+| `research` | Read ordinary host files; write only the Workspace | Sandboxed, child network denied | Controlled public-HTTPS fetch; hosted web search only when the selected model profile declares it | Workspace tools, `fetch_url`, and capability-gated hosted web search. |
 | `full_access` | Read/write host filesystem except PaperMachine-managed state | Platform sandbox remains active | Child network plus server-hosted tools | All access-permitted Workspace tools and capability-gated hosted web search. |
 
 The profile is declared with `access = "research"` on an Agent class or with an
@@ -157,6 +157,11 @@ runtime primitive. A Workflow may expose such choices through arbitrary
 `params_schema` fields using `format: "model-profile"`.
 This DSL inheritance occurs only after launch; the HTTP launch itself requires
 an explicit non-empty model profile and access ceiling.
+
+Before each Turn, the router freezes the exact profile, provider, upstream
+model, context window, capabilities, final reasoning effort, and non-secret
+configuration SHA-256 in ModelRouteSnapshot. Every sample in that Turn uses the
+same route; recovery fails closed on drift.
 
 ## 5. Action, attempt, and Turn semantics
 
@@ -208,6 +213,10 @@ contain the run `instructions`, Action contract, and relevant directed
 relations. It never implicitly contains the run request or launch-context
 snapshot. Interruption/retry guidance belongs to the control layer. See
 [prompt model](prompt-model.md).
+
+Skills are instructions-only. Turn creation freezes their complete resolved
+text in PromptSnapshot; recovery neither reads live Skill files nor restores a
+scripts/assets package.
 
 | Invocation/attempt status | Meaning |
 |---|---|
@@ -335,7 +344,8 @@ Sampling, dispatch, pause/resume, and recovery rebuild the same exact Registry
 from that snapshot. Missing executors or changed definitions fail closed.
 `project-summary` declares only `read_project_home`, `patch_project_home`, and
 `preview_project_home`, then publishes with one replay-safe
-`publish_project_home(...)` effect after the Agent Action ends. Publication uses
+`publish_project_home(action=call)` effect after that exact `_ActionCall` has
+been awaited. The call retains its first ActionInvocation ID. Publication uses
 the Project's canonical home revision as a CAS base; stale drafts fail and
 unchanged drafts reuse the existing Artifact. Reserved home roles cannot be
 claimed through `publish_artifact(...)`.
@@ -352,8 +362,10 @@ Control messages are asynchronous:
 | cancel | Changes run to `cancelled` and propagates cancellation to Python, model, and tool work. |
 | Stop Turn | Cancels only that active Turn and its model/tool Steps. It does not ask the model to synthesize an answer. If it belongs to a Workflow Action, the effect returns a cancellation error for ordinary Workflow error handling. |
 
-Guide/finish/interrupt delivery is durable and at-most-once at the Store level: pending
-messages are marked applied when a checkpoint consumes them.
+Guide/finish/interrupt delivery is durable. A message moves `pending ->
+claimed` for one target Turn and becomes `applied` only in the canonical
+context or terminal transaction that consumes it. A pre-checkpoint crash lets
+that same Turn reclaim the message.
 
 ## 10. Channels and signals
 
@@ -368,7 +380,7 @@ explicit.
 
 ## 11. Timers
 
-`@every(seconds=..., policy=..., name=...)` creates a TimerHandle and starts a
+`@every(seconds=..., name=...)` creates a TimerHandle and starts a
 background loop:
 
 1. register or reuse an active timer by name;
@@ -377,15 +389,10 @@ background loop:
 4. await the callback;
 5. repeat.
 
-| Policy | Intended scheduling meaning | Current executor behavior |
-|---|---|---|
-| `coalesce` | Collapse missed ticks into one run. | One callback per returned wait. |
-| `skip` | Skip a tick when prior work is still running. | Recorded, not yet behaviorally distinct. |
-| `queue` | Preserve every tick as queued work. | Recorded, not yet behaviorally distinct. |
-
 Because the timer loop awaits the callback, one TimerHandle does not overlap its
-own callback. A callback action creates a new Turn each time. Active timers are
-marked completed when the workflow completes.
+own callback. Missed firings coalesce until the Workflow observes the timer. A
+callback action creates a new Turn each time. Active timers are marked completed
+when the workflow completes.
 
 ## 12. Completion, failure, and observability
 
@@ -434,19 +441,15 @@ requests converge on the original durable object. Reaching one path with a
 different request fails closed.
 
 An unfinished Action reuses its ActionInvocation, latest non-terminal Attempt,
-and attached Turn. Its Session rollout stores append-or-replace model-context
-mutations, cumulative usage, completed-model-step and hosted-search cursors,
-plus any terminal candidate message; the Turn's SQLite document does not copy
-the cumulative context. Each local Tool Step stores its provider call ID,
-effect disposition, and `prepared`/`executing` boundary. Recovery replays the
-rollout and reuses the exact output of a completed Tool Step. A prepared call
-has not crossed the external-effect boundary and may execute after recovery
-marks it executing. For an executing call, `pure` and `idempotent` tools may
-replay with the same effect ID, `reconcilable` tools inspect external state
-before returning a result or retrying, and `unknown` tools are never replayed
-automatically. The latter becomes an explicit `execution_unknown` function
-result. A Workflow-level `ask_human` effect is itself journaled and continues
-waiting on its deterministic HumanRequest.
+and attached Turn. Its Session rollout stores append-or-replace model context,
+usage, model/search cursors, and terminal candidates. A validated FunctionCall
+is canonical before dispatch; its FunctionCallOutput is canonical before Step
+completion and another sample. Recovery repairs projection for call/output
+pairs. A call without output receives exactly one `"aborted"` output and is
+never dispatched again; the same Agent continues and observes durable reality
+before deciding whether to issue a new call. A Workflow-level `ask_human`
+effect remains separately journaled and waits on its deterministic
+HumanRequest.
 
 Human, timer, and signal waits additionally support process-free suspension.
 The Python effect client tracks all pending futures; only when every pending

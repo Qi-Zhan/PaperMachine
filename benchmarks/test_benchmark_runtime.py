@@ -8,6 +8,7 @@ from benchmark_runtime import (
     default_server_binary,
     drive_phase,
     ensure_project,
+    launch_workflow,
     reopen_terminal_failures,
     runtime_artifact_fingerprints,
     server_command,
@@ -17,6 +18,45 @@ from benchmark_runtime import (
 
 
 class BenchmarkRuntimeTests(unittest.TestCase):
+    def test_launch_workflow_owns_the_shared_api_contract(self) -> None:
+        class FakeApi:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def post(self, path, payload):
+                self.requests.append((path, payload))
+                return {"id": f"run-{len(self.requests)}"}
+
+        api = FakeApi()
+        result = launch_workflow(
+            api,
+            "project-1",
+            program_slug="program",
+            request="request",
+            params={"value": 1},
+            model="model",
+            access="research",
+        )
+        self.assertEqual(result["workflow_id"], "run-1")
+        self.assertIn("launched_at", result)
+        self.assertEqual(
+            api.requests,
+            [
+                (
+                    "/projects/project-1/workflows",
+                    {
+                        "program_slug": "program",
+                        "request": "request",
+                        "params": {"value": 1},
+                        "model": "model",
+                        "access": "research",
+                        "enabled_skills": [],
+                        "context_mode": "fresh",
+                    },
+                )
+            ],
+        )
+
     def test_workflow_wall_time_includes_process_downtime(self) -> None:
         run = {
             "created_at": "2026-08-07T00:00:00Z",

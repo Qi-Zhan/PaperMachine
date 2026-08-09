@@ -22,7 +22,7 @@
 | `Team` | `TeamId` | 一组可动态修改的具名 Agent instance。 |
 | `AgentRelation` | `RelationId` | 会作为 action 上下文注入的有向、带类型关系。 |
 | `TaskScope` | `TaskScopeId` | 对相关 action invocation 的持久、可嵌套分组。 |
-| `WorkflowTimer` | `TimerId` | 定时触发状态：interval、policy、status、fire count 与 deadline。 |
+| `WorkflowTimer` | `TimerId` | coalesce 定时触发状态：interval、status、fire count 与 deadline。 |
 | `Channel` / `Signal` | `ChannelId` / `SignalId` | 具名数据流及其中有序、持久的值。 |
 | `HumanRequest` | `HumanRequestId` | 由 Workflow 控制流创建的带类型问题；回答后恢复暂停的 workflow。 |
 | `ControlMessage` | `ControlMessageId` | 发往某个 Session/action 边界的待处理 `guide`、`finish` 或 `interrupt`。 |
@@ -104,9 +104,9 @@ provenance。通用 Workflow cancel 对 `interactive-agent` 与其他 Workflow �
 | 档位 | 文件 | 命令 | 网络 | Model 可见的资源工具 |
 |---|---|---|---|---|
 | `model_only` | 无 | 无 | 无 | 无。 |
-| `read_only` | 只读该 Turn 获准操作的挂载 Workspace | 无 | 无 | `read_file`。 |
-| `workspace` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | 无 | `read_file`、`write_file`、`exec_command`。 |
-| `research` | 读写该 Turn 获准操作的挂载 Workspace | 沙箱执行，子进程禁止联网 | 受控公共 HTTPS fetch；仅所选 model profile 声明能力时提供 hosted web search | Workspace 工具、`fetch_url` 与按能力开放的 hosted web search。 |
+| `read_only` | 读取普通宿主机文件，但 managed/credential 路径除外 | 无 | 无 | `read_file`。 |
+| `workspace` | 读取普通宿主机文件；只在 Workspace 内写入 | 沙箱执行，子进程禁止联网 | 无 | `read_file`、`write_file`、`exec_command`。 |
+| `research` | 读取普通宿主机文件；只在 Workspace 内写入 | 沙箱执行，子进程禁止联网 | 受控公共 HTTPS fetch；仅所选 model profile 声明能力时提供 hosted web search | Workspace 工具、`fetch_url` 与按能力开放的 hosted web search。 |
 | `full_access` | 除 PaperMachine managed state 外的宿主机文件系统 | 仍使用平台 sandbox | 子进程网络及 server-hosted 工具 | 所有 access 允许的 Workspace 工具与按能力开放的 hosted web search。 |
 
 Agent class 用 `access = "research"` 声明权限，也可以在构造函数中用
@@ -141,6 +141,11 @@ Agent class 或构造函数可以设置 `model`。空值继承 Workflow Run 启�
 `format: "model-profile"`，向用户暴露模型选择。
 这种继承只属于启动后的 DSL 语义；HTTP launch 本身必须显式提供非空 model profile
 与 access ceiling。
+
+每个 Turn 创建前，router 会把准确的 profile、provider、upstream model、context
+window、capabilities、最终 reasoning effort，以及非秘密配置的 SHA-256 固化进
+ModelRouteSnapshot。该 Turn 的全部 sample 都使用同一路由；恢复时发生 drift 会
+fail closed。
 
 ## 5. Action、Attempt 与 Turn 语义
 
@@ -182,6 +187,9 @@ Workflow、Agent/Session、Skills、runtime control。Workflow layer 可包含�
 的 `instructions`、Action contract 与该 Agent 有关的有向关系，但不会隐式包含
 run request 或启动上下文快照；interrupt/retry guidance 属于 control layer。详见
 [prompt 模型](prompt-model.md)。
+
+Skills 只提供 instructions。Turn 创建时会把完整解析文本固化进 PromptSnapshot；
+恢复既不读取 live Skill 文件，也不会恢复 scripts/assets package。
 
 | Invocation/Attempt 状态 | 含义 |
 |---|---|
@@ -287,8 +295,9 @@ definitions 及其 SHA-256 作为 Turn 的 ToolSetSnapshot 持久保存。Hosted
 model sampling、dispatch、pause/resume 与 crash recovery 都从该快照重建同一个精确
 Registry；executor 缺失或 definition 改变时 fail closed。内置 `project-summary` 只
 声明 `read_project_home`、`patch_project_home` 和 `preview_project_home`，Agent 自然
-结束后再由 `publish_project_home(...)` 一次性发布。发布以 Project canonical home
-revision 做 CAS：过期 draft fail closed，无变化 draft 复用现有 Artifact；普通
+结束后再由 `publish_project_home(action=call)` 发布该 exact `_ActionCall`。call 会
+保留首次 ActionInvocation ID。发布以 Project canonical home revision 做 CAS：
+过期 draft fail closed，无变化 draft 复用现有 Artifact；普通
 `publish_artifact(...)` 不能声明保留的 home role。
 
 Control message 是异步的：
@@ -303,8 +312,9 @@ Control message 是异步的：
 | cancel | 把 run 设为 `cancelled`，并把 cancellation 传播到 Python、model 与 tool。 |
 | Stop Turn | 只取消该 active Turn 及其 model/tool Steps，不要求模型生成收尾答案。如果它属于 Workflow Action，对应 effect 会把取消错误交回普通 Workflow 异常处理。 |
 
-guide/finish/interrupt 的 delivery 在 Store 层持久且 at-most-once：checkpoint 消费
-pending message 时会把它标记为 applied。
+guide/finish/interrupt 的 delivery 是持久的。message 先从 `pending` 变为由一个
+目标 Turn 持有的 `claimed`，只有消费它的 canonical context 或 terminal transaction
+才会把它改为 `applied`。如果 checkpoint 前崩溃，同一 Turn 可以重新 claim。
 
 ## 10. Channel 与 Signal
 
@@ -318,7 +328,7 @@ schema 目前会保存供检查，但尚未用于校验 Signal value。publish �
 
 ## 11. Timer
 
-`@every(seconds=..., policy=..., name=...)` 创建 TimerHandle，并启动一个
+`@every(seconds=..., name=...)` 创建 TimerHandle，并启动一个
 background loop：
 
 1. 按名字注册或复用 active timer；
@@ -327,15 +337,9 @@ background loop：
 4. await callback；
 5. 重复。
 
-| Policy | 目标调度语义 | 当前 executor 行为 |
-|---|---|---|
-| `coalesce` | 把错过的多个 tick 合并为一次运行。 | 每次 wait 返回执行一次 callback。 |
-| `skip` | 上一次工作未完成时跳过 tick。 | 已记录，行为尚未区分。 |
-| `queue` | 把每个 tick 保留为排队工作。 | 已记录，行为尚未区分。 |
-
 timer loop 会 await callback，所以同一个 TimerHandle 的 callback 不会重叠。
-callback 中的 action 每次都会创建新 Turn。workflow 完成时，active timer record
-会变为 completed。
+Workflow 尚未观察 timer 时，错过的 firing 会合并。callback 中的 action 每次都会
+创建新 Turn。workflow 完成时，active timer record 会变为 completed。
 
 ## 12. 完成、失败与可观测性
 
@@ -364,11 +368,9 @@ protocol error。
 ## 13. 持久化与 Replay 边界
 
 所有权威 entity、effect 结果与有序 event 都会持久化，workflow 源码也会被
-快照。所有非终态 Workflow 都会在 server 重启时进入恢复调度。未完成的独立
-Session Turn 则会被收束：已有持久化终态候选时直接提交，否则不再次请求 provider，
-而是转为 `interrupted` 并等待用户明确决定。Resume 会基于已提交的 Session rollout
-创建一个新的 user Turn，绝不重新打开旧的 interrupted Turn；Workflow-owned Turn
-不能由用户手工 Resume。
+快照。所有非终态 Workflow 都会在 server 重启时进入恢复调度。每个 Turn 都属于
+一个 ActionAttempt，只能由其所属 Workflow 恢复；不存在独立 Session submit 或
+手工恢复旧 Turn 的第二条路径。
 
 runtime 不序列化 Python instruction pointer，而是从 entrypoint 重新执行源码。
 每个 DSL 操作都有确定性的逻辑 effect path；Store 会持久化该 path、kind、精确
@@ -379,16 +381,13 @@ effect 仍是 started，runtime 会用 `(WorkflowId, effect path, resource kind)
 收敛到原有对象。同一路径若出现不同请求会 fail closed。
 
 未完成的 Action 会复用原 ActionInvocation、最新的非终态 Attempt 与关联 Turn。
-对应 Session 的 append-only rollout 保存追加或显式替换的 model context、累计
-usage、已完成 model-step 与 hosted-search 游标，以及可能已经得到的终态候选消息；
-Turn 的 SQLite 文档不再复制累计 context。每个本地 Tool Step 还会保存 provider
-call ID、effect disposition，以及 `prepared`/`executing` 持久化边界。恢复会 replay
-rollout，并复用 completed Tool Step 的真实输出。`prepared` 表示尚未越过外部副作用
-边界，恢复时会先持久化为 `executing` 再执行；对于已是 `executing` 的调用，`pure`
-与 `idempotent` 可带同一 effect ID 重放，`reconcilable` 必须先检查外部状态，
-`unknown` 绝不自动重放，而是产生明确的 `execution_unknown` function result。
-workflow 级 `ask_human` 本身是 journaled effect，因此会继续等待同一个确定性
-HumanRequest。
+对应 Session 的 append-only rollout 保存 model context、usage、model/search 游标
+与终态候选。通过校验的 FunctionCall 必须先进入 canonical rollout 才能 dispatch；
+FunctionCallOutput 也必须先进入 canonical rollout，之后才能完成 Step projection
+或开始下一次 sample。恢复时，有 call/output 对只修复 projection；call 缺少 output
+则只补一次 `"aborted"`，旧 call 永远不会再次 dispatch。同一 Agent 随后继续，并先
+观察 Workspace 或外部持久状态，再决定是否创建新 call。workflow 级
+`ask_human` 仍是另一层 journaled effect，会继续等待同一个确定性 HumanRequest。
 
 human、timer 与 signal wait 还支持不保留进程的挂起。Python effect client 会跟踪
 所有 pending future；只有全部 pending effect 都是可 replay wait 时才请求 runtime

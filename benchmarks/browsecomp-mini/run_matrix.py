@@ -26,6 +26,7 @@ from benchmark_runtime import (  # noqa: E402
     ensure_project,
     install_project_workflow,
     isolated_server,
+    launch_workflow,
     load_json,
     mean,
     operational_usage,
@@ -146,22 +147,15 @@ def launch_research_run(
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
     question, _ = task_content(task)
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": condition["program_slug"],
-            "request": research_prompt(question),
-            "params": condition["params"],
-            "model": model,
-            "access": "research",
-            "enabled_skills": [],
-            "context_mode": "fresh",
-        },
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug=condition["program_slug"],
+        request=research_prompt(question),
+        params=condition["params"],
+        model=model,
+        access="research",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def launch_grader_run(
@@ -173,27 +167,20 @@ def launch_grader_run(
     model: str,
 ) -> dict[str, Any]:
     question, correct_answer = task_content(task)
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": "short-answer-grader",
-            "request": "Blindly judge the submitted response against the supplied reference answer.",
-            "params": {
-                "question": question,
-                "correct_answer": correct_answer,
-                "response": response,
-                "grader_model": model,
-            },
-            "model": model,
-            "access": "model_only",
-            "enabled_skills": [],
-            "context_mode": "fresh",
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug="short-answer-grader",
+        request="Blindly judge the submitted response against the supplied reference answer.",
+        params={
+            "question": question,
+            "correct_answer": correct_answer,
+            "response": response,
+            "grader_model": model,
         },
+        model=model,
+        access="model_only",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def session_metrics(view: dict[str, Any]) -> dict[str, Any]:

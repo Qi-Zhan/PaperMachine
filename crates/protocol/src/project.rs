@@ -414,7 +414,6 @@ pub enum ControlMessageStatus {
     Pending,
     Claimed,
     Applied,
-    Cancelled,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

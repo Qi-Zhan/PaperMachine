@@ -1,13 +1,10 @@
 # Runtime kernel contract
 
-Status: active clean-break contract, 2026-08-08.
+Status: active clean-break contract, 2026-08-09.
 
-This document fixes the security and durability contracts for the current
-PaperMachine runtime kernel. The server opens only state created with its
-current schema; HTTP data, stored documents, and internal Rust types form one
-current contract.
-User-owned Workspace files remain outside that clean break and must never be
-deleted or rewritten as part of Project-state replacement.
+PaperMachine opens only the current schema and current Workflow ABI. User-owned
+Workspace files are outside that clean break and are never migrated, deleted,
+or rewritten as part of Project-state replacement.
 
 ## Product boundary
 
@@ -15,203 +12,188 @@ deleted or rewritten as part of Project-state replacement.
 > is the user filesystem an Agent is authorized to operate; structured runtime
 > APIs connect them, and they never share storage or a security boundary.
 
-- Project is the sole ownership root for Sessions, Workflows, Artifacts,
-  prompts, skills, human requests, and runtime journals.
-- Project state lives only below PaperMachine's managed data directory.
-- Workspace is an attachment containing one canonical filesystem directory.
-  PaperMachine creates no hidden state inside it.
-- Removing Project state never removes Workspace files. A missing Workspace
-  makes execution unavailable but does not make the Project disappear.
-- `goal` is an ordinary built-in Python Workflow. The Rust server, scheduler,
-  Store, Session runtime, and Agent runtime must not branch on its slug or give
-  it privileged lifecycle semantics.
+- Project owns Sessions, Workflows, prompts, Skills, Artifacts, journals, and
+  human/control state. All of it lives below PaperMachine's managed data root.
+- Workspace is one user-owned filesystem attachment and the default cwd for
+  Agent tools. PaperMachine stores no application metadata there.
+- Every Turn belongs to one Workflow ActionAttempt. `interactive-agent`,
+  `goal`, and `project-summary` are ordinary built-in Python Workflows; the
+  kernel has no slug-specific lifecycle branch.
 
-## Turn environment and authorization
+## Immutable Turn contract
 
-The five user-facing access choices remain presets, not enforcement objects.
-At Turn creation, Rust materializes one immutable authorization context from
-the selected preset, Workspace attachment, Project-managed roots, and provider
-capabilities. The Turn persists the environment and its policy hash.
+Before creating a Turn, the host materializes three immutable snapshots:
 
 ```text
-TurnEnvironmentSnapshot
-  workspace attachment ID and revision
-  canonical Workspace path and cwd
-  materialized filesystem policy
-  local-process network policy
-  Workspace tool and hosted-search capability ceilings
-  immutable protected managed paths
-  environment-variable policy
+Turn
+  ModelRouteSnapshot       exact provider route and non-secret config hash
+  TurnEnvironmentSnapshot Workspace revision and authorization hash
+  ToolSetSnapshot          sorted exact tool definitions and SHA-256
+  PromptSnapshot           ordered resolved instructions and SHA-256
 ```
 
-Local-tool selection is a separate host-owned surface. At Turn creation a
-trusted ToolCatalog constructs an exact immutable ToolRegistry. Workflow
-Actions supply a static `tools=[...]` candidate list; access filters Workspace
-tools, while Project tools also require explicit Action declaration. The Turn
-stores the sorted definitions and SHA-256 as a ToolSetSnapshot.
+`ModelRouteSnapshot` pins the profile, provider, upstream model, context
+window, capabilities, final reasoning effort, and a SHA-256 over all relevant
+non-secret provider/model configuration. API keys never enter the snapshot.
+Every sample and hosted-tool decision uses this route. Recovery fails closed if
+the current router cannot reproduce it.
 
-Every enforcement boundary consumes one or both immutable snapshots:
+The trusted host ToolCatalog constructs an exact per-Turn ToolRegistry.
+Workflow Actions provide a static `tools=[...]` list. Access may remove
+Workspace tools; Project tools enter only through the declaring Action.
+The built-in interactive Action declares the ordinary Workspace tools and is
+filtered by its access preset; it never receives Project tools automatically. Missing executors,
+definition drift, invalid hashes, or calls outside Registry membership fail
+closed.
 
-1. model-visible definitions and dispatch use exact ToolRegistry membership;
-2. each direct file and network tool rechecks Turn authorization;
-3. local command sandbox construction uses Turn authorization; and
-4. sandboxed Workflow Python execution uses its separate run policy.
+Skills are instructions only. A Project may store an editable `SKILL.md`, but
+the Turn freezes its fully resolved instructions in PromptSnapshot. Recovery
+does not read a live Skill and no scripts/assets package is copied into runtime
+state.
 
-Recovery rebuilds from the saved ToolSetSnapshot. A missing executor, changed
-definition, non-canonical ordering, or invalid hash fails closed before another
-sample or tool execution.
+## Filesystem and sandbox policy
 
-For every preset, PaperMachine-managed Project state is unreadable and
-unwritable by Agent tools. Below `full_access`, writes to `.git`, `.agents`, and
-`.codex` are denied, and credential-bearing Workspace files such as `.env` are
-not readable. `research` authorizes controlled server tools such as
-`fetch_url`; it does not give child processes unrestricted network access.
+The five access presets materialize as follows:
 
-Path authorization must be anchored to the Workspace path and remain valid at
-the file operation, not only during an earlier string or canonical-path check.
-Absolute-path escape, parent traversal, symlink escape, and replacement races
-must fail closed.
+| Access | Host reads | Writes | Command child network | Rust-hosted research |
+|---|---|---|---|---|
+| `model_only` | none | none | none | none |
+| `read_only` | allowed | none | none | none |
+| `workspace` | allowed | Workspace only | denied | none |
+| `research` | allowed | Workspace only | denied | controlled fetch/search |
+| `full_access` | allowed | host, except managed state | allowed | controlled fetch/search |
 
-## Sandbox boundary
+Relative paths resolve against the Workspace cwd. Direct file tools and local
+commands consume the same materialized rule. PaperMachine managed roots are
+always unreadable and unwritable, including under `full_access`. Below
+`full_access`, `.env*`, common credential filenames, and user credential roots
+are also unreadable; Workspace `.git`, `.agents`, and `.codex` metadata is
+read-only.
 
-One sandbox manager prepares every untrusted child process. Command tools and
-Workflow Python do not maintain separate policy builders.
+Path traversal, symlink following, and replacement races fail closed. One
+sandbox manager prepares every untrusted child, clears the environment, applies
+filesystem/network rules, bounds output and time, and kills descendants on
+cancellation. macOS uses Seatbelt; Linux/WSL2 uses bubblewrap. Native Windows
+is not part of the current test or release scope.
 
-- macOS uses Seatbelt.
-- Linux and WSL2 use the adapted Codex bubblewrap path; WSL1 fails closed.
-- Native Windows uses the pinned Codex elevated restricted-token backend. The
-  source path is implemented, but Windows is not a release-tested platform
-  until it passes the same policy matrix on a real MSVC host.
-- A requested restricted profile fails closed when no backend is available.
-- The child environment starts empty. Rust constructs a small explicit
-  environment, provides synthetic home and temporary directories, and never
-  forwards provider credentials.
-- Timeout, output limits, process-group cancellation, and descendant cleanup
-  are mandatory properties of every backend.
-
-`full_access` deliberately grants ordinary host authority after explicit user
-authorization, but the PaperMachine-managed root remains protected.
-
-## Project storage
-
-There is one authoritative Project record: the row in that Project's managed
-database. Startup discovers these per-Project stores directly.
+## Managed storage and lifecycle
 
 ```text
 data_dir/
   projects/<project-id>/
     state/project.db
-    rollouts/
+    rollouts/<session-id>.jsonl
     artifacts/
-    workflow-runtime/           disposable Python process scratch
-    runtime/sandboxes/          disposable per-Turn process scratch
-    runtime/skill-snapshots/    immutable Turn-referenced skill packages
+    prompts/
+    workflows/
+    skills/
+    workflow-runtime/        disposable Python scratch
+    runtime/sandboxes/       disposable Turn scratch
   staging/
   trash/
 ```
 
-Startup scans managed Project directories and builds an in-memory catalog.
-Project creation initializes state under `staging/` and atomically renames it
-into `projects/`. Project removal atomically renames managed state into
-`trash/` before asynchronous deletion. The Workspace path is never a target of
-those operations.
+The Project database row is authoritative; there is no global Project database
+or duplicate Workflow-program table. Startup performs a resilient directory
+scan: one damaged unrelated Project yields a diagnostic but does not block
+other valid Projects. Built-in and Project-local Workflow files are the catalog
+truth; each Run still stores immutable source and ABI hashes.
 
-The Store has one current schema. Artifact files are written and synced before
-their database records commit. Runtime startup removes unreferenced Artifact
-files and fails closed if a durable Artifact is missing or its hash changed.
-Python Workflow directories and per-Turn sandboxes are disposable scratch;
-durable recovery state remains in SQLite, rollouts, and immutable snapshots.
+A Project slot is `Open`, `Closing`, or `Retired`. Creating/registering work
+holds a read lease. Relocate/remove takes the write lease, enters `Closing`,
+rechecks active work, and then mutates. Removal stops and joins that Project's
+runtime and Store before moving managed state to trash; the Workspace is never
+a deletion target.
 
-## Session journal and projection
+Every loaded Project owns one bounded StoreHandle queue (256) and one blocking
+thread that holds the synchronous Store core. Server, Session, Workflow, and
+tool runtimes call it asynchronously, so SQLite, hashing, and managed directory
+scans do not block Tokio workers. Entity ownership is indexed once at Project
+open and updated from committed ownership events; request routing never scans
+all Projects as a fallback.
 
-Each Session owns one append-only rollout below the Project-managed root. The
-rollout is the canonical model-context history. SQLite keeps query projections,
-ownership, lifecycle status, usage summaries, and PaperMachine domain state;
-it does not persist a cumulative copy of model history in every Turn.
+Managed text and artifact paths use capability-rooted `ManagedFs`: bounded
+nofollow regular-file reads, bounded traversal, atomic replace, directory
+fsync, and root-confined deletion. Artifact bytes are synced before metadata
+commit; startup removes uncommitted orphans and fails closed on missing or
+hash-mismatched durable artifacts.
 
-Stable rollout items cover Turn input, model items, hosted calls, function
-calls, tool lifecycle, usage, compaction replacement, terminal candidates, and
-Turn terminal state. Streaming deltas remain ephemeral until they form a
-stable context item.
+## Canonical Session rollout
 
-The write rule is journal first, projection second:
+Each Session has one append-only JSONL rollout. It is canonical model context;
+SQLite is a query/UI projection and may be rebuilt. One writer assigns sequence
+numbers, flushes and syncs each stable record, then advances the SQLite
+projection. Replay and final-line repair use streaming `BufRead`, not a whole
+rollout allocation.
 
-1. append the next monotonically sequenced item;
-2. flush at the item's durability boundary;
-3. apply the SQLite projection with that sequence; and
-4. replay journal items after the last projected sequence on restart.
+Streaming deltas and `ModelStepStarted` are transient. After a complete model
+response is validated, its stable response items, usage, model-step cursor, and
+terminal candidate enter a ContextCheckpoint before a completed Step or tool
+dispatch is projected. A `FunctionCall` therefore becomes canonical before any
+executor sees it. After a tool returns, its `FunctionCallOutput` becomes
+canonical before Step/UI completion and before another sample.
 
-One live writer serializes each Session. Compaction is an explicit replacement
-item and never mutates prior journal entries.
+## Crash recovery
 
-## Recovery and external effects
+On restart, PaperMachine replays canonical records and scans function
+call/output pairs:
 
-Recovery reconstructs the Turn from the rollout rather than trusting a stored
-history snapshot. A completed model item, tool result, or terminal candidate is
-not sampled or executed again.
+- a call with an output repairs only missing Step/UI projection;
+- a call without an output receives exactly one JSON string output
+  `"aborted"`;
+- a running Tool Step for that call becomes `aborted`;
+- no old model tool call is ever sent to an executor.
 
-Tools declare an effect disposition:
+The same Agent then continues the same Turn and sees `aborted` in context. It
+must inspect durable Workspace or external state before choosing whether a new
+call is appropriate. This is deliberately Codex-style at-most-once recovery;
+there is no aggregate `ModelSampleCommitted`, tool effect disposition,
+reconciliation interface, or automatic replay of uncertain model tools.
 
-- `pure`: safe to replay;
-- `idempotent`: replay with the same call/effect identity;
-- `reconcilable`: inspect durable external state before deciding; or
-- `unknown`: never replay automatically after an execution-unknown crash.
+Workflow host effects are a different layer. Python restarts from its immutable
+entrypoint and uses deterministic logical effect IDs plus request-hash CAS.
+Completed effects replay their results; started effects redispatch according to
+their deterministic domain contract. Model tool calls never use that effect
+journal.
 
-Turns resume automatically because their Workflow is the durable control-flow
-owner. This includes the ordinary built-in `goal` Workflow. An
-execution-unknown command is surfaced to the model and user; it is never
-silently treated as either failed or completed.
+The real-process SIGKILL matrix verifies:
 
-The macOS/Linux process test launches the real server binary against a local
-Responses-compatible provider, pauses only debug builds at named durability
-boundaries, sends the server `SIGKILL`, and restarts it over the same managed
-data. The matrix verifies:
+| Crash boundary | Required result |
+|---|---|
+| before call checkpoint | sample again; uncommitted call never dispatches |
+| call checkpointed, no output | append `aborted`; dispatch count unchanged |
+| effect may exist, output absent | append `aborted`; Agent observes reality |
+| output checkpointed, projection absent | recover real output; do not replay |
+| terminal checkpointed, Turn commit absent | complete without another sample |
 
-| Killed state | Required restart result |
-| --- | --- |
-| rollout appended, SQLite projection pending | replay reaches the exact rollout sequence |
-| terminal model answer checkpointed, Turn commit pending | commit the answer without another sample |
-| Workflow model sample in flight | resume the same ActionAttempt and sample again |
-| unknown-effect tool prepared, execution not started | execute exactly once |
-| unknown-effect tool marked executing | surface `execution_unknown`, never replay |
+It also verifies rollout/projection convergence and in-flight sampling. Fault
+hooks exist only in debug builds. The matrix runs on macOS and Linux.
 
-The fault controls are absent from release CLI parsing, and their boundary
-calls compile to no-ops in release builds. Native Windows is intentionally not
-part of this matrix.
+## Control, store, and protocol reliability
 
-## Adaptation boundary
+Workflow lifecycle, Action start/finish, timer fire, usage, and terminal
+transitions use typed `BEGIN IMMEDIATE` transactions with explicit allowed-from
+states. Human answers use an `id + open-status` CAS.
 
-PaperMachine owns its Project, Workflow, Session, Run, Evaluation, Artifact,
-prompt, and provider models. It does not run Codex CLI or app-server as a
-dependency. Proven implementation is adapted from the pinned OpenAI Codex
-source where the semantics match this document:
+Control messages move `pending -> claimed -> applied`. Claim records the target
+Turn. IDs become applied only in the same canonical context/terminal
+transaction that consumes them. A crash before checkpoint lets the same Turn
+claim them again; an interrupt is acknowledged with its terminal Turn update.
 
-| Concern | Pinned Codex source |
-| --- | --- |
-| filesystem and network policy | `codex-rs/protocol/src/permissions.rs` |
-| sandbox selection and request transformation | `codex-rs/sandboxing/src/manager.rs` |
-| macOS and Linux/WSL backends | `codex-rs/sandboxing/src/{seatbelt,bwrap}.rs` |
-| native Windows backend | `codex-rs/windows-sandbox-rs` |
-| child environment construction | `codex-rs/core/src/exec_env.rs` |
-| append-only live writer | `codex-rs/thread-store/src/local/live_writer.rs` |
-| context reconstruction | `codex-rs/core/src/session/rollout_reconstruction.rs` |
+Rust and Python cap each Workflow JSONL frame at 16 MiB. At most 64 effects may
+be in flight, the response channel is bounded to 64, and reader, writer, or
+handler failure immediately fails the runtime. The scheduler drops terminal
+in-memory handles; a late `wait()` reads the persistent terminal result.
 
-Direct adaptations retain source notes and Apache-2.0 attribution. PaperMachine
-keeps its own configuration schema and product-domain objects.
+## Adaptation boundary and completion gates
 
-## Completion gates
+PaperMachine adapts selected Codex patterns—Responses streaming, the
+sample/tool/follow-up loop, process sandboxing, canonical rollout ordering, and
+aborted missing-output normalization—but owns its Project, Workflow, Session,
+prompt, provider, and Artifact domain model. Codex is source material, not a
+runtime dependency.
 
-The kernel is release-ready only when:
-
-- built-in Workflows, including `goal`, use only ordinary Workflow primitives;
-- each Project Store is the sole authority for its managed research world;
-- direct tools and child processes agree on filesystem authorization;
-- all restricted child processes use the unified sandbox manager;
-- Session context is reconstructable from append-only rollouts;
-- completed effects are not repeated and unknown effects are not auto-replayed;
-- process-level crash injection covers every durability boundary;
-- Rust, Python, and Web tests and the Web production build pass; and
-- a real provider run survives a forced server restart with inspectable proof.
-
-The current release validation target is macOS plus Linux; native Windows is
-intentionally excluded from the test matrix until the product needs it.
+The kernel is release-ready only when direct tools and command sandboxes agree
+on authorization, managed state remains unreachable, route/tool/prompt
+snapshots rebuild exactly, all five crash boundaries pass, and complete Rust,
+Python, Web, production-build, and real-provider validation succeeds.

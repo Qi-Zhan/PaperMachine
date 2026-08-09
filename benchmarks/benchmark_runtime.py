@@ -132,6 +132,31 @@ def ensure_project(api: Any, name: str, workspace_root: Path) -> str:
     )
 
 
+def launch_workflow(
+    api: Any,
+    project_id: str,
+    *,
+    program_slug: str,
+    request: str,
+    params: dict[str, Any],
+    model: str,
+    access: str,
+) -> dict[str, Any]:
+    run = api.post(
+        f"/projects/{project_id}/workflows",
+        {
+            "program_slug": program_slug,
+            "request": request,
+            "params": params,
+            "model": model,
+            "access": access,
+            "enabled_skills": [],
+            "context_mode": "fresh",
+        },
+    )
+    return {"workflow_id": str(run["id"]), "launched_at": utc_now()}
+
+
 def token_usage(tokens: dict[str, Any]) -> dict[str, int | float]:
     input_tokens = int(tokens.get("input_tokens", 0))
     output_tokens = int(tokens.get("output_tokens", 0))

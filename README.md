@@ -93,7 +93,6 @@ Project database. PaperMachine owns all Project state below `data_dir`:
     artifacts/
     workflow-runtime/           disposable Python process scratch
     runtime/sandboxes/          disposable per-Turn process scratch
-    runtime/skill-snapshots/    immutable Turn-referenced skill packages
     prompts/
     workflows/
     skills/
@@ -131,7 +130,8 @@ code for:
 - a conversation-first UI with execution details folded under each Turn.
 
 Codex is source material, not PaperMachine's runtime dependency. Skills are
-small packages owned by one Project.
+Project-owned instruction files. Their resolved instructions are frozen into
+each Turn's PromptSnapshot; scripts and assets are not a runtime capability.
 
 ## Repository layout
 
@@ -162,7 +162,8 @@ small packages owned by one Project.
   WebSocket state, distinguish cache writes from cache reads, and compact long
   histories at 90% of the available context capacity.
 - Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
-- Enable Project-local skills per Session and snapshot them per Turn.
+- Enable Project-local skills per Session and freeze their complete resolved
+  instructions into each Turn's PromptSnapshot.
 - Assign each Session/Workflow Agent one of five access presets. A Workflow
   launch establishes a hard run ceiling, a Session-origin launch cannot exceed
   the source Session, and per-Agent class overrides cannot exceed the run.
@@ -201,11 +202,13 @@ small packages owned by one Project.
   interrupt an attempt; or let explicit Workflow code request typed human input.
 - Recover every non-terminal Workflow after a server restart by replaying its
   immutable Python source against deterministic effect IDs and a durable result
-  journal; unfinished Agent actions resume the same checkpointed Turn. Local
-  tool calls persist a `prepared`/`executing` boundary plus a `pure`,
-  `idempotent`, `reconcilable`, or `unknown` effect disposition, so recovery
-  replays only safe work. Every Turn belongs to a Workflow Action, and recovery
-  resumes it only through that ActionAttempt and the immutable Workflow program.
+  journal; unfinished Agent actions resume the same checkpointed Turn. A model
+  function call must enter canonical Session history before dispatch. If a
+  restart finds a call without its output, recovery appends the stable output
+  `"aborted"`, never invokes that old call, and lets the same Agent observe
+  durable reality before deciding what to do next. Every Turn belongs to a
+  Workflow Action and resumes only through that ActionAttempt and immutable
+  Workflow program.
 - Generate, inspect, validate, and save workflow source from the Workflow
   page. Advanced source editing is available but is not the primary UI.
 - Use Responses API hosted web search for normal research and retain every
@@ -326,7 +329,8 @@ provider is known not to implement Responses WebSocket mode.
 ## Verification
 
 ```sh
-cargo test --workspace
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 PYTHONPATH=python:benchmarks python3 -m unittest discover -s python/tests -p 'test_*.py'
 PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/deep-research-mini -p 'test_*.py'
@@ -335,6 +339,7 @@ PYTHONPATH=python:benchmarks python3 -m unittest discover -s benchmarks/live-dr-
 PYTHONPATH=python:benchmarks python3 benchmarks/test_benchmark_runtime.py
 pnpm --dir apps/web test
 pnpm --dir apps/web build
+git diff --check
 ```
 
 On macOS and Linux, the Rust workspace run includes the real-process `SIGKILL`
@@ -346,6 +351,6 @@ See the accepted [runtime kernel target](docs/runtime-kernel.md),
 [prompt model](docs/prompt-model.md),
 [workflow ABI](docs/workflow-abi.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
-[security boundaries](docs/security.md). The final clean-break test and real
-DeepSeek restart evidence are summarized in
-[the 2026-08-08 validation report](docs/clean-break-report-2026-08-08.md).
+[security boundaries](docs/security.md). The crash matrix, complete release
+checks, and current real-provider evidence are summarized in
+[the 2026-08-09 kernel validation report](docs/kernel-validation-2026-08-09.md).

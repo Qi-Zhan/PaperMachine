@@ -35,6 +35,7 @@ from benchmark_runtime import (  # noqa: E402
     ensure_project,
     install_project_workflow,
     isolated_server,
+    launch_workflow,
     load_json,
     mean,
     operational_usage,
@@ -510,22 +511,15 @@ def launch_run(
     model: str,
 ) -> dict[str, Any]:
     condition = CONDITIONS[job["condition"]]
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": condition["program_slug"],
-            "request": task["question"],
-            "params": condition["params"],
-            "model": model,
-            "access": "research",
-            "enabled_skills": [],
-            "context_mode": "fresh",
-        },
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug=condition["program_slug"],
+        request=task["question"],
+        params=condition["params"],
+        model=model,
+        access="research",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def launch_grader_run(
@@ -541,28 +535,21 @@ def launch_grader_run(
     prediction = (job.get("research", {}).get("result") or {}).get("prediction")
     if prediction is None:
         raise ValueError("cannot launch semantic grader without a parsed prediction")
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": "live-dr-grader",
-            "request": "Blindly apply the pinned upstream LiveDRBench claim-matching rubric.",
-            "params": {
-                "category": task["category"],
-                "ground_truth": ground_truths[0],
-                "prediction": prediction,
-                "eval_info": misc.get("eval_info") or {},
-                "grader_model": grader_model,
-            },
-            "model": grader_model,
-            "access": "model_only",
-            "enabled_skills": [],
-            "context_mode": "fresh",
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug="live-dr-grader",
+        request="Blindly apply the pinned upstream LiveDRBench claim-matching rubric.",
+        params={
+            "category": task["category"],
+            "ground_truth": ground_truths[0],
+            "prediction": prediction,
+            "eval_info": misc.get("eval_info") or {},
+            "grader_model": grader_model,
         },
+        model=grader_model,
+        access="model_only",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def session_metrics(view: dict[str, Any]) -> dict[str, Any]:

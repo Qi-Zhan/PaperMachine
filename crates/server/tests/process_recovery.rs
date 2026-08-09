@@ -8,8 +8,11 @@ use axum::http::StatusCode as AxumStatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use papermachine_store::process_fault::FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH;
+use papermachine_store::process_fault::FUNCTION_CALL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION;
+use papermachine_store::process_fault::FUNCTION_CALL_RECEIVED_BEFORE_CHECKPOINT;
 use papermachine_store::process_fault::MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION;
 use papermachine_store::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION;
+use papermachine_store::process_fault::TOOL_EFFECT_COMPLETED_BEFORE_OUTPUT_CHECKPOINT;
 use papermachine_store::process_fault::TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT;
 use reqwest::Client;
 use reqwest::Method;
@@ -177,6 +180,10 @@ impl MockProvider {
             (self.call_count().await >= expected).then_some(())
         })
         .await;
+    }
+
+    async fn requests(&self) -> Vec<Value> {
+        self.state.requests.lock().await.clone()
     }
 }
 
@@ -613,6 +620,72 @@ fn assert_rollout_projected(view: &Value) {
     assert_eq!(last, projected, "rollout and projection must converge");
 }
 
+fn tool_steps(view: &Value) -> Vec<&Value> {
+    view["steps"]
+        .as_array()
+        .expect("Steps should exist")
+        .iter()
+        .filter(|step| step["kind"] == "tool")
+        .collect()
+}
+
+fn request_tool_output<'a>(request: &'a Value, call_id: &str) -> Option<&'a str> {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|item| {
+            (item["type"] == "function_call_output" && item["call_id"] == call_id)
+                .then(|| item["output"].as_str())
+                .flatten()
+        })
+}
+
+async fn function_call_before_checkpoint_is_resampled_without_dispatch() {
+    let mut scenario = Scenario::new().await;
+    scenario
+        .mock
+        .enqueue_tool_call(
+            "uncommitted-call",
+            "printf 'must-not-run\n' >> uncommitted-call.log",
+        )
+        .await;
+    scenario
+        .mock
+        .enqueue_text("resampled after uncommitted call")
+        .await;
+    let (mut server, marker) = scenario
+        .start(Some(FUNCTION_CALL_RECEIVED_BEFORE_CHECKPOINT))
+        .await;
+    let project_id = scenario.create_project("Uncommitted tool call crash").await;
+    scenario.publish_workflow(&project_id).await;
+    let workflow_id = scenario
+        .launch_workflow(&project_id, "Crash before committing this model call.")
+        .await;
+    wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
+    server.sigkill().await;
+
+    let (mut restarted, _) = scenario.start(None).await;
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
+    assert!(tool_steps(&view).is_empty());
+    assert!(
+        !scenario.workspace.join("uncommitted-call.log").exists(),
+        "a call that never reached the canonical checkpoint must not dispatch"
+    );
+    let requests = scenario.mock.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[1].to_string().contains("uncommitted-call"),
+        "an uncommitted call must not enter recovered model context"
+    );
+    assert_rollout_projected(&view);
+    restarted.stop().await;
+}
+
 async fn rollout_ahead_of_projection_is_replayed_after_sigkill() {
     let mut scenario = Scenario::new().await;
     scenario.mock.enqueue_text("recovered rollout").await;
@@ -781,6 +854,120 @@ async fn canonical_tool_call_is_aborted_without_dispatch_after_sigkill() {
         "a canonical call without an output must never be dispatched during recovery"
     );
     assert_eq!(scenario.mock.call_count().await, 2);
+    let requests = scenario.mock.requests().await;
+    assert_eq!(
+        request_tool_output(&requests[1], "prepared-call"),
+        Some("\"aborted\"")
+    );
+    assert_rollout_projected(&view);
+    restarted.stop().await;
+}
+
+async fn completed_effect_without_output_is_aborted_and_observed_after_sigkill() {
+    let mut scenario = Scenario::new().await;
+    scenario
+        .mock
+        .enqueue_tool_call("effect-call", "printf 'one\\n' >> effect-once.log")
+        .await;
+    scenario
+        .mock
+        .enqueue_tool_call("observe-call", "cat effect-once.log")
+        .await;
+    scenario
+        .mock
+        .enqueue_text("observed existing effect without replay")
+        .await;
+    let (mut server, marker) = scenario
+        .start(Some(TOOL_EFFECT_COMPLETED_BEFORE_OUTPUT_CHECKPOINT))
+        .await;
+    let project_id = scenario.create_project("Tool effect crash").await;
+    scenario.publish_workflow(&project_id).await;
+    let workflow_id = scenario
+        .launch_workflow(
+            &project_id,
+            "Write one line, then recover by observing durable Workspace state.",
+        )
+        .await;
+    wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
+    server.sigkill().await;
+
+    let (mut restarted, _) = scenario.start(None).await;
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
+    let tools = tool_steps(&view);
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["tool_call_id"], "effect-call");
+    assert_eq!(tools[0]["status"], "aborted");
+    assert_eq!(tools[1]["tool_call_id"], "observe-call");
+    assert_eq!(tools[1]["status"], "completed");
+    assert_eq!(
+        std::fs::read_to_string(scenario.workspace.join("effect-once.log"))
+            .expect("effect file should exist"),
+        "one\n",
+        "recovery must not replay an old model tool call"
+    );
+    let requests = scenario.mock.requests().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        request_tool_output(&requests[1], "effect-call"),
+        Some("\"aborted\"")
+    );
+    assert!(
+        request_tool_output(&requests[2], "observe-call").is_some(),
+        "the Agent should continue from an explicit observation of reality"
+    );
+    assert_rollout_projected(&view);
+    restarted.stop().await;
+}
+
+async fn committed_tool_output_repairs_projection_without_replay() {
+    let mut scenario = Scenario::new().await;
+    scenario
+        .mock
+        .enqueue_tool_call(
+            "durable-output-call",
+            "printf 'one\\n' >> durable-output.log",
+        )
+        .await;
+    scenario.mock.enqueue_text("used durable tool output").await;
+    let (mut server, marker) = scenario
+        .start(Some(FUNCTION_CALL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION))
+        .await;
+    let project_id = scenario
+        .create_project("Tool output projection crash")
+        .await;
+    scenario.publish_workflow(&project_id).await;
+    let workflow_id = scenario
+        .launch_workflow(&project_id, "Recover the committed tool output.")
+        .await;
+    wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
+    server.sigkill().await;
+
+    let (mut restarted, _) = scenario.start(None).await;
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
+    let tools = tool_steps(&view);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["tool_call_id"], "durable-output-call");
+    assert_eq!(tools[0]["status"], "completed");
+    assert_ne!(tools[0]["output"], "aborted");
+    assert_eq!(
+        std::fs::read_to_string(scenario.workspace.join("durable-output.log"))
+            .expect("effect file should exist"),
+        "one\n",
+        "a tool with canonical output must not dispatch again during projection repair"
+    );
+    let requests = scenario.mock.requests().await;
+    assert_eq!(requests.len(), 2);
+    let recovered_output = request_tool_output(&requests[1], "durable-output-call")
+        .expect("recovered request should carry the canonical tool output");
+    assert_ne!(recovered_output, "\"aborted\"");
     assert_rollout_projected(&view);
     restarted.stop().await;
 }
@@ -789,7 +976,10 @@ async fn canonical_tool_call_is_aborted_without_dispatch_after_sigkill() {
 async fn process_sigkill_recovery_matrix_preserves_durable_boundaries() {
     rollout_ahead_of_projection_is_replayed_after_sigkill().await;
     model_checkpoint_preserves_usage_before_step_projection().await;
+    function_call_before_checkpoint_is_resampled_without_dispatch().await;
+    canonical_tool_call_is_aborted_without_dispatch_after_sigkill().await;
+    completed_effect_without_output_is_aborted_and_observed_after_sigkill().await;
+    committed_tool_output_repairs_projection_without_replay().await;
     terminal_checkpoint_commits_without_resampling_after_sigkill().await;
     workflow_inflight_sample_resumes_automatically_after_sigkill().await;
-    canonical_tool_call_is_aborted_without_dispatch_after_sigkill().await;
 }

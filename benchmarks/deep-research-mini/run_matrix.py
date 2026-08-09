@@ -30,6 +30,7 @@ from benchmark_runtime import (  # noqa: E402
     ensure_project,
     install_project_workflow,
     isolated_server,
+    launch_workflow,
     load_json,
     mean,
     record_runtime_snapshot as record_shared_runtime_snapshot,
@@ -242,22 +243,15 @@ def launch_research_run(
                 if agent_models.get(role)
             }
         )
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": condition["program_slug"],
-            "request": task["prompt"],
-            "params": params,
-            "model": model,
-            "access": "research",
-            "enabled_skills": [],
-            "context_mode": "fresh",
-        },
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug=condition["program_slug"],
+        request=task["prompt"],
+        params=params,
+        model=model,
+        access="research",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def combined_token_usage(usages: list[dict[str, Any]]) -> dict[str, int | float]:
@@ -575,28 +569,21 @@ def launch_grader_run(
     report: str,
     model: str,
 ) -> dict[str, Any]:
-    run = api.post(
-        f"/projects/{project_id}/workflows",
-        {
-            "program_slug": "report-grader",
-            "request": "Blindly grade the supplied final report against the full external rubric.",
-            "params": {
-                "question": task["prompt"],
-                "report": report,
-                "criteria": visible_criteria(task["rubric"]),
-                "language": task["language"],
-                "grader_model": model,
-            },
-            "model": model,
-            "access": "model_only",
-            "enabled_skills": [],
-            "context_mode": "fresh",
+    return launch_workflow(
+        api,
+        project_id,
+        program_slug="report-grader",
+        request="Blindly grade the supplied final report against the full external rubric.",
+        params={
+            "question": task["prompt"],
+            "report": report,
+            "criteria": visible_criteria(task["rubric"]),
+            "language": task["language"],
+            "grader_model": model,
         },
+        model=model,
+        access="model_only",
     )
-    return {
-        "workflow_id": str(run["id"]),
-        "launched_at": utc_now(),
-    }
 
 
 def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:

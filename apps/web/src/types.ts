@@ -350,7 +350,7 @@ export interface ControlMessage {
   action_invocation_id: Id | null
   kind: ControlMessageKind
   content: string
-  status: 'pending' | 'claimed' | 'applied' | 'cancelled'
+  status: 'pending' | 'claimed' | 'applied'
   created_at: string
   claimed_turn_id: Id | null
   claimed_at: string | null

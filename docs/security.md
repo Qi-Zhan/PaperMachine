@@ -53,9 +53,14 @@ Turn; the ActionInvocation retains the source HumanRequest ID for inspection.
 
 Saving the same Project-local slug replaces the editable program source. Every
 Workflow stores an immutable snapshot of the exact source and SHA-256 it started
-with, together with the SHA-256 of the Python DSL package used to validate it.
+with, together with the SHA-256 of the Python DSL runtime used to validate it.
 Before every initial execution or recovery, Rust re-hashes both source and DSL
 runtime; a mismatch fails before Python starts or any effect is dispatched.
+
+All PaperMachine-managed text paths go through a capability-rooted ManagedFs.
+It accepts only bounded root-relative operations, never follows symlinks,
+requires regular files, atomically replaces and syncs content, and confines
+traversal/deletion beneath the opened Project root.
 
 The ordinary `project-summary` Agent does not receive PaperMachine's managed
 directory as a Workspace. Its Action declares exactly `read_project_home`,
@@ -64,11 +69,13 @@ Project tools into that Action Turn's immutable ToolSet. They operate on a
 bounded managed draft keyed to that exact Workflow Action. Semantic patches use revision checks and stable block IDs;
 unsafe active tags, inline event/style attributes, script URLs, oversized
 blocks, stale revisions, and no-op edits fail as tool results that the same
-Agent can inspect and correct. The publication effect accepts only the latest
-completed Action belonging to that Workflow and Agent. It compares the draft's
-base to the canonical Project-home revision, atomically commits the source,
-page, and canonical pointer, and reuses the current revision for a no-op. Generic
-Artifact metadata cannot claim the reserved Project-home roles.
+Agent can inspect and correct. The awaited `_ActionCall` retains its exact first
+ActionInvocation ID; `publish_project_home(action=call)` accepts only that
+completed Action and verifies that its Turn ToolSet contains the Project-home
+tools. It compares the draft's base to the canonical Project-home revision,
+atomically commits the source, page, and canonical pointer, and reuses the
+current revision for a no-op. Generic Artifact metadata cannot claim the
+reserved Project-home roles.
 
 Generated project-summary HTML remains untrusted model output. It is served
 with `nosniff` and a restrictive CSP (`sandbox`, no default network/source
@@ -82,14 +89,13 @@ into the parent Vue DOM.
 ## Agent tools
 
 Every Session selects one of five access presets. `model_only` has no resource
-tools; `read_only` can only read the attached Workspace authorized for the
-Turn; `workspace` adds writes there and sandboxed commands; `research` authorizes
-controlled URL fetching and hosted web search when the selected model profile
-declares that capability; `full_access` allows host files and child-process
-network after explicit human grant. Even `full_access` commands remain inside a
-platform sandbox so PaperMachine-managed state can stay unreadable and
-unwritable. `ask_human` is not a model-visible tool and is available only as an
-explicit Workflow DSL effect.
+tools. `read_only` can read ordinary host files but cannot write or run commands.
+`workspace` and `research` keep host reads and add writes only inside the
+Workspace plus sandboxed commands; `research` also authorizes controlled URL
+fetching and capability-gated hosted search. `full_access` allows ordinary host
+writes and child-process network after explicit confirmation. Every profile,
+including `full_access`, is denied PaperMachine managed state. `ask_human` is
+not model-visible and exists only as an explicit Workflow DSL effect.
 
 Run creation applies access bounds before Python starts. The Workflow profile
 is a hard ceiling; a Session-origin Workflow cannot choose a profile above the
@@ -117,7 +123,7 @@ remain inside each implementation as defense in depth. Thus declaring a
 Workspace tool never expands the Session's filesystem or network policy, while
 declaring a Project tool never grants access to its managed files.
 
-Provider tool-call IDs are opaque effect identities, but they must be non-empty,
+Provider tool-call IDs are opaque call identities, but they must be non-empty,
 bounded, and unique across the whole Turn. The Agent validates the complete
 batch against prior history before emitting a tool-call event or beginning any
 execution; duplicates fail the model Step and cannot alias a durable effect.
@@ -131,9 +137,10 @@ revision; it never mutates the immutable environment of an earlier Turn.
 `read_file` and `write_file` first resolve and authorize the requested target,
 then reopen every component through directory handles without following
 symlinks. A rename or symlink swap after authorization therefore fails instead
-of redirecting the operation. Direct file operations
-make credential-bearing files such as `.env` unreadable and Workspace-root
-`.git`, `.agents`, and `.codex` metadata read-only. `exec_command` consumes the
+of redirecting the operation. Below `full_access`, direct file operations make
+credential-bearing files such as `.env*` and user credential directories
+unreadable; Workspace-root `.git`, `.agents`, and `.codex` metadata is
+read-only. `exec_command` consumes the
 same materialized filesystem, metadata, credential, managed-root, environment,
 and child-network policy. It starts with an empty environment, redirects
 home/temp paths into a Session sandbox, denies writes outside the Workspace,
@@ -150,10 +157,9 @@ and descendant cleanup for both Agent commands and Workflow Python:
   Codex source; and
 - unsupported platforms, WSL1, or a missing required backend fail closed.
 
-The macOS and Linux paths are build-validated in this repository. The Windows
-source integration targets Rust's MSVC ABI and retains Codex's on-demand
-elevated provisioning/ACL refresh behavior; it was not exercised during the
-2026-08-08 cutover because no Windows host was in scope.
+The macOS policy is exercised by real filesystem and process tests; Linux keeps
+compile and policy coverage. Native Windows is outside the current release and
+test scope.
 
 `fetch_url` is the only built-in research tool with outbound network access. It
 accepts public HTTPS destinations only, rejects credentials and nonstandard
@@ -188,8 +194,6 @@ not silently rewrite the endpoint.
 - `sandbox-exec` is a deprecated macOS interface.
 - Read confinement is not a VM: the platform runtime and explicitly mounted
   executable/library roots remain readable to sandboxed commands.
-- Windows elevated-sandbox behavior still requires validation on a real MSVC
-  Windows host before Windows is treated as a release-tested platform.
 - The AST policy is intentionally small and should not be treated as a proof
   that Python code is harmless; OS isolation remains mandatory.
 - Workflow recovery relies on deterministic effect paths. Replaying the same
@@ -197,13 +201,11 @@ not silently rewrite the endpoint.
   side effect the author intended. Workflow source should therefore keep the
   sequence and shape of effects deterministic for the same snapshotted input;
   arbitrary external I/O remains outside the Python sandbox and effect model.
-- A local tool Step completed before a crash is replayed from its durable output.
-  Every call also persists whether it was merely prepared or may have started,
-  plus a `pure`, `idempotent`, `reconcilable`, or `unknown` disposition. Only
-  pure/idempotent effects replay automatically after the boundary; reconcilable
-  tools must inspect external state first. An arbitrary command is `unknown`,
-  because PaperMachine cannot prove whether its external effect happened before
-  the process disappeared, and is therefore surfaced without automatic replay.
+- Model tools use at-most-once crash recovery. A canonical FunctionCall without
+  a canonical output receives `"aborted"` and is never automatically replayed,
+  even if its external effect may already exist. The next model sample must
+  inspect durable reality. This avoids duplicate writes but deliberately cannot
+  prove whether an interrupted external effect happened.
 - Every Turn is owned by one ActionAttempt and is recovered only by its
   Workflow runtime. There is no separate Session submit or manual Turn-resume
   capability.
@@ -212,5 +214,8 @@ not silently rewrite the endpoint.
   Provider request and stream-idle timeouts protect broken connections, and
   server-wide concurrency limits protect the process. Token/cache/search/time
   usage is persisted for inspection.
+- Workflow protocol frames are capped at 16 MiB, with at most 64 in-flight
+  effects and a bounded response channel. These are resource limits, not a
+  substitute for OS isolation or input validation.
 - Generated protocols and model output can still be wrong. Inspectability and
   provenance do not establish factual correctness.

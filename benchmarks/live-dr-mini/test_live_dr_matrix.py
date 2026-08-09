@@ -12,43 +12,6 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class LiveDrMatrixTests(unittest.TestCase):
-    def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:
-        class FakeApi:
-            def __init__(self) -> None:
-                self.requests = []
-
-            def post(self, path, payload):
-                self.requests.append((path, payload))
-                return {"id": f"run-{len(self.requests)}"}
-
-        task = json.loads(Path(__file__).with_name("tasks.json").read_text())["tasks"][
-            0
-        ]
-        api = FakeApi()
-        job = {
-            "task_key": str(task["key"]),
-            "condition": "single_agent",
-            "repeat": 1,
-            "research": {"result": {"prediction": {}}},
-        }
-        research = run_matrix.launch_run(api, "project-1", job, task, "deepseek-flash")
-        grade = run_matrix.launch_grader_run(
-            api, "project-1", job, task, "deepseek-flash"
-        )
-
-        self.assertEqual(research["workflow_id"], "run-1")
-        self.assertEqual(grade["workflow_id"], "run-2")
-        self.assertEqual(
-            [path for path, _ in api.requests],
-            [
-                "/projects/project-1/workflows",
-                "/projects/project-1/workflows",
-            ],
-        )
-        for _, payload in api.requests:
-            self.assertEqual(payload["context_mode"], "fresh")
-            self.assertNotIn("started_from_session_id", payload)
-
     def test_build_jobs_is_balanced_and_deterministic(self) -> None:
         first = run_matrix.build_jobs(
             ["0", "22"], ["single_agent", "coverage_r2"], 2, 7

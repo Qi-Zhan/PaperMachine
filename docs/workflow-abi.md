@@ -59,10 +59,6 @@ class Synthesizer(Agent):
             },
         },
     },
-    output_schema={
-        "type": "object",
-        "properties": {"summary": {"type": "string"}},
-    },
 )
 async def main(ctx):
     perspectives = ctx.params.get("perspectives") or ["support", "limitations"]
@@ -100,7 +96,6 @@ must be Python literals.
 | `description` | Protocol purpose shown on the Workflow page. |
 | `request_mode` | `"required"` by default. Use `"none"` for a persistent interactive Workflow whose user messages enter through `ask_human`, not through a launch task. |
 | `params_schema` | Supported JSON Schema subset for reusable run parameters, checked before scheduling. A string with `format: "model-profile"` gets a configured-model picker and profile validation. |
-| `output_schema` | Declared result contract; currently descriptive at completion. |
 
 The runtime provides `ctx.request`, `ctx.instructions`, `ctx.params`,
 `ctx.workflow_id`, `ctx.trigger`, `ctx.context`, and `ctx.project`. `ctx.request` is the concrete
@@ -143,11 +138,11 @@ Project summary, remains readable as ordinary Project context.
 | `await ask_human(...)` | Suspends until a schema-validated answer is supplied. A string answer is a `HumanMessage` carrying its durable request ID. |
 | `action(message: HumanMessage)` | Creates a true user-origin Turn only after Rust verifies that the text exactly matches the referenced answered HumanRequest; the action prompt becomes a Workflow prompt layer. |
 | `background(awaitable)` | Starts concurrent workflow work and returns a joinable handle. |
-| `@every(seconds=..., policy=...)` | Starts a periodic callback backed by a durable timer record. |
+| `@every(seconds=...)` | Starts a periodic callback backed by a durable coalescing timer record. |
 | `await wait(seconds=... / minutes=...)` | Suspends one branch until a named durable timer fires. |
 | `await ctx.project.snapshot(...)` | Reads bounded Project-owned research state through Rust; Python never opens the database directly. |
 | `await publish_artifact(...)` | Publishes a deterministic text Artifact, optionally associated with an Agent Session. |
-| `await publish_project_home(agent=...)` | Atomically publishes the semantic Project-home draft produced through that Agent's current Action tool loop. |
+| `await publish_project_home(action=call)` | Atomically publishes the semantic Project-home draft produced by that exact awaited `_ActionCall`. |
 
 Ordinary Python `if`, `for`, `while`, functions, collections, and exceptions
 remain the workflow control language. Arbitrary imports, filesystem/network
@@ -213,8 +208,9 @@ The built-in `project-summary` is the reference background program. It reads
 Agent. Inside the existing Agent loop, that Agent can repeatedly call
 `read_project_home`, `patch_project_home`, and `preview_project_home`; there is
 no one-shot HTML return contract and no separate evaluator Action. When the
-Action naturally ends, `publish_project_home(...)` commits its validated block
-draft with a canonical revision CAS. Stale drafts fail, and unchanged drafts
+Action naturally ends, `publish_project_home(action=call)` uses that awaited
+call's exact first ActionInvocation ID and commits its validated block draft
+with a canonical revision CAS. Stale drafts fail, and unchanged drafts
 reuse the existing Artifact. The Workflow may then call
 `wait(minutes=...)` before repeating. Its reviewed Agent prompt lives in source;
 the Project Page exposes the run's user-controlled `instructions` and timer
@@ -229,6 +225,11 @@ The isolated runner reserves stdout for newline-delimited JSON:
 {"id":"root/together:2/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_instance_id":"...","action_name":"investigate","prompt":"Find evidence.","arguments":{"question":"..."},"response_format":null,"tools_enabled":true,"web_search_context_size":null,"reasoning_effort":null,"task_scope_id":null,"human_request_id":null,"human_message_argument":null}}
 {"id":"root/together:2/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
 ```
+
+Each encoded line is limited to 16 MiB in both directions. Python and Rust
+allow at most 64 in-flight effects, and Rust uses a bounded response channel of
+64. Reader, writer, or handler failure terminates the run instead of leaving
+pending calls suspended.
 
 The request ID is both the concurrent response correlation ID and a durable
 logical idempotency key. Sequential operations reserve monotonically numbered
@@ -251,14 +252,14 @@ Rust rejects unknown effects and malformed or cross-run IDs. On process
 restart, the snapshotted Python program starts at its entrypoint: completed
 effects replay their stored results, while a journal entry left `started` is
 redispatched to deterministic domain-resource IDs. Unfinished Agent actions
-resume the same checkpointed Turn rather than sampling their first model step
-again. The source SHA-256 and snapshotted Python DSL ABI SHA-256 are verified
-before this replay begins; drift fails closed. Local Tool Steps additionally
-persist a stable call/effect ID, an effect
-disposition (`pure`, `idempotent`, `reconcilable`, or `unknown`), and whether
-execution was only prepared or may have begun. Recovery replays only safe
-effects, reconciles where supported, and turns an uncertain unknown effect into
-an explicit model-visible `execution_unknown` result.
+resume the same checkpointed Turn. The source SHA-256 and snapshotted Python
+DSL ABI SHA-256 are verified before replay; drift fails closed.
+
+Model tool calls are deliberately outside the Workflow effect journal. Their
+FunctionCall enters canonical Session history before dispatch and their output
+enters it before another sample. Recovery never re-executes an old call: a call
+without output receives `"aborted"`, then the same Agent observes durable state
+and decides whether a new call is needed.
 
 Every Turn is owned by one ActionAttempt. It is recovered only by replaying the
 owning Workflow; no independent Session submit/resume path exists.
@@ -278,10 +279,10 @@ resources, while a per-Agent mutex ensures that one Session never runs two
 Turns concurrently. The output tuple preserves argument order, independent of
 completion order.
 
-Timers use `coalesce`, `skip`, or `queue` policy metadata and persist fire count,
-next fire time, and last fire time. Dormant timer waits are scheduler wakeups,
-not sleeping Python processes. One callback runs per `wait_timer` response;
-complete backlog semantics for all three policies are not yet distinct.
+Timers persist fire count, next fire time, and last fire time. Firings coalesce
+while the Workflow is not observing them. Dormant timer waits are scheduler
+wakeups, not sleeping Python processes, and one TimerHandle never overlaps its
+own callback.
 Periodic work is cancelled when the workflow entrypoint exits, and active timer
 records become completed.
 

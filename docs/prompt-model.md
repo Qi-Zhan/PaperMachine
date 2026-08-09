@@ -20,6 +20,15 @@ prompt layer，也不是 Project 存储。只有工具明确读取文件，或 W
 runtime result 显式传递内容时，Workspace 数据才会进入模型请求。Turn 的权限快照
 始终独立于 prompt 文本执行。
 
+Model routing is another independent immutable surface. Before Turn creation,
+`ModelRouteSnapshot` pins profile, provider, upstream model, context window,
+capabilities, final reasoning effort, and a SHA-256 of relevant non-secret
+configuration. Prompts cannot change that route, and API keys never enter it.
+
+模型路由是另一条独立的不可变边界。Turn 创建前，`ModelRouteSnapshot` 会固化
+profile、provider、upstream model、context window、capabilities、最终 reasoning
+effort 与相关非秘密配置的 SHA-256。prompt 无法改变这条路由，API key 也不会进入快照。
+
 ## Resolution order / 解析顺序
 
 | Order | Layer | User control | Source |
@@ -28,7 +37,7 @@ runtime result 显式传递内容时，Workspace 数据才会进入模型请求�
 | 2 | `project` | yes | `<data-dir>/projects/<project-id>/prompts/system.md` |
 | 3 | `workflow` | yes | Optional run `instructions`, Action contract, and relevant relations |
 | 4 | `agent` or `session` | yes | Agent class/constructor `system_prompt`, or an interactive Session system prompt |
-| 5 | `skills` | yes | enabled Project Skill snapshots |
+| 5 | `skills` | yes | complete resolved instructions from enabled Project Skills |
 | 6 | `control` | yes | explicit runtime or human attempt guidance |
 
 Layers are rendered in this order into the single `instructions` field used by
@@ -50,8 +59,9 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 - An Agent class uses `system_prompt = "..."`; a constructor may override it.
 - A completed or queued Turn never changes when any source prompt is edited.
   Only subsequently created Turns receive a new snapshot.
-- Workflow source and skill packages already use immutable source/package
-  snapshots; their prompt layers record those snapshot origins.
+- Workflow source is immutable per Run. Skill instructions are resolved in full
+  and frozen directly into PromptSnapshot; only slug/hash audit metadata remains,
+  with no runtime package copy or live-file read during recovery.
 
 - Project Page 负责修改项目级 system prompt 文件。
 - Session 右侧 inspector 可以在没有 active Turn 时修改该 Session 的 system prompt。
@@ -60,6 +70,9 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
   复制它的 system prompt。
 - Agent class 使用 `system_prompt = "..."`，构造实例时也可以覆盖。
 - 任意源 prompt 的修改都不会追溯改变已有 Turn，只影响之后创建的 Turn。
+- Workflow source 在每个 Run 中不可变。Skill instructions 会完整解析并直接固化到
+  PromptSnapshot；只保留 slug/hash 审计信息，不复制 runtime package，恢复时也不
+  读取 live file。
 
 `project-summary` makes this split concrete. Its reviewed Agent base prompt and
 Action contract stay in the built-in Workflow source. The contract gives the
@@ -127,19 +140,19 @@ runtime 也会把它作为该 run 每个 Action Turn 的 Workflow instruction la
 
 ## Message origin / 消息来源
 
-`Turn.origin` is `user` for text submitted directly through the Session
-composer or for a string HumanRequest answer that Rust has verified and bound
-to a `HumanMessage` action parameter. It is `workflow` for an Action dispatched
-from program-generated data. Both use the same Agent runtime, history, model,
-tools, and Step representation. The distinction is a display and provenance
-contract: the UI must never render a Workflow-generated task as if the human
-typed it.
+`Turn.origin` is `user` only when Rust verifies a string HumanRequest answer and
+binds it to a `HumanMessage` action parameter. The Session composer answers the
+open request owned by `interactive-agent`; it is not a standalone Session
+submit path. `Turn.origin` is `workflow` for an Action dispatched from
+program-generated data. Both use the same Agent runtime, history, model, tools,
+and Step representation. The distinction is a display and provenance contract:
+the UI must never render a Workflow-generated task as if the human typed it.
 
-`Turn.origin=user` 表示文字来自 Session 输入框，或来自 Rust 已核验并绑定到
-`HumanMessage` action 参数的字符串 HumanRequest 回答；`Turn.origin=workflow`
-表示 Action 使用的是程序生成的数据。二者共享同一 Agent runtime、history、
-model、tools 与 Step 结构，但 UI 必须明确显示来源，不能把 Workflow 生成的任务
-伪装成人类消息。
+`Turn.origin=user` 只表示 Rust 已核验字符串 HumanRequest 回答，并将其绑定到
+`HumanMessage` action 参数。Session 输入框回答的是 `interactive-agent` 拥有的 open
+request，并不是独立的 Session submit 路径。`Turn.origin=workflow` 表示 Action 使用
+程序生成的数据。二者共享同一 Agent runtime、history、model、tools 与 Step 结构，
+但 UI 必须明确显示来源，不能把 Workflow 生成的任务伪装成人类消息。
 
 ## Cache behavior / 缓存行为
 

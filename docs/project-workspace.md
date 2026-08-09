@@ -33,11 +33,11 @@ and all managed history remain inspectable.
 A Workspace attachment has a stable `WorkspaceId`, a monotonically increasing
 revision, and one canonical absolute directory used as cwd. It
 contains user files only. PaperMachine writes no hidden application state,
-database, journal, prompt, or Skill package into it.
+database, journal, prompt, or Skill file into it.
 
 Workspace attachment 包含稳定的 `WorkspaceId`、单调递增的 revision，以及一个
 作为 cwd 的 canonical 绝对目录。它只保存用户文件；PaperMachine 不会
-在其中写入隐藏应用状态、数据库、journal、prompt 或 Skill package。
+在其中写入隐藏应用状态、数据库、journal、prompt 或 Skill 文件。
 
 When the user does not choose a Workspace during Project creation, PaperMachine
 creates a unique directory below `~/Documents/PaperMachine/<project-name>`.
@@ -84,6 +84,18 @@ materializes the Session access preset into a `TurnEnvironmentSnapshot`:
 ID/revision/path/cwd、精确的文件/工具/网络/子进程环境策略、受保护的 managed
 roots 与权限 SHA-256。
 
+`read_only`, `workspace`, and `research` may read ordinary host files, while
+only `workspace`/`research` may write inside the Workspace; non-`full_access`
+never writes outside it. Every profile is denied PaperMachine managed roots,
+and non-`full_access` also denies credential paths. Relative paths resolve from
+the Workspace cwd, and direct file tools and command sandboxes share this rule.
+
+`read_only`、`workspace` 与 `research` 可以读取普通宿主机文件，但只有
+`workspace`/`research` 能在 Workspace 内写入；非 `full_access` 永远不能在
+Workspace 外写入。所有档位都不能读写 PaperMachine managed roots，非
+`full_access` 还会拒绝 credential 路径。相对路径始终以 Workspace cwd 解析，直接
+文件工具与 command sandbox 使用同一规则。
+
 At the same boundary, the host ToolCatalog creates one exact ToolRegistry. For
 a Workflow Action, `@action(tools=[...])` supplies the candidates and access
 filters its Workspace tools; declared Project tools are admitted only on that
@@ -101,12 +113,26 @@ Project 工具只允许通过这条路径进入。排序后的 definitions 与 S
 不可变快照重建；direct tool 与 process sandbox 仍在内部执行 authorization 检查。
 prompt 文本无法改变任一边界，后续 relocation、权限变化或 Action 调用只影响后续 Turn。
 
+Project Summary is ordinary Agent work but uses Project tools, not filesystem
+access. Its source, draft, canonical page, and history remain in managed Project
+state. Other Agents do not see them through Workspace and never receive those
+tools automatically; Workflow code must explicitly request a bounded Project
+snapshot or declare the relevant Project tools on an Action.
+
+Project Summary 是普通 Agent 工作，但它使用 Project 工具，而不是文件系统权限。
+其 source、draft、canonical page 与历史留在 managed Project state。其他 Agent
+不会通过 Workspace 看到这些内容，也不会自动获得这些工具；Workflow 必须显式读取
+有界 Project snapshot，或在 Action 上声明相应 Project 工具。
+
 ## Recovery and inspection
 
-The Session API exposes each Turn environment and ToolSetSnapshot, Tool Step
-effect disposition and execution state, canonical rollout sequence, and SQLite
-projection sequence. Every Turn is recovered only through its owning Workflow.
+The Session API exposes each Turn environment, ModelRouteSnapshot,
+ToolSetSnapshot, Tool Step status, canonical rollout sequence, and SQLite
+projection sequence. A canonical FunctionCall without output recovers as
+`"aborted"` and is never dispatched again. Every Turn is recovered only through
+its owning Workflow.
 
-Session API 会暴露每个 Turn 的 environment 与 ToolSetSnapshot、Tool Step effect
-disposition 与 execution state、canonical rollout 序号和 SQLite projection 序号。
+Session API 会暴露每个 Turn 的 environment、ModelRouteSnapshot、ToolSetSnapshot、
+Tool Step 状态、canonical rollout 序号和 SQLite projection 序号。canonical
+FunctionCall 若缺少 output，恢复时会得到 `"aborted"`，旧 call 永不再次 dispatch。
 每个 Turn 只通过其所属 Workflow 恢复。
