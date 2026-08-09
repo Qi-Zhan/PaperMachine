@@ -4,7 +4,6 @@ use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
 use papermachine_tools::ExecCommandTool;
@@ -32,10 +31,6 @@ impl ToolExecutor for ProjectProbeTool {
             input_schema: json!({"type": "object"}),
             supports_parallel: false,
         }
-    }
-
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        ToolEffectDisposition::Pure
     }
 
     async fn execute(
@@ -80,7 +75,6 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
         workflow_id: Some(WorkflowId::new()),
         action_invocation_id: None,
         action_attempt_id: None,
-        effect_id: "test-effect".to_string(),
         sandbox_root,
         authorization,
         cancellation: CancellationToken::new(),

@@ -6,8 +6,7 @@
 //! terminates the server.
 
 pub const ROLLOUT_APPENDED_BEFORE_PROJECTION: &str = "rollout_appended_before_projection";
-pub const TOOL_PREPARED_BEFORE_EXECUTION: &str = "tool_prepared_before_execution";
-pub const TOOL_EXECUTION_STARTED: &str = "tool_execution_started";
+pub const FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH: &str = "function_call_committed_before_dispatch";
 pub const TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT: &str =
     "turn_terminal_checkpointed_before_commit";
 

@@ -9,6 +9,7 @@ use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::PromptLayerKind;
+use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnOrigin;
@@ -237,6 +238,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
     let workflow_id = run.id;
     let invocation_id = invocation.id;
     let attempt_id = attempt.id;
+    let mut session_events = store.subscribe_sessions();
     let execution = {
         let runtime = runtime.clone();
         tokio::spawn(async move {
@@ -263,30 +265,35 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
         })
     };
 
-    let mut active_turn = None;
-    for _ in 0..100 {
-        active_turn = store
-            .list_turns(participant_session_id)
-            .expect("Turns should load")
-            .into_iter()
-            .find(|turn| turn.status == TurnStatus::Running);
-        if let Some(turn) = active_turn.as_ref()
-            && !store
-                .list_steps(turn.id)
-                .expect("Steps should load")
-                .is_empty()
-        {
-            break;
+    let model_started = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = session_events
+                .recv()
+                .await
+                .expect("Session event stream should stay open");
+            if event.session_id == participant_session_id
+                && matches!(event.payload, SessionEventPayload::ModelStepStarted)
+            {
+                return event;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let turn = active_turn.expect("Workflow Action Turn should be running");
+    })
+    .await
+    .expect("Workflow Action should reach its model Step before cancellation");
+    let turn = store
+        .get_turn(
+            model_started
+                .turn_id
+                .expect("model event should identify its Turn"),
+        )
+        .expect("Workflow Action Turn should load");
+    assert_eq!(turn.status, TurnStatus::Running);
     assert!(
-        !store
+        store
             .list_steps(turn.id)
-            .expect("Step should be running before cancellation")
+            .expect("Steps should load before cancellation")
             .is_empty(),
-        "Workflow Action should reach its model Step before cancellation"
+        "an in-flight model sample must remain transient"
     );
     runtime.cancel(turn.id).await.expect("Turn should cancel");
     let result = execution.await.expect("execution task should join");

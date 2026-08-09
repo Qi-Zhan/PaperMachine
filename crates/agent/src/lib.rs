@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use futures::future::join_all;
+use futures::stream::FuturesUnordered;
 use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
@@ -28,7 +28,6 @@ use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
@@ -149,10 +148,6 @@ pub enum AgentEvent {
     },
     ToolCallStarted {
         call: ModelToolCall,
-        effect_disposition: ToolEffectDisposition,
-    },
-    ToolExecutionStarted {
-        call_id: String,
     },
     ToolCallCompleted {
         call_id: String,
@@ -687,33 +682,11 @@ impl AgentRuntime {
             );
             let model_step_output =
                 inspectable_model_output(&message, &response_items, request_metadata.as_ref());
-            // Persist provider-hosted tool actions before the model Step is
-            // completed so search telemetry and the Session trace stay aligned.
-            for item in &response_items {
-                if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
-                    self.events
-                        .emit(AgentEvent::HostedToolCompleted {
-                            tool_name: HostedTool::WebSearch.name().to_string(),
-                            input: item.get("action").cloned().unwrap_or(Value::Null),
-                            output: item.clone(),
-                        })
-                        .await
-                        .map_err(AgentError::EventSink)?;
-                }
-            }
-            self.events
-                .emit(AgentEvent::ModelStepCompleted {
-                    step,
-                    output: model_step_output,
-                    usage: step_usage,
-                    duration_ms: sample_started
-                        .elapsed()
-                        .as_millis()
-                        .min(u128::from(u64::MAX)) as u64,
-                })
-                .await
-                .map_err(AgentError::EventSink)?;
-
+            let hosted_items = response_items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
+                .cloned()
+                .collect::<Vec<_>>();
             let has_message_item = response_items
                 .iter()
                 .any(|item| item.get("type").and_then(Value::as_str) == Some("message"));
@@ -728,19 +701,11 @@ impl AgentRuntime {
                     .into_iter()
                     .map(|item| ModelInputItem::ResponseItem { item }),
             );
-            if !message.is_empty() {
-                if !has_message_item {
-                    history.push(ModelInputItem::Message {
-                        role: MessageRole::Assistant,
-                        content: message.clone(),
-                    });
-                }
-                self.events
-                    .emit(AgentEvent::MessageCompleted {
-                        message: message.clone(),
-                    })
-                    .await
-                    .map_err(AgentError::EventSink)?;
+            if !message.is_empty() && !has_message_item {
+                history.push(ModelInputItem::Message {
+                    role: MessageRole::Assistant,
+                    content: message.clone(),
+                });
             }
 
             for call in &calls {
@@ -751,18 +716,11 @@ impl AgentRuntime {
                         arguments: call.arguments.clone(),
                     });
                 }
-                self.events
-                    .emit(AgentEvent::ToolCallStarted {
-                        call: call.clone(),
-                        effect_disposition: self
-                            .tools
-                            .effect_disposition(&call.name)
-                            .unwrap_or(ToolEffectDisposition::Unknown),
-                    })
-                    .await
-                    .map_err(AgentError::EventSink)?;
             }
 
+            // The model-visible call is canonical before any local executor can
+            // observe it. A failed checkpoint therefore fails closed without
+            // dispatching a tool.
             self.events
                 .emit(AgentEvent::HistoryCheckpoint {
                     history: history.clone(),
@@ -773,6 +731,37 @@ impl AgentRuntime {
                 })
                 .await
                 .map_err(AgentError::EventSink)?;
+
+            for item in hosted_items {
+                self.events
+                    .emit(AgentEvent::HostedToolCompleted {
+                        tool_name: HostedTool::WebSearch.name().to_string(),
+                        input: item.get("action").cloned().unwrap_or(Value::Null),
+                        output: item,
+                    })
+                    .await
+                    .map_err(AgentError::EventSink)?;
+            }
+            self.events
+                .emit(AgentEvent::ModelStepCompleted {
+                    step,
+                    output: model_step_output,
+                    usage: step_usage,
+                    duration_ms: sample_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                })
+                .await
+                .map_err(AgentError::EventSink)?;
+            if !message.is_empty() {
+                self.events
+                    .emit(AgentEvent::MessageCompleted {
+                        message: message.clone(),
+                    })
+                    .await
+                    .map_err(AgentError::EventSink)?;
+            }
 
             if calls.is_empty() {
                 if message.is_empty() {
@@ -788,29 +777,26 @@ impl AgentRuntime {
 
             for call in &calls {
                 self.events
-                    .emit(AgentEvent::ToolExecutionStarted {
-                        call_id: call.call_id.clone(),
-                    })
+                    .emit(AgentEvent::ToolCallStarted { call: call.clone() })
                     .await
                     .map_err(AgentError::EventSink)?;
             }
 
-            let futures = calls.into_iter().map(|call| {
-                self.execute_tool(
-                    &request,
-                    call,
-                    cancellation.clone(),
-                    Arc::clone(&execution_gate),
-                )
-            });
-            for outcome in join_all(futures).await {
-                self.events
-                    .emit(outcome.event)
-                    .await
-                    .map_err(AgentError::EventSink)?;
+            let mut futures = calls
+                .into_iter()
+                .map(|call| {
+                    self.execute_tool(
+                        &request,
+                        call,
+                        cancellation.clone(),
+                        Arc::clone(&execution_gate),
+                    )
+                })
+                .collect::<FuturesUnordered<_>>();
+            while let Some(outcome) = futures.next().await {
                 history.push(ModelInputItem::FunctionCallOutput {
-                    call_id: outcome.call_id,
-                    output: outcome.output,
+                    call_id: outcome.call_id.clone(),
+                    output: outcome.output.clone(),
                 });
                 self.events
                     .emit(AgentEvent::HistoryCheckpoint {
@@ -820,6 +806,10 @@ impl AgentRuntime {
                         hosted_search_calls_used,
                         message: None,
                     })
+                    .await
+                    .map_err(AgentError::EventSink)?;
+                self.events
+                    .emit(outcome.event)
                     .await
                     .map_err(AgentError::EventSink)?;
             }
@@ -965,7 +955,6 @@ impl AgentRuntime {
                     workflow_id: request.workflow_id,
                     action_invocation_id: request.action_invocation_id,
                     action_attempt_id: request.action_attempt_id,
-                    effect_id: call.call_id.clone(),
                     sandbox_root: request.sandbox_root.clone(),
                     authorization: request.environment.authorization.clone(),
                     cancellation,

@@ -5,7 +5,6 @@ use crate::ToolOutput;
 use async_trait::async_trait;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::WorkflowId;
 use papermachine_store::ProjectHomeDraft;
 use papermachine_store::ProjectHomePatchOperation;
@@ -70,10 +69,6 @@ impl ToolExecutor for ReadProjectHomeTool {
         }
     }
 
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        ToolEffectDisposition::Idempotent
-    }
-
     async fn execute(
         &self,
         context: ToolContext,
@@ -130,10 +125,6 @@ impl ToolExecutor for PatchProjectHomeTool {
         }
     }
 
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        ToolEffectDisposition::Idempotent
-    }
-
     async fn execute(
         &self,
         context: ToolContext,
@@ -146,7 +137,6 @@ impl ToolExecutor for PatchProjectHomeTool {
             .patch_project_home_draft(
                 workflow_id,
                 action_invocation_id,
-                &context.effect_id,
                 &args.base_revision,
                 args.operations,
             )
@@ -175,10 +165,6 @@ impl ToolExecutor for PreviewProjectHomeTool {
             input_schema: empty_schema(),
             supports_parallel: false,
         }
-    }
-
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        ToolEffectDisposition::Idempotent
     }
 
     async fn execute(

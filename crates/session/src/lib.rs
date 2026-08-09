@@ -12,7 +12,6 @@ use papermachine_agent::AgentTurnRequest;
 use papermachine_model::ModelClient;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
-use papermachine_protocol::AgentStep;
 use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ModelContextMutation;
@@ -29,8 +28,6 @@ use papermachine_protocol::StepId;
 use papermachine_protocol::StepKind;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
-use papermachine_protocol::ToolEffectDisposition;
-use papermachine_protocol::ToolExecutionState;
 use papermachine_protocol::Turn;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::TurnOrigin;
@@ -45,10 +42,7 @@ use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_tools::ToolCatalog;
-use papermachine_tools::ToolContext;
 use papermachine_tools::ToolError;
-use papermachine_tools::ToolReconciliation;
-use papermachine_tools::model_visible_tool_result;
 use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
@@ -60,7 +54,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history. If a recovered tool result is marked execution_unknown, inspect durable Workspace or external state before deciding whether any effect should be repeated.";
+const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history. If a recovered tool result is aborted, inspect durable Workspace or external state before deciding whether any effect should be attempted again.";
 
 #[derive(Clone)]
 pub struct SessionRuntime {
@@ -192,18 +186,6 @@ impl SessionRuntime {
         context: WorkflowTurnContext,
         cancellation: CancellationToken,
     ) -> Result<Turn, SessionRuntimeError> {
-        let turn = self.inner.store.get_turn(turn_id)?;
-        let recovered_steps = self
-            .recover_orphaned_steps(&turn, context, cancellation.clone())
-            .await?;
-        if recovered_steps > 0 {
-            self.inner.store.publish_transient_session_event(
-                turn.session_id,
-                Some(turn_id),
-                None,
-                SessionEventPayload::AssistantMessageReset,
-            )?;
-        }
         self.run_tracked_turn(turn_id, context, cancellation)
             .await?;
         Ok(self.inner.store.get_turn(turn_id)?)
@@ -290,225 +272,6 @@ impl SessionRuntime {
         )?)
     }
 
-    async fn recover_orphaned_steps(
-        &self,
-        turn: &Turn,
-        workflow_context: WorkflowTurnContext,
-        cancellation: CancellationToken,
-    ) -> Result<usize, SessionRuntimeError> {
-        let steps = self
-            .inner
-            .store
-            .list_steps(turn.id)?
-            .into_iter()
-            .filter(|step| step.status == StepStatus::Running)
-            .collect::<Vec<_>>();
-        if steps.is_empty() {
-            return Ok(0);
-        }
-        let session = self.inner.store.get_session(turn.session_id)?;
-        let registry = self.inner.tools.registry_for_snapshot(&turn.tool_set)?;
-        for step in &steps {
-            if step.kind != StepKind::Tool {
-                self.inner.store.finish_step(
-                    step.id,
-                    StepStatus::Cancelled,
-                    Some(json!({
-                        "error": "server process stopped while this internal Step was running",
-                        "recovered": true,
-                    })),
-                    TokenUsage::default(),
-                    None,
-                )?;
-                continue;
-            }
-
-            let Some(call_id) = step.tool_call_id.as_ref() else {
-                self.finish_recovered_tool_step(
-                    turn,
-                    step,
-                    StepStatus::ExecutionUnknown,
-                    recovery_unknown_output(
-                        step,
-                        "Tool Step has no durable provider call identity",
-                    ),
-                    false,
-                    0,
-                )?;
-                continue;
-            };
-            let disposition = step
-                .effect_disposition
-                .unwrap_or(ToolEffectDisposition::Unknown);
-            let execution_state = step
-                .execution_state
-                .unwrap_or(ToolExecutionState::ExecutionUnknown);
-
-            let registered_disposition = registry.effect_disposition(&step.name);
-            if registered_disposition != Some(disposition) {
-                let output = recovery_unknown_output(
-                    step,
-                    "the registered tool is missing or its effect disposition changed",
-                );
-                let status = if execution_state == ToolExecutionState::Prepared {
-                    StepStatus::Failed
-                } else {
-                    StepStatus::ExecutionUnknown
-                };
-                self.finish_recovered_tool_step(turn, step, status, output, false, 0)?;
-                continue;
-            }
-
-            let tool_context = ToolContext {
-                project_id: session.project_id,
-                session_id: session.id,
-                turn_id: turn.id,
-                workflow_id: Some(workflow_context.workflow_id),
-                action_invocation_id: Some(workflow_context.action_invocation_id),
-                action_attempt_id: Some(workflow_context.action_attempt_id),
-                effect_id: call_id.clone(),
-                sandbox_root: self
-                    .inner
-                    .store
-                    .managed_root()
-                    .join("runtime/sandboxes")
-                    .join(session.id.to_string())
-                    .join(turn.id.to_string()),
-                authorization: turn.environment.authorization.clone(),
-                cancellation: cancellation.clone(),
-            };
-
-            let started = std::time::Instant::now();
-            let result = match execution_state {
-                ToolExecutionState::Prepared => {
-                    // This is the recovery equivalent of
-                    // `AgentEvent::ToolExecutionStarted`: persist that the
-                    // external-effect boundary may be crossed before invoking
-                    // the tool. A second crash must never see this call as
-                    // still safely prepared.
-                    self.inner.store.start_tool_execution(step.id)?;
-                    registry
-                        .execute(&step.name, tool_context, step.input.clone())
-                        .await
-                }
-                ToolExecutionState::Executing => match disposition {
-                    ToolEffectDisposition::Pure | ToolEffectDisposition::Idempotent => {
-                        registry
-                            .execute(&step.name, tool_context, step.input.clone())
-                            .await
-                    }
-                    ToolEffectDisposition::Reconcilable => match registry
-                        .reconcile(&step.name, tool_context.clone(), step.input.clone())
-                        .await
-                    {
-                        Ok(ToolReconciliation::Completed(output)) => Ok(output),
-                        Ok(ToolReconciliation::Retry) => {
-                            registry
-                                .execute(&step.name, tool_context, step.input.clone())
-                                .await
-                        }
-                        Ok(ToolReconciliation::Unknown { message }) => {
-                            let output = recovery_unknown_output(step, &message);
-                            self.finish_recovered_tool_step(
-                                turn,
-                                step,
-                                StepStatus::ExecutionUnknown,
-                                output,
-                                false,
-                                elapsed_millis(started),
-                            )?;
-                            continue;
-                        }
-                        Err(error) => {
-                            let output = recovery_unknown_output(
-                                step,
-                                &format!("tool reconciliation failed: {error}"),
-                            );
-                            self.finish_recovered_tool_step(
-                                turn,
-                                step,
-                                StepStatus::ExecutionUnknown,
-                                output,
-                                false,
-                                elapsed_millis(started),
-                            )?;
-                            continue;
-                        }
-                    },
-                    ToolEffectDisposition::Unknown => {
-                        let output = recovery_unknown_output(
-                            step,
-                            "unknown external effects are never replayed automatically",
-                        );
-                        self.finish_recovered_tool_step(
-                            turn,
-                            step,
-                            StepStatus::ExecutionUnknown,
-                            output,
-                            false,
-                            elapsed_millis(started),
-                        )?;
-                        continue;
-                    }
-                },
-                ToolExecutionState::Completed | ToolExecutionState::ExecutionUnknown => {
-                    let output = recovery_unknown_output(
-                        step,
-                        "running Step has an inconsistent terminal execution state",
-                    );
-                    self.finish_recovered_tool_step(
-                        turn,
-                        step,
-                        StepStatus::ExecutionUnknown,
-                        output,
-                        false,
-                        elapsed_millis(started),
-                    )?;
-                    continue;
-                }
-            };
-            let (output, success) = model_visible_tool_result(result);
-            self.finish_recovered_tool_step(
-                turn,
-                step,
-                if success {
-                    StepStatus::Completed
-                } else {
-                    StepStatus::Failed
-                },
-                output,
-                success,
-                elapsed_millis(started),
-            )?;
-        }
-        Ok(steps.len())
-    }
-
-    fn finish_recovered_tool_step(
-        &self,
-        turn: &Turn,
-        step: &AgentStep,
-        status: StepStatus,
-        output: Value,
-        _success: bool,
-        duration_ms: u64,
-    ) -> Result<(), SessionRuntimeError> {
-        self.inner.store.finish_step(
-            step.id,
-            status,
-            Some(output.clone()),
-            TokenUsage::default(),
-            Some(duration_ms),
-        )?;
-        self.inner.store.append_session_event(
-            turn.session_id,
-            Some(turn.id),
-            Some(step.id),
-            SessionEventPayload::ToolCallCompleted,
-        )?;
-        Ok(())
-    }
-
     pub async fn cancel(&self, turn_id: TurnId) -> Result<(), SessionRuntimeError> {
         if let Some(cancellation) = self.inner.active.lock().await.get(&turn_id) {
             cancellation.cancel();
@@ -587,12 +350,33 @@ async fn run_scheduled_turn_inner(
         .into());
     }
     let resume_current_turn = active_rollout.has_checkpoint;
-    let rollout_context = active_rollout.context;
-    let history = if resume_current_turn {
-        repair_interrupted_tool_calls(rollout_context.clone(), &inner.store.list_steps(turn.id)?)
-    } else {
-        rollout_context.clone()
-    };
+    let mut rollout_context = active_rollout.context;
+    if resume_current_turn {
+        let recovered = reconcile_step_projections(&inner.store, &turn, &rollout_context)?;
+        if recovered > 0 {
+            inner.store.publish_transient_session_event(
+                turn.session_id,
+                Some(turn.id),
+                None,
+                SessionEventPayload::AssistantMessageReset,
+            )?;
+        }
+        let repaired = repair_interrupted_tool_calls(rollout_context.clone());
+        if repaired.len() != rollout_context.len() {
+            inner.store.checkpoint_turn_context(
+                turn.id,
+                ModelContextMutation::Append {
+                    items: repaired[rollout_context.len()..].to_vec(),
+                },
+                active_rollout.usage,
+                active_rollout.completed_model_steps,
+                active_rollout.hosted_search_calls_used,
+                active_rollout.checkpoint_message.clone(),
+            )?;
+            rollout_context = repaired;
+        }
+    }
+    let history = rollout_context.clone();
     let event_sink = Arc::new(SessionAgentEventSink::new(
         Arc::clone(&inner.store),
         session.id,
@@ -753,69 +537,153 @@ impl AgentControlPlane for StoreAgentControlPlane {
     }
 }
 
-fn repair_interrupted_tool_calls(
-    mut history: Vec<ModelInputItem>,
-    steps: &[AgentStep],
-) -> Vec<ModelInputItem> {
+#[derive(Clone)]
+struct CanonicalToolCall {
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+fn canonical_tool_state(
+    history: &[ModelInputItem],
+) -> (Vec<CanonicalToolCall>, HashMap<String, Value>) {
     let mut calls = Vec::new();
-    let mut outputs = std::collections::HashSet::new();
-    let recovered_outputs = steps
-        .iter()
-        .filter_map(|step| {
-            step.tool_call_id
-                .as_ref()
-                .zip(step.output.as_ref())
-                .map(|(call_id, output)| (call_id.clone(), output.clone()))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    for item in &history {
+    let mut outputs = HashMap::new();
+    for item in history {
         match item {
-            ModelInputItem::FunctionCall { call_id, .. } => calls.push(call_id.clone()),
-            ModelInputItem::FunctionCallOutput { call_id, .. } => {
-                outputs.insert(call_id.clone());
+            ModelInputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => calls.push(CanonicalToolCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
+            ModelInputItem::FunctionCallOutput { call_id, output } => {
+                outputs.insert(call_id.clone(), output.clone());
             }
             ModelInputItem::ResponseItem { item }
                 if item.get("type").and_then(Value::as_str) == Some("function_call") =>
             {
-                if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
-                    calls.push(call_id.to_string());
+                if let (Some(call_id), Some(name)) = (
+                    item.get("call_id").and_then(Value::as_str),
+                    item.get("name").and_then(Value::as_str),
+                ) {
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            item.get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| json!({}))
+                                .to_string()
+                        });
+                    calls.push(CanonicalToolCall {
+                        call_id: call_id.to_string(),
+                        name: name.to_string(),
+                        arguments,
+                    });
                 }
             }
             _ => {}
         }
     }
-    for call_id in calls {
-        if outputs.insert(call_id.clone()) {
+    (calls, outputs)
+}
+
+fn repair_interrupted_tool_calls(mut history: Vec<ModelInputItem>) -> Vec<ModelInputItem> {
+    let (calls, outputs) = canonical_tool_state(&history);
+    for call in calls {
+        if !outputs.contains_key(&call.call_id) {
             history.push(ModelInputItem::FunctionCallOutput {
-                output: recovered_outputs.get(&call_id).cloned().unwrap_or_else(|| {
-                    json!({
-                        "error": "tool execution was interrupted by a server restart; inspect durable state before retrying",
-                        "recovered": true,
-                    })
-                }),
-                call_id,
+                call_id: call.call_id,
+                output: Value::String("aborted".to_string()),
             });
         }
     }
     history
 }
 
-fn recovery_unknown_output(step: &AgentStep, message: &str) -> Value {
-    json!({
-        "ok": false,
-        "error": "tool execution state is unknown after process restart",
-        "recovery": {
-            "message": message,
-            "effect_id": step.tool_call_id,
-            "effect_disposition": step.effect_disposition,
-            "execution_state": step.execution_state,
-            "automatic_replay": false,
+fn reconcile_step_projections(
+    store: &Store,
+    turn: &Turn,
+    history: &[ModelInputItem],
+) -> Result<usize, StoreError> {
+    let (calls, outputs) = canonical_tool_state(history);
+    let steps = store.list_steps(turn.id)?;
+    let mut by_call = steps
+        .iter()
+        .filter_map(|step| {
+            step.tool_call_id
+                .as_ref()
+                .map(|call_id| (call_id.clone(), step.id))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut recovered = 0_usize;
+
+    for step in steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Running)
+    {
+        let (status, output) = match step
+            .tool_call_id
+            .as_ref()
+            .and_then(|call_id| outputs.get(call_id))
+        {
+            Some(output) => (tool_step_status(output), output.clone()),
+            None => (StepStatus::Aborted, Value::String("aborted".to_string())),
+        };
+        store.finish_step(step.id, status, Some(output), TokenUsage::default(), None)?;
+        if step.kind == StepKind::Tool {
+            store.append_session_event(
+                turn.session_id,
+                Some(turn.id),
+                Some(step.id),
+                SessionEventPayload::ToolCallCompleted,
+            )?;
         }
-    })
+        recovered = recovered.saturating_add(1);
+    }
+
+    for call in calls {
+        if by_call.contains_key(&call.call_id) || outputs.contains_key(&call.call_id) {
+            continue;
+        }
+        let input = serde_json::from_str(&call.arguments)
+            .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+        let step = store.create_tool_step(turn.id, &call.call_id, call.name, input)?;
+        by_call.insert(call.call_id.clone(), step.id);
+        let output = outputs
+            .get(&call.call_id)
+            .cloned()
+            .unwrap_or_else(|| Value::String("aborted".to_string()));
+        let status = if outputs.contains_key(&call.call_id) {
+            tool_step_status(&output)
+        } else {
+            StepStatus::Aborted
+        };
+        store.finish_step(step.id, status, Some(output), TokenUsage::default(), None)?;
+        store.append_session_event(
+            turn.session_id,
+            Some(turn.id),
+            Some(step.id),
+            SessionEventPayload::ToolCallCompleted,
+        )?;
+        recovered = recovered.saturating_add(1);
+    }
+    Ok(recovered)
 }
 
-fn elapsed_millis(started: std::time::Instant) -> u64 {
-    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+fn tool_step_status(output: &Value) -> StepStatus {
+    if output == "aborted" {
+        StepStatus::Aborted
+    } else if output.get("ok").and_then(Value::as_bool) == Some(false) {
+        StepStatus::Failed
+    } else {
+        StepStatus::Completed
+    }
 }
 
 fn build_prompt_snapshot(
@@ -957,7 +825,7 @@ struct SessionAgentEventSink {
     session_id: SessionId,
     turn_id: TurnId,
     workflow_id: Option<WorkflowId>,
-    model_steps: Mutex<HashMap<u32, StepId>>,
+    model_steps: Mutex<HashMap<u32, Value>>,
     tool_steps: Mutex<HashMap<String, StepId>>,
     compaction_steps: Mutex<Vec<StepId>>,
     checkpoint: Mutex<RolloutCheckpointState>,
@@ -1007,18 +875,8 @@ impl AgentEventSink for SessionAgentEventSink {
                 self.append(None, SessionEventPayload::AssistantMessageCompleted)
             }
             AgentEvent::ModelStepStarted { step, input } => {
-                let stored = self
-                    .store
-                    .create_step(
-                        self.turn_id,
-                        StepKind::Model,
-                        format!("model sample {step}"),
-                        input,
-                    )
-                    .map_err(|error| error.to_string())?;
-                self.model_steps.lock().await.insert(step, stored.id);
-                self.charge_action_step().await?;
-                self.append(Some(stored.id), SessionEventPayload::ModelStepStarted)
+                self.model_steps.lock().await.insert(step, input);
+                self.transient(None, SessionEventPayload::ModelStepStarted)
             }
             AgentEvent::ModelStepCompleted {
                 step,
@@ -1026,18 +884,23 @@ impl AgentEventSink for SessionAgentEventSink {
                 usage,
                 duration_ms,
             } => {
-                let step_id = self.model_steps.lock().await.remove(&step);
-                if let Some(step_id) = step_id {
-                    self.store
-                        .finish_step(
-                            step_id,
-                            StepStatus::Completed,
-                            Some(output),
-                            usage,
-                            Some(duration_ms),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
+                let input = self.model_steps.lock().await.remove(&step).ok_or_else(|| {
+                    format!("model Step {step} completed without a matching start")
+                })?;
+                let stored = self
+                    .store
+                    .create_terminal_step(
+                        self.turn_id,
+                        StepKind::Model,
+                        format!("model sample {step}"),
+                        input,
+                        StepStatus::Completed,
+                        Some(output),
+                        usage,
+                        Some(duration_ms),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.charge_action_step().await?;
                 if let Some(workflow_id) = self.workflow_id {
                     self.store
                         .add_workflow_usage(
@@ -1049,7 +912,7 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                self.append(step_id, SessionEventPayload::ModelStepCompleted)
+                self.append(Some(stored.id), SessionEventPayload::ModelStepCompleted)
             }
             AgentEvent::ModelStepFailed {
                 step,
@@ -1057,18 +920,26 @@ impl AgentEventSink for SessionAgentEventSink {
                 usage,
                 duration_ms,
             } => {
-                let step_id = self.model_steps.lock().await.remove(&step);
-                if let Some(step_id) = step_id {
-                    self.store
-                        .finish_step(
-                            step_id,
-                            StepStatus::Failed,
-                            Some(json!({"error": &error})),
-                            usage,
-                            Some(duration_ms),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
+                let input = self
+                    .model_steps
+                    .lock()
+                    .await
+                    .remove(&step)
+                    .unwrap_or_else(|| json!({"model_step": step}));
+                let stored = self
+                    .store
+                    .create_terminal_step(
+                        self.turn_id,
+                        StepKind::Model,
+                        format!("model sample {step}"),
+                        input,
+                        StepStatus::Failed,
+                        Some(json!({"error": &error})),
+                        usage,
+                        Some(duration_ms),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.charge_action_step().await?;
                 if let Some(workflow_id) = self.workflow_id {
                     self.store
                         .add_workflow_usage(
@@ -1080,23 +951,14 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                self.append(step_id, SessionEventPayload::ModelStepFailed)
+                self.append(Some(stored.id), SessionEventPayload::ModelStepFailed)
             }
-            AgentEvent::ToolCallStarted {
-                call,
-                effect_disposition,
-            } => {
+            AgentEvent::ToolCallStarted { call } => {
                 let input = serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| Value::String(call.arguments.clone()));
                 let step = self
                     .store
-                    .create_tool_step(
-                        self.turn_id,
-                        call.call_id.clone(),
-                        call.name.clone(),
-                        input,
-                        effect_disposition,
-                    )
+                    .create_tool_step(self.turn_id, call.call_id.clone(), call.name.clone(), input)
                     .map_err(|error| error.to_string())?;
                 self.tool_steps
                     .lock()
@@ -1105,21 +967,7 @@ impl AgentEventSink for SessionAgentEventSink {
                 self.charge_action_step().await?;
                 self.append(Some(step.id), SessionEventPayload::ToolCallStarted)?;
                 papermachine_store::process_fault::reach_process_fault_boundary(
-                    papermachine_store::process_fault::TOOL_PREPARED_BEFORE_EXECUTION,
-                );
-                Ok(())
-            }
-            AgentEvent::ToolExecutionStarted { call_id } => {
-                let step_id = self.tool_steps.lock().await.get(&call_id).copied();
-                let step_id = step_id.ok_or_else(|| {
-                    format!("tool execution started without a prepared Step for {call_id}")
-                })?;
-                self.store
-                    .start_tool_execution(step_id)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())?;
-                papermachine_store::process_fault::reach_process_fault_boundary(
-                    papermachine_store::process_fault::TOOL_EXECUTION_STARTED,
+                    papermachine_store::process_fault::FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH,
                 );
                 Ok(())
             }
@@ -1155,16 +1003,11 @@ impl AgentEventSink for SessionAgentEventSink {
             } => {
                 let step = self
                     .store
-                    .create_step(
+                    .create_terminal_step(
                         self.turn_id,
                         StepKind::Tool,
                         tool_name.clone(),
                         input.clone(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                self.store
-                    .finish_step(
-                        step.id,
                         StepStatus::Completed,
                         Some(output),
                         TokenUsage::default(),
@@ -1319,13 +1162,19 @@ impl SessionAgentEventSink {
     }
 
     async fn finish_pending(&self, status: StepStatus, error: &str) -> Result<(), StoreError> {
-        let model_steps = self
-            .model_steps
-            .lock()
-            .await
-            .drain()
-            .map(|(_, step_id)| step_id)
-            .collect::<Vec<_>>();
+        let model_steps = self.model_steps.lock().await.drain().collect::<Vec<_>>();
+        for (step, input) in model_steps {
+            self.store.create_terminal_step(
+                self.turn_id,
+                StepKind::Model,
+                format!("model sample {step}"),
+                input,
+                status,
+                Some(json!({"error": error})),
+                TokenUsage::default(),
+                None,
+            )?;
+        }
         let tool_steps = self
             .tool_steps
             .lock()
@@ -1339,11 +1188,7 @@ impl SessionAgentEventSink {
             .await
             .drain(..)
             .collect::<Vec<_>>();
-        for step_id in model_steps
-            .into_iter()
-            .chain(tool_steps)
-            .chain(compaction_steps)
-        {
+        for step_id in tool_steps.into_iter().chain(compaction_steps) {
             self.store.finish_step(
                 step_id,
                 status,
@@ -1399,70 +1244,18 @@ pub enum SessionRuntimeError {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
-    fn recovery_reuses_a_completed_tool_step_output() {
-        let directory = tempdir().expect("temporary directory should be created");
-        let store =
-            Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
-        let project = store
-            .create_project("Tool recovery", directory.path().join("project"))
-            .expect("Project should be created");
-        let session = store
-            .create_session(project.id, "Session", "", "test-model", Vec::new())
-            .expect("Session should be created");
-        let turn = store
-            .create_turn(
-                session.id,
-                TurnOrigin::User,
-                "Read evidence",
-                "test-model",
-                PromptSnapshot::default(),
-                None,
-                true,
-                papermachine_protocol::AccessPreset::Research,
-                papermachine_protocol::ToolSetSnapshot::materialize(Vec::new())
-                    .expect("empty tool set should be valid"),
-                None,
-                None,
-                Vec::new(),
-            )
-            .expect("Turn should be created");
-        let step = store
-            .create_tool_step(
-                turn.id,
-                "call-read",
-                "read_file",
-                json!({"path": "evidence.md"}),
-                papermachine_protocol::ToolEffectDisposition::Pure,
-            )
-            .expect("Tool Step should be created");
-        store
-            .start_tool_execution(step.id)
-            .expect("Tool Step should cross its execution boundary");
-        let output = json!({"content": "durable evidence"});
-        let step = store
-            .finish_step(
-                step.id,
-                StepStatus::Completed,
-                Some(output.clone()),
-                TokenUsage::default(),
-                Some(3),
-            )
-            .expect("Tool Step should complete");
-        let repaired = repair_interrupted_tool_calls(
-            vec![ModelInputItem::FunctionCall {
-                call_id: "call-read".to_string(),
-                name: "read_file".to_string(),
-                arguments: "{\"path\":\"evidence.md\"}".to_string(),
-            }],
-            &[step],
-        );
+    fn recovery_synthesizes_one_stable_aborted_output() {
+        let repaired = repair_interrupted_tool_calls(vec![ModelInputItem::FunctionCall {
+            call_id: "call-read".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{\"path\":\"evidence.md\"}".to_string(),
+        }]);
 
         assert!(repaired.iter().any(|item| {
             matches!(item, ModelInputItem::FunctionCallOutput { call_id, output: value }
-                if call_id == "call-read" && value == &output)
+                if call_id == "call-read" && value == "aborted")
         }));
     }
 }

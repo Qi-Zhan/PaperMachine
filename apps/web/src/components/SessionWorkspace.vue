@@ -107,9 +107,7 @@
                     <ChevronDown :size="14" />
                   </summary>
                   <div class="activity-payload step-payload">
-                    <dl v-if="step.effect_disposition || step.execution_state || step.tool_call_id" class="tool-effect-meta">
-                      <div v-if="step.effect_disposition"><dt>{{ t('session.effectDisposition') }}</dt><dd>{{ step.effect_disposition }}</dd></div>
-                      <div v-if="step.execution_state"><dt>{{ t('session.executionState') }}</dt><dd>{{ step.execution_state }}</dd></div>
+                    <dl v-if="step.tool_call_id" class="tool-effect-meta">
                       <div v-if="step.tool_call_id"><dt>{{ t('session.toolCallId') }}</dt><dd>{{ step.tool_call_id }}</dd></div>
                     </dl>
                     <div>

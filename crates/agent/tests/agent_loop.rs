@@ -200,22 +200,59 @@ async fn agent_executes_a_tool_then_follows_up() {
                 if item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
         )
     }));
+    let events = events.events().await;
     assert!(
         events
-            .events()
-            .await
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolCallCompleted { success: true, .. }))
     );
     assert_eq!(
         events
-            .events()
-            .await
             .iter()
             .filter(|event| matches!(event, AgentEvent::MessageDelta { .. }))
             .count(),
         1
     );
+    let call_checkpoint = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::HistoryCheckpoint { history, .. }
+                    if history.iter().any(|item| matches!(
+                        item,
+                        ModelInputItem::ResponseItem { item }
+                            if item.get("call_id").and_then(serde_json::Value::as_str)
+                                == Some("call-write")
+                    ))
+            )
+        })
+        .expect("the canonical function call should be checkpointed");
+    let call_started = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ToolCallStarted { call } if call.call_id == "call-write"))
+        .expect("the tool call should start");
+    assert!(call_checkpoint < call_started);
+
+    let output_checkpoint = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::HistoryCheckpoint { history, .. }
+                    if history.iter().any(|item| matches!(
+                        item,
+                        ModelInputItem::FunctionCallOutput { call_id, .. }
+                            if call_id == "call-write"
+                    ))
+            )
+        })
+        .expect("the canonical function-call output should be checkpointed");
+    let call_completed = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ToolCallCompleted { call_id, .. } if call_id == "call-write"))
+        .expect("the tool call should complete");
+    assert!(output_checkpoint < call_completed);
 }
 
 #[tokio::test]
@@ -259,10 +296,13 @@ async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_executio
         .expect_err("duplicate tool-call IDs must fail closed");
     assert!(error.to_string().contains("duplicate call ID"));
     assert!(!directory.path().join("must-not-exist.txt").exists());
-    assert!(!events.events().await.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolExecutionStarted { .. }
-    )));
+    assert!(
+        !events
+            .events()
+            .await
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallStarted { .. }))
+    );
 }
 
 #[tokio::test]

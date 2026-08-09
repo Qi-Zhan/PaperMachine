@@ -7,9 +7,8 @@ use axum::extract::State;
 use axum::http::StatusCode as AxumStatusCode;
 use axum::response::Response;
 use axum::routing::post;
+use papermachine_store::process_fault::FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH;
 use papermachine_store::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION;
-use papermachine_store::process_fault::TOOL_EXECUTION_STARTED;
-use papermachine_store::process_fault::TOOL_PREPARED_BEFORE_EXECUTION;
 use papermachine_store::process_fault::TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT;
 use reqwest::Client;
 use reqwest::Method;
@@ -717,21 +716,23 @@ async fn workflow_inflight_sample_resumes_automatically_after_sigkill() {
     restarted.stop().await;
 }
 
-async fn prepared_unknown_tool_executes_once_after_sigkill() {
+async fn canonical_tool_call_is_aborted_without_dispatch_after_sigkill() {
     let mut scenario = Scenario::new().await;
     scenario
         .mock
         .enqueue_tool_call(
             "prepared-call",
-            "printf 'prepared-once\\n' >> prepared-once.log",
+            "printf 'must-not-run\\n' >> canonical-call.log",
         )
         .await;
     scenario.mock.enqueue_text("prepared tool recovered").await;
-    let (mut server, marker) = scenario.start(Some(TOOL_PREPARED_BEFORE_EXECUTION)).await;
-    let project_id = scenario.create_project("Prepared tool crash").await;
+    let (mut server, marker) = scenario
+        .start(Some(FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH))
+        .await;
+    let project_id = scenario.create_project("Canonical tool call crash").await;
     scenario.publish_workflow(&project_id).await;
     let workflow_id = scenario
-        .launch_workflow(&project_id, "Execute the prepared command once.")
+        .launch_workflow(&project_id, "Do not replay the interrupted command.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
@@ -750,59 +751,10 @@ async fn prepared_unknown_tool_executes_once_after_sigkill() {
         .collect::<Vec<_>>();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["tool_call_id"], "prepared-call");
-    assert_eq!(tools[0]["status"], "completed");
-    assert_eq!(tools[0]["execution_state"], "completed");
-    assert_eq!(
-        std::fs::read_to_string(scenario.workspace.join("prepared-once.log"))
-            .expect("prepared tool effect should exist"),
-        "prepared-once\n"
-    );
-    assert_eq!(scenario.mock.call_count().await, 2);
-    assert_rollout_projected(&view);
-    restarted.stop().await;
-}
-
-async fn executing_unknown_tool_is_not_replayed_after_sigkill() {
-    let mut scenario = Scenario::new().await;
-    scenario
-        .mock
-        .enqueue_tool_call(
-            "executing-call",
-            "printf 'must-not-run\\n' >> execution-unknown.log",
-        )
-        .await;
-    scenario
-        .mock
-        .enqueue_text("unknown tool outcome reconciled by the Agent")
-        .await;
-    let (mut server, marker) = scenario.start(Some(TOOL_EXECUTION_STARTED)).await;
-    let project_id = scenario.create_project("Executing tool crash").await;
-    scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Do not replay an unknown tool effect.")
-        .await;
-    wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
-    server.sigkill().await;
-
-    let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(session_id).await;
-    let tools = view["steps"]
-        .as_array()
-        .expect("Steps should exist")
-        .iter()
-        .filter(|step| step["kind"] == "tool")
-        .collect::<Vec<_>>();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["tool_call_id"], "executing-call");
-    assert_eq!(tools[0]["status"], "execution_unknown");
-    assert_eq!(tools[0]["execution_state"], "execution_unknown");
+    assert_eq!(tools[0]["status"], "aborted");
     assert!(
-        !scenario.workspace.join("execution-unknown.log").exists(),
-        "an executing unknown effect must never be automatically replayed"
+        !scenario.workspace.join("canonical-call.log").exists(),
+        "a canonical call without an output must never be dispatched during recovery"
     );
     assert_eq!(scenario.mock.call_count().await, 2);
     assert_rollout_projected(&view);
@@ -814,6 +766,5 @@ async fn process_sigkill_recovery_matrix_preserves_durable_boundaries() {
     rollout_ahead_of_projection_is_replayed_after_sigkill().await;
     terminal_checkpoint_commits_without_resampling_after_sigkill().await;
     workflow_inflight_sample_resumes_automatically_after_sigkill().await;
-    prepared_unknown_tool_executes_once_after_sigkill().await;
-    executing_unknown_tool_is_not_replayed_after_sigkill().await;
+    canonical_tool_call_is_aborted_without_dispatch_after_sigkill().await;
 }

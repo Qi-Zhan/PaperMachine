@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -941,7 +941,47 @@ impl Store {
         name: impl Into<String>,
         input: Value,
     ) -> Result<AgentStep, StoreError> {
-        self.create_step_inner(turn_id, kind, name, None, None, input)
+        self.create_step_inner(
+            turn_id,
+            kind,
+            name,
+            None,
+            StepStatus::Running,
+            input,
+            None,
+            TokenUsage::default(),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_terminal_step(
+        &self,
+        turn_id: TurnId,
+        kind: StepKind,
+        name: impl Into<String>,
+        input: Value,
+        status: StepStatus,
+        output: Option<Value>,
+        usage: TokenUsage,
+        duration_ms: Option<u64>,
+    ) -> Result<AgentStep, StoreError> {
+        if status == StepStatus::Running {
+            return Err(StoreError::Invariant(
+                "terminal Step creation requires a terminal status".to_string(),
+            ));
+        }
+        self.create_step_inner(
+            turn_id,
+            kind,
+            name,
+            None,
+            status,
+            input,
+            output,
+            usage,
+            duration_ms,
+        )
     }
 
     pub fn create_tool_step(
@@ -950,31 +990,57 @@ impl Store {
         call_id: impl Into<String>,
         name: impl Into<String>,
         input: Value,
-        effect_disposition: ToolEffectDisposition,
     ) -> Result<AgentStep, StoreError> {
         self.create_step_inner(
             turn_id,
             StepKind::Tool,
             name,
             Some(call_id.into()),
-            Some(effect_disposition),
+            StepStatus::Running,
             input,
+            None,
+            TokenUsage::default(),
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_step_inner(
         &self,
         turn_id: TurnId,
         kind: StepKind,
         name: impl Into<String>,
         tool_call_id: Option<String>,
-        effect_disposition: Option<ToolEffectDisposition>,
+        status: StepStatus,
         input: Value,
+        output: Option<Value>,
+        usage: TokenUsage,
+        duration_ms: Option<u64>,
     ) -> Result<AgentStep, StoreError> {
         let turn = self.get_turn(turn_id)?;
         let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
         let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
         self.replay_session_rollout_locked(turn.session_id)?;
+        let name = name.into();
+        if let Some(call_id) = tool_call_id.as_ref() {
+            let existing = self
+                .connection()?
+                .query_row(
+                    "SELECT document_json FROM steps WHERE turn_id = ?1 AND tool_call_id = ?2",
+                    params![turn_id.to_string(), call_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(document) = existing {
+                let existing: AgentStep = serde_json::from_str(&document)?;
+                if existing.kind == kind && existing.name == name && existing.input == input {
+                    return Ok(existing);
+                }
+                return Err(StoreError::Invariant(format!(
+                    "tool call {call_id} already belongs to a different Step"
+                )));
+            }
+        }
         let now = Utc::now();
         let sequence = self.connection()?.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM steps WHERE turn_id = ?1",
@@ -986,47 +1052,19 @@ impl Store {
             turn_id,
             sequence,
             kind,
-            name: name.into(),
+            name,
             tool_call_id,
-            effect_disposition,
-            execution_state: effect_disposition.map(|_| ToolExecutionState::Prepared),
-            status: StepStatus::Running,
+            status,
             input,
-            output: None,
-            usage: TokenUsage::default(),
-            duration_ms: None,
+            output,
+            usage,
+            duration_ms,
             created_at: now,
             updated_at: now,
         };
         self.commit_session_rollout_item_locked(
             turn.session_id,
             SessionRolloutItem::StepsCreated {
-                steps: vec![step.clone()],
-            },
-        )?;
-        Ok(step)
-    }
-
-    pub fn start_tool_execution(&self, id: StepId) -> Result<AgentStep, StoreError> {
-        let existing = self.get_step(id)?;
-        let turn = self.get_turn(existing.turn_id)?;
-        let session_lock = self.shared.session_rollout_lock(turn.session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(turn.session_id)?;
-        let mut step = self.get_step(id)?;
-        if step.kind != StepKind::Tool
-            || step.status != StepStatus::Running
-            || step.execution_state != Some(ToolExecutionState::Prepared)
-        {
-            return Err(StoreError::Invariant(format!(
-                "Step {id} is not a prepared Tool execution"
-            )));
-        }
-        step.execution_state = Some(ToolExecutionState::Executing);
-        step.updated_at = Utc::now();
-        self.commit_session_rollout_item_locked(
-            turn.session_id,
-            SessionRolloutItem::StepsUpdated {
                 steps: vec![step.clone()],
             },
         )?;
@@ -1062,18 +1100,6 @@ impl Store {
         step.output = output;
         step.usage = usage;
         step.duration_ms = duration_ms;
-        if step.effect_disposition.is_some() {
-            step.execution_state = Some(match (status, step.execution_state) {
-                (StepStatus::ExecutionUnknown, _) => ToolExecutionState::ExecutionUnknown,
-                (_, Some(ToolExecutionState::Prepared)) => ToolExecutionState::Prepared,
-                (_, Some(ToolExecutionState::Executing)) => ToolExecutionState::Completed,
-                (_, state) => {
-                    return Err(StoreError::Invariant(format!(
-                        "cannot finish Tool Step {id} from execution state {state:?}"
-                    )));
-                }
-            });
-        }
         step.updated_at = Utc::now();
         self.commit_session_rollout_item_locked(
             turn.session_id,
@@ -3997,8 +4023,8 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS turns_session_created ON turns(session_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS steps (
            id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id), sequence INTEGER NOT NULL,
-           status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
-           UNIQUE(turn_id, sequence)
+           tool_call_id TEXT, status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
+           UNIQUE(turn_id, sequence), UNIQUE(turn_id, tool_call_id)
          );
          CREATE TABLE IF NOT EXISTS session_events (
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), turn_id TEXT, step_id TEXT,
@@ -4469,12 +4495,13 @@ fn apply_rollout_record_tx(
             for step in steps {
                 transaction.execute(
                     "INSERT INTO steps
-                     (id, turn_id, sequence, status, updated_at, document_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (id, turn_id, sequence, tool_call_id, status, updated_at, document_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         step.id.to_string(),
                         step.turn_id.to_string(),
                         step.sequence,
+                        step.tool_call_id,
                         enum_string(step.status)?,
                         step.updated_at.to_rfc3339(),
                         serde_json::to_string(step)?,
@@ -4557,6 +4584,7 @@ fn is_transient_session_event(payload: &SessionEventPayload) -> bool {
         payload,
         SessionEventPayload::AssistantMessageDelta { .. }
             | SessionEventPayload::AssistantMessageReset
+            | SessionEventPayload::ModelStepStarted
     )
 }
 

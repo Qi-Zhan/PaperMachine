@@ -14,9 +14,7 @@ export type TurnStatus =
   | 'interrupted'
   | 'cancelled'
 export type StepKind = 'model' | 'tool' | 'workflow' | 'system'
-export type StepStatus = 'running' | 'completed' | 'failed' | 'execution_unknown' | 'cancelled'
-export type ToolEffectDisposition = 'pure' | 'idempotent' | 'reconcilable' | 'unknown'
-export type ToolExecutionState = 'prepared' | 'executing' | 'completed' | 'execution_unknown'
+export type StepStatus = 'running' | 'completed' | 'failed' | 'aborted' | 'cancelled'
 export type WorkflowStatus =
   | 'created'
   | 'running'
@@ -135,8 +133,6 @@ export interface AgentStep {
   kind: StepKind
   name: string
   tool_call_id: string | null
-  effect_disposition: ToolEffectDisposition | null
-  execution_state: ToolExecutionState | null
   status: StepStatus
   input: unknown
   output: unknown | null

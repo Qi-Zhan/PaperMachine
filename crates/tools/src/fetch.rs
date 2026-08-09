@@ -5,7 +5,6 @@ use crate::ToolOutput;
 use async_trait::async_trait;
 use futures::StreamExt;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use reqwest::header::ACCEPT;
 use reqwest::header::LOCATION;
 use reqwest::header::USER_AGENT;
@@ -61,10 +60,6 @@ impl ToolExecutor for FetchUrlTool {
             }),
             supports_parallel: true,
         }
-    }
-
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        ToolEffectDisposition::Pure
     }
 
     fn supports_parallel(&self) -> bool {

@@ -943,7 +943,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .patch_project_home_draft(
             workflow.id,
             invocation.id,
-            "call-1",
             &empty.revision,
             vec![ProjectHomePatchOperation::Upsert {
                 id: "overview".to_string(),
@@ -954,25 +953,10 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
     assert_ne!(patched.revision, empty.revision);
     assert_eq!(patched.blocks[0].id, "overview");
 
-    let replayed = store
-        .patch_project_home_draft(
-            workflow.id,
-            invocation.id,
-            "call-1",
-            &empty.revision,
-            vec![ProjectHomePatchOperation::Upsert {
-                id: "overview".to_string(),
-                html: "<header><h1>Current research state</h1></header>".to_string(),
-            }],
-        )
-        .expect("same durable tool effect should replay idempotently");
-    assert_eq!(replayed.revision, patched.revision);
-
     let conflict = store
         .patch_project_home_draft(
             workflow.id,
             invocation.id,
-            "call-2",
             &empty.revision,
             vec![ProjectHomePatchOperation::Remove {
                 id: "overview".to_string(),
@@ -985,7 +969,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .patch_project_home_draft(
             workflow.id,
             invocation.id,
-            "call-3",
             &patched.revision,
             vec![ProjectHomePatchOperation::Upsert {
                 id: "unsafe".to_string(),
@@ -1072,7 +1055,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .patch_project_home_draft(
             workflow.id,
             winning_action.id,
-            "winning-patch",
             &winning_base.revision,
             vec![ProjectHomePatchOperation::Upsert {
                 id: "status".to_string(),
@@ -1084,7 +1066,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .patch_project_home_draft(
             workflow.id,
             stale_action.id,
-            "stale-patch",
             &stale_base.revision,
             vec![ProjectHomePatchOperation::Upsert {
                 id: "status".to_string(),

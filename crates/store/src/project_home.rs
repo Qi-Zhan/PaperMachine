@@ -54,8 +54,6 @@ pub struct ProjectHomeDraft {
     pub base_artifact_id: Option<ArtifactId>,
     pub revision: String,
     pub blocks: Vec<ProjectHomeBlock>,
-    #[serde(default)]
-    applied_effects: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,7 +110,6 @@ impl Store {
             base_artifact_id,
             revision: source.revision,
             blocks: source.blocks,
-            applied_effects: Vec::new(),
         };
         validate_draft(&draft)?;
         write_draft(&path, &draft)?;
@@ -123,28 +120,15 @@ impl Store {
         &self,
         workflow_id: WorkflowId,
         action_invocation_id: ActionInvocationId,
-        effect_id: &str,
         base_revision: &str,
         operations: Vec<ProjectHomePatchOperation>,
     ) -> Result<ProjectHomeDraft, StoreError> {
-        if effect_id.trim().is_empty() {
-            return Err(StoreError::Invariant(
-                "Project-home patch effect ID must not be empty".to_string(),
-            ));
-        }
         if operations.is_empty() || operations.len() > MAX_PATCH_OPERATIONS {
             return Err(StoreError::Invariant(format!(
                 "Project-home patch must contain 1 to {MAX_PATCH_OPERATIONS} operations"
             )));
         }
         let mut draft = self.read_project_home_draft(workflow_id, action_invocation_id)?;
-        if draft
-            .applied_effects
-            .iter()
-            .any(|applied| applied == effect_id)
-        {
-            return Ok(draft);
-        }
         if draft.revision != base_revision {
             return Err(StoreError::Invariant(format!(
                 "Project-home revision conflict: expected {}, received {base_revision}",
@@ -163,7 +147,6 @@ impl Store {
             ));
         }
         draft.revision = revision_for(&draft.blocks)?;
-        draft.applied_effects.push(effect_id.to_string());
         write_draft(
             &self.project_home_draft_path(workflow_id, action_invocation_id),
             &draft,

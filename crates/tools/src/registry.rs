@@ -2,10 +2,8 @@ use crate::ToolContext;
 use crate::ToolError;
 use crate::ToolExecutor;
 use crate::ToolOutput;
-use crate::ToolReconciliation;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::ToolSetSnapshot;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -138,10 +136,6 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| tool.supports_parallel())
     }
 
-    pub fn effect_disposition(&self, name: &str) -> Option<ToolEffectDisposition> {
-        self.tools.get(name).map(|tool| tool.effect_disposition())
-    }
-
     pub async fn execute(
         &self,
         name: &str,
@@ -154,20 +148,6 @@ impl ToolRegistry {
             .cloned()
             .ok_or_else(|| ToolError::UnknownTool(name.to_string()))?;
         tool.execute(context, arguments).await
-    }
-
-    pub async fn reconcile(
-        &self,
-        name: &str,
-        context: ToolContext,
-        arguments: Value,
-    ) -> Result<ToolReconciliation, ToolError> {
-        let tool = self
-            .tools
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ToolError::UnknownTool(name.to_string()))?;
-        tool.reconcile(context, arguments).await
     }
 }
 

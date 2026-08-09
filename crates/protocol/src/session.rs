@@ -133,26 +133,8 @@ pub enum StepStatus {
     Running,
     Completed,
     Failed,
-    ExecutionUnknown,
+    Aborted,
     Cancelled,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolEffectDisposition {
-    Pure,
-    Idempotent,
-    Reconcilable,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolExecutionState {
-    Prepared,
-    Executing,
-    Completed,
-    ExecutionUnknown,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -165,8 +147,6 @@ pub struct AgentStep {
     /// Provider/tool-loop call ID for local tool Steps. Model and system Steps
     /// leave this empty.
     pub tool_call_id: Option<String>,
-    pub effect_disposition: Option<ToolEffectDisposition>,
-    pub execution_state: Option<ToolExecutionState>,
     pub status: StepStatus,
     pub input: Value,
     pub output: Option<Value>,

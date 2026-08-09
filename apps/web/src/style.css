@@ -510,10 +510,10 @@ body.sidebar-resizing * {
 }
 
 .status-pin[data-status="failed"],
-.status-pin[data-status="execution_unknown"],
+.status-pin[data-status="aborted"],
 .status-pin[data-status="cancelled"],
 .status-dot[data-status="failed"],
-.status-dot[data-status="execution_unknown"],
+.status-dot[data-status="aborted"],
 .status-dot[data-status="cancelled"] {
   background: var(--red);
 }
@@ -694,7 +694,7 @@ body.sidebar-resizing * {
 }
 
 .status-badge[data-status="failed"],
-.status-badge[data-status="execution_unknown"],
+.status-badge[data-status="aborted"],
 .status-badge[data-status="cancelled"] {
   border-color: #efc9ce;
   color: #98323d;

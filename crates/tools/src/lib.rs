@@ -19,7 +19,6 @@ use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
 use serde_json::Value;
@@ -46,9 +45,6 @@ pub struct ToolContext {
     pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
-    /// Stable provider call identity. Idempotent and reconcilable tools must
-    /// use this identity when talking to an external system.
-    pub effect_id: String,
     pub sandbox_root: PathBuf,
     pub authorization: AuthorizationContext,
     pub cancellation: CancellationToken,
@@ -58,13 +54,6 @@ pub struct ToolContext {
 pub struct ToolOutput {
     pub value: Value,
     pub summary: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ToolReconciliation {
-    Completed(ToolOutput),
-    Retry,
-    Unknown { message: String },
 }
 
 pub fn model_visible_tool_result(result: Result<ToolOutput, ToolError>) -> (Value, bool) {
@@ -120,8 +109,6 @@ pub enum ToolError {
 pub trait ToolExecutor: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
-    fn effect_disposition(&self) -> ToolEffectDisposition;
-
     fn supports_parallel(&self) -> bool {
         false
     }
@@ -131,14 +118,4 @@ pub trait ToolExecutor: Send + Sync {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError>;
-
-    async fn reconcile(
-        &self,
-        _context: ToolContext,
-        _arguments: Value,
-    ) -> Result<ToolReconciliation, ToolError> {
-        Ok(ToolReconciliation::Unknown {
-            message: "tool does not implement external-effect reconciliation".to_string(),
-        })
-    }
 }

@@ -9,8 +9,6 @@ use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::ToolEffectDisposition;
-use papermachine_protocol::ToolExecutionState;
 use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WorkflowProgramId;
@@ -29,7 +27,6 @@ use papermachine_tools::ToolContext;
 use papermachine_tools::ToolError;
 use papermachine_tools::ToolExecutor;
 use papermachine_tools::ToolOutput;
-use papermachine_tools::ToolReconciliation;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -40,126 +37,91 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn workflow_restart_replays_an_executing_idempotent_tool_once() {
-    let fixture = workflow_recovery_fixture(ToolEffectDisposition::Idempotent, "write_file");
-    let runtime = runtime(
-        Arc::clone(&fixture.store),
-        Arc::new(fixture.model.clone()),
-        fixture.catalog.clone(),
-        Arc::clone(&fixture.skills),
-    );
-    let turn = runtime
+async fn workflow_restart_aborts_an_unfinished_tool_without_dispatching_it() {
+    let fixture = workflow_recovery_fixture(true, None);
+    let turn = fixture
+        .runtime()
         .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
         .expect("Workflow Turn should resume");
 
     assert_eq!(turn.status, TurnStatus::Completed);
-    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
     let step = fixture
         .store
-        .get_step(fixture.step_id)
+        .get_step(fixture.step_id.expect("fixture should create a Step"))
         .expect("Step should load");
-    assert_eq!(step.status, StepStatus::Completed);
-    assert_eq!(step.execution_state, Some(ToolExecutionState::Completed));
+    assert_eq!(step.status, StepStatus::Aborted);
+    assert_eq!(step.output, Some(Value::String("aborted".to_string())));
     let requests = fixture.model.requests().expect("requests should load");
     assert_eq!(requests.len(), 1);
     assert!(requests[0].input.iter().any(|item| matches!(
         item,
         ModelInputItem::FunctionCallOutput { call_id, output }
-            if call_id == "call-recovery" && output.get("ok") == Some(&Value::Bool(true))
+            if call_id == "call-recovery" && output == "aborted"
     )));
-}
-
-#[tokio::test]
-async fn workflow_restart_surfaces_unknown_effect_without_executing_it() {
-    let fixture = workflow_recovery_fixture(ToolEffectDisposition::Unknown, "exec_command");
-    let runtime = runtime(
-        Arc::clone(&fixture.store),
-        Arc::new(fixture.model.clone()),
-        fixture.catalog.clone(),
-        Arc::clone(&fixture.skills),
-    );
-    let turn = runtime
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
-        .await
-        .expect("Workflow Turn should resume around unknown execution");
-
-    assert_eq!(turn.status, TurnStatus::Completed);
-    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-    let step = fixture
+    let rollout = fixture
         .store
-        .get_step(fixture.step_id)
-        .expect("Step should load");
-    assert_eq!(step.status, StepStatus::ExecutionUnknown);
+        .reconstruct_session_rollout(turn.session_id)
+        .expect("canonical rollout should reconstruct");
     assert_eq!(
-        step.execution_state,
-        Some(ToolExecutionState::ExecutionUnknown)
+        rollout
+            .committed_context
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ModelInputItem::FunctionCallOutput { call_id, output }
+                    if call_id == "call-recovery" && output == "aborted"
+            ))
+            .count(),
+        1,
+        "recovery should durably append one synthetic aborted output"
     );
-    let requests = fixture.model.requests().expect("requests should load");
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].input.iter().any(|item| matches!(
-        item,
-        ModelInputItem::FunctionCallOutput { call_id, output }
-            if call_id == "call-recovery"
-                && output.pointer("/recovery/automatic_replay") == Some(&Value::Bool(false))
-    )));
 }
 
 #[tokio::test]
-async fn workflow_restart_executes_a_prepared_unknown_tool_once() {
-    let fixture =
-        workflow_recovery_fixture_with(ToolEffectDisposition::Unknown, "exec_command", false, None);
-    let runtime = runtime(
-        Arc::clone(&fixture.store),
-        Arc::new(fixture.model.clone()),
-        fixture.catalog.clone(),
-        Arc::clone(&fixture.skills),
-    );
-    let turn = runtime
+async fn workflow_restart_creates_an_aborted_projection_for_a_canonical_call() {
+    let fixture = workflow_recovery_fixture(false, None);
+    fixture
+        .runtime()
         .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
-        .expect("prepared Workflow tool should execute after restart");
-
-    assert_eq!(turn.status, TurnStatus::Completed);
-    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
-    let step = fixture
-        .store
-        .get_step(fixture.step_id)
-        .expect("Step should load");
-    assert_eq!(step.status, StepStatus::Completed);
-    assert_eq!(step.execution_state, Some(ToolExecutionState::Completed));
-}
-
-#[tokio::test]
-async fn workflow_restart_reconciles_before_resolving_an_external_effect() {
-    let fixture = workflow_recovery_fixture_with(
-        ToolEffectDisposition::Reconcilable,
-        "write_file",
-        true,
-        Some(ToolReconciliation::Completed(ToolOutput {
-            value: json!({"reconciled": true}),
-            summary: "external effect already completed".to_string(),
-        })),
-    );
-    let runtime = runtime(
-        Arc::clone(&fixture.store),
-        Arc::new(fixture.model.clone()),
-        fixture.catalog.clone(),
-        Arc::clone(&fixture.skills),
-    );
-    runtime
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
-        .await
-        .expect("reconcilable Workflow tool should recover");
+        .expect("Workflow Turn should resume");
 
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.reconciliations.load(Ordering::SeqCst), 1);
+    let steps = fixture
+        .store
+        .list_steps(fixture.turn_id)
+        .expect("Steps should load");
+    let step = steps
+        .iter()
+        .find(|step| step.tool_call_id.as_deref() == Some("call-recovery"))
+        .expect("recovery should project the canonical call");
+    assert_eq!(step.status, StepStatus::Aborted);
+}
+
+#[tokio::test]
+async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
+    let output = json!({"ok": true, "result": {"durable": true}});
+    let fixture = workflow_recovery_fixture(true, Some(output.clone()));
+    fixture
+        .runtime()
+        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .await
+        .expect("Workflow Turn should resume");
+
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    let step = fixture
+        .store
+        .get_step(fixture.step_id.expect("fixture should create a Step"))
+        .expect("Step should load");
+    assert_eq!(step.status, StepStatus::Completed);
+    assert_eq!(step.output, Some(output.clone()));
     let requests = fixture.model.requests().expect("requests should load");
     assert!(requests[0].input.iter().any(|item| matches!(
         item,
-        ModelInputItem::FunctionCallOutput { call_id, output }
-            if call_id == "call-recovery"
-                && output.pointer("/result/reconciled") == Some(&Value::Bool(true))
+        ModelInputItem::FunctionCallOutput { call_id, output: value }
+            if call_id == "call-recovery" && value == &output
     )));
 }
 
@@ -170,24 +132,30 @@ struct WorkflowRecoveryFixture {
     catalog: ToolCatalog,
     model: ScriptedModelClient,
     calls: Arc<AtomicUsize>,
-    reconciliations: Arc<AtomicUsize>,
     turn_id: papermachine_protocol::TurnId,
-    step_id: papermachine_protocol::StepId,
+    step_id: Option<papermachine_protocol::StepId>,
     context: WorkflowTurnContext,
 }
 
-fn workflow_recovery_fixture(
-    disposition: ToolEffectDisposition,
-    tool_name: &str,
-) -> WorkflowRecoveryFixture {
-    workflow_recovery_fixture_with(disposition, tool_name, true, None)
+impl WorkflowRecoveryFixture {
+    fn runtime(&self) -> SessionRuntime {
+        SessionRuntime::new(
+            Arc::clone(&self.store),
+            Arc::new(self.model.clone()),
+            self.catalog.clone(),
+            Arc::clone(&self.skills),
+            SessionRuntimeConfig {
+                default_model: "test-model".to_string(),
+                model_context_window: 128_000,
+                max_concurrent_turns: 1,
+            },
+        )
+    }
 }
 
-fn workflow_recovery_fixture_with(
-    disposition: ToolEffectDisposition,
-    tool_name: &str,
-    execution_started: bool,
-    reconciliation: Option<ToolReconciliation>,
+fn workflow_recovery_fixture(
+    create_step: bool,
+    canonical_output: Option<Value>,
 ) -> WorkflowRecoveryFixture {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
@@ -231,18 +199,13 @@ fn workflow_recovery_fixture_with(
         )
         .expect("participant should be created");
     let calls = Arc::new(AtomicUsize::new(0));
-    let reconciliations = Arc::new(AtomicUsize::new(0));
     let catalog = ToolCatalog::builder()
         .register_workspace(CountingTool {
-            name: tool_name.to_string(),
-            disposition,
             calls: Arc::clone(&calls),
-            reconciliations: Arc::clone(&reconciliations),
-            reconciliation,
         })
         .expect("tool should register")
         .build();
-    let requested_tools = vec![tool_name.to_string()];
+    let requested_tools = vec!["write_file".to_string()];
     let invocation = store
         .create_action_invocation(
             run.id,
@@ -278,33 +241,36 @@ fn workflow_recovery_fixture_with(
         )
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
+    let mut items = vec![
+        message(MessageRole::User, "recover"),
+        ModelInputItem::FunctionCall {
+            call_id: "call-recovery".to_string(),
+            name: "write_file".to_string(),
+            arguments: "{}".to_string(),
+        },
+    ];
+    if let Some(output) = canonical_output {
+        items.push(ModelInputItem::FunctionCallOutput {
+            call_id: "call-recovery".to_string(),
+            output,
+        });
+    }
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append {
-                items: vec![
-                    message(MessageRole::User, "recover"),
-                    ModelInputItem::FunctionCall {
-                        call_id: "call-recovery".to_string(),
-                        name: tool_name.to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                ],
-            },
+            ModelContextMutation::Append { items },
             TokenUsage::default(),
             1,
             0,
             None,
         )
         .expect("context should checkpoint");
-    let step = store
-        .create_tool_step(turn.id, "call-recovery", tool_name, json!({}), disposition)
-        .expect("Tool Step should be created");
-    if execution_started {
+    let step_id = create_step.then(|| {
         store
-            .start_tool_execution(step.id)
-            .expect("Tool Step should execute");
-    }
+            .create_tool_step(turn.id, "call-recovery", "write_file", json!({}))
+            .expect("Tool Step should be created")
+            .id
+    });
 
     let model = ScriptedModelClient::new([response("recovered")]);
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
@@ -318,9 +284,8 @@ fn workflow_recovery_fixture_with(
         catalog,
         model,
         calls,
-        reconciliations,
         turn_id: turn.id,
-        step_id: step.id,
+        step_id,
         context: WorkflowTurnContext {
             workflow_id: run.id,
             action_invocation_id: invocation.id,
@@ -331,74 +296,31 @@ fn workflow_recovery_fixture_with(
 
 #[derive(Clone)]
 struct CountingTool {
-    name: String,
-    disposition: ToolEffectDisposition,
     calls: Arc<AtomicUsize>,
-    reconciliations: Arc<AtomicUsize>,
-    reconciliation: Option<ToolReconciliation>,
 }
 
 #[async_trait]
 impl ToolExecutor for CountingTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: self.name.clone(),
+            name: "write_file".to_string(),
             description: "recovery probe".to_string(),
             input_schema: json!({"type": "object"}),
             supports_parallel: false,
         }
     }
 
-    fn effect_disposition(&self) -> ToolEffectDisposition {
-        self.disposition
-    }
-
     async fn execute(
         &self,
-        context: ToolContext,
+        _context: ToolContext,
         _arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        assert_eq!(context.effect_id, "call-recovery");
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput {
-            value: json!({"effect_id": context.effect_id}),
-            summary: "recovered once".to_string(),
+            value: json!({"unexpected": true}),
+            summary: "unexpected dispatch".to_string(),
         })
     }
-
-    async fn reconcile(
-        &self,
-        context: ToolContext,
-        _arguments: Value,
-    ) -> Result<ToolReconciliation, ToolError> {
-        assert_eq!(context.effect_id, "call-recovery");
-        self.reconciliations.fetch_add(1, Ordering::SeqCst);
-        Ok(self
-            .reconciliation
-            .clone()
-            .unwrap_or(ToolReconciliation::Unknown {
-                message: "no reconciliation result configured".to_string(),
-            }))
-    }
-}
-
-fn runtime(
-    store: Arc<Store>,
-    model: Arc<ScriptedModelClient>,
-    tools: ToolCatalog,
-    skills: Arc<ProjectSkillCatalog>,
-) -> SessionRuntime {
-    SessionRuntime::new(
-        store,
-        model,
-        tools,
-        skills,
-        SessionRuntimeConfig {
-            default_model: "test-model".to_string(),
-            model_context_window: 128_000,
-            max_concurrent_turns: 1,
-        },
-    )
 }
 
 fn workflow_snapshot() -> WorkflowProgramSnapshot {
