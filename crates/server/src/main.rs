@@ -16,7 +16,6 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
@@ -122,6 +121,7 @@ async fn run_server() -> anyhow::Result<()> {
     };
     let state = papermachine_server::initialize(&config).await?;
     let mode = state.mode();
+    let shutdown_started = state.shutdown_token();
     let app = papermachine_server::router(state, resource_root.join("apps/web/dist"))
         .layer(axum::middleware::from_fn(require_loopback_host));
     let address = SocketAddr::from(([127, 0, 0, 1], args.port));
@@ -129,7 +129,6 @@ async fn run_server() -> anyhow::Result<()> {
         .await
         .context("failed to bind PaperMachine server")?;
     info!(%address, %mode, resource_root = %resource_root.display(), data_dir = %data_dir.display(), "PaperMachine server listening");
-    let shutdown_started = CancellationToken::new();
     let shutdown_notice = shutdown_started.clone();
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {

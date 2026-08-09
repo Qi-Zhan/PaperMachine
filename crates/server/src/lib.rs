@@ -125,6 +125,7 @@ pub struct AppState {
     default_workspace_root: PathBuf,
     projects: Arc<RwLock<HashMap<ProjectId, ProjectHandle>>>,
     runtime_factory: Arc<ProjectRuntimeFactory>,
+    shutdown: CancellationToken,
     generator: WorkflowGenerator,
     default_model: String,
     model_context_window: usize,
@@ -136,6 +137,10 @@ pub struct AppState {
 impl AppState {
     pub fn mode(&self) -> &'static str {
         self.mode
+    }
+
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     async fn project_lease(&self, project_id: ProjectId) -> Result<ProjectReadLease, StoreError> {
@@ -496,6 +501,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         default_workspace_root: config.default_workspace_root.clone(),
         projects: Arc::new(RwLock::new(projects)),
         runtime_factory,
+        shutdown: CancellationToken::new(),
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
         default_model,
         model_context_window,
@@ -1074,11 +1080,25 @@ async fn stream_project_events(
             }
         })
         .filter_map(|event| event);
-    Ok(Sse::new(stream::select(sessions, workflows)).keep_alive(
+    Ok(event_stream(
+        stream::select(sessions, workflows),
+        state.shutdown_token(),
+    ))
+}
+
+fn event_stream(
+    events: impl Stream<Item = Result<Event, Infallible>> + Send + 'static,
+    shutdown: CancellationToken,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    Sse::new(futures::StreamExt::take_until(
+        events,
+        shutdown.cancelled_owned(),
+    ))
+    .keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    ))
+    )
 }
 
 fn project_update_sse_event(
@@ -1997,11 +2017,7 @@ async fn stream_workflow_events(
         }
         _ => None,
     });
-    Ok(Sse::new(replay.chain(live)).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    ))
+    Ok(event_stream(replay.chain(live), state.shutdown_token()))
 }
 
 async fn list_session_events(
@@ -2087,13 +2103,10 @@ async fn stream_session_events(
             }
         })
         .filter_map(|event| event);
-    Ok(
-        Sse::new(stream::select(replay.chain(live), workflows)).keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("keep-alive"),
-        ),
-    )
+    Ok(event_stream(
+        stream::select(replay.chain(live), workflows),
+        state.shutdown_token(),
+    ))
 }
 
 fn run_sse_event(event: WorkflowEvent) -> Result<Event, Infallible> {
@@ -2420,5 +2433,24 @@ impl From<SkillError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({"error": self.message}))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn event_stream_closes_on_application_shutdown() {
+        let shutdown = CancellationToken::new();
+        let response = event_stream(stream::pending(), shutdown.clone()).into_response();
+        let mut body = response.into_body().into_data_stream();
+
+        shutdown.cancel();
+
+        let next = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("SSE body should close promptly");
+        assert!(next.is_none());
     }
 }
