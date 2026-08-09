@@ -423,7 +423,7 @@
               :key="workflow.id"
               type="button"
               :data-active="workflowView?.workflow.id === workflow.id"
-              @click="$emit('inspect-workflow', workflow.id)"
+              @click="$emit('inspect-workflow', view.session.project_id, workflow.id)"
             >
               <GitBranch :size="14" />
               <span>
@@ -542,7 +542,7 @@
                 v-for="(participant, index) in workflowView.participants"
                 :key="participant.id"
                 type="button"
-                @click="$emit('select-session', participant.session_id)"
+                @click="$emit('select-session', view.session.project_id, participant.session_id)"
               >
                 <span class="participant-number">{{ String(index + 1).padStart(2, '0') }}</span>
                 <span>
@@ -698,12 +698,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   'toggle-sidebar': []
   'select-project': [projectId: string]
-  'select-session': [sessionId: string]
+  'select-session': [projectId: string, sessionId: string]
   'close-session': []
   send: [input: string]
   'cancel-turn': [turnId: string]
   'open-workflow': []
-  'inspect-workflow': [workflowId: string]
+  'inspect-workflow': [projectId: string, workflowId: string]
   'pause-workflow': [workflowId: string]
   'resume-workflow': [workflowId: string]
   'cancel-workflow': [workflowId: string]

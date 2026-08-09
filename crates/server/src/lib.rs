@@ -124,7 +124,6 @@ pub struct AppState {
     catalog: Arc<ProjectCatalog>,
     default_workspace_root: PathBuf,
     projects: Arc<RwLock<HashMap<ProjectId, ProjectSlot>>>,
-    entity_projects: Arc<RwLock<HashMap<String, ProjectId>>>,
     runtime_factory: Arc<ProjectRuntimeFactory>,
     generator: WorkflowGenerator,
     default_model: String,
@@ -189,36 +188,6 @@ impl AppState {
                 id: project_id.to_string(),
             })?;
         slot.write().await
-    }
-
-    async fn locate<T>(
-        &self,
-        entity: &'static str,
-        id: &str,
-        lookup: impl FnOnce(&Store) -> Result<T, StoreError> + Send + 'static,
-    ) -> Result<(ProjectRuntimeLease, T), StoreError>
-    where
-        T: Send + 'static,
-    {
-        let project_id = self
-            .entity_projects
-            .read()
-            .await
-            .get(id)
-            .copied()
-            .ok_or_else(|| StoreError::NotFound {
-                entity,
-                id: id.to_string(),
-            })?;
-        let runtime = self.project_runtime(project_id).await?;
-        match runtime.store.call(lookup).await {
-            Ok(value) => Ok((runtime, value)),
-            Err(error @ StoreError::NotFound { .. }) => {
-                self.entity_projects.write().await.remove(id);
-                Err(error)
-            }
-            Err(error) => Err(error),
-        }
     }
 }
 
@@ -610,15 +579,10 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         );
     }
     let mut projects = HashMap::new();
-    let mut entity_projects = HashMap::new();
-    let mut ownership_handles = Vec::new();
     let mut recoverable_projects = Vec::new();
     for entry in catalog_projects {
         let project = entry.project;
         let store = entry.store;
-        for entity_id in store.list_owned_entity_ids(project.id)? {
-            entity_projects.insert(entity_id, project.id);
-        }
         match store.list_recoverable_workflows() {
             Ok(workflows) if !workflows.is_empty() => recoverable_projects.push(project.id),
             Ok(_) => {}
@@ -631,7 +595,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
             }
         }
         let store = StoreHandle::spawn(store)?;
-        ownership_handles.push(store.clone());
         projects.insert(project.id, ProjectSlot::unloaded(store));
     }
     schedule_trash_cleanup(Arc::clone(&catalog), catalog.trash_entries()?);
@@ -640,7 +603,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         catalog,
         default_workspace_root: config.default_workspace_root.clone(),
         projects: Arc::new(RwLock::new(projects)),
-        entity_projects: Arc::new(RwLock::new(entity_projects)),
         runtime_factory,
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
         default_model,
@@ -649,9 +611,6 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         model_providers,
         mode,
     };
-    for store in ownership_handles {
-        subscribe_project_ownership(store, Arc::clone(&state.entity_projects));
-    }
     for project_id in recoverable_projects {
         if let Err(error) = state.project_runtime(project_id).await {
             tracing::error!(%project_id, %error, "failed to recover active Project runtime");
@@ -689,25 +648,37 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         )
         .route("/projects/{project_id}/sessions", get(list_sessions))
         .route(
-            "/sessions/{session_id}",
+            "/projects/{project_id}/sessions/{session_id}",
             get(get_session_view).delete(close_session),
         )
-        .route("/sessions/{session_id}/skills", put(update_session_skills))
         .route(
-            "/sessions/{session_id}/system-prompt",
+            "/projects/{project_id}/sessions/{session_id}/skills",
+            put(update_session_skills),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/system-prompt",
             put(update_session_system_prompt),
         )
-        .route("/sessions/{session_id}/access", put(update_session_access))
         .route(
-            "/sessions/{session_id}/workflows",
+            "/projects/{project_id}/sessions/{session_id}/access",
+            put(update_session_access),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/workflows",
             get(list_session_workflows),
         )
-        .route("/sessions/{session_id}/events", get(list_session_events))
         .route(
-            "/sessions/{session_id}/events/stream",
+            "/projects/{project_id}/sessions/{session_id}/events",
+            get(list_session_events),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/events/stream",
             get(stream_session_events),
         )
-        .route("/turns/{turn_id}/cancel", post(cancel_turn))
+        .route(
+            "/projects/{project_id}/turns/{turn_id}/cancel",
+            post(cancel_turn),
+        )
         .route(
             "/projects/{project_id}/workflow-programs",
             get(list_workflow_programs).post(save_workflow_program),
@@ -728,25 +699,46 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/projects/{project_id}/workflows",
             get(list_project_workflows).post(create_workflow),
         )
-        .route("/workflows/{workflow_id}", get(get_workflow_view))
-        .route("/workflows/{workflow_id}/state", get(get_workflow_state))
-        .route("/workflows/{workflow_id}/pause", post(pause_workflow))
-        .route("/workflows/{workflow_id}/resume", post(resume_workflow))
-        .route("/workflows/{workflow_id}/cancel", post(cancel_workflow))
         .route(
-            "/workflows/{workflow_id}/sessions/{session_id}/control",
+            "/projects/{project_id}/workflows/{workflow_id}",
+            get(get_workflow_view),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/state",
+            get(get_workflow_state),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/pause",
+            post(pause_workflow),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/resume",
+            post(resume_workflow),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/cancel",
+            post(cancel_workflow),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/sessions/{session_id}/control",
             post(create_control_message),
         )
-        .route("/workflows/{workflow_id}/events", get(list_workflow_events))
         .route(
-            "/workflows/{workflow_id}/events/stream",
+            "/projects/{project_id}/workflows/{workflow_id}/events",
+            get(list_workflow_events),
+        )
+        .route(
+            "/projects/{project_id}/workflows/{workflow_id}/events/stream",
             get(stream_workflow_events),
         )
         .route(
-            "/human-requests/{human_request_id}/answer",
+            "/projects/{project_id}/human-requests/{human_request_id}/answer",
             post(answer_human_request),
         )
-        .route("/artifacts/{artifact_id}/content", get(artifact_content));
+        .route(
+            "/projects/{project_id}/artifacts/{artifact_id}/content",
+            get(artifact_content),
+        );
     let index = web_dist.join("index.html");
     Router::new()
         .nest("/api", api)
@@ -856,7 +848,6 @@ async fn create_project(
     .map_err(|error| ApiError::internal(format!("Project creation task failed: {error}")))??;
     let project = entry.project;
     let store = StoreHandle::spawn(entry.store)?;
-    subscribe_project_ownership(store.clone(), Arc::clone(&state.entity_projects));
     let runtime = match state.runtime_factory.build(&project, store.clone()).await {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -1014,7 +1005,6 @@ async fn remove_project(
         Ok(trash) => trash,
         Err(error) => {
             let reopened = StoreHandle::spawn(Store::open(&managed_root)?)?;
-            subscribe_project_ownership(reopened.clone(), Arc::clone(&state.entity_projects));
             resources.store = Some(reopened);
             lease.restore(resources).await;
             return Err(error);
@@ -1022,11 +1012,6 @@ async fn remove_project(
     };
     lease.retire();
     state.projects.write().await.remove(&project_id);
-    state
-        .entity_projects
-        .write()
-        .await
-        .retain(|_, owner| *owner != project_id);
     schedule_trash_cleanup(Arc::clone(&state.catalog), vec![trash]);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1040,26 +1025,6 @@ fn schedule_trash_cleanup(catalog: Arc<ProjectCatalog>, paths: Vec<PathBuf>) {
             }
         });
     }
-}
-
-fn subscribe_project_ownership(store: StoreHandle, index: Arc<RwLock<HashMap<String, ProjectId>>>) {
-    let mut events = store.subscribe_ownership();
-    tokio::spawn(async move {
-        loop {
-            match events.recv().await {
-                Ok(event) => {
-                    index
-                        .write()
-                        .await
-                        .insert(event.entity_id, event.project_id);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::error!(skipped, "Project ownership index subscriber lagged");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
 }
 
 fn canonical_workspace(value: &str, create: bool) -> ApiResult<PathBuf> {
@@ -1380,13 +1345,14 @@ struct SessionWorkflowUpdate {
 
 async fn get_session_view(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<Json<SessionView>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, session) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let session = runtime
+        .store
+        .call(move |store| store.get_session(session_id))
         .await?;
     let (turns, steps, rollout, workflows, memberships, requests) = runtime
         .store
@@ -1414,13 +1380,14 @@ async fn get_session_view(
 
 async fn close_session(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, session) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let session = runtime
+        .store
+        .call(move |store| store.get_session(session_id))
         .await?;
     if session.status == SessionStatus::Archived {
         return Ok(StatusCode::NO_CONTENT);
@@ -1479,14 +1446,15 @@ struct UpdateSessionSkillsRequest {
 
 async fn update_session_skills(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
     Json(request): Json<UpdateSessionSkillsRequest>,
 ) -> ApiResult<Json<Session>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, session) = state
-        .locate("session", &id.to_string(), move |store| {
-            store.get_session(id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let session = runtime
+        .store
+        .call(move |store| store.get_session(id))
         .await?;
     runtime
         .skills
@@ -1502,15 +1470,12 @@ async fn update_session_skills(
 
 async fn update_session_system_prompt(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
     Json(request): Json<SystemPromptRequest>,
 ) -> ApiResult<Json<Session>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     Ok(Json(
         runtime
             .store
@@ -1527,15 +1492,12 @@ struct UpdateSessionAccessRequest {
 
 async fn update_session_access(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
     Json(request): Json<UpdateSessionAccessRequest>,
 ) -> ApiResult<Json<Session>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     Ok(Json(
         runtime
             .store
@@ -1546,13 +1508,14 @@ async fn update_session_access(
 
 async fn cancel_turn(
     State(state): State<AppState>,
-    Path(turn_id): Path<String>,
+    Path((project_id, turn_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let turn_id: TurnId = parse_id(&turn_id, "Turn")?;
-    let (runtime, _) = state
-        .locate("turn", &turn_id.to_string(), move |store| {
-            store.get_turn(turn_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    runtime
+        .store
+        .call(move |store| store.get_turn(turn_id))
         .await?;
     runtime.sessions.cancel(turn_id).await?;
     Ok(StatusCode::ACCEPTED)
@@ -1670,13 +1633,14 @@ async fn save_workflow_program(
 
 async fn list_session_workflows(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Workflow>>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &id.to_string(), move |store| {
-            store.get_session(id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    runtime
+        .store
+        .call(move |store| store.get_session(id))
         .await?;
     Ok(Json(
         runtime
@@ -1930,13 +1894,14 @@ struct WorkflowView {
 
 async fn get_workflow_view(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
 ) -> ApiResult<Json<WorkflowView>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, run) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let run = runtime
+        .store
+        .call(move |store| store.get_workflow(workflow_id))
         .await?;
     let (
         effects,
@@ -1995,55 +1960,47 @@ async fn get_workflow_view(
 
 async fn get_workflow_state(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Workflow>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (_, workflow) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let workflow = runtime
+        .store
+        .call(move |store| store.get_workflow(workflow_id))
         .await?;
     Ok(Json(workflow))
 }
 
 async fn pause_workflow(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     runtime.scheduler.pause(workflow_id).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn resume_workflow(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     runtime.scheduler.resume(workflow_id).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn cancel_workflow(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     runtime.scheduler.cancel(workflow_id).await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2058,18 +2015,19 @@ struct ControlRequest {
 
 async fn create_control_message(
     State(state): State<AppState>,
-    Path((workflow_id, session_id)): Path<(String, String)>,
+    Path((project_id, workflow_id, session_id)): Path<(String, String, String)>,
     Json(request): Json<ControlRequest>,
 ) -> ApiResult<(StatusCode, Json<ControlMessage>)> {
     if request.content.trim().is_empty() {
         return Err(ApiError::bad_request("control message must not be empty"));
     }
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, run) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let run = runtime
+        .store
+        .call(move |store| store.get_workflow(workflow_id))
         .await?;
     let content = request.content.trim().to_string();
     let message = runtime
@@ -2103,14 +2061,15 @@ struct HumanAnswerRequest {
 
 async fn answer_human_request(
     State(state): State<AppState>,
-    Path(request_id): Path<String>,
+    Path((project_id, request_id)): Path<(String, String)>,
     Json(request): Json<HumanAnswerRequest>,
 ) -> ApiResult<Json<HumanRequest>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let id: HumanRequestId = parse_id(&request_id, "HumanRequest")?;
-    let (runtime, current) = state
-        .locate("human request", &id.to_string(), move |store| {
-            store.get_human_request(id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let current = runtime
+        .store
+        .call(move |store| store.get_human_request(id))
         .await?;
     validate_schema_value(&current.response_schema, &request.answer, "answer")
         .map_err(ApiError::bad_request)?;
@@ -2130,15 +2089,12 @@ struct EventQuery {
 
 async fn list_workflow_events(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
 ) -> ApiResult<Json<Vec<WorkflowEvent>>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     Ok(Json(
         runtime
             .store
@@ -2149,15 +2105,12 @@ async fn list_workflow_events(
 
 async fn stream_workflow_events(
     State(state): State<AppState>,
-    Path(workflow_id): Path<String>,
+    Path((project_id, workflow_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
-    let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), move |store| {
-            store.get_workflow(workflow_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     let (receiver, replay) = runtime
         .store
         .call(move |store| {
@@ -2184,15 +2137,12 @@ async fn stream_workflow_events(
 
 async fn list_session_events(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
 ) -> ApiResult<Json<Vec<SessionEvent>>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     Ok(Json(
         runtime
             .store
@@ -2203,15 +2153,12 @@ async fn list_session_events(
 
 async fn stream_session_events(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    Path((project_id, session_id)): Path<(String, String)>,
     Query(query): Query<EventQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
-    let (runtime, _) = state
-        .locate("session", &session_id.to_string(), move |store| {
-            store.get_session(session_id)
-        })
-        .await?;
+    let runtime = state.project_runtime(project_id).await?;
     let (receiver, workflow_receiver, replay) = runtime
         .store
         .call(move |store| {
@@ -2391,13 +2338,14 @@ fn serialize_sse_data(value: &impl Serialize) -> String {
 
 async fn artifact_content(
     State(state): State<AppState>,
-    Path(artifact_id): Path<String>,
+    Path((project_id, artifact_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
+    let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let artifact_id: ArtifactId = parse_id(&artifact_id, "Artifact")?;
-    let (runtime, artifact) = state
-        .locate("artifact", &artifact_id.to_string(), move |store| {
-            store.get_artifact(artifact_id)
-        })
+    let runtime = state.project_runtime(project_id).await?;
+    let artifact = runtime
+        .store
+        .call(move |store| store.get_artifact(artifact_id))
         .await?;
     let stored_artifact = artifact.clone();
     let bytes = runtime

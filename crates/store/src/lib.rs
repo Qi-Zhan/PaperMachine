@@ -38,7 +38,6 @@ pub use database::ProjectChange;
 pub use database::ProjectChangeBatch;
 pub use database::Store;
 pub use filesystem::ManagedFs;
-pub use handle::OwnershipEvent;
 pub use handle::STORE_QUEUE_CAPACITY;
 pub use handle::StoreHandle;
 pub use project_home::PROJECT_HOME_MEDIA_TYPE;

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 18;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -48,13 +48,6 @@ pub struct ProjectChange {
 pub struct ProjectChangeBatch {
     pub captured_cursor: u64,
     pub changes: Vec<ProjectChange>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnershipChange {
-    pub sequence: u64,
-    pub project_id: ProjectId,
-    pub entity_id: String,
 }
 
 #[derive(Clone)]
@@ -478,45 +471,6 @@ impl Store {
             captured_cursor,
             changes,
         })
-    }
-
-    pub fn list_owned_entity_ids(&self, project_id: ProjectId) -> Result<Vec<String>, StoreError> {
-        self.get_project(project_id)?;
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT entity_id FROM entity_ownership
-             WHERE project_id = ?1 ORDER BY sequence ASC",
-        )?;
-        let rows = statement.query_map([project_id.to_string()], |row| row.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub(crate) fn ownership_changes_after(
-        &self,
-        after: u64,
-    ) -> Result<Vec<OwnershipChange>, StoreError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT sequence, project_id, entity_id FROM entity_ownership
-             WHERE sequence > ?1 ORDER BY sequence ASC",
-        )?;
-        let rows = statement.query_map([after], |row| {
-            Ok((
-                row.get::<_, u64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (sequence, project_id, entity_id) = row?;
-            Ok(OwnershipChange {
-                sequence,
-                project_id: ProjectId::from_str(&project_id)
-                    .map_err(|error| StoreError::Invariant(error.to_string()))?,
-                entity_id,
-            })
-        })
-        .collect()
     }
 
     pub fn set_session_status(
@@ -4449,105 +4403,6 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS project_changes_project_sequence
            ON project_changes(project_id, sequence);
-         CREATE TABLE IF NOT EXISTS entity_ownership (
-           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-           project_id TEXT NOT NULL REFERENCES projects(id),
-           entity_id TEXT NOT NULL UNIQUE
-         );
-         CREATE INDEX IF NOT EXISTS entity_ownership_project_sequence
-           ON entity_ownership(project_id, sequence);
-
-         CREATE TRIGGER IF NOT EXISTS ownership_project_insert
-         AFTER INSERT ON projects BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           VALUES (NEW.id, NEW.id);
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_session_insert
-         AFTER INSERT ON sessions BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           VALUES (NEW.project_id, NEW.id);
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_turn_insert
-         AFTER INSERT ON turns BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM sessions WHERE id = NEW.session_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_step_insert
-         AFTER INSERT ON steps BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT sessions.project_id, NEW.id
-           FROM turns JOIN sessions ON sessions.id = turns.session_id
-           WHERE turns.id = NEW.turn_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_workflow_insert
-         AFTER INSERT ON workflows BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           VALUES (NEW.project_id, NEW.id);
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_participant_insert
-         AFTER INSERT ON workflow_participants BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_action_invocation_insert
-         AFTER INSERT ON action_invocations BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_action_attempt_insert
-         AFTER INSERT ON action_attempts BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT workflows.project_id, NEW.id
-           FROM action_invocations
-           JOIN workflows ON workflows.id = action_invocations.workflow_id
-           WHERE action_invocations.id = NEW.invocation_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_team_insert
-         AFTER INSERT ON workflow_teams BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_relation_insert
-         AFTER INSERT ON agent_relations BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_scope_insert
-         AFTER INSERT ON task_scopes BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_timer_insert
-         AFTER INSERT ON workflow_timers BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_channel_insert
-         AFTER INSERT ON workflow_channels BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_signal_insert
-         AFTER INSERT ON workflow_signals BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_human_request_insert
-         AFTER INSERT ON human_requests BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_control_message_insert
-         AFTER INSERT ON control_messages BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS ownership_artifact_insert
-         AFTER INSERT ON artifacts BEGIN
-           INSERT OR IGNORE INTO entity_ownership(project_id, entity_id)
-           SELECT project_id, NEW.id FROM workflows WHERE id = NEW.workflow_id;
-         END;
-
          CREATE TRIGGER IF NOT EXISTS project_change_project_insert
          AFTER INSERT ON projects BEGIN
            INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)

@@ -1,6 +1,5 @@
 use crate::Store;
 use crate::StoreError;
-use papermachine_protocol::ProjectId;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,14 +7,12 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 pub const STORE_QUEUE_CAPACITY: usize = 256;
 
-type StoreJob =
-    Box<dyn FnOnce(&Store, &mut u64, &broadcast::Sender<OwnershipEvent>) + Send + 'static>;
+type StoreJob = Box<dyn FnOnce(&Store) + Send + 'static>;
 
 enum StoreCommand {
     Run(StoreJob),
@@ -24,7 +21,6 @@ enum StoreCommand {
 
 struct StoreHandleInner {
     sender: mpsc::Sender<StoreCommand>,
-    ownership_events: broadcast::Sender<OwnershipEvent>,
     thread: Mutex<Option<JoinHandle<()>>>,
     stopped: AtomicBool,
     managed_root: PathBuf,
@@ -40,22 +36,10 @@ pub struct StoreHandle {
     inner: Arc<StoreHandleInner>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwnershipEvent {
-    pub project_id: ProjectId,
-    pub entity_id: String,
-}
-
 impl StoreHandle {
     pub fn spawn(store: Store) -> Result<Self, StoreError> {
         let managed_root = store.managed_root().to_path_buf();
-        let mut ownership_cursor = store
-            .ownership_changes_after(0)?
-            .last()
-            .map_or(0, |change| change.sequence);
         let (sender, mut receiver) = mpsc::channel(STORE_QUEUE_CAPACITY);
-        let (ownership_events, _) = broadcast::channel(4096);
-        let thread_ownership_events = ownership_events.clone();
         let thread = std::thread::Builder::new()
             .name(format!(
                 "papermachine-store-{}",
@@ -67,9 +51,7 @@ impl StoreHandle {
             .spawn(move || {
                 while let Some(command) = receiver.blocking_recv() {
                     match command {
-                        StoreCommand::Run(job) => {
-                            job(&store, &mut ownership_cursor, &thread_ownership_events)
-                        }
+                        StoreCommand::Run(job) => job(&store),
                         StoreCommand::Shutdown(acknowledged) => {
                             let _ = acknowledged.send(());
                             break;
@@ -81,7 +63,6 @@ impl StoreHandle {
         Ok(Self {
             inner: Arc::new(StoreHandleInner {
                 sender,
-                ownership_events,
                 thread: Mutex::new(Some(thread)),
                 stopped: AtomicBool::new(false),
                 managed_root,
@@ -91,10 +72,6 @@ impl StoreHandle {
 
     pub fn managed_root(&self) -> &Path {
         &self.inner.managed_root
-    }
-
-    pub fn subscribe_ownership(&self) -> broadcast::Receiver<OwnershipEvent> {
-        self.inner.ownership_events.subscribe()
     }
 
     pub async fn call<T, E, F>(&self, operation: F) -> Result<T, E>
@@ -111,12 +88,8 @@ impl StoreHandle {
         let (result_tx, result_rx) = oneshot::channel();
         self.inner
             .sender
-            .send(StoreCommand::Run(Box::new(move |store, cursor, events| {
-                let result = operation(store).and_then(|value| {
-                    publish_ownership_changes(store, cursor, events)
-                        .map(|()| value)
-                        .map_err(E::from)
-                });
+            .send(StoreCommand::Run(Box::new(move |store| {
+                let result = operation(store);
                 let _ = result_tx.send(result);
             })))
             .await
@@ -174,28 +147,13 @@ impl StoreHandle {
     }
 }
 
-fn publish_ownership_changes(
-    store: &Store,
-    cursor: &mut u64,
-    events: &broadcast::Sender<OwnershipEvent>,
-) -> Result<(), StoreError> {
-    for change in store.ownership_changes_after(*cursor)? {
-        *cursor = change.sequence;
-        let _ = events.send(OwnershipEvent {
-            project_id: change.project_id,
-            entity_id: change.entity_id,
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn jobs_are_isolated_and_publish_ownership_before_returning() {
+    async fn jobs_are_isolated_on_the_store_thread() {
         let directory = tempdir().expect("temporary directory should be created");
         let store =
             Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
@@ -204,7 +162,6 @@ mod tests {
             .expect("Project should be created");
         let caller_thread = std::thread::current().id();
         let handle = StoreHandle::spawn(store).expect("Store thread should start");
-        let mut ownership = handle.subscribe_ownership();
 
         let store_thread = handle
             .call(|_| Ok::<_, StoreError>(std::thread::current().id()))
@@ -213,15 +170,10 @@ mod tests {
         assert_ne!(store_thread, caller_thread);
 
         let project_id = project.id;
-        let session = handle
+        handle
             .call(move |store| store.create_session(project_id, "Session", "", "model", Vec::new()))
             .await
             .expect("Session should be created");
-        let event = ownership
-            .try_recv()
-            .expect("ownership should be published before the Store call returns");
-        assert_eq!(event.project_id, project.id);
-        assert_eq!(event.entity_id, session.id.to_string());
 
         handle.shutdown().await.expect("Store should stop cleanly");
         let error = handle

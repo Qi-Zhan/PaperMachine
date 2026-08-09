@@ -106,6 +106,7 @@ class BenchmarkRuntimeTests(unittest.TestCase):
     def test_retry_and_interrupt_state_preserve_attempt_history(self) -> None:
         attempts = [{"workflow_id": "research-run"}]
         state = {
+            "project_id": "project-1",
             "jobs": [
                 {
                     "research_failed": True,
@@ -139,7 +140,10 @@ class BenchmarkRuntimeTests(unittest.TestCase):
         self.assertEqual(cancel_inflight(api, state), 2)
         self.assertEqual(
             api.paths,
-            ["/workflows/research-run/cancel", "/workflows/grade-run/cancel"],
+            [
+                "/projects/project-1/workflows/research-run/cancel",
+                "/projects/project-1/workflows/grade-run/cancel",
+            ],
         )
 
     def test_phase_driver_retries_then_commits_one_result(self) -> None:
@@ -165,6 +169,7 @@ class BenchmarkRuntimeTests(unittest.TestCase):
             return {"workflow_id": workflow_id}
 
         state = {
+            "project_id": "project-1",
             "jobs": [{"key": "job", "task_key": "task"}],
             "current_runtime_source_sha256": {"runner": "hash"},
         }

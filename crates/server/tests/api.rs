@@ -10,6 +10,7 @@ use papermachine_model::ModelRouter;
 use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::Project;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::Session;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
@@ -507,7 +508,7 @@ async fn start_interactive_session(
         .as_str()
         .expect("interactive Workflow id should exist");
     for _ in 0..400 {
-        let view = get_workflow_view(app, workflow_id).await;
+        let view = get_workflow_view(app, project_id, workflow_id).await;
         if let Some(session) = view["sessions"]
             .as_array()
             .and_then(|sessions| sessions.first())
@@ -529,10 +530,18 @@ async fn start_interactive_session(
     panic!("interactive Workflow did not create its Session")
 }
 
-async fn send_interactive_message(app: &Router, session_id: SessionId, message: &str) -> Value {
+async fn send_interactive_message(
+    app: &Router,
+    project_id: ProjectId,
+    session_id: SessionId,
+    message: &str,
+) -> Value {
     let initial = app
         .clone()
-        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{project_id}/sessions/{session_id}"),
+        ))
         .await
         .expect("Session view should load before answering");
     let initial = response_json(initial).await;
@@ -541,7 +550,10 @@ async fn send_interactive_message(app: &Router, session_id: SessionId, message: 
     let request_id = loop {
         let response = app
             .clone()
-            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .oneshot(empty_request(
+                "GET",
+                &format!("/api/projects/{project_id}/sessions/{session_id}"),
+            ))
             .await
             .expect("Session view should load while waiting for human input");
         let view = response_json(response).await;
@@ -563,7 +575,7 @@ async fn send_interactive_message(app: &Router, session_id: SessionId, message: 
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/human-requests/{request_id}/answer"),
+            &format!("/api/projects/{project_id}/human-requests/{request_id}/answer"),
             json!({"answer": message}),
         ))
         .await
@@ -573,7 +585,10 @@ async fn send_interactive_message(app: &Router, session_id: SessionId, message: 
     for _ in 0..400 {
         let response = app
             .clone()
-            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .oneshot(empty_request(
+                "GET",
+                &format!("/api/projects/{project_id}/sessions/{session_id}"),
+            ))
             .await
             .expect("Session view should load while waiting for the Turn");
         let view = response_json(response).await;
@@ -630,6 +645,40 @@ async fn workflow_request_mode_matches_the_program_contract() {
 }
 
 #[tokio::test]
+async fn entity_routes_are_scoped_by_project() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let (owner, session) = create_project_and_session(&app, directory.path(), "Entity owner").await;
+    let other = create_project(&app, directory.path(), "Other project").await;
+
+    let owner_view = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}/sessions/{}", owner.id, session.id),
+        ))
+        .await
+        .expect("owner Session should load");
+    assert_eq!(owner_view.status(), StatusCode::OK);
+    let owner_view = response_json(owner_view).await;
+    let workflow_id = owner_view["workflows"][0]["id"]
+        .as_str()
+        .expect("interactive Workflow should exist");
+
+    for path in [
+        format!("/api/projects/{}/sessions/{}", other.id, session.id),
+        format!("/api/projects/{}/workflows/{workflow_id}", other.id),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(empty_request("GET", &path))
+            .await
+            .expect("cross-Project request should complete");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn api_creates_and_updates_session_access_profiles() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
@@ -643,7 +692,10 @@ async fn api_creates_and_updates_session_access_profiles() {
         .clone()
         .oneshot(json_request(
             "PUT",
-            &format!("/api/sessions/{}/access", created.id),
+            &format!(
+                "/api/projects/{}/sessions/{}/access",
+                project.id, created.id
+            ),
             json!({"access": "workspace"}),
         ))
         .await
@@ -656,7 +708,10 @@ async fn api_creates_and_updates_session_access_profiles() {
     let invalid = app
         .oneshot(json_request(
             "PUT",
-            &format!("/api/sessions/{}/access", created.id),
+            &format!(
+                "/api/projects/{}/sessions/{}/access",
+                project.id, created.id
+            ),
             json!({"access": "superuser"}),
         ))
         .await
@@ -688,7 +743,10 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         .clone()
         .oneshot(json_request(
             "PUT",
-            &format!("/api/sessions/{}/system-prompt", session.id),
+            &format!(
+                "/api/projects/{}/sessions/{}/system-prompt",
+                project.id, session.id
+            ),
             json!({"system_prompt": "Answer in a compact evidence table."}),
         ))
         .await
@@ -701,7 +759,7 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         "Answer in a compact evidence table."
     );
 
-    let turn = send_interactive_message(&app, session.id, "Compare the sources.").await;
+    let turn = send_interactive_message(&app, project.id, session.id, "Compare the sources.").await;
     assert_eq!(turn["origin"], "user");
     let kinds = turn["prompt"]["layers"]
         .as_array()
@@ -723,12 +781,12 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
     assert_eq!(project_prompt["content"], "Use only primary evidence.");
 }
 
-async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
+async fn get_workflow_view(app: &Router, project_id: ProjectId, workflow_id: &str) -> Value {
     let response = app
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/workflows/{workflow_id}"),
+            &format!("/api/projects/{project_id}/workflows/{workflow_id}"),
         ))
         .await
         .expect("run view request should complete");
@@ -736,10 +794,15 @@ async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
     response_json(response).await
 }
 
-async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &str) -> Value {
+async fn wait_for_workflow_status(
+    app: &Router,
+    project_id: ProjectId,
+    workflow_id: &str,
+    expected: &str,
+) -> Value {
     let mut last_view = Value::Null;
     for _ in 0..400 {
-        let view = get_workflow_view(app, workflow_id).await;
+        let view = get_workflow_view(app, project_id, workflow_id).await;
         if view["workflow"]["status"] == expected {
             return view;
         }
@@ -760,14 +823,14 @@ async fn wait_for_workflow_status(app: &Router, workflow_id: &str, expected: &st
 async fn interactive_session_turns_preserve_exact_human_message_provenance() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
-    let (_, session) =
+    let (project, session) =
         create_project_and_session(&app, directory.path(), "Interactive project").await;
 
     let session_view = app
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{}", session.id),
+            &format!("/api/projects/{}/sessions/{}", project.id, session.id),
         ))
         .await
         .expect("Session view should complete");
@@ -781,7 +844,7 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
         let mut request_id = None;
         let mut final_view = None;
         for _ in 0..400 {
-            let view = get_workflow_view(&app, &workflow_id).await;
+            let view = get_workflow_view(&app, project.id, &workflow_id).await;
             if request_id.is_none() {
                 request_id = view["human_requests"]
                     .as_array()
@@ -795,7 +858,10 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
                         .clone()
                         .oneshot(json_request(
                             "POST",
-                            &format!("/api/human-requests/{request_id}/answer"),
+                            &format!(
+                                "/api/projects/{}/human-requests/{request_id}/answer",
+                                project.id
+                            ),
                             json!({"answer": "Inspect the prompt cache behavior."}),
                         ))
                         .await
@@ -828,7 +894,7 @@ async fn interactive_session_turns_preserve_exact_human_message_provenance() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{}", session.id),
+            &format!("/api/projects/{}/sessions/{}", project.id, session.id),
         ))
         .await
         .expect("updated Session view should complete");
@@ -859,7 +925,7 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{}", session.id),
+            &format!("/api/projects/{}/sessions/{}", project.id, session.id),
         ))
         .await
         .expect("Session view should complete");
@@ -873,7 +939,10 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         .clone()
         .oneshot(empty_request(
             "POST",
-            &format!("/api/workflows/{workflow_id}/cancel"),
+            &format!(
+                "/api/projects/{}/workflows/{workflow_id}/cancel",
+                project.id
+            ),
         ))
         .await
         .expect("interactive Workflow cancellation should be validated");
@@ -883,7 +952,7 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         .clone()
         .oneshot(empty_request(
             "DELETE",
-            &format!("/api/sessions/{}", session.id),
+            &format!("/api/projects/{}/sessions/{}", project.id, session.id),
         ))
         .await
         .expect("Session close should complete");
@@ -893,7 +962,7 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{}", session.id),
+            &format!("/api/projects/{}/sessions/{}", project.id, session.id),
         ))
         .await
         .expect("archived Session should remain inspectable");
@@ -917,7 +986,7 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
             .is_some_and(Vec::is_empty)
     );
 
-    let workflow = get_workflow_view(&app, &workflow_id).await;
+    let workflow = get_workflow_view(&app, project.id, &workflow_id).await;
     assert_eq!(workflow["workflow"]["status"], "cancelled");
     assert!(
         workflow["human_requests"]
@@ -944,7 +1013,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
 
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Parallel project").await;
-    send_interactive_message(&app, origin.id, "Frame the comparison.").await;
+    send_interactive_message(&app, project.id, origin.id, "Frame the comparison.").await;
 
     let response = app
         .clone()
@@ -967,7 +1036,7 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     let run = response_json(response).await;
     let workflow_id = run["id"].as_str().expect("run id should be present");
 
-    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let view = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
     assert_eq!(
         view["workflow"]["instructions"],
         "Prefer directly comparable implementation evidence."
@@ -998,7 +1067,10 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/workflows/{workflow_id}/events"),
+            &format!(
+                "/api/projects/{}/workflows/{workflow_id}/events",
+                project.id
+            ),
         ))
         .await
         .expect("events request should complete");
@@ -1036,7 +1108,10 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{participant_session_id}"),
+            &format!(
+                "/api/projects/{}/sessions/{participant_session_id}",
+                project.id
+            ),
         ))
         .await
         .expect("participant Session should load");
@@ -1106,8 +1181,9 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
         .oneshot(empty_request(
             "GET",
             &format!(
-                "/api/workflows/{workflow_id}/events/stream?after={}",
-                events.len()
+                "/api/projects/{}/workflows/{workflow_id}/events/stream?after={}",
+                project.id,
+                events.len(),
             ),
         ))
         .await
@@ -1155,7 +1231,7 @@ async fn goal_reuses_one_tool_capable_session_and_stops_on_same_turn_completion(
     assert_eq!(response.status(), StatusCode::CREATED);
     let workflow = response_json(response).await;
     let workflow_id = workflow["id"].as_str().expect("Workflow id should exist");
-    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let view = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
 
     assert_eq!(view["participants"].as_array().map(Vec::len), Some(1));
     assert_eq!(view["sessions"].as_array().map(Vec::len), Some(1));
@@ -1195,7 +1271,10 @@ async fn goal_reuses_one_tool_capable_session_and_stops_on_same_turn_completion(
         .as_str()
         .expect("Goal Session id should exist");
     let session = app
-        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}/sessions/{session_id}", project.id),
+        ))
         .await
         .expect("Goal Session should load");
     let session = response_json(session).await;
@@ -1236,7 +1315,7 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let workflow = response_json(response).await;
     let workflow_id = workflow["id"].as_str().expect("Workflow id should exist");
-    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let view = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
 
     for participant in view["participants"]
         .as_array()
@@ -1260,7 +1339,10 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
             .expect("participant Session id should be a string");
         let session_view = app
             .clone()
-            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .oneshot(empty_request(
+                "GET",
+                &format!("/api/projects/{}/sessions/{session_id}", project.id),
+            ))
             .await
             .expect("participant Session should load");
         let session_view = response_json(session_view).await;
@@ -1310,6 +1392,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         create_project_and_session(&app, directory.path(), "Configured launch").await;
     send_interactive_message(
         &app,
+        project.id,
         origin.id,
         "Reuse this prior evidence instead of restarting.",
     )
@@ -1393,7 +1476,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
     assert_eq!(run["agent_access_overrides"]["Researcher"], "read_only");
     let workflow_id = run["id"].as_str().expect("Workflow id should exist");
 
-    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let completed = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
     for participant in completed["participants"]
         .as_array()
         .expect("participants should be present")
@@ -1425,7 +1508,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{context_session_id}"),
+            &format!("/api/projects/{}/sessions/{context_session_id}", project.id),
         ))
         .await
         .expect("ContextAnalyst Session should load");
@@ -1447,7 +1530,10 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
     let participant = app
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{participant_session_id}"),
+            &format!(
+                "/api/projects/{}/sessions/{participant_session_id}",
+                project.id
+            ),
         ))
         .await
         .expect("participant Session should load");
@@ -1503,7 +1589,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
     let workflow_id = workflow["id"]
         .as_str()
         .expect("summary Workflow id should exist");
-    let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let view = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
     let artifacts = view["artifacts"]
         .as_array()
         .expect("summary Artifacts should be present");
@@ -1548,7 +1634,10 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/artifacts/{artifact_id}/content"),
+            &format!(
+                "/api/projects/{}/artifacts/{artifact_id}/content",
+                project.id
+            ),
         ))
         .await
         .expect("summary Artifact should load");
@@ -1572,7 +1661,10 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
         .expect("summary Agent Session should exist");
     let session = app
         .clone()
-        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}/sessions/{session_id}", project.id),
+        ))
         .await
         .expect("summary Agent Session should load");
     let session = response_json(session).await;
@@ -1840,7 +1932,7 @@ async def main(ctx):
 
     let mut request_id = None;
     for _ in 0..200 {
-        let view = get_workflow_view(&app, workflow_id).await;
+        let view = get_workflow_view(&app, project.id, workflow_id).await;
         request_id = view["human_requests"].as_array().and_then(|items| {
             items
                 .iter()
@@ -1860,17 +1952,20 @@ async def main(ctx):
         .clone()
         .oneshot(empty_request(
             "POST",
-            &format!("/api/workflows/{workflow_id}/pause"),
+            &format!("/api/projects/{}/workflows/{workflow_id}/pause", project.id),
         ))
         .await
         .expect("pause should complete");
     assert_eq!(pause.status(), StatusCode::ACCEPTED);
-    wait_for_workflow_status(&app, workflow_id, "paused").await;
+    wait_for_workflow_status(&app, project.id, workflow_id, "paused").await;
     let resume = app
         .clone()
         .oneshot(empty_request(
             "POST",
-            &format!("/api/workflows/{workflow_id}/resume"),
+            &format!(
+                "/api/projects/{}/workflows/{workflow_id}/resume",
+                project.id
+            ),
         ))
         .await
         .expect("resume should complete");
@@ -1880,7 +1975,10 @@ async def main(ctx):
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/human-requests/{request_id}/answer"),
+            &format!(
+                "/api/projects/{}/human-requests/{request_id}/answer",
+                project.id
+            ),
             json!({"answer": true}),
         ))
         .await
@@ -1890,7 +1988,10 @@ async def main(ctx):
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/human-requests/{request_id}/answer"),
+            &format!(
+                "/api/projects/{}/human-requests/{request_id}/answer",
+                project.id
+            ),
             json!({"answer": "Prioritize primary evidence."}),
         ))
         .await
@@ -1899,7 +2000,7 @@ async def main(ctx):
     let answer_body = response_json(answer).await;
     assert_eq!(answer_status, StatusCode::OK, "{answer_body}");
 
-    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let completed = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
     assert_eq!(
         completed["workflow"]["output"]["decision"],
         "Prioritize primary evidence."
@@ -1971,7 +2072,7 @@ async def main(ctx):
     let mut open_request = None;
     let mut participant_session_id = None;
     for _ in 0..200 {
-        let view = get_workflow_view(&app, workflow_id).await;
+        let view = get_workflow_view(&app, project.id, workflow_id).await;
         participant_session_id = view["sessions"]
             .as_array()
             .and_then(|items| items.first())
@@ -2004,19 +2105,25 @@ async def main(ctx):
         .clone()
         .oneshot(json_request(
             "POST",
-            &format!("/api/human-requests/{request_id}/answer"),
+            &format!(
+                "/api/projects/{}/human-requests/{request_id}/answer",
+                project.id
+            ),
             json!({"answer": true}),
         ))
         .await
         .expect("grant should complete");
     assert_eq!(answer.status(), StatusCode::OK);
-    let completed = wait_for_workflow_status(&app, workflow_id, "completed").await;
+    let completed = wait_for_workflow_status(&app, project.id, workflow_id, "completed").await;
     assert_eq!(completed["sessions"][0]["access"], "full_access");
 
     let participant = app
         .oneshot(empty_request(
             "GET",
-            &format!("/api/sessions/{participant_session_id}"),
+            &format!(
+                "/api/projects/{}/sessions/{participant_session_id}",
+                project.id
+            ),
         ))
         .await
         .expect("participant Session should load");

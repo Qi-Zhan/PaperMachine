@@ -332,7 +332,9 @@ onMounted(async () => {
     projects.value = projectResult
     const initialRoute = readRoute()
     let restored = false
-    if (initialRoute?.kind === 'session') restored = await selectSession(initialRoute.id)
+    if (initialRoute?.kind === 'session' && initialRoute.childId) {
+      restored = await selectSession(initialRoute.id, initialRoute.childId)
+    }
     else if (initialRoute?.kind === 'project') restored = await selectProject(initialRoute.id)
     else if (initialRoute?.kind === 'workflows') restored = await openWorkflowLibrary(initialRoute.id)
     const firstProject = projectResult[0]
@@ -496,7 +498,7 @@ async function selectProject(projectId: string): Promise<boolean> {
   }
 }
 
-async function selectSession(sessionId: string): Promise<boolean> {
+async function selectSession(projectId: string, sessionId: string): Promise<boolean> {
   selectedSessionId.value = sessionId
   sessionView.value = null
   sessionEvents.value = []
@@ -507,7 +509,10 @@ async function selectSession(sessionId: string): Promise<boolean> {
   closeSessionStream()
   closeProjectStream()
   try {
-    const [view, events] = await Promise.all([api.getSession(sessionId), api.listSessionEvents(sessionId)])
+    const [view, events] = await Promise.all([
+      api.getSession(projectId, sessionId),
+      api.listSessionEvents(projectId, sessionId),
+    ])
     if (selectedSessionId.value !== sessionId) return false
     selectedProjectId.value = view.session.project_id
     sessionView.value = view
@@ -517,10 +522,10 @@ async function selectSession(sessionId: string): Promise<boolean> {
       refreshProjectSessions(view.session.project_id),
       loadWorkflowPrograms(view.session.project_id),
     ])
-    connectSessionStream(sessionId, events.at(-1)?.sequence ?? 0)
+    connectSessionStream(projectId, sessionId, events.at(-1)?.sequence ?? 0)
     const latestWorkflow = view.workflows[0]
-    if (latestWorkflow) void inspectWorkflow(latestWorkflow.id)
-    writeRoute('session', sessionId)
+    if (latestWorkflow) void inspectWorkflow(projectId, latestWorkflow.id)
+    writeRoute('session', projectId, sessionId)
     return true
   } catch (error) {
     if (selectedSessionId.value === sessionId) selectedSessionId.value = null
@@ -529,9 +534,9 @@ async function selectSession(sessionId: string): Promise<boolean> {
   }
 }
 
-function connectSessionStream(sessionId: string, after: number) {
+function connectSessionStream(projectId: string, sessionId: string, after: number) {
   closeSessionStream()
-  const source = new EventSource(`/api/sessions/${sessionId}/events/stream?after=${after}`)
+  const source = new EventSource(`/api/projects/${projectId}/sessions/${sessionId}/events/stream?after=${after}`)
   sessionEventSource = source
   source.onopen = () => {
     streamConnected.value = true
@@ -544,7 +549,7 @@ function connectSessionStream(sessionId: string, after: number) {
     try {
       const update = JSON.parse(message.data) as SessionStreamUpdate
       if (update.type === 'session_resync') {
-        void reconcileSession(sessionId)
+        void reconcileSession(projectId, sessionId)
         return
       }
       liveAssistantOutputs.value = applyLiveAssistantUpdate(liveAssistantOutputs.value, update)
@@ -561,7 +566,7 @@ function connectSessionStream(sessionId: string, after: number) {
       if ('session' in update && update.session) updateSidebarSession(update.session)
       const updatedWorkflow = 'workflow' in update ? update.workflow : undefined
       if (updatedWorkflow && workflowView.value?.workflow.id === updatedWorkflow.id) {
-        scheduleWorkflowInspection(updatedWorkflow.id)
+        scheduleWorkflowInspection(projectId, updatedWorkflow.id)
       }
     } catch {
       globalError.value = t('app.invalidSessionEvent')
@@ -570,12 +575,12 @@ function connectSessionStream(sessionId: string, after: number) {
   for (const type of sessionEventTypes) source.addEventListener(type, receive as EventListener)
 }
 
-async function reconcileSession(sessionId: string) {
+async function reconcileSession(projectId: string, sessionId: string) {
   try {
     const after = sessionEvents.value.at(-1)?.sequence ?? 0
     const [view, events] = await Promise.all([
-      api.getSession(sessionId),
-      api.listSessionEvents(sessionId, after),
+      api.getSession(projectId, sessionId),
+      api.listSessionEvents(projectId, sessionId, after),
     ])
     if (selectedSessionId.value !== sessionId) return
     sessionView.value = view
@@ -661,11 +666,11 @@ function updateSidebarSession(session: Session) {
   ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
 }
 
-function scheduleWorkflowInspection(workflowId: string) {
+function scheduleWorkflowInspection(projectId: string, workflowId: string) {
   if (workflowRefreshTimer !== null) window.clearTimeout(workflowRefreshTimer)
   workflowRefreshTimer = window.setTimeout(() => {
     workflowRefreshTimer = null
-    if (workflowView.value?.workflow.id === workflowId) void inspectWorkflow(workflowId, true)
+    if (workflowView.value?.workflow.id === workflowId) void inspectWorkflow(projectId, workflowId, true)
   }, 120)
 }
 
@@ -722,10 +727,10 @@ async function loadWorkflowPrograms(projectId: string, refresh = false) {
   return programs
 }
 
-async function inspectWorkflow(workflowId: string, quiet = false) {
+async function inspectWorkflow(projectId: string, workflowId: string, quiet = false) {
   if (!quiet) workflowLoading.value = true
   try {
-    const view = await api.getWorkflow(workflowId)
+    const view = await api.getWorkflow(projectId, workflowId)
     if (
       selectedSessionId.value &&
       (view.workflow.started_from_session_id === selectedSessionId.value ||
@@ -877,10 +882,10 @@ async function createSession(input: CreateSessionInput) {
       access: input.access,
       enabled_skills: input.enabled_skills,
     })
-    const session = await waitForWorkflowSession(workflow.id)
+    const session = await waitForWorkflowSession(project.id, workflow.id)
     sessionsByProject[project.id] = [session, ...(sessionsByProject[project.id] ?? [])]
     sessionDialogOpen.value = false
-    await selectSession(session.id)
+    await selectSession(project.id, session.id)
   } catch (error) {
     dialogError.value = messageOf(error)
   } finally {
@@ -888,9 +893,9 @@ async function createSession(input: CreateSessionInput) {
   }
 }
 
-async function waitForWorkflowSession(workflowId: string): Promise<Session> {
+async function waitForWorkflowSession(projectId: string, workflowId: string): Promise<Session> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const view = await api.getWorkflow(workflowId)
+    const view = await api.getWorkflow(projectId, workflowId)
     const participant = view.participants[0]
     const session = participant
       ? view.sessions.find((candidate) => candidate.id === participant.session_id)
@@ -915,7 +920,7 @@ async function sendSessionMessage(input: string) {
         (!request.response_schema.type || request.response_schema.type === 'string'),
     )
     if (!humanRequest) return
-    const answered = await api.answerHumanRequest(humanRequest.id, input)
+    const answered = await api.answerHumanRequest(view.session.project_id, humanRequest.id, input)
     if (sessionView.value?.session.id === view.session.id) {
       sessionView.value = {
         ...sessionView.value,
@@ -924,7 +929,7 @@ async function sendSessionMessage(input: string) {
         ),
       }
     }
-    await inspectWorkflow(humanRequest.workflow_id, true)
+    await inspectWorkflow(view.session.project_id, humanRequest.workflow_id, true)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -934,7 +939,7 @@ async function closeSession() {
   const view = sessionView.value
   if (!view || !window.confirm(t('session.closeConfirm', { title: view.session.title }))) return
   try {
-    await api.closeSession(view.session.id)
+    await api.closeSession(view.session.project_id, view.session.id)
     const projectId = view.session.project_id
     sessionsByProject[projectId] = (sessionsByProject[projectId] ?? []).filter(
       (session) => session.id !== view.session.id,
@@ -946,8 +951,10 @@ async function closeSession() {
 }
 
 async function cancelTurn(turnId: string) {
+  const projectId = sessionView.value?.session.project_id
+  if (!projectId) return
   try {
-    await api.cancelTurn(turnId)
+    await api.cancelTurn(projectId, turnId)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -958,7 +965,7 @@ async function updateSessionSkills(slugs: string[]) {
   if (!view || skillsBusy.value) return
   skillsBusy.value = true
   try {
-    const session = await api.updateSessionSkills(view.session.id, slugs)
+    const session = await api.updateSessionSkills(view.session.project_id, view.session.id, slugs)
     if (sessionView.value?.session.id === session.id) sessionView.value.session = session
   } catch (error) {
     globalError.value = messageOf(error)
@@ -973,7 +980,7 @@ async function updateSessionAccess(access: AccessPreset) {
   if (!view || accessBusy.value) return
   accessBusy.value = true
   try {
-    const session = await api.updateSessionAccess(view.session.id, access)
+    const session = await api.updateSessionAccess(view.session.project_id, view.session.id, access)
     if (sessionView.value?.session.id === session.id) sessionView.value.session = session
     const sessions = sessionsByProject[session.project_id] ?? []
     sessionsByProject[session.project_id] = [
@@ -992,7 +999,7 @@ async function updateSessionSystemPrompt(systemPrompt: string) {
   if (!view || promptBusy.value) return
   promptBusy.value = true
   try {
-    const session = await api.updateSessionSystemPrompt(view.session.id, systemPrompt)
+    const session = await api.updateSessionSystemPrompt(view.session.project_id, view.session.id, systemPrompt)
     if (sessionView.value?.session.id === session.id) sessionView.value.session = session
   } catch (error) {
     globalError.value = messageOf(error)
@@ -1030,7 +1037,7 @@ async function runProjectSummary(input: {
       enabled_skills: [],
     })
     if (input.replaceWorkflowId && input.replaceWorkflowId !== workflow.id) {
-      await api.cancelWorkflow(input.replaceWorkflowId)
+      await api.cancelWorkflow(overview.project.id, input.replaceWorkflowId)
     }
     await waitForProjectSummary(overview.project.id, workflow.id)
   } catch (error) {
@@ -1042,7 +1049,7 @@ async function runProjectSummary(input: {
 
 async function waitForProjectSummary(projectId: string, workflowId: string) {
   for (let attempt = 0; attempt < 240; attempt += 1) {
-    const workflow = await api.getWorkflowState(workflowId)
+    const workflow = await api.getWorkflowState(projectId, workflowId)
     if (workflow.status === 'failed' || workflow.status === 'cancelled') {
       throw new Error(workflow.error ?? workflow.status)
     }
@@ -1092,11 +1099,11 @@ async function createWorkflow(input: {
         ...sessionView.value,
         workflows: [workflow, ...sessionView.value.workflows.filter((candidate) => candidate.id !== workflow.id)],
       }
-      await inspectWorkflow(workflow.id)
+      await inspectWorkflow(project.id, workflow.id)
     } else {
-      const session = await waitForWorkflowSessionOrTerminal(workflow.id)
+      const session = await waitForWorkflowSessionOrTerminal(project.id, workflow.id)
       await refreshProjectIndex(project.id)
-      if (session) await selectSession(session.id)
+      if (session) await selectSession(project.id, session.id)
       else if (selectedProjectId.value === project.id) await selectProject(project.id)
     }
   } catch (error) {
@@ -1107,9 +1114,9 @@ async function createWorkflow(input: {
   }
 }
 
-async function waitForWorkflowSessionOrTerminal(workflowId: string): Promise<Session | null> {
+async function waitForWorkflowSessionOrTerminal(projectId: string, workflowId: string): Promise<Session | null> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const view = await api.getWorkflow(workflowId)
+    const view = await api.getWorkflow(projectId, workflowId)
     const participant = view.participants[0]
     const session = participant
       ? view.sessions.find((candidate) => candidate.id === participant.session_id)
@@ -1123,24 +1130,30 @@ async function waitForWorkflowSessionOrTerminal(workflowId: string): Promise<Ses
 }
 
 async function cancelWorkflow(workflowId: string) {
+  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
+  if (!projectId) return
   try {
-    await api.cancelWorkflow(workflowId)
+    await api.cancelWorkflow(projectId, workflowId)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
 async function pauseWorkflow(workflowId: string) {
+  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
+  if (!projectId) return
   try {
-    await api.pauseWorkflow(workflowId)
+    await api.pauseWorkflow(projectId, workflowId)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
 async function resumeWorkflow(workflowId: string) {
+  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
+  if (!projectId) return
   try {
-    await api.resumeWorkflow(workflowId)
+    await api.resumeWorkflow(projectId, workflowId)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -1153,24 +1166,29 @@ async function sendWorkflowControl(input: {
   content: string
   actionInvocationId?: string
 }) {
+  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
+  if (!projectId) return
   try {
     await api.sendControl(
+      projectId,
       input.workflowId,
       input.sessionId,
       input.kind,
       input.content,
       input.actionInvocationId,
     )
-    await inspectWorkflow(input.workflowId, true)
+    await inspectWorkflow(projectId, input.workflowId, true)
   } catch (error) {
     globalError.value = messageOf(error)
   }
 }
 
 async function answerHumanRequest(input: { requestId: string; answer: unknown; workflowId: string }) {
+  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
+  if (!projectId) return
   try {
-    await api.answerHumanRequest(input.requestId, input.answer)
-    await inspectWorkflow(input.workflowId, true)
+    await api.answerHumanRequest(projectId, input.requestId, input.answer)
+    await inspectWorkflow(projectId, input.workflowId, true)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -1188,15 +1206,22 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function writeRoute(kind: 'project' | 'session' | 'workflows', id?: string) {
-  const hash = id ? `#${kind}/${encodeURIComponent(id)}` : `#${kind}`
+function writeRoute(kind: 'project' | 'session' | 'workflows', id?: string, childId?: string) {
+  const suffix = id
+    ? `/${encodeURIComponent(id)}${childId ? `/${encodeURIComponent(childId)}` : ''}`
+    : ''
+  const hash = `#${kind}${suffix}`
   if (window.location.hash !== hash) window.history.replaceState(null, '', hash)
 }
 
-function readRoute(): { kind: 'project' | 'session' | 'workflows'; id: string } | null {
-  const [kind, encodedId] = window.location.hash.slice(1).split('/', 2)
+function readRoute(): { kind: 'project' | 'session' | 'workflows'; id: string; childId?: string } | null {
+  const [kind, encodedId, encodedChildId] = window.location.hash.slice(1).split('/', 3)
   if ((kind === 'project' || kind === 'session' || kind === 'workflows') && encodedId) {
-    return { kind, id: decodeURIComponent(encodedId) }
+    return {
+      kind,
+      id: decodeURIComponent(encodedId),
+      ...(encodedChildId ? { childId: decodeURIComponent(encodedChildId) } : {}),
+    }
   }
   return null
 }

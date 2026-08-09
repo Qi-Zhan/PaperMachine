@@ -266,7 +266,7 @@ def capture_research_result(
         raise ValueError("completed research run did not return a non-empty report")
     atomic_write_text(article_path, report.rstrip() + "\n")
     agents = [
-        session_metrics(api.get(f"/sessions/{session['id']}"))
+        session_metrics(api.get(f"/projects/{run['project_id']}/sessions/{session['id']}"))
         for session in view.get("sessions", [])
     ]
     usage = run.get("usage") or {}

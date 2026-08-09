@@ -317,8 +317,9 @@ def capture_per_agent(
     api: PaperMachineApi, view: dict[str, Any]
 ) -> list[dict[str, Any]]:
     agents = []
+    project_id = view["workflow"]["project_id"]
     for session in view.get("sessions", []):
-        session_view = api.get(f"/sessions/{session['id']}")
+        session_view = api.get(f"/projects/{project_id}/sessions/{session['id']}")
         turns = session_view.get("turns", [])
         steps = session_view.get("steps", [])
         usage = {
@@ -1170,7 +1171,7 @@ def run_research_phase(
             if not research["attempts"] or research.get("status") == "pending_retry":
                 continue
             attempt = research["attempts"][-1]
-            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            view = api.get(f"/projects/{project_id}/workflows/{attempt['workflow_id']}")
             status = str(view["workflow"]["status"])
             research["status"] = status
             attempt["status"] = status
@@ -1266,7 +1267,7 @@ def run_grading_phase(
             if not grade["attempts"] or grade.get("status") == "pending_retry":
                 continue
             attempt = grade["attempts"][-1]
-            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            view = api.get(f"/projects/{project_id}/workflows/{attempt['workflow_id']}")
             run = view["workflow"]
             status = str(run["status"])
             grade["status"] = status
@@ -1367,10 +1368,13 @@ def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool
     """Upgrade completed and failed phases recorded by older runner revisions."""
     changed = False
     workflow_view_cache: dict[str, dict[str, Any]] = {}
+    project_id = state["project_id"]
 
     def workflow_view(workflow_id: str) -> dict[str, Any]:
         if workflow_id not in workflow_view_cache:
-            workflow_view_cache[workflow_id] = api.get(f"/workflows/{workflow_id}")
+            workflow_view_cache[workflow_id] = api.get(
+                f"/projects/{project_id}/workflows/{workflow_id}"
+            )
         return workflow_view_cache[workflow_id]
 
     def workflow(workflow_id: str) -> dict[str, Any]:

@@ -192,6 +192,7 @@ def reopen_terminal_failures(state: dict[str, Any]) -> int:
 
 def cancel_inflight(api: Any, state: dict[str, Any]) -> int:
     cancelled = 0
+    project_id = state["project_id"]
     for job in state.get("jobs", []):
         for phase in ("research", "grade"):
             phase_state = job.get(phase) or {}
@@ -202,7 +203,9 @@ def cancel_inflight(api: Any, state: dict[str, Any]) -> int:
                 continue
             attempt = attempts[-1]
             try:
-                api.post_empty(f"/workflows/{attempt['workflow_id']}/cancel")
+                api.post_empty(
+                    f"/projects/{project_id}/workflows/{attempt['workflow_id']}/cancel"
+                )
             except ApiError as error:
                 attempt["cancel_error"] = str(error)
             else:
@@ -324,7 +327,9 @@ def drive_phase(
             ):
                 continue
             attempt = phase_state["attempts"][-1]
-            view = api.get(f"/workflows/{attempt['workflow_id']}")
+            view = api.get(
+                f"/projects/{state['project_id']}/workflows/{attempt['workflow_id']}"
+            )
             run = view["workflow"]
             status = str(run["status"])
             phase_state["status"] = status

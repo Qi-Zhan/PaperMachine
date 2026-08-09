@@ -114,7 +114,7 @@
             class="session-row"
             :data-active="session.id === selectedSessionId"
             type="button"
-            @click="$emit('select-session', session.id)"
+            @click="$emit('select-session', project.id, session.id)"
           >
             <span class="status-pin" :data-status="session.status" />
             <span class="session-row-copy">
@@ -166,7 +166,7 @@ defineEmits<{
   'remove-project': [projectId: string]
   'open-workflows': []
   'select-project': [projectId: string]
-  'select-session': [sessionId: string]
+  'select-session': [projectId: string, sessionId: string]
 }>()
 
 const searchVisible = ref(false)

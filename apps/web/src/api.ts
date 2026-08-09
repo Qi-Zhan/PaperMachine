@@ -74,39 +74,48 @@ export const api = {
     projectId: string,
     input: { slug: string; name: string; description: string; instructions: string },
   ) => request<ProjectSkill>(`/projects/${projectId}/skills`, { method: 'POST', body: JSON.stringify(input) }),
-  getSession: (sessionId: string) => request<SessionView>(`/sessions/${sessionId}`),
-  closeSession: (sessionId: string) => request<void>(`/sessions/${sessionId}`, { method: 'DELETE' }),
-  cancelTurn: (turnId: string) => request<void>(`/turns/${turnId}/cancel`, { method: 'POST' }),
-  updateSessionSkills: (sessionId: string, enabledSkills: string[]) =>
-    request<Session>(`/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
-  updateSessionAccess: (sessionId: string, access: AccessPreset) =>
-    request<Session>(`/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
-  updateSessionSystemPrompt: (sessionId: string, systemPrompt: string) =>
-    request<Session>(`/sessions/${sessionId}/system-prompt`, {
+  getSession: (projectId: string, sessionId: string) =>
+    request<SessionView>(`/projects/${projectId}/sessions/${sessionId}`),
+  closeSession: (projectId: string, sessionId: string) =>
+    request<void>(`/projects/${projectId}/sessions/${sessionId}`, { method: 'DELETE' }),
+  cancelTurn: (projectId: string, turnId: string) =>
+    request<void>(`/projects/${projectId}/turns/${turnId}/cancel`, { method: 'POST' }),
+  updateSessionSkills: (projectId: string, sessionId: string, enabledSkills: string[]) =>
+    request<Session>(`/projects/${projectId}/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
+  updateSessionAccess: (projectId: string, sessionId: string, access: AccessPreset) =>
+    request<Session>(`/projects/${projectId}/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
+  updateSessionSystemPrompt: (projectId: string, sessionId: string, systemPrompt: string) =>
+    request<Session>(`/projects/${projectId}/sessions/${sessionId}/system-prompt`, {
       method: 'PUT',
       body: JSON.stringify({ system_prompt: systemPrompt }),
     }),
-  listSessionEvents: (sessionId: string, after = 0) =>
-    request<SessionEvent[]>(`/sessions/${sessionId}/events?after=${after}`),
+  listSessionEvents: (projectId: string, sessionId: string, after = 0) =>
+    request<SessionEvent[]>(`/projects/${projectId}/sessions/${sessionId}/events?after=${after}`),
   createWorkflow: (projectId: string, input: CreateWorkflowInput) =>
     request<Workflow>(`/projects/${projectId}/workflows`, { method: 'POST', body: JSON.stringify(input) }),
-  getWorkflow: (workflowId: string) => request<WorkflowView>(`/workflows/${workflowId}`),
-  getWorkflowState: (workflowId: string) => request<Workflow>(`/workflows/${workflowId}/state`),
-  pauseWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/pause`, { method: 'POST' }),
-  resumeWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/resume`, { method: 'POST' }),
-  cancelWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/cancel`, { method: 'POST' }),
+  getWorkflow: (projectId: string, workflowId: string) =>
+    request<WorkflowView>(`/projects/${projectId}/workflows/${workflowId}`),
+  getWorkflowState: (projectId: string, workflowId: string) =>
+    request<Workflow>(`/projects/${projectId}/workflows/${workflowId}/state`),
+  pauseWorkflow: (projectId: string, workflowId: string) =>
+    request<void>(`/projects/${projectId}/workflows/${workflowId}/pause`, { method: 'POST' }),
+  resumeWorkflow: (projectId: string, workflowId: string) =>
+    request<void>(`/projects/${projectId}/workflows/${workflowId}/resume`, { method: 'POST' }),
+  cancelWorkflow: (projectId: string, workflowId: string) =>
+    request<void>(`/projects/${projectId}/workflows/${workflowId}/cancel`, { method: 'POST' }),
   sendControl: (
+    projectId: string,
     runId: string,
     sessionId: string,
     kind: ControlMessageKind,
     content: string,
     actionInvocationId?: string,
-  ) => request<ControlMessage>(`/workflows/${runId}/sessions/${sessionId}/control`, {
+  ) => request<ControlMessage>(`/projects/${projectId}/workflows/${runId}/sessions/${sessionId}/control`, {
     method: 'POST',
     body: JSON.stringify({ kind, content, action_invocation_id: actionInvocationId ?? null }),
   }),
-  answerHumanRequest: (requestId: string, answer: unknown) =>
-    request<HumanRequest>(`/human-requests/${requestId}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
+  answerHumanRequest: (projectId: string, requestId: string, answer: unknown) =>
+    request<HumanRequest>(`/projects/${projectId}/human-requests/${requestId}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   listWorkflowPrograms: (projectId: string) => request<WorkflowProgram[]>(`/projects/${projectId}/workflow-programs`),
   getWorkflowProgram: (projectId: string, slug: string) =>
     request<WorkflowProgramSource>(`/projects/${projectId}/workflow-programs/${encodeURIComponent(slug)}`),
@@ -116,9 +125,9 @@ export const api = {
     request<WorkflowValidation>(`/projects/${projectId}/workflow-programs/validate`, { method: 'POST', body: JSON.stringify({ source }) }),
   saveWorkflowProgram: (projectId: string, source: string) =>
     request<WorkflowProgram>(`/projects/${projectId}/workflow-programs`, { method: 'POST', body: JSON.stringify({ source }) }),
-  artifactUrl: (artifact: Artifact) => `${API_ROOT}/artifacts/${artifact.id}/content`,
+  artifactUrl: (artifact: Artifact) => `${API_ROOT}/projects/${artifact.project_id}/artifacts/${artifact.id}/content`,
   readArtifact: async (artifact: Artifact) => {
-    const response = await fetch(`${API_ROOT}/artifacts/${artifact.id}/content`)
+    const response = await fetch(`${API_ROOT}/projects/${artifact.project_id}/artifacts/${artifact.id}/content`)
     if (!response.ok) throw new Error(`Artifact request failed with status ${response.status}`)
     return response.text()
   },
