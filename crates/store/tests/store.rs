@@ -11,7 +11,6 @@ use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
 use papermachine_protocol::TaskScopeStatus;
-use papermachine_protocol::TimerPolicy;
 use papermachine_protocol::TimerStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolSetSnapshot;
@@ -19,7 +18,6 @@ use papermachine_protocol::WorkflowContextMode;
 use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowEventPayload;
 use papermachine_protocol::WorkflowLaunchContext;
-use papermachine_protocol::WorkflowProgram;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
@@ -186,17 +184,6 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
     original.definition_path = "workflows/parallel-review/workflow.py".to_string();
     original.sha256 = "original-sha".to_string();
     original.source_code = "async def main(ctx): return {'revision': 1}\n".to_string();
-    store
-        .register_workflow_program(&WorkflowProgram {
-            project_id: original.project_id,
-            manifest: original.manifest.clone(),
-            source: original.source,
-            definition_path: original.definition_path.clone(),
-            sha256: original.sha256.clone(),
-            updated_at: chrono::Utc::now(),
-        })
-        .expect("original program should register");
-
     let workflow = store
         .create_workflow(NewWorkflow {
             project_id: project.id,
@@ -214,21 +201,6 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
         })
         .expect("Project-level Workflow should be created without a Session");
 
-    let mut replacement = workflow.program.clone();
-    replacement.manifest.id = WorkflowProgramId::new();
-    replacement.sha256 = "replacement-sha".to_string();
-    replacement.source_code = "async def main(ctx): return {'revision': 2}\n".to_string();
-    store
-        .register_workflow_program(&WorkflowProgram {
-            project_id: replacement.project_id,
-            manifest: replacement.manifest.clone(),
-            source: replacement.source,
-            definition_path: replacement.definition_path.clone(),
-            sha256: replacement.sha256.clone(),
-            updated_at: chrono::Utc::now(),
-        })
-        .expect("replacement program should register");
-
     let persisted = store
         .get_workflow(workflow.id)
         .expect("Workflow should remain readable");
@@ -241,11 +213,6 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
             .expect("Project Workflows should load"),
         vec![persisted]
     );
-    let registrations = store
-        .list_workflow_programs()
-        .expect("programs should load");
-    assert_eq!(registrations.len(), 1);
-    assert_eq!(registrations[0].sha256, "replacement-sha");
 }
 
 #[test]
@@ -353,7 +320,6 @@ fn workflow() -> WorkflowProgramSnapshot {
             entrypoint: "main".to_string(),
             request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/parallel-review/workflow.py".to_string(),
@@ -579,7 +545,7 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
         .set_task_scope_status(scope.id, TaskScopeStatus::Completed)
         .expect("scope should complete");
     let timer = store
-        .create_timer(run.id, "periodic summary", 10, TimerPolicy::Coalesce)
+        .create_timer(run.id, "periodic summary", 10)
         .expect("timer should be created");
     store.fire_timer(timer.id).expect("timer should fire");
     let channel = store
@@ -762,7 +728,7 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         )
         .expect("control should queue");
     let timer = store
-        .create_timer(run.id, "summary", 1000, TimerPolicy::Coalesce)
+        .create_timer(run.id, "summary", 1000)
         .expect("timer should start");
 
     store

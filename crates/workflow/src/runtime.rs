@@ -834,6 +834,7 @@ impl RunEffectContext {
                         None,
                     )?;
                     return Ok(json!({
+                        "action_invocation_id": invocation.id,
                         "output": turn.output.unwrap_or_default(),
                         "turn_id": turn.id,
                         "hosted_search_calls_used": turn.hosted_search_calls_used,
@@ -991,16 +992,6 @@ impl RunEffectContext {
         {
             return Ok(json!({"timer_id": timer.id}));
         }
-        let policy = match payload.policy.as_str() {
-            "coalesce" => TimerPolicy::Coalesce,
-            "skip" => TimerPolicy::Skip,
-            "queue" => TimerPolicy::Queue,
-            other => {
-                return Err(WorkflowRuntimeError::Protocol(format!(
-                    "invalid timer policy: {other}"
-                )));
-            }
-        };
         let timer_id =
             TimerId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "timer"));
         let timer = match self.store.get_timer(timer_id) {
@@ -1011,7 +1002,6 @@ impl RunEffectContext {
                     self.workflow_id,
                     payload.name,
                     payload.interval_ms,
-                    policy,
                 )?
             }
             Err(error) => return Err(error.into()),
@@ -1290,29 +1280,20 @@ impl RunEffectContext {
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: PublishProjectHomeEffect = serde_json::from_value(payload)?;
-        let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
+        let invocation_id = ActionInvocationId::from_str(&payload.action_invocation_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let participant = self.store.get_participant(agent_id)?;
-        if participant.workflow_id != self.workflow_id {
+        let invocation = self.store.get_action_invocation(invocation_id)?;
+        if invocation.workflow_id != self.workflow_id {
             return Err(WorkflowRuntimeError::Protocol(
-                "Project-home Agent belongs to another Workflow".to_string(),
+                "Project-home Action belongs to another Workflow".to_string(),
             ));
         }
-        let invocation = self
-            .store
-            .list_action_invocations(self.workflow_id)?
-            .into_iter()
-            .rev()
-            .find(|invocation| {
-                invocation.agent_instance_id == agent_id
-                    && invocation.status == ActionStatus::Completed
-            })
-            .ok_or_else(|| {
-                WorkflowRuntimeError::Protocol(
-                    "Project home can be published only after the editing Action completes"
-                        .to_string(),
-                )
-            })?;
+        if invocation.status != ActionStatus::Completed {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Project home can be published only after the exact Action completes".to_string(),
+            ));
+        }
+        let participant = self.store.get_participant(invocation.agent_instance_id)?;
         let completed_turn = self
             .store
             .list_action_attempts(invocation.id)?
@@ -1604,6 +1585,7 @@ fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, Workf
         ))
     })?;
     Ok(json!({
+        "action_invocation_id": invocation.id,
         "output": output.get("message").and_then(Value::as_str).unwrap_or_default(),
         "turn_id": output.get("turn_id").cloned().unwrap_or(Value::Null),
         "hosted_search_calls_used": output
@@ -1754,7 +1736,6 @@ struct CloseScopeEffect {
 struct TimerEffect {
     name: String,
     interval_ms: u64,
-    policy: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1837,7 +1818,7 @@ struct PublishArtifactEffect {
 
 #[derive(Debug, Deserialize)]
 struct PublishProjectHomeEffect {
-    agent_instance_id: String,
+    action_invocation_id: String,
     #[serde(default = "empty_object")]
     metadata: Value,
 }

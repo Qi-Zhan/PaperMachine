@@ -66,19 +66,6 @@ Use active whenever any required work remains or completion is not proved. Use c
         },
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "result": {"type": "string"},
-            "status": {
-                "type": "string",
-                "enum": ["complete", "blocked"],
-            },
-            "iterations": {"type": "integer"},
-        },
-        "required": ["result", "status", "iterations"],
-        "additionalProperties": False,
-    },
 )
 async def main(ctx):
     title = str(ctx.params.get("session_title") or "Goal").strip()

@@ -65,11 +65,6 @@ class Synthesizer(Agent):
         },
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {"summary": {"type": "string"}},
-        "required": ["summary"],
-    },
 )
 async def main(ctx):
     perspectives = ctx.params.get("perspectives") or [

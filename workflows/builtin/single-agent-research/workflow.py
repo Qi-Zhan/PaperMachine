@@ -21,11 +21,6 @@ class Researcher(Agent):
     name="Single-agent research",
     description="Research a request and produce the requested deliverable.",
     params_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    output_schema={
-        "type": "object",
-        "properties": {"report": {"type": "string"}},
-        "required": ["report"],
-    },
 )
 async def main(ctx):
     researcher = Researcher(name="Single researcher")

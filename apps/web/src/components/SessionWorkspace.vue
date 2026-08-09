@@ -586,7 +586,7 @@
                 <AlarmClock :size="13" />
                 <span>
                   <strong>{{ timer.name }}</strong>
-                  <small>{{ t('session.timerFires', { count: timer.fire_count }) }} · {{ timer.policy }}</small>
+                  <small>{{ t('session.timerFires', { count: timer.fire_count }) }}</small>
                 </span>
                 <span class="status-pin" :data-status="timer.status" />
               </div>

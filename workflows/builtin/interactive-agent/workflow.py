@@ -50,10 +50,6 @@ class InteractiveAgent(Agent):
         },
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "additionalProperties": False,
-    },
 )
 async def main(ctx):
     title = str(ctx.params.get("session_title") or "New project Session").strip()

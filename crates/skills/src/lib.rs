@@ -1,4 +1,4 @@
-//! Project-local skill packages using the Codex `SKILL.md` shape.
+//! Project-local instruction skills using the Codex `SKILL.md` shape.
 
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::ProjectSkill;
@@ -9,8 +9,6 @@ use serde::Deserialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
-use std::path::Component;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -39,41 +37,36 @@ impl ProjectSkillCatalog {
     }
 
     pub fn ensure_project(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
-        let root = self.managed_root(project_id)?;
-        std::fs::create_dir_all(root.join("skills"))?;
-        std::fs::create_dir_all(root.join("sources"))?;
-        Ok(root)
+        self.store.get_project(project_id)?;
+        self.store.ensure_managed_directory("skills")?;
+        self.store.ensure_managed_directory("sources")?;
+        Ok(self.store.managed_root().to_path_buf())
     }
 
     pub fn list(&self, project_id: ProjectId) -> Result<Vec<ProjectSkill>, SkillError> {
-        let skills_root = self.ensure_project(project_id)?.join("skills");
-        let mut directories = std::fs::read_dir(&skills_root)?.collect::<Result<Vec<_>, _>>()?;
-        directories.sort_by_key(std::fs::DirEntry::file_name);
+        self.ensure_project(project_id)?;
         let mut skills = Vec::new();
-        for entry in directories {
-            if entry.file_type()?.is_dir() {
-                skills.push(self.load(project_id, &entry.file_name().to_string_lossy())?);
-            }
+        for slug in self.store.list_managed_directories("skills")? {
+            skills.push(self.load(project_id, &slug)?);
         }
         Ok(skills)
     }
 
     pub fn load(&self, project_id: ProjectId, slug: &str) -> Result<ProjectSkill, SkillError> {
         validate_slug(slug)?;
-        let package = self.managed_root(project_id)?.join("skills").join(slug);
-        let skill_path = package.join("SKILL.md");
-        if !skill_path.is_file() {
+        self.store.get_project(project_id)?;
+        let relative_path = PathBuf::from("skills").join(slug).join("SKILL.md");
+        if !self.store.managed_file_exists(&relative_path)? {
             return Err(SkillError::NotFound(slug.to_string()));
         }
-        ensure_package_is_regular(&package, &package)?;
-        let source = std::fs::read_to_string(&skill_path)?;
+        let source = self.store.read_managed_text(&relative_path, 1024 * 1024)?;
         let (frontmatter, instructions) = parse_skill_markdown(&source)?;
         Ok(ProjectSkill {
             slug: slug.to_string(),
             name: frontmatter.name,
             description: frontmatter.description,
             relative_path: format!("skills/{slug}/SKILL.md"),
-            sha256: hash_package(&package)?,
+            sha256: hex::encode(Sha256::digest(source.as_bytes())),
             instructions: instructions.to_string(),
         })
     }
@@ -93,11 +86,15 @@ impl ProjectSkillCatalog {
                 "skill name, description, and instructions must not be empty".to_string(),
             ));
         }
-        let package = self.ensure_project(project_id)?.join("skills").join(slug);
-        if package.exists() {
+        self.ensure_project(project_id)?;
+        if self
+            .store
+            .list_managed_directories("skills")?
+            .iter()
+            .any(|existing| existing == slug)
+        {
             return Err(SkillError::AlreadyExists(slug.to_string()));
         }
-        std::fs::create_dir_all(&package)?;
         let document = format!(
             "---\nname: {}\ndescription: {}\n---\n\n{}\n",
             yaml_scalar(name.trim())?,
@@ -108,7 +105,9 @@ impl ProjectSkillCatalog {
             PathBuf::from("skills").join(slug).join("SKILL.md"),
             document.as_bytes(),
         ) {
-            let _ = std::fs::remove_dir(&package);
+            let _ = self
+                .store
+                .remove_managed_entry(PathBuf::from("skills").join(slug));
             return Err(error.into());
         }
         self.load(project_id, slug)
@@ -134,30 +133,13 @@ impl ProjectSkillCatalog {
         let mut sections = Vec::new();
         for slug in unique_slugs(slugs)? {
             let skill = self.load(project_id, slug)?;
-            let hash_prefix = skill.sha256.get(..16).unwrap_or(&skill.sha256);
-            let relative_package = PathBuf::from("runtime")
-                .join("skill-snapshots")
-                .join(slug)
-                .join(hash_prefix);
-            let destination = self.managed_root(project_id)?.join(&relative_package);
-            if !destination.exists() {
-                copy_package(
-                    &self.managed_root(project_id)?.join("skills").join(slug),
-                    &destination,
-                )?;
-            }
-            let relative_path = relative_package
-                .join("SKILL.md")
-                .to_string_lossy()
-                .into_owned();
             snapshots.push(SkillSnapshot {
                 slug: slug.to_string(),
                 sha256: skill.sha256.clone(),
-                relative_path: relative_path.clone(),
             });
             sections.push(format!(
-                "## Skill: {} (`{}`)\nPackage: `{}`\n{}\n\n{}",
-                skill.name, slug, relative_path, skill.description, skill.instructions
+                "## Skill: {} (`{}`)\n{}\n\n{}",
+                skill.name, slug, skill.description, skill.instructions
             ));
         }
         Ok(ResolvedSkills {
@@ -171,51 +153,6 @@ impl ProjectSkillCatalog {
                 )
             },
         })
-    }
-
-    pub fn resolve_snapshots(
-        &self,
-        project_id: ProjectId,
-        snapshots: &[SkillSnapshot],
-    ) -> Result<String, SkillError> {
-        let mut sections = Vec::new();
-        for snapshot in snapshots {
-            let path = safe_relative_path(&snapshot.relative_path)?;
-            let package = self
-                .managed_root(project_id)?
-                .join(path)
-                .parent()
-                .ok_or_else(|| {
-                    SkillError::Invalid("skill snapshot path has no package directory".to_string())
-                })?
-                .to_path_buf();
-            if hash_package(&package)? != snapshot.sha256 {
-                return Err(SkillError::SnapshotChanged(snapshot.slug.clone()));
-            }
-            let source = std::fs::read_to_string(package.join("SKILL.md"))?;
-            let (frontmatter, instructions) = parse_skill_markdown(&source)?;
-            sections.push(format!(
-                "## Skill: {} (`{}`)\nPackage: `{}`\n{}\n\n{}",
-                frontmatter.name,
-                snapshot.slug,
-                snapshot.relative_path,
-                frontmatter.description,
-                instructions
-            ));
-        }
-        Ok(if sections.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "Project-local skills enabled for this turn:\n\n{}",
-                sections.join("\n\n")
-            )
-        })
-    }
-
-    fn managed_root(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
-        self.store.get_project(project_id)?;
-        Ok(self.store.managed_root().to_path_buf())
     }
 }
 
@@ -286,88 +223,6 @@ fn unique_slugs(slugs: &[String]) -> Result<Vec<&str>, SkillError> {
     Ok(unique.into_iter().collect())
 }
 
-fn safe_relative_path(value: &str) -> Result<&Path, SkillError> {
-    let path = Path::new(value);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err(SkillError::Invalid(format!(
-            "skill snapshot path escapes workspace: {value}"
-        )));
-    }
-    Ok(path)
-}
-
-fn hash_package(package: &Path) -> Result<String, SkillError> {
-    let mut files = Vec::new();
-    collect_files(package, package, &mut files)?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for relative in files {
-        hasher.update(relative.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        hasher.update(std::fs::read(package.join(&relative))?);
-        hasher.update([0]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<(), SkillError> {
-    for entry in std::fs::read_dir(current)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            return Err(SkillError::Invalid(format!(
-                "skill packages may not contain symlinks: {}",
-                entry.path().display()
-            )));
-        }
-        if file_type.is_dir() {
-            collect_files(root, &entry.path(), files)?;
-        } else if file_type.is_file() {
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .map_err(|error| SkillError::Invalid(error.to_string()))?
-                    .to_path_buf(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn ensure_package_is_regular(root: &Path, current: &Path) -> Result<(), SkillError> {
-    let mut files = Vec::new();
-    collect_files(root, current, &mut files)
-}
-
-fn copy_package(source: &Path, destination: &Path) -> Result<(), SkillError> {
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = destination.join(entry.file_name());
-        if file_type.is_symlink() {
-            return Err(SkillError::Invalid(format!(
-                "skill packages may not contain symlinks: {}",
-                entry.path().display()
-            )));
-        }
-        if file_type.is_dir() {
-            copy_package(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            std::fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Error)]
 pub enum SkillError {
     #[error(transparent)]
@@ -376,12 +231,8 @@ pub enum SkillError {
     NotFound(String),
     #[error("skill already exists: {0}")]
     AlreadyExists(String),
-    #[error("invalid skill package: {0}")]
+    #[error("invalid skill: {0}")]
     Invalid(String),
-    #[error("skill snapshot changed after turn creation: {0}")]
-    SnapshotChanged(String),
-    #[error("skill I/O failed: {0}")]
-    Io(#[from] std::io::Error),
     #[error("skill frontmatter is invalid: {0}")]
     Yaml(#[from] serde_yaml::Error),
 }

@@ -27,7 +27,6 @@ pub struct WorkflowProgramManifest {
     /// own interaction points (for example, a persistent interactive Session).
     pub request_mode: WorkflowRequestMode,
     pub params_schema: Value,
-    pub output_schema: Value,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -103,7 +102,6 @@ pub struct WorkflowFeatureSummary {
 pub struct WorkflowTimerDeclaration {
     pub callback: String,
     pub seconds: Option<f64>,
-    pub policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

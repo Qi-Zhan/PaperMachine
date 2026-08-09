@@ -67,14 +67,6 @@ Finish only when the preview is accurate, coherent, useful, and supported by the
         },
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "artifact_id": {"type": "string"},
-            "refresh_count": {"type": "integer"},
-        },
-        "required": ["artifact_id", "refresh_count"],
-    },
 )
 async def main(ctx):
     interval_minutes = float(ctx.params.get("interval_minutes", 60))
@@ -102,13 +94,13 @@ async def main(ctx):
             await wait(
                 minutes=interval_minutes,
                 name="project-summary-refresh",
-                policy="coalesce",
             )
             continue
-        await summarizer.maintain_project_home(snapshot)
+        action = summarizer.maintain_project_home(snapshot)
+        await action
         next_refresh_count = refresh_count + 1
         artifact = await publish_project_home(
-            agent=summarizer,
+            action=action,
             metadata={
                 "snapshot_cursor": snapshot["cursor"],
                 "snapshot_mode": snapshot["mode"],
@@ -127,5 +119,4 @@ async def main(ctx):
         await wait(
             minutes=interval_minutes,
             name="project-summary-refresh",
-            policy="coalesce",
         )

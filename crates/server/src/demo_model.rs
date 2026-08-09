@@ -179,7 +179,6 @@ class Reviewer(Agent):
     name={requested_name:?},
     description="Run two independent evidence routes and synthesize their disagreements.",
     params_schema={{"type": "object", "additionalProperties": False}},
-    output_schema={{"type": "object", "properties": {{"summary": {{"type": "string"}}}}}},
 )
 async def main(ctx):
     primary = EvidenceResearcher(name="Primary evidence")

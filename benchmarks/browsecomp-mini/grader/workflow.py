@@ -35,11 +35,6 @@ class Grader(Agent):
         "required": ["question", "correct_answer", "response"],
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {"grading": {"type": "object"}},
-        "required": ["grading"],
-    },
 )
 async def main(ctx):
     grader = Grader(

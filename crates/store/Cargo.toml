@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 hex.workspace = true
 papermachine-protocol = { path = "../protocol" }

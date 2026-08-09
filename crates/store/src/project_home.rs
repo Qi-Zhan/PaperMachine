@@ -1,7 +1,6 @@
 use crate::Store;
 use crate::StoreError;
 use crate::artifact::store_artifact_file;
-use crate::filesystem::write_atomic;
 use chrono::Utc;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::Artifact;
@@ -17,7 +16,6 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::path::PathBuf;
 
 pub const PROJECT_HOME_ROLE: &str = "project_summary";
@@ -93,10 +91,9 @@ impl Store {
     ) -> Result<ProjectHomeDraft, StoreError> {
         self.validate_project_home_action(workflow_id, action_invocation_id)?;
         let path = self.project_home_draft_path(workflow_id, action_invocation_id);
-        if path.is_file() {
-            let draft: ProjectHomeDraft = serde_json::from_slice(
-                &std::fs::read(&path).map_err(|error| StoreError::Io(error.to_string()))?,
-            )?;
+        if self.managed_file_exists(&path)? {
+            let draft: ProjectHomeDraft =
+                serde_json::from_slice(&self.read_managed_file(&path, MAX_PAGE_BYTES * 2)?)?;
             if draft.action_invocation_id == action_invocation_id {
                 validate_draft(&draft)?;
                 return Ok(draft);
@@ -112,7 +109,7 @@ impl Store {
             blocks: source.blocks,
         };
         validate_draft(&draft)?;
-        write_draft(&path, &draft)?;
+        self.write_project_home_draft(&path, &draft)?;
         Ok(draft)
     }
 
@@ -147,7 +144,7 @@ impl Store {
             ));
         }
         draft.revision = revision_for(&draft.blocks)?;
-        write_draft(
+        self.write_project_home_draft(
             &self.project_home_draft_path(workflow_id, action_invocation_id),
             &draft,
         )?;
@@ -358,10 +355,19 @@ impl Store {
         workflow_id: WorkflowId,
         action_invocation_id: ActionInvocationId,
     ) -> PathBuf {
-        self.managed_root()
-            .join("runtime/project-home-drafts")
+        PathBuf::from("runtime/project-home-drafts")
             .join(workflow_id.to_string())
             .join(format!("{action_invocation_id}.json"))
+    }
+
+    fn write_project_home_draft(
+        &self,
+        path: &std::path::Path,
+        draft: &ProjectHomeDraft,
+    ) -> Result<(), StoreError> {
+        let bytes = serde_json::to_vec(draft)?;
+        self.write_managed_file(path, &bytes)?;
+        Ok(())
     }
 }
 
@@ -589,9 +595,4 @@ fn materialize_html(blocks: &[ProjectHomeBlock]) -> String {
     }
     html.push_str("</article>");
     html
-}
-
-fn write_draft(path: &Path, draft: &ProjectHomeDraft) -> Result<(), StoreError> {
-    let bytes = serde_json::to_vec(draft)?;
-    write_atomic(path, &bytes)
 }

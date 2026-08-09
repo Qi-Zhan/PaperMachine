@@ -335,14 +335,6 @@ pub struct AgentRelation {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TimerPolicy {
-    Coalesce,
-    Skip,
-    Queue,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum TimerStatus {
     Active,
     Paused,
@@ -356,7 +348,6 @@ pub struct WorkflowTimer {
     pub workflow_id: WorkflowId,
     pub name: String,
     pub interval_ms: u64,
-    pub policy: TimerPolicy,
     pub status: TimerStatus,
     pub fire_count: u32,
     pub next_fire_at: DateTime<Utc>,

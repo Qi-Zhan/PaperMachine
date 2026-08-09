@@ -151,11 +151,6 @@ def _grading_contract_errors(grading, criteria):
         "required": ["question", "report", "criteria", "language"],
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {"grading": {"type": "object"}},
-        "required": ["grading"],
-    },
 )
 async def main(ctx):
     criteria = dict(ctx.params["criteria"])

@@ -68,7 +68,10 @@ class ActionOptionsTest(unittest.TestCase):
             if kind == "create_agent":
                 return {"agent_instance_id": "page-agent", "session_id": "page-session"}
             if kind == "invoke_action":
-                return {"output": "Page checked."}
+                return {
+                    "action_invocation_id": "invocation-page",
+                    "output": "Page checked.",
+                }
             if kind == "publish_project_home":
                 return {
                     "artifact_id": "page-artifact",
@@ -82,8 +85,9 @@ class ActionOptionsTest(unittest.TestCase):
         async def invoke() -> str:
             _set_runtime(_Runtime(send))
             agent = ProjectPageAgent()
-            await agent.maintain()
-            artifact = await publish_project_home(agent=agent)
+            action = agent.maintain()
+            await action
+            artifact = await publish_project_home(action=action)
             return artifact.id
 
         self.assertEqual(asyncio.run(invoke()), "page-artifact")
@@ -92,7 +96,7 @@ class ActionOptionsTest(unittest.TestCase):
             action["requested_tools"], ["read_project_home", "patch_project_home"]
         )
         publication = effects[-1][1]
-        self.assertEqual(publication["agent_instance_id"], "page-agent")
+        self.assertEqual(publication["action_invocation_id"], "invocation-page")
 
     def test_after_search_finalization_uses_same_session_without_tools(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
@@ -103,11 +107,15 @@ class ActionOptionsTest(unittest.TestCase):
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if payload["action_name"] == "research":
                 return {
+                    "action_invocation_id": "invocation-research",
                     "output": "I finished searching and will now write the answer.",
                     "hosted_search_calls_used": 3,
                 }
             if payload["action_name"] == "research_finalize":
-                return {"output": "The complete final answer."}
+                return {
+                    "action_invocation_id": "invocation-finalize",
+                    "output": "The complete final answer.",
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> str:
@@ -134,7 +142,11 @@ class ActionOptionsTest(unittest.TestCase):
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
                 actions += 1
-                return {"output": "Already final.", "hosted_search_calls_used": 0}
+                return {
+                    "action_invocation_id": "invocation-research",
+                    "output": "Already final.",
+                    "hosted_search_calls_used": 0,
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> str:
@@ -161,7 +173,11 @@ class ActionOptionsTest(unittest.TestCase):
                     "answer": "Please inspect the cache behavior.",
                 }
             if kind == "invoke_action":
-                return {"output": "I will inspect it.", "turn_id": "turn-1"}
+                return {
+                    "action_invocation_id": "invocation-respond",
+                    "output": "I will inspect it.",
+                    "turn_id": "turn-1",
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> str:
@@ -202,7 +218,11 @@ class ActionOptionsTest(unittest.TestCase):
                         "session_id": f"session-{payload['name']}",
                     }
                 if kind == "invoke_action":
-                    return {"output": identity, "turn_id": f"turn-{identity}"}
+                    return {
+                        "action_invocation_id": f"invocation-{identity}",
+                        "output": identity,
+                        "turn_id": f"turn-{identity}",
+                    }
                 raise AssertionError(f"unexpected effect: {kind}")
 
             _set_runtime(_Runtime(send))
@@ -231,7 +251,10 @@ class ActionOptionsTest(unittest.TestCase):
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
-                return {"output": '```json\n{"answer": 42}\n```'}
+                return {
+                    "action_invocation_id": "invocation-research",
+                    "output": '```json\n{"answer": 42}\n```',
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -245,7 +268,10 @@ class ActionOptionsTest(unittest.TestCase):
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
-                return {"output": 'Result follows:\n{"answer": 42}\nDone.'}
+                return {
+                    "action_invocation_id": "invocation-research",
+                    "output": 'Result follows:\n{"answer": 42}\nDone.',
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -262,12 +288,18 @@ class ActionOptionsTest(unittest.TestCase):
             if kind == "create_agent":
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action" and payload["action_name"] == "research":
-                return {"output": '{"answer": "unterminated}'}
+                return {
+                    "action_invocation_id": "invocation-research",
+                    "output": '{"answer": "unterminated}',
+                }
             if (
                 kind == "invoke_action"
                 and payload["action_name"] == "research_json_repair"
             ):
-                return {"output": '{"answer": 42}'}
+                return {
+                    "action_invocation_id": "invocation-repair",
+                    "output": '{"answer": 42}',
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -289,7 +321,10 @@ class ActionOptionsTest(unittest.TestCase):
                 return {"agent_instance_id": "agent", "session_id": "session"}
             if kind == "invoke_action":
                 calls += 1
-                return {"output": "not json"}
+                return {
+                    "action_invocation_id": "invocation-research",
+                    "output": "not json",
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> dict:
@@ -312,7 +347,11 @@ class ActionOptionsTest(unittest.TestCase):
                     "access": payload["access"],
                 }
             if kind == "invoke_action":
-                return {"output": "done", "turn_id": "turn"}
+                return {
+                    "action_invocation_id": "invocation-compose",
+                    "output": "done",
+                    "turn_id": "turn",
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def invoke() -> str:

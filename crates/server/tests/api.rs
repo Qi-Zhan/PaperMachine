@@ -1516,8 +1516,17 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
         .iter()
         .find(|artifact| artifact["metadata"]["role"] == "project_summary_source")
         .expect("Project-home block source Artifact should exist");
+    let action_id = view["actions"]
+        .as_array()
+        .expect("summary Actions should exist")
+        .iter()
+        .find(|action| action["action_name"] == "maintain_project_home")
+        .and_then(|action| action["id"].as_str())
+        .expect("Project-home Action should exist");
     assert_eq!(summary["media_type"], "text/html; charset=utf-8");
     assert_eq!(summary["metadata"]["source_artifact_id"], source["id"]);
+    assert_eq!(summary["action_invocation_id"], action_id);
+    assert_eq!(source["action_invocation_id"], action_id);
 
     let overview = app
         .clone()
@@ -1760,6 +1769,20 @@ async def main(ctx):
         .expect("replaced workflow should load");
     assert_eq!(loaded.status(), StatusCode::OK);
     assert_eq!(response_json(loaded).await["source"], changed);
+
+    let restarted = test_app(&directory).await;
+    let reloaded = restarted
+        .oneshot(empty_request(
+            "GET",
+            &format!(
+                "/api/projects/{}/workflow-programs/claim-challenge",
+                project.id
+            ),
+        ))
+        .await
+        .expect("filesystem catalog should reload after restart");
+    assert_eq!(reloaded.status(), StatusCode::OK);
+    assert_eq!(response_json(reloaded).await["source"], changed);
 }
 
 #[cfg(target_os = "macos")]
@@ -1777,7 +1800,6 @@ async fn workflow_can_pause_request_human_input_and_resume() {
     name="Human decision",
     description="Wait for a human decision before completing.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object", "properties": {"decision": {"type": "string"}}},
 )
 async def main(ctx):
     answer = await ask_human(
@@ -1908,7 +1930,6 @@ class HostInspector(Agent):
     name="Access grant",
     description="Require a human grant before creating a full-access Agent Session.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
 )
 async def main(ctx):
     inspector = HostInspector(name="Host inspector")

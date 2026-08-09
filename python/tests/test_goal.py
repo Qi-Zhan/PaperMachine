@@ -40,6 +40,7 @@ class GoalWorkflowTests(unittest.TestCase):
                 }
             if kind == "invoke_action":
                 return {
+                    "action_invocation_id": f"invocation-{len(effects)}",
                     "output": next(responses),
                     "turn_id": f"turn-{len(effects)}",
                 }
@@ -107,6 +108,7 @@ class GoalWorkflowTests(unittest.TestCase):
                 }
             if kind == "invoke_action":
                 return {
+                    "action_invocation_id": "invocation-work",
                     "output": "Already verified.\n<!-- papermachine-goal:complete -->",
                     "turn_id": "turn-work",
                 }

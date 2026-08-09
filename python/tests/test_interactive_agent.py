@@ -48,7 +48,11 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
                 waiting_for_next_message.set()
                 await asyncio.Future()
             if kind == "invoke_action":
-                return {"output": "The prefix changed.", "turn_id": "turn-1"}
+                return {
+                    "action_invocation_id": "invocation-respond",
+                    "output": "The prefix changed.",
+                    "turn_id": "turn-1",
+                }
             raise AssertionError(f"unexpected effect: {kind}")
 
         async def run() -> None:

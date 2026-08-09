@@ -108,6 +108,16 @@ type InitializedModels = (
     Vec<ModelProviderInfo>,
 );
 
+const LOCAL_TOOL_NAMES: [&str; 7] = [
+    "read_file",
+    "write_file",
+    "exec_command",
+    "fetch_url",
+    "read_project_home",
+    "patch_project_home",
+    "preview_project_home",
+];
+
 #[derive(Clone)]
 pub struct AppState {
     catalog: Arc<ProjectCatalog>,
@@ -427,8 +437,7 @@ struct ProjectRuntime {
 }
 
 struct ProjectRuntimeFactory {
-    workflows_root: PathBuf,
-    python_runtime_root: PathBuf,
+    base_catalog: WorkflowProgramCatalog,
     model: Arc<dyn ModelClient>,
     default_model: String,
     model_context_window: usize,
@@ -467,13 +476,7 @@ impl ProjectRuntimeFactory {
             .register_project(PreviewProjectHomeTool::new(Arc::clone(&store)))
             .context("failed to register preview_project_home")?
             .build();
-        let mut catalog = WorkflowProgramCatalog::scan(
-            &self.workflows_root,
-            &self.python_runtime_root,
-            &store,
-            tools.names().map(str::to_string),
-        )
-        .context("failed to load built-in Workflow catalog")?;
+        let mut catalog = self.base_catalog.clone();
         catalog
             .load_project(project, &store)
             .with_context(|| format!("failed to load Workflows for Project {}", project.id))?;
@@ -549,6 +552,12 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         "PaperMachine Python runtime is missing: {}",
         validator.display()
     );
+    let base_catalog = WorkflowProgramCatalog::scan(
+        &workflows_root,
+        &python_runtime_root,
+        LOCAL_TOOL_NAMES.into_iter().map(str::to_string),
+    )
+    .context("failed to load built-in Workflow catalog")?;
     let catalog = Arc::new(
         ProjectCatalog::open(&config.data_dir)
             .context("failed to open PaperMachine Project catalog")?,
@@ -583,8 +592,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
     };
 
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
-        workflows_root,
-        python_runtime_root,
+        base_catalog,
         model: Arc::clone(&model),
         default_model: default_model.clone(),
         model_context_window,
@@ -2367,10 +2375,7 @@ impl From<SkillError> for ApiError {
             SkillError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SkillError::NotFound(_) => StatusCode::NOT_FOUND,
             SkillError::AlreadyExists(_) => StatusCode::CONFLICT,
-            SkillError::Invalid(_) | SkillError::SnapshotChanged(_) | SkillError::Yaml(_) => {
-                StatusCode::BAD_REQUEST
-            }
-            SkillError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SkillError::Invalid(_) | SkillError::Yaml(_) => StatusCode::BAD_REQUEST,
         };
         Self {
             status,

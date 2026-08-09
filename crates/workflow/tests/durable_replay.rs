@@ -37,7 +37,6 @@ class Observer(Agent):
     name="Durable replay",
     description="Exercise replay across an abrupt Python process loss.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object", "properties": {"decision": {"type": "string"}}},
 )
 async def main(ctx):
     observer = Observer(name="Observer")
@@ -58,7 +57,6 @@ const TIMER_SOURCE: &str = r#"from papermachine import wait, workflow
     name="Durable timer replay",
     description="Suspend a Python process until its durable timer is due.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object", "properties": {"fire_count": {"type": "integer"}}},
 )
 async def main(ctx):
     fired = await wait(seconds=0.05, name="test-wake")
@@ -82,7 +80,6 @@ async def publish(channel):
     name="Durable signal replay",
     description="Synchronize concurrent branches through a durable Channel.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object"},
 )
 async def main(ctx):
     channel = Channel("handoff", schema={"type": "object"})
@@ -107,7 +104,6 @@ async def summarize_on_timer():
     name="Background timer and human",
     description="Keep a durable timer active while the main flow waits for a human.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object"},
 )
 async def main(ctx):
     coordinator = Coordinator(name="Coordinator")
@@ -147,7 +143,6 @@ class Clamped(Agent):
     name="Launch context and access",
     description="Exercise immutable launch context and per-Agent access.",
     params_schema={"type": "object", "additionalProperties": False},
-    output_schema={"type": "object"},
 )
 async def main(ctx):
     conservative = Conservative(name="Conservative")
@@ -173,7 +168,6 @@ fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot
             entrypoint: "main".to_string(),
             request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: format!("builtin/{slug}/workflow.py"),

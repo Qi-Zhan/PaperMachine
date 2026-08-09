@@ -62,7 +62,7 @@ export interface Session {
   updated_at: string
 }
 
-export interface SkillSnapshot { slug: string; sha256: string; relative_path: string }
+export interface SkillSnapshot { slug: string; sha256: string }
 export interface PromptLayer {
   kind: PromptLayerKind
   name: string
@@ -173,7 +173,6 @@ export interface WorkflowProgramManifest {
   entrypoint: string
   request_mode: 'required' | 'none'
   params_schema: Record<string, unknown>
-  output_schema: Record<string, unknown>
 }
 
 export interface WorkflowProgram {
@@ -321,7 +320,6 @@ export interface WorkflowTimer {
   workflow_id: Id
   name: string
   interval_ms: number
-  policy: 'coalesce' | 'skip' | 'queue'
   status: 'active' | 'paused' | 'completed' | 'cancelled'
   fire_count: number
   next_fire_at: string
@@ -486,7 +484,7 @@ export interface WorkflowAgentDeclaration {
   access: AccessPreset
 }
 export interface WorkflowActionDeclaration { name: string; tools: string[] }
-export interface WorkflowTimerDeclaration { callback: string; seconds: number | null; policy: string | null }
+export interface WorkflowTimerDeclaration { callback: string; seconds: number | null }
 export interface WorkflowFeatureSummary {
   parallel_blocks: number
   teams: string[]

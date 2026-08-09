@@ -58,12 +58,6 @@ class ProcessWorker(Agent):
     name="Process recovery",
     description="Exercise one deterministic Agent Action across a process restart.",
     params_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    output_schema={
-        "type": "object",
-        "properties": {"result": {"type": "string"}},
-        "required": ["result"],
-        "additionalProperties": False,
-    },
 )
 async def main(ctx):
     worker = ProcessWorker(name="Process worker")

@@ -62,7 +62,6 @@ impl WorkflowProgramCatalog {
     pub fn scan(
         workflows_root: impl AsRef<Path>,
         python_runtime_root: impl AsRef<Path>,
-        store: &Store,
         known_tools: impl IntoIterator<Item = String>,
     ) -> Result<Self, WorkflowProgramCatalogError> {
         let builtins_root = workflows_root.as_ref().join("builtin");
@@ -84,8 +83,8 @@ impl WorkflowProgramCatalog {
             entries: BTreeMap::new(),
         };
         for path in workflow_files(&catalog.builtins_root)? {
-            let loaded = catalog.load_file(&path, None, WorkflowProgramSource::Builtin, store)?;
-            catalog.insert(loaded, store)?;
+            let loaded = catalog.load_file(&path)?;
+            catalog.insert(loaded)?;
         }
         Ok(catalog)
     }
@@ -98,12 +97,23 @@ impl WorkflowProgramCatalog {
     ) -> Result<(), WorkflowProgramCatalogError> {
         self.entries
             .retain(|(owner, _), _| *owner != Some(project.id));
-        let root = project_workflows_root(store);
-        fs::create_dir_all(&root)?;
-        for path in workflow_files(&root)? {
-            let loaded =
-                self.load_file(&path, Some(project), WorkflowProgramSource::User, store)?;
-            self.insert(loaded, store)?;
+        store.ensure_managed_directory("workflows")?;
+        for slug in store.list_managed_directories("workflows")? {
+            let relative = PathBuf::from("workflows").join(slug).join("workflow.py");
+            if !store.managed_file_exists(&relative)? {
+                continue;
+            }
+            let source_code = store.read_managed_text(&relative, 4 * 1024 * 1024)?;
+            let path = store.managed_path(&relative)?;
+            let loaded = self.load_source(
+                &path,
+                source_code,
+                Some(project),
+                WorkflowProgramSource::User,
+                Some(store.managed_root()),
+                Utc::now(),
+            )?;
+            self.insert(loaded)?;
         }
         Ok(())
     }
@@ -207,7 +217,7 @@ impl WorkflowProgramCatalog {
                 project_id: Some(project.id),
                 manifest,
                 source: WorkflowProgramSource::User,
-                definition_path: project_definition_path(&path, store)?,
+                definition_path: project_definition_path(&path, store.managed_root())?,
                 sha256,
                 updated_at: Utc::now(),
             },
@@ -216,16 +226,11 @@ impl WorkflowProgramCatalog {
             validation,
             runtime_sha256: self.runtime_sha256.clone(),
         };
-        store.register_workflow_program(&loaded.registration)?;
         self.entries.insert(key, loaded.clone());
         Ok(loaded)
     }
 
-    fn insert(
-        &mut self,
-        loaded: LoadedWorkflowProgram,
-        store: &Store,
-    ) -> Result<(), WorkflowProgramCatalogError> {
+    fn insert(&mut self, loaded: LoadedWorkflowProgram) -> Result<(), WorkflowProgramCatalogError> {
         let key = (
             loaded.registration.project_id,
             loaded.registration.manifest.slug.clone(),
@@ -236,18 +241,34 @@ impl WorkflowProgramCatalog {
                 slug: key.1,
             });
         }
-        store.register_workflow_program(&loaded.registration)?;
         Ok(())
     }
 
-    fn load_file(
+    fn load_file(&self, path: &Path) -> Result<LoadedWorkflowProgram, WorkflowProgramCatalogError> {
+        let source_code = fs::read_to_string(path)?;
+        let updated_at = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .map(chrono::DateTime::<Utc>::from)
+            .unwrap_or_else(|_| Utc::now());
+        self.load_source(
+            path,
+            source_code,
+            None,
+            WorkflowProgramSource::Builtin,
+            None,
+            updated_at,
+        )
+    }
+
+    fn load_source(
         &self,
         path: &Path,
+        source_code: String,
         project: Option<&Project>,
         source: WorkflowProgramSource,
-        store: &Store,
+        managed_root: Option<&Path>,
+        updated_at: chrono::DateTime<Utc>,
     ) -> Result<LoadedWorkflowProgram, WorkflowProgramCatalogError> {
-        let source_code = fs::read_to_string(path)?;
         let validation = self.validate_source(&source_code)?;
         if !validation.valid {
             return Err(WorkflowProgramCatalogError::InvalidFile {
@@ -261,7 +282,14 @@ impl WorkflowProgramCatalog {
             )
         })?;
         let definition_path = match project {
-            Some(_) => project_definition_path(path, store)?,
+            Some(_) => project_definition_path(
+                path,
+                managed_root.ok_or_else(|| {
+                    WorkflowProgramCatalogError::Path(
+                        "Project Workflow has no managed root".to_string(),
+                    )
+                })?,
+            )?,
             None => {
                 let relative = path
                     .strip_prefix(&self.builtins_root)
@@ -279,10 +307,7 @@ impl WorkflowProgramCatalog {
                 source,
                 definition_path,
                 sha256: encode(Sha256::digest(source_code.as_bytes())),
-                updated_at: fs::metadata(path)
-                    .and_then(|metadata| metadata.modified())
-                    .map(chrono::DateTime::<Utc>::from)
-                    .unwrap_or_else(|_| Utc::now()),
+                updated_at,
             },
             source_code,
             path: path.to_path_buf(),
@@ -300,15 +325,11 @@ impl WorkflowProgramCatalog {
     }
 }
 
-fn project_workflows_root(store: &Store) -> PathBuf {
-    store.managed_root().join("workflows")
-}
-
 fn project_definition_path(
     path: &Path,
-    store: &Store,
+    managed_root: &Path,
 ) -> Result<String, WorkflowProgramCatalogError> {
-    path.strip_prefix(store.managed_root())
+    path.strip_prefix(managed_root)
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(|error| WorkflowProgramCatalogError::Path(error.to_string()))
 }

@@ -247,11 +247,6 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
         "required": ["category", "ground_truth", "prediction", "eval_info"],
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {"grading": {"type": "object"}},
-        "required": ["grading"],
-    },
 )
 async def main(ctx):
     category = str(ctx.params["category"])

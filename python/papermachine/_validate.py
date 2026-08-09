@@ -55,7 +55,6 @@ WORKFLOW_METADATA_KEYS = {
     "description",
     "request_mode",
     "params_schema",
-    "output_schema",
     "entrypoint",
 }
 
@@ -142,7 +141,6 @@ class Validator(ast.NodeVisitor):
                     {
                         "callback": values.get("name", "wait"),
                         "seconds": float(interval) if interval is not None else None,
-                        "policy": values.get("policy"),
                     }
                 )
         elif isinstance(node.func, ast.Attribute) and node.func.attr == "snapshot":
@@ -157,12 +155,10 @@ class Validator(ast.NodeVisitor):
                 continue
             values = literal_call_keywords(decorator)
             seconds = values.get("seconds")
-            policy = values.get("policy")
             self.features["timers"].append(
                 {
                     "callback": node.name,
                     "seconds": float(seconds) if isinstance(seconds, (int, float)) else None,
-                    "policy": policy if isinstance(policy, str) else None,
                 }
             )
         self.generic_visit(node)
@@ -353,7 +349,6 @@ def validate(source: str) -> dict[str, Any]:
         (not description.strip(), "workflow description is required"),
         (request_mode not in {"required", "none"}, "request_mode must be required or none"),
         (not isinstance(metadata.get("params_schema", {}), dict), "params_schema must be a literal dict"),
-        (not isinstance(metadata.get("output_schema", {}), dict), "output_schema must be a literal dict"),
     ]:
         if condition:
             diagnostics.append({"severity": "error", "message": message, "line": getattr(node, "lineno", None), "column": getattr(node, "col_offset", None)})
@@ -366,7 +361,6 @@ def validate(source: str) -> dict[str, Any]:
         "entrypoint": entrypoint,
         "request_mode": request_mode,
         "params_schema": metadata.get("params_schema", {"type": "object"}),
-        "output_schema": metadata.get("output_schema", {}),
     }
     return {
         "valid": not any(item["severity"] == "error" for item in diagnostics),

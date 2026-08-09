@@ -44,7 +44,6 @@ fn workflow_snapshot() -> WorkflowProgramSnapshot {
             entrypoint: "main".to_string(),
             request_mode: Default::default(),
             params_schema: serde_json::json!({"type": "object"}),
-            output_schema: serde_json::json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/usage-test/workflow.py".to_string(),

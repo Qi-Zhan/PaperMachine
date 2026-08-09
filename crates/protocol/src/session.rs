@@ -75,7 +75,6 @@ impl TurnStatus {
 pub struct SkillSnapshot {
     pub slug: String,
     pub sha256: String,
-    pub relative_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

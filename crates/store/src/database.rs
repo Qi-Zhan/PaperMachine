@@ -6,6 +6,7 @@ use crate::artifact::read_artifact_file;
 use crate::artifact::reconcile_artifact_files;
 use crate::artifact::remove_artifact_file;
 use crate::artifact::store_artifact_file;
+use crate::filesystem::ManagedFs;
 use crate::filesystem::remove_entry;
 use crate::filesystem::write_atomic;
 use chrono::Duration;
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 15;
+const SCHEMA_VERSION: u32 = 16;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -53,6 +54,7 @@ pub struct ProjectChangeBatch {
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
     shared: StoreShared,
+    managed_fs: ManagedFs,
     managed_root: PathBuf,
 }
 
@@ -74,6 +76,7 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             shared: StoreShared::new(&managed_root)?,
+            managed_fs: ManagedFs::open(&managed_root)?,
             managed_root,
         })
     }
@@ -91,6 +94,7 @@ impl Store {
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             shared: StoreShared::new(&managed_root)?,
+            managed_fs: ManagedFs::open(&managed_root)?,
             managed_root,
         };
         store.replay_all_session_rollouts()?;
@@ -104,6 +108,7 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             shared: StoreShared::new(&managed_root)?,
+            managed_fs: ManagedFs::open(&managed_root)?,
             managed_root,
         })
     }
@@ -117,21 +122,49 @@ impl Store {
         relative_path: impl AsRef<Path>,
         content: &[u8],
     ) -> Result<PathBuf, StoreError> {
-        let relative_path = relative_path.as_ref();
-        if relative_path.as_os_str().is_empty()
-            || relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(StoreError::Invariant(format!(
-                "managed file path must be relative and normalized: {}",
-                relative_path.display()
-            )));
-        }
-        let path = self.managed_root.join(relative_path);
-        write_atomic(&path, content)?;
-        Ok(path)
+        self.managed_fs.write_atomic(relative_path, content)
+    }
+
+    pub fn read_managed_text(
+        &self,
+        relative_path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<String, StoreError> {
+        self.managed_fs.read_string(relative_path, max_bytes)
+    }
+
+    pub fn read_managed_file(
+        &self,
+        relative_path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.managed_fs.read(relative_path, max_bytes)
+    }
+
+    pub fn ensure_managed_directory(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<(), StoreError> {
+        self.managed_fs.ensure_dir(relative_path)
+    }
+
+    pub fn list_managed_directories(
+        &self,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<Vec<String>, StoreError> {
+        self.managed_fs.list_directories(relative_path)
+    }
+
+    pub fn managed_file_exists(&self, relative_path: impl AsRef<Path>) -> Result<bool, StoreError> {
+        self.managed_fs.is_regular_file(relative_path)
+    }
+
+    pub fn remove_managed_entry(&self, relative_path: impl AsRef<Path>) -> Result<(), StoreError> {
+        self.managed_fs.remove(relative_path)
+    }
+
+    pub fn managed_path(&self, relative_path: impl AsRef<Path>) -> Result<PathBuf, StoreError> {
+        self.managed_fs.absolute_path(relative_path)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
@@ -246,10 +279,9 @@ impl Store {
         id: ProjectId,
     ) -> Result<ProjectSystemPrompt, StoreError> {
         self.ensure_project(id)?;
-        let path = self.managed_root.join(PROJECT_SYSTEM_PROMPT_PATH);
-        reject_prompt_symlink(&path)?;
-        let content =
-            std::fs::read_to_string(&path).map_err(|error| StoreError::Io(error.to_string()))?;
+        let content = self
+            .managed_fs
+            .read_string(PROJECT_SYSTEM_PROMPT_PATH, MAX_SYSTEM_PROMPT_BYTES)?;
         Ok(ProjectSystemPrompt {
             relative_path: PROJECT_SYSTEM_PROMPT_PATH.to_string(),
             sha256: hash_text(&content),
@@ -265,9 +297,8 @@ impl Store {
         self.ensure_project(id)?;
         let content = content.into();
         validate_system_prompt(&content)?;
-        let path = self.managed_root.join(PROJECT_SYSTEM_PROMPT_PATH);
-        reject_prompt_symlink(&path)?;
-        write_atomic(&path, content.as_bytes())?;
+        self.managed_fs
+            .write_atomic(PROJECT_SYSTEM_PROMPT_PATH, content.as_bytes())?;
         self.get_project_system_prompt(id)
     }
 
@@ -1208,41 +1239,6 @@ impl Store {
             "SELECT event_json FROM session_events WHERE session_id = ?1 AND sequence > ?2
              ORDER BY sequence ASC",
             params![session_id.to_string(), after_sequence],
-        )
-    }
-
-    pub fn register_workflow_program(
-        &self,
-        registration: &WorkflowProgram,
-    ) -> Result<(), StoreError> {
-        let owner_key = registration
-            .project_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "builtin".to_string());
-        self.connection()?.execute(
-            "INSERT INTO workflow_programs (owner_key, id, slug, source, definition_path, sha256, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(owner_key, slug) DO UPDATE SET id=excluded.id, source=excluded.source,
-             definition_path=excluded.definition_path, sha256=excluded.sha256,
-             updated_at=excluded.updated_at, document_json=excluded.document_json",
-            params![
-                owner_key,
-                registration.manifest.id.to_string(),
-                registration.manifest.slug,
-                enum_string(registration.source)?,
-                registration.definition_path,
-                registration.sha256,
-                registration.updated_at.to_rfc3339(),
-                serde_json::to_string(registration)?,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_workflow_programs(&self) -> Result<Vec<WorkflowProgram>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_programs ORDER BY source ASC, owner_key ASC, slug ASC",
-            [],
         )
     }
 
@@ -2758,9 +2754,8 @@ impl Store {
         workflow_id: WorkflowId,
         name: impl Into<String>,
         interval_ms: u64,
-        policy: TimerPolicy,
     ) -> Result<WorkflowTimer, StoreError> {
-        self.create_timer_with_id(TimerId::new(), workflow_id, name, interval_ms, policy)
+        self.create_timer_with_id(TimerId::new(), workflow_id, name, interval_ms)
     }
 
     pub fn create_timer_with_id(
@@ -2769,7 +2764,6 @@ impl Store {
         workflow_id: WorkflowId,
         name: impl Into<String>,
         interval_ms: u64,
-        policy: TimerPolicy,
     ) -> Result<WorkflowTimer, StoreError> {
         if interval_ms == 0 {
             return Err(StoreError::Invariant(
@@ -2784,7 +2778,6 @@ impl Store {
             workflow_id,
             name: name.into(),
             interval_ms,
-            policy,
             status: TimerStatus::Active,
             fire_count: 0,
             next_fire_at: now + Duration::milliseconds(interval),
@@ -4175,7 +4168,6 @@ fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "artifacts",
         "workflow-runtime",
         "runtime/sandboxes",
-        "runtime/skill-snapshots",
     ] {
         std::fs::create_dir_all(root.join(directory))
             .map_err(|error| StoreError::Io(error.to_string()))?;
@@ -4202,7 +4194,6 @@ fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "artifacts",
         "workflow-runtime",
         "runtime/sandboxes",
-        "runtime/skill-snapshots",
     ] {
         let directory = root.join(relative);
         let metadata = std::fs::symlink_metadata(&directory)
@@ -4248,19 +4239,6 @@ fn validate_workflow_instructions(content: &str) -> Result<(), StoreError> {
     if content.len() > MAX_SYSTEM_PROMPT_BYTES {
         return Err(StoreError::Invariant(format!(
             "Workflow instructions exceed the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
-        )));
-    }
-    Ok(())
-}
-
-fn reject_prompt_symlink(path: &Path) -> Result<(), StoreError> {
-    if std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(StoreError::Invariant(format!(
-            "Project system prompt may not be a symlink: {}",
-            path.display()
         )));
     }
     Ok(())
@@ -4318,11 +4296,6 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS session_events_sequence ON session_events(session_id, sequence ASC);
          CREATE TABLE IF NOT EXISTS session_rollout_projection (
            session_id TEXT PRIMARY KEY REFERENCES sessions(id), last_sequence INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflow_programs (
-           owner_key TEXT NOT NULL, id TEXT NOT NULL, slug TEXT NOT NULL, source TEXT NOT NULL,
-           definition_path TEXT NOT NULL, sha256 TEXT NOT NULL, updated_at TEXT NOT NULL,
-           document_json TEXT NOT NULL, PRIMARY KEY(owner_key, slug)
          );
          CREATE TABLE IF NOT EXISTS workflows (
            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),

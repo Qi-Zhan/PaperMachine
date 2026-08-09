@@ -66,15 +66,6 @@ class RecoveryDogfoodAgent(Agent):
         ],
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "proof": {"type": "string"},
-            "denials": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["proof", "denials"],
-        "additionalProperties": False,
-    },
 )
 async def main(ctx):
     agent = RecoveryDogfoodAgent(name="DeepSeek recovery verifier")

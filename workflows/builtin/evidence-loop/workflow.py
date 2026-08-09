@@ -222,29 +222,6 @@ def _follow_ups(assessment, limit):
         },
         "additionalProperties": False,
     },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "report": {"type": "string"},
-            "plan": {"type": "object"},
-            "evaluation": {"type": "object"},
-            "draft_audit": {"type": "object"},
-            "rounds": {"type": "integer"},
-            "evidence_ledger": {"type": "array"},
-            "route_sessions_reused": {"type": "boolean"},
-            "completion": {"type": "object"},
-        },
-        "required": [
-            "report",
-            "plan",
-            "evaluation",
-            "draft_audit",
-            "rounds",
-            "evidence_ledger",
-            "route_sessions_reused",
-            "completion",
-        ],
-    },
 )
 async def main(ctx):
     route_count = max(2, min(int(ctx.params.get("route_count", 2)), 4))

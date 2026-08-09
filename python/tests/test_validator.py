@@ -23,7 +23,6 @@ class Reviewer(Agent):
     name="Review report",
     description="Review a report and request an explicit decision.",
     params_schema={"type": "object"},
-    output_schema={"type": "object"},
 )
 async def main(ctx):
     reviewer = Reviewer(name="Reviewer")
@@ -142,7 +141,6 @@ from papermachine import workflow
     name="Unsafe workflow",
     description="Attempt forbidden host access.",
     params_schema={"type": "object"},
-    output_schema={"type": "object"},
 )
 async def main(ctx):
     return {"cwd": os.getcwd()}

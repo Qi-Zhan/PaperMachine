@@ -361,13 +361,23 @@ class _ActionCall(Awaitable[Any]):
         self.tools = list(tools)
         self.human_message_parameter = human_message_parameter
         self.human_request_id = human_request_id
+        self.action_invocation_id: str | None = None
+        self._started = False
+        self._completed = False
 
     def __await__(self):  # type: ignore[no-untyped-def]
+        if self._started:
+            raise RuntimeError(f"action {self.name} may be awaited only once")
+        self._started = True
         return self._run().__await__()
 
     async def _run(self) -> Any:
         remote = await self.agent._ensure_remote()
         result = await self._invoke(remote, use_human_message=True)
+        invocation_id = result.get("action_invocation_id")
+        if not isinstance(invocation_id, str) or not invocation_id:
+            raise RuntimeError("invoke_action did not return action_invocation_id")
+        self.action_invocation_id = invocation_id
         try:
             hosted_search_calls = int(result.get("hosted_search_calls_used", 0))
         except (TypeError, ValueError):
@@ -398,12 +408,15 @@ class _ActionCall(Awaitable[Any]):
             )
         output = str(result.get("output", ""))
         if self.return_kind is None:
+            self._completed = True
             return output
 
         error: ValueError | json.JSONDecodeError | None = None
         for repair_attempt in range(3):
             try:
-                return _validate_action_json(output, self.return_kind, self.name)
+                value = _validate_action_json(output, self.return_kind, self.name)
+                self._completed = True
+                return value
             except (json.JSONDecodeError, ValueError) as parse_error:
                 error = parse_error
             if repair_attempt == 2:
@@ -762,16 +775,19 @@ async def publish_artifact(
 
 async def publish_project_home(
     *,
-    agent: Agent,
+    action: _ActionCall,
     metadata: dict[str, Any] | None = None,
 ) -> ArtifactRef:
-    """Atomically publish the Project-home draft edited by one Agent Action."""
+    """Publish the Project-home draft produced by one completed Action call."""
 
-    remote = await agent._ensure_remote()
+    if not isinstance(action, _ActionCall):
+        raise TypeError("publish_project_home action must be an Action call")
+    if not action._completed or action.action_invocation_id is None:
+        raise RuntimeError("publish_project_home action must be awaited successfully first")
     result = await _effect(
         "publish_project_home",
         {
-            "agent_instance_id": remote["agent_instance_id"],
+            "action_invocation_id": action.action_invocation_id,
             "metadata": metadata or {},
         },
     )
@@ -810,12 +826,10 @@ class TimerHandle:
         function: Callable[[], Awaitable[Any]],
         *,
         seconds: float,
-        policy: str,
         name: str,
     ) -> None:
         self.function = function
         self.seconds = seconds
-        self.policy = policy
         self.name = name
         path = _reserve_effect_path("timer")
         self._task = asyncio.create_task(_run_in_effect_branch(self._run(), path))
@@ -829,7 +843,6 @@ class TimerHandle:
             {
                 "name": self.name,
                 "interval_ms": max(1, int(self.seconds * 1000)),
-                "policy": self.policy,
             },
         )
         timer_id = result["timer_id"]
@@ -849,20 +862,15 @@ def every(
     *,
     seconds: float | None = None,
     minutes: float | None = None,
-    policy: str = "coalesce",
     name: str | None = None,
 ) -> Callable[[Callable[[], Awaitable[Any]]], TimerHandle]:
     interval = seconds if seconds is not None else (minutes or 0) * 60
     if interval <= 0:
         raise ValueError("every() requires a positive seconds or minutes interval")
-    if policy not in {"coalesce", "skip", "queue"}:
-        raise ValueError("timer policy must be coalesce, skip, or queue")
-
     def decorate(function: Callable[[], Awaitable[Any]]) -> TimerHandle:
         return TimerHandle(
             function,
             seconds=interval,
-            policy=policy,
             name=name or function.__name__,
         )
 
@@ -873,20 +881,16 @@ async def wait(
     *,
     seconds: float | None = None,
     minutes: float | None = None,
-    policy: str = "coalesce",
     name: str = "wait",
 ) -> dict[str, Any]:
     interval = seconds if seconds is not None else (minutes or 0) * 60
     if interval <= 0:
         raise ValueError("wait() requires a positive seconds or minutes interval")
-    if policy not in {"coalesce", "skip", "queue"}:
-        raise ValueError("timer policy must be coalesce, skip, or queue")
     timer = await _effect(
         "register_timer",
         {
             "name": name,
             "interval_ms": max(1, int(interval * 1000)),
-            "policy": policy,
         },
     )
     return await _effect("wait_timer", {"timer_id": timer["timer_id"]})

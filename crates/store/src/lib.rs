@@ -36,6 +36,7 @@ pub use catalog::ProjectCatalog;
 pub use database::ProjectChange;
 pub use database::ProjectChangeBatch;
 pub use database::Store;
+pub use filesystem::ManagedFs;
 pub use project_home::PROJECT_HOME_MEDIA_TYPE;
 pub use project_home::PROJECT_HOME_ROLE;
 pub use project_home::PROJECT_HOME_SOURCE_MEDIA_TYPE;

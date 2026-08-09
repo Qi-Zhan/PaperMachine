@@ -61,9 +61,14 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     ],
                 )
                 self.assertIsNone(payload["response_format"])
-                return {"output": "The Project home page is current."}
+                return {
+                    "action_invocation_id": "invocation-summary",
+                    "output": "The Project home page is current.",
+                }
             if kind == "publish_project_home":
-                self.assertEqual(payload["agent_instance_id"], "agent-summary")
+                self.assertEqual(
+                    payload["action_invocation_id"], "invocation-summary"
+                )
                 self.assertEqual(payload["metadata"]["snapshot_mode"], "full")
                 self.assertEqual(payload["metadata"]["refresh_count"], 1)
                 return {
