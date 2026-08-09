@@ -7,17 +7,13 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import random
 import re
 import statistics
 import sys
-import tempfile
 import time
-import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +21,26 @@ BENCHMARKS_ROOT = Path(__file__).resolve().parent.parent
 if str(BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_ROOT))
 
-from benchmark_runtime import (
+from benchmark_runtime import (  # noqa: E402
+    PaperMachineApi,
+    atomic_write_json,
+    atomic_write_text,
+    cancel_inflight,
     default_server_binary,
+    ensure_project,
     install_project_workflow,
     isolated_server,
+    load_json,
+    mean,
+    record_runtime_snapshot as record_shared_runtime_snapshot,
+    reopen_terminal_failures,
+    runtime_fingerprint as shared_runtime_fingerprint,
     runtime_artifact_fingerprints,
+    save_state,
+    token_usage,
+    utc_now,
+    validate_workflows,
+    workflow_wall_time_seconds,
 )
 
 
@@ -105,119 +116,16 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 URL_RE = re.compile(r"https?://[^\s)\]>]+")
 
 
-class ApiError(RuntimeError):
-    pass
-
-
-class PaperMachineApi:
-    def __init__(self, base_url: str) -> None:
-        self.base_url = base_url.rstrip("/") + "/api"
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None = None,
-    ) -> Any:
-        body = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            self.base_url + path,
-            data=body,
-            method=method,
-            headers={"content-type": "application/json"} if body is not None else {},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise ApiError(
-                f"{method} {path} returned HTTP {error.code}: {detail}"
-            ) from error
-        except urllib.error.URLError as error:
-            raise ApiError(f"{method} {path} failed: {error}") from error
-        return None if not data else json.loads(data)
-
-    def get(self, path: str) -> Any:
-        return self.request("GET", path)
-
-    def post(self, path: str, payload: dict[str, Any]) -> Any:
-        return self.request("POST", path, payload)
-
-    def post_empty(self, path: str) -> Any:
-        return self.request("POST", path)
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def workflow_wall_time_seconds(run: dict[str, Any]) -> int:
-    """Return end-to-end elapsed time, including time lost across restarts."""
-    usage = run.get("usage") or {}
-    runtime_seconds = max(0, int(usage.get("wall_time_seconds", 0)))
-    try:
-        created_at = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
-        updated_at = datetime.fromisoformat(str(run["updated_at"]).replace("Z", "+00:00"))
-        observed_seconds = max(
-            0,
-            math.ceil((updated_at - created_at).total_seconds()),
-        )
-    except (KeyError, TypeError, ValueError):
-        observed_seconds = 0
-    return max(runtime_seconds, observed_seconds)
-
-
-def atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-    ) as handle:
-        handle.write(content)
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
-
-
 def runtime_fingerprint(
     root: Path, runtime_artifacts: dict[str, str] | None = None
 ) -> dict[str, str]:
-    fingerprint = {
-        relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
-        for relative in RUNTIME_FILES
-    }
-    fingerprint.update(runtime_artifacts or {})
-    return fingerprint
+    return shared_runtime_fingerprint(root, RUNTIME_FILES, runtime_artifacts)
 
 
 def record_runtime_snapshot(
     state: dict[str, Any], root: Path, runtime_artifacts: dict[str, str]
 ) -> dict[str, str]:
-    current = runtime_fingerprint(root, runtime_artifacts)
-    history = state.setdefault("runtime_source_history", [])
-    original = state.get("runtime_source_sha256")
-    if original and not any(item.get("files_sha256") == original for item in history):
-        history.insert(
-            0,
-            {
-                "observed_at": state.get("created_at", utc_now()),
-                "files_sha256": original,
-            },
-        )
-    if not history or history[-1].get("files_sha256") != current:
-        history.append({"observed_at": utc_now(), "files_sha256": current})
-    state["current_runtime_source_sha256"] = current
-    return current
-
-
-def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return record_shared_runtime_snapshot(state, root, RUNTIME_FILES, runtime_artifacts)
 
 
 def fetch_json(url: str) -> Any:
@@ -316,29 +224,6 @@ def build_jobs(
     return jobs
 
 
-def ensure_project(
-    api: PaperMachineApi,
-    name: str,
-    description: str,
-    workspace_root: Path,
-) -> str:
-    canonical_root = str(workspace_root.resolve())
-    for project in api.get("/projects"):
-        workspace = project["workspace"]
-        if workspace["path"] == canonical_root:
-            return str(project["id"])
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    created = api.post(
-        "/projects",
-        {
-            "name": name,
-            "description": description,
-            "workspace": {"path": canonical_root},
-        },
-    )
-    return str(created["id"])
-
-
 def launch_research_run(
     api: PaperMachineApi,
     project_id: str,
@@ -372,19 +257,6 @@ def launch_research_run(
     return {
         "workflow_id": str(run["id"]),
         "launched_at": utc_now(),
-    }
-
-
-def token_usage(tokens: dict[str, Any]) -> dict[str, int | float]:
-    input_tokens = int(tokens.get("input_tokens", 0))
-    cached = int(tokens.get("cached_input_tokens", 0))
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": int(tokens.get("output_tokens", 0)),
-        "cached_input_tokens": cached,
-        "cache_write_input_tokens": int(tokens.get("cache_write_input_tokens", 0)),
-        "uncached_input_tokens": max(0, input_tokens - cached),
-        "cache_read_ratio": cached / input_tokens if input_tokens else 0.0,
     }
 
 
@@ -749,8 +621,7 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
     grader_input = sum(int(usage["input_tokens"]) for usage in grader_usage)
     grader_cached = sum(int(usage["cached_input_tokens"]) for usage in grader_usage)
     controls = [
-        job["research"]["result"].get("workflow_control") or {}
-        for job in selected
+        job["research"]["result"].get("workflow_control") or {} for job in selected
     ]
     completion_statuses = Counter(
         str(
@@ -771,10 +642,7 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
         Counter(),
     )
     research_phase_counts = sum(
-        (
-            Counter(control.get("research_phase_counts") or {})
-            for control in controls
-        ),
+        (Counter(control.get("research_phase_counts") or {}) for control in controls),
         Counter(),
     )
     route_counts = [
@@ -894,10 +762,6 @@ def aggregate_condition(jobs: list[dict[str, Any]], condition: str) -> dict[str,
             for job in selected
         ),
     }
-
-
-def mean(values: list[float]) -> float:
-    return statistics.mean(values) if values else 0.0
 
 
 def compact_error(error: str) -> str:
@@ -1284,46 +1148,6 @@ def render_report(state: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
-def save_state(path: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = utc_now()
-    atomic_write_json(path, state)
-
-
-def reopen_terminal_failures(state: dict[str, Any]) -> int:
-    reopened = 0
-    for job in state["jobs"]:
-        if job.pop("research_failed", False):
-            job.setdefault("research", {"attempts": []})["status"] = "pending_retry"
-            reopened += 1
-        if job.pop("grade_failed", False) and "result" in job.get("research", {}):
-            job.setdefault("grade", {"attempts": []})["status"] = "pending_retry"
-            reopened += 1
-    return reopened
-
-
-def cancel_inflight(api: PaperMachineApi, state: dict[str, Any]) -> int:
-    cancelled = 0
-    for job in state.get("jobs", []):
-        for phase in ("research", "grade"):
-            phase_state = job.get(phase) or {}
-            if phase_state.get("status") not in {"created", "running", "paused"}:
-                continue
-            attempts = phase_state.get("attempts") or []
-            if not attempts:
-                continue
-            attempt = attempts[-1]
-            try:
-                api.post_empty(f"/workflows/{attempt['workflow_id']}/cancel")
-            except ApiError as error:
-                attempt["cancel_error"] = str(error)
-            else:
-                attempt["status"] = "cancel_requested"
-                attempt["cancelled_by_runner"] = True
-                phase_state["status"] = "cancel_requested"
-                cancelled += 1
-    return cancelled
-
-
 def status_counts(state: dict[str, Any], phase: str) -> Counter[str]:
     statuses = Counter()
     for job in state["jobs"]:
@@ -1552,22 +1376,6 @@ def run_grading_phase(
         time.sleep(poll_seconds)
 
 
-def validate_workflows(
-    api: PaperMachineApi,
-    project_id: str,
-    required: set[str],
-) -> None:
-    available = {
-        item["manifest"]["slug"]
-        for item in api.get(f"/projects/{project_id}/workflow-programs")
-    }
-    missing = sorted(required - available)
-    if missing:
-        raise RuntimeError(
-            f"PaperMachine server is missing workflows: {missing}; restart it"
-        )
-
-
 def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool:
     """Upgrade completed and failed phases recorded by older runner revisions."""
     changed = False
@@ -1603,7 +1411,9 @@ def backfill_result_metrics(api: PaperMachineApi, state: dict[str, Any]) -> bool
             target = (
                 phase_state.get("result")
                 if phase == "research"
-                else phase_state if "score" in phase_state else None
+                else phase_state
+                if "score" in phase_state
+                else None
             )
             if not isinstance(target, dict):
                 continue
@@ -1641,9 +1451,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-config", type=Path)
     parser.add_argument("--server-bin", type=Path)
     parser.add_argument("--task-ids", default="19,59,66,68,69")
-    parser.add_argument(
-        "--conditions", default="single_agent,evidence_r1,evidence_r2"
-    )
+    parser.add_argument("--conditions", default="single_agent,evidence_r1,evidence_r2")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260805)
     parser.add_argument("--model", default="deepseek-flash")
@@ -1652,9 +1460,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluator-model", default="")
     parser.add_argument("--writer-model", default="")
     parser.add_argument("--grader-model", default="deepseek-flash")
-    parser.add_argument(
-        "--run-name", default="deepseek-baseline-5x3x2-2026-08-07"
-    )
+    parser.add_argument("--run-name", default="deepseek-baseline-5x3x2-2026-08-07")
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--max-parallel-runs", type=int, default=2)
@@ -1683,8 +1489,7 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
         value.strip() for value in args.conditions.split(",") if value.strip()
     ]
     agent_models = {
-        role: str(getattr(args, f"{role}_model") or "")
-        for role in AGENT_MODEL_ROLES
+        role: str(getattr(args, f"{role}_model") or "") for role in AGENT_MODEL_ROLES
     }
     unknown_conditions = sorted(set(conditions) - CONDITIONS.keys())
     if not conditions or unknown_conditions:
@@ -1795,14 +1600,12 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
         state["projects"]["research"] = ensure_project(
             api,
             f"Benchmark research - {args.run_name}",
-            "Controlled research runs for the auto-research benchmark matrix.",
             run_dir / "projects" / "research",
         )
     if "grader" not in state["projects"]:
         state["projects"]["grader"] = ensure_project(
             api,
             f"Benchmark graders - {args.run_name}",
-            "Independent post-write grading Sessions using the full upstream rubric.",
             run_dir / "projects" / "grader",
         )
     install_project_workflow(
@@ -1861,7 +1664,9 @@ def main() -> int:
     args.server_config = (
         args.server_config or repository_root / "papermachine.toml"
     ).resolve()
-    args.server_bin = (args.server_bin or default_server_binary(repository_root)).resolve()
+    args.server_bin = (
+        args.server_bin or default_server_binary(repository_root)
+    ).resolve()
     if args.prepare_only:
         return run_matrix(args, None)
     run_dir = Path(__file__).resolve().parent / "runs" / args.run_name

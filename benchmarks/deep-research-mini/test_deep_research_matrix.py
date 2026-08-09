@@ -1,5 +1,4 @@
 import importlib.util
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,7 +11,9 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class MatrixTests(unittest.TestCase):
-    def test_workflow_control_metrics_separates_repair_and_followup_actions(self) -> None:
+    def test_workflow_control_metrics_separates_repair_and_followup_actions(
+        self,
+    ) -> None:
         actions = [
             {"id": "plan", "action_name": "plan", "status": "completed"},
             *[
@@ -58,79 +59,6 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(metrics["action_attempt_retries"], 1)
         self.assertEqual(metrics["failed_action_attempts"], 1)
 
-    def test_workflow_wall_time_survives_runtime_restart(self) -> None:
-        run = {
-            "created_at": "2026-08-07T00:00:00Z",
-            "updated_at": "2026-08-07T00:05:00Z",
-            "usage": {"wall_time_seconds": 10},
-        }
-        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 300)
-        run["usage"]["wall_time_seconds"] = 400
-        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 400)
-
-    def test_ensure_project_reuses_matching_workspace_attachment(self) -> None:
-        class FakeApi:
-            def __init__(self, workspace_root: str) -> None:
-                self.workspace_root = workspace_root
-
-            def get(self, path):
-                self.assert_path(path)
-                return [
-                    {
-                        "id": "existing-project",
-                        "workspace": {"path": self.workspace_root},
-                    }
-                ]
-
-            def post(self, path, payload):
-                raise AssertionError(f"unexpected project creation: {path} {payload}")
-
-            @staticmethod
-            def assert_path(path):
-                if path != "/projects":
-                    raise AssertionError(f"unexpected path: {path}")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "research"
-            root.mkdir()
-            api = FakeApi(str(root.resolve()))
-            self.assertEqual(
-                run_matrix.ensure_project(api, "Research", "Benchmark", root),
-                "existing-project",
-            )
-            self.assertTrue(root.is_dir())
-
-    def test_ensure_project_creates_a_structured_workspace_attachment(self) -> None:
-        class FakeApi:
-            def __init__(self) -> None:
-                self.payload = None
-
-            def get(self, path):
-                self.assert_path(path)
-                return []
-
-            def post(self, path, payload):
-                self.assert_path(path)
-                self.payload = payload
-                return {"id": "created-project"}
-
-            @staticmethod
-            def assert_path(path):
-                if path != "/projects":
-                    raise AssertionError(f"unexpected path: {path}")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "research"
-            api = FakeApi()
-            self.assertEqual(
-                run_matrix.ensure_project(api, "Research", "Benchmark", root),
-                "created-project",
-            )
-            self.assertEqual(
-                api.payload["workspace"],
-                {"path": str(root.resolve())},
-            )
-
     def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:
         class FakeApi:
             def __init__(self) -> None:
@@ -142,9 +70,7 @@ class MatrixTests(unittest.TestCase):
 
         api = FakeApi()
         job = {"task_id": 1, "condition": "single_agent", "repeat": 1}
-        rubric = {
-            "criterions": {dimension: [] for dimension in run_matrix.DIMENSIONS}
-        }
+        rubric = {"criterions": {dimension: [] for dimension in run_matrix.DIMENSIONS}}
         task = {"prompt": "Research question", "rubric": rubric, "language": "en"}
         research = run_matrix.launch_research_run(
             api,
@@ -196,27 +122,6 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(api.payload["params"]["max_rounds"], 2)
         self.assertEqual(api.payload["params"]["research_model"], "deepseek-flash")
         self.assertEqual(api.payload["params"]["writer_model"], "glm-5-2")
-
-    def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
-        attempts = [{"workflow_id": "failed-run"}]
-        state = {
-            "jobs": [
-                {
-                    "research_failed": True,
-                    "research": {"status": "failed", "attempts": attempts},
-                },
-                {
-                    "grade_failed": True,
-                    "research": {"result": {}},
-                    "grade": {"status": "failed", "attempts": attempts},
-                },
-            ]
-        }
-        self.assertEqual(run_matrix.reopen_terminal_failures(state), 2)
-        self.assertEqual(state["jobs"][0]["research"]["status"], "pending_retry")
-        self.assertEqual(state["jobs"][0]["research"]["attempts"], attempts)
-        self.assertNotIn("research_failed", state["jobs"][0])
-        self.assertEqual(state["jobs"][1]["grade"]["status"], "pending_retry")
 
     def test_build_jobs_is_balanced_and_deterministic(self) -> None:
         conditions = ["single_agent", "evidence_r3"]

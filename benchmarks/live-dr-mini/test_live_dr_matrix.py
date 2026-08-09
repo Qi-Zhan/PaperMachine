@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,75 +12,6 @@ SPEC.loader.exec_module(run_matrix)
 
 
 class LiveDrMatrixTests(unittest.TestCase):
-    def test_workflow_wall_time_survives_runtime_restart(self) -> None:
-        run = {
-            "created_at": "2026-08-07T00:00:00Z",
-            "updated_at": "2026-08-07T00:05:00Z",
-            "usage": {"wall_time_seconds": 10},
-        }
-        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 300)
-        run["usage"]["wall_time_seconds"] = 400
-        self.assertEqual(run_matrix.workflow_wall_time_seconds(run), 400)
-
-    def test_ensure_project_reuses_matching_workspace_attachment(self) -> None:
-        class FakeApi:
-            def __init__(self, workspace_root: str) -> None:
-                self.workspace_root = workspace_root
-
-            def get(self, path):
-                if path != "/projects":
-                    raise AssertionError(f"unexpected path: {path}")
-                return [
-                    {
-                        "id": "existing-project",
-                        "workspace": {"path": self.workspace_root},
-                    }
-                ]
-
-            def post(self, path, payload):
-                raise AssertionError(f"unexpected project creation: {path} {payload}")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "research"
-            root.mkdir()
-            api = FakeApi(str(root.resolve()))
-            self.assertEqual(
-                run_matrix.ensure_project(api, "Research", "Benchmark", root),
-                "existing-project",
-            )
-            self.assertTrue(root.is_dir())
-
-    def test_ensure_project_creates_a_structured_workspace_attachment(self) -> None:
-        class FakeApi:
-            def __init__(self) -> None:
-                self.payload = None
-
-            def get(self, path):
-                self.assert_path(path)
-                return []
-
-            def post(self, path, payload):
-                self.assert_path(path)
-                self.payload = payload
-                return {"id": "created-project"}
-
-            @staticmethod
-            def assert_path(path):
-                if path != "/projects":
-                    raise AssertionError(f"unexpected path: {path}")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "research"
-            api = FakeApi()
-            self.assertEqual(
-                run_matrix.ensure_project(api, "Research", "Benchmark", root),
-                "created-project",
-            )
-            self.assertEqual(
-                api.payload["workspace"],
-                {"path": str(root.resolve())},
-            )
-
     def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:
         class FakeApi:
             def __init__(self) -> None:
@@ -91,7 +21,9 @@ class LiveDrMatrixTests(unittest.TestCase):
                 self.requests.append((path, payload))
                 return {"id": f"run-{len(self.requests)}"}
 
-        task = json.loads(Path(__file__).with_name("tasks.json").read_text())["tasks"][0]
+        task = json.loads(Path(__file__).with_name("tasks.json").read_text())["tasks"][
+            0
+        ]
         api = FakeApi()
         job = {
             "task_key": str(task["key"]),
@@ -99,9 +31,7 @@ class LiveDrMatrixTests(unittest.TestCase):
             "repeat": 1,
             "research": {"result": {"prediction": {}}},
         }
-        research = run_matrix.launch_run(
-            api, "project-1", job, task, "deepseek-flash"
-        )
+        research = run_matrix.launch_run(api, "project-1", job, task, "deepseek-flash")
         grade = run_matrix.launch_grader_run(
             api, "project-1", job, task, "deepseek-flash"
         )
@@ -118,27 +48,6 @@ class LiveDrMatrixTests(unittest.TestCase):
         for _, payload in api.requests:
             self.assertEqual(payload["context_mode"], "fresh")
             self.assertNotIn("started_from_session_id", payload)
-
-    def test_reopen_terminal_failures_preserves_attempt_history(self) -> None:
-        attempts = [{"workflow_id": "failed-run"}]
-        state = {
-            "jobs": [
-                {
-                    "failed": True,
-                    "research": {"status": "failed", "attempts": attempts},
-                },
-                {
-                    "grade_failed": True,
-                    "research": {"result": {}},
-                    "grade": {"status": "failed", "attempts": attempts},
-                },
-            ]
-        }
-        self.assertEqual(run_matrix.reopen_terminal_failures(state), 2)
-        self.assertEqual(state["jobs"][0]["research"]["status"], "pending_retry")
-        self.assertEqual(state["jobs"][0]["research"]["attempts"], attempts)
-        self.assertNotIn("failed", state["jobs"][0])
-        self.assertEqual(state["jobs"][1]["grade"]["status"], "pending_retry")
 
     def test_build_jobs_is_balanced_and_deterministic(self) -> None:
         first = run_matrix.build_jobs(
@@ -209,34 +118,6 @@ class LiveDrMatrixTests(unittest.TestCase):
             ],
         )
         self.assertEqual(score["f1"], 1.0)
-
-    def test_interrupt_cleanup_cancels_only_inflight_runs(self) -> None:
-        class FakeApi:
-            def __init__(self) -> None:
-                self.paths = []
-
-            def post_empty(self, path: str) -> None:
-                self.paths.append(path)
-
-        api = FakeApi()
-        state = {
-            "jobs": [
-                {
-                    "research": {
-                        "status": "running",
-                        "attempts": [{"workflow_id": "run-1"}],
-                    }
-                },
-                {
-                    "research": {
-                        "status": "completed",
-                        "attempts": [{"workflow_id": "run-2"}],
-                    }
-                },
-            ]
-        }
-        self.assertEqual(run_matrix.cancel_inflight(api, state), 1)
-        self.assertEqual(api.paths, ["/workflows/run-1/cancel"])
 
     def test_snapshot_ground_truths_remain_encrypted(self) -> None:
         snapshot = json.loads(Path(__file__).with_name("tasks.json").read_text())

@@ -5,9 +5,7 @@ import unittest
 from pathlib import Path
 
 
-WORKFLOW = runpy.run_path(
-    Path(__file__).resolve().parent / "grader" / "workflow.py"
-)
+WORKFLOW = runpy.run_path(Path(__file__).resolve().parent / "grader" / "workflow.py")
 
 
 class LiveDRGraderTest(unittest.TestCase):

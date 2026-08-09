@@ -9,22 +9,13 @@ claim-matching rubric. A strict deterministic score remains as a cheap diagnosti
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
-import math
-import os
 import random
 import re
-import statistics
 import sys
-import tempfile
-import time
 import unicodedata
-import urllib.error
-import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -33,11 +24,29 @@ BENCHMARKS_ROOT = Path(__file__).resolve().parent.parent
 if str(BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_ROOT))
 
-from benchmark_runtime import (
+from benchmark_runtime import (  # noqa: E402
+    PaperMachineApi,
+    atomic_write_json,
+    atomic_write_text,
+    cancel_inflight,
     default_server_binary,
+    decrypt,
+    drive_phase,
+    ensure_project,
     install_project_workflow,
     isolated_server,
+    load_json,
+    mean,
+    operational_usage,
+    record_runtime_snapshot as record_shared_runtime_snapshot,
+    reopen_terminal_failures,
+    runtime_fingerprint as shared_runtime_fingerprint,
     runtime_artifact_fingerprints,
+    save_state,
+    token_usage,
+    utc_now,
+    validate_workflows,
+    workflow_wall_time_seconds,
 )
 
 
@@ -112,98 +121,6 @@ UPSTREAM_EVALUATOR = {
         "src/evals/scifacts.py": "ee88d2c1b8378d46a4b6035c69bf0c089b8d0d12f4778282240b6a836bcda610",
     },
 }
-
-
-class ApiError(RuntimeError):
-    pass
-
-
-class PaperMachineApi:
-    def __init__(self, base_url: str) -> None:
-        self.base_url = base_url.rstrip("/") + "/api"
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None = None,
-    ) -> Any:
-        body = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            self.base_url + path,
-            data=body,
-            method=method,
-            headers={"content-type": "application/json"} if body is not None else {},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise ApiError(
-                f"{method} {path} returned HTTP {error.code}: {detail}"
-            ) from error
-        except urllib.error.URLError as error:
-            raise ApiError(f"{method} {path} failed: {error}") from error
-        return None if not data else json.loads(data)
-
-    def get(self, path: str) -> Any:
-        return self.request("GET", path)
-
-    def post(self, path: str, payload: dict[str, Any]) -> Any:
-        return self.request("POST", path, payload)
-
-    def post_empty(self, path: str) -> Any:
-        return self.request("POST", path)
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def workflow_wall_time_seconds(run: dict[str, Any]) -> int:
-    """Return end-to-end elapsed time, including time lost across restarts."""
-    usage = run.get("usage") or {}
-    runtime_seconds = max(0, int(usage.get("wall_time_seconds", 0)))
-    try:
-        created_at = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
-        updated_at = datetime.fromisoformat(str(run["updated_at"]).replace("Z", "+00:00"))
-        observed_seconds = max(
-            0,
-            math.ceil((updated_at - created_at).total_seconds()),
-        )
-    except (KeyError, TypeError, ValueError):
-        observed_seconds = 0
-    return max(runtime_seconds, observed_seconds)
-
-
-def atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        handle.write(content)
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
-
-
-def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def derive_key(password: str, length: int) -> bytes:
-    digest = hashlib.sha256(password.encode()).digest()
-    return digest * (length // len(digest)) + digest[: length % len(digest)]
-
-
-def decrypt(ciphertext_b64: str, password: str) -> str:
-    encrypted = base64.b64decode(ciphertext_b64)
-    key = derive_key(password, len(encrypted))
-    return bytes(left ^ right for left, right in zip(encrypted, key)).decode()
 
 
 def normalize_text(value: Any) -> str:
@@ -567,46 +484,6 @@ def claim_count(value: Any) -> int:
     return 1
 
 
-def token_usage(tokens: dict[str, Any]) -> dict[str, int | float]:
-    input_tokens = int(tokens.get("input_tokens", 0))
-    output_tokens = int(tokens.get("output_tokens", 0))
-    cached = int(tokens.get("cached_input_tokens", 0))
-    uncached = max(0, input_tokens - cached)
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cached_input_tokens": cached,
-        "cache_write_input_tokens": int(tokens.get("cache_write_input_tokens", 0)),
-        "uncached_input_tokens": uncached,
-        "effective_tokens": uncached + output_tokens,
-        "cache_read_ratio": cached / input_tokens if input_tokens else 0.0,
-    }
-
-
-def ensure_project(
-    api: PaperMachineApi,
-    name: str,
-    description: str,
-    workspace_root: Path,
-) -> str:
-    canonical_root = str(workspace_root.resolve())
-    for project in api.get("/projects"):
-        workspace = project["workspace"]
-        if workspace["path"] == canonical_root:
-            return str(project["id"])
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    return str(
-        api.post(
-            "/projects",
-            {
-                "name": name,
-                "description": description,
-                "workspace": {"path": canonical_root},
-            },
-        )["id"]
-    )
-
-
 def build_jobs(
     task_keys: list[str], conditions: list[str], repeats: int, seed: int
 ) -> list[dict[str, Any]]:
@@ -886,13 +763,6 @@ def capture_grader_result(view: dict[str, Any], grade_path: Path) -> dict[str, A
     }
 
 
-def record_failed_attempt(attempt: dict[str, Any], run: dict[str, Any]) -> None:
-    usage = run.get("usage") or {}
-    attempt["usage"] = token_usage(usage.get("tokens") or {})
-    attempt["runtime_wall_time_seconds"] = int(usage.get("wall_time_seconds", 0))
-    attempt["wall_time_seconds"] = workflow_wall_time_seconds(run)
-
-
 def is_retryable_error(error: str) -> bool:
     lowered = error.casefold()
     deterministic = (
@@ -916,90 +786,24 @@ def run_research_matrix(
     max_attempts: int,
     max_parallel_runs: int,
 ) -> None:
-    for job in state["jobs"]:
-        job.setdefault("research", {"attempts": [], "status": "pending"})
-
-    while True:
-        active = 0
-        for job in state["jobs"]:
-            research = job["research"]
-            if "result" in research or job.get("failed"):
-                continue
-            if not research["attempts"] or research.get("status") == "pending_retry":
-                continue
-            attempt = research["attempts"][-1]
-            view = api.get(f"/workflows/{attempt['workflow_id']}")
-            run = view["workflow"]
-            status = str(run["status"])
-            research["status"] = status
-            attempt["status"] = status
-            if status in {"created", "running", "paused"}:
-                active += 1
-                continue
-            if status == "completed":
-                try:
-                    result = capture_result(
-                        api,
-                        view,
-                        tasks[job["task_key"]],
-                        articles_dir / f"{job['key']}.txt",
-                    )
-                except (KeyError, TypeError, ValueError) as error:
-                    status = "invalid_output"
-                    attempt["error"] = str(error)
-                    record_failed_attempt(attempt, run)
-                else:
-                    research["result"] = result
-                    research["status"] = "completed"
-                    save_state(state_path, state)
-                    continue
-            if status in {"failed", "cancelled", "invalid_output"}:
-                error = str(attempt.get("error") or run.get("error") or status)
-                attempt["error"] = error
-                if "usage" not in attempt:
-                    record_failed_attempt(attempt, run)
-                if attempt.get("cancelled_by_runner") or (
-                    len(research["attempts"]) < max_attempts
-                    and is_retryable_error(error)
-                ):
-                    research["status"] = "pending_retry"
-                else:
-                    job["failed"] = True
-                save_state(state_path, state)
-
-        for job in state["jobs"]:
-            if active >= max_parallel_runs:
-                break
-            research = job["research"]
-            if "result" in research or job.get("failed"):
-                continue
-            if research["attempts"] and research.get("status") != "pending_retry":
-                continue
-            attempt = launch_run(api, project_id, job, tasks[job["task_key"]], model)
-            attempt["runtime_source_sha256"] = state.get(
-                "current_runtime_source_sha256", {}
-            )
-            research["attempts"].append(attempt)
-            research["status"] = "created"
-            active += 1
-            save_state(state_path, state)
-
-        unfinished = sum(
-            "result" not in job["research"] and not job.get("failed")
-            for job in state["jobs"]
-        )
-        counts = Counter(
-            (
-                "failed"
-                if job.get("failed")
-                else job.get("research", {}).get("status", "pending")
-            )
-            for job in state["jobs"]
-        )
-        print(f"research: {dict(counts)}", flush=True)
-        if unfinished == 0:
-            return
-        time.sleep(poll_seconds)
+    drive_phase(
+        api,
+        state,
+        state_path,
+        tasks,
+        "research",
+        lambda job, task: launch_run(api, project_id, job, task, model),
+        lambda job, view: capture_result(
+            api,
+            view,
+            tasks[job["task_key"]],
+            articles_dir / f"{job['key']}.txt",
+        ),
+        is_retryable_error,
+        poll_seconds,
+        max_attempts,
+        max_parallel_runs,
+    )
 
 
 def run_grading_matrix(
@@ -1015,7 +819,7 @@ def run_grading_matrix(
     max_parallel_runs: int,
 ) -> None:
     for job in state["jobs"]:
-        if job.get("failed"):
+        if job.get("research_failed"):
             continue
         grade = job.setdefault("grade", {"attempts": [], "status": "pending"})
         result = job.get("research", {}).get("result") or {}
@@ -1031,191 +835,33 @@ def run_grading_matrix(
             }
             grade["status"] = "completed"
     save_state(state_path, state)
-
-    while True:
-        active = 0
-        for job in state["jobs"]:
-            if job.get("failed"):
-                continue
-            grade = job["grade"]
-            if "result" in grade or job.get("grade_failed"):
-                continue
-            if not grade["attempts"] or grade.get("status") == "pending_retry":
-                continue
-            attempt = grade["attempts"][-1]
-            view = api.get(f"/workflows/{attempt['workflow_id']}")
-            run = view["workflow"]
-            status = str(run["status"])
-            grade["status"] = status
-            attempt["status"] = status
-            if status in {"created", "running", "paused"}:
-                active += 1
-                continue
-            error: str | None = None
-            if status == "completed":
-                try:
-                    grade["result"] = capture_grader_result(
-                        view, grades_dir / f"{job['key']}.json"
-                    )
-                except (KeyError, TypeError, ValueError) as capture_error:
-                    error = f"invalid grade output: {capture_error}"
-                else:
-                    grade["status"] = "completed"
-                    save_state(state_path, state)
-                    continue
-            elif status in {"failed", "cancelled"}:
-                error = str(run.get("error") or status)
-            if error is not None:
-                attempt["error"] = error
-                record_failed_attempt(attempt, run)
-                if attempt.get("cancelled_by_runner") or (
-                    len(grade["attempts"]) < max_attempts and is_retryable_error(error)
-                ):
-                    grade["status"] = "pending_retry"
-                else:
-                    job["grade_failed"] = True
-                save_state(state_path, state)
-
-        for job in state["jobs"]:
-            if active >= max_parallel_runs:
-                break
-            if job.get("failed"):
-                continue
-            grade = job["grade"]
-            if "result" in grade or job.get("grade_failed"):
-                continue
-            if grade["attempts"] and grade.get("status") != "pending_retry":
-                continue
-            attempt = launch_grader_run(
-                api,
-                project_id,
-                job,
-                tasks[job["task_key"]],
-                grader_model,
-            )
-            attempt["runtime_source_sha256"] = state.get(
-                "current_runtime_source_sha256", {}
-            )
-            grade["attempts"].append(attempt)
-            grade["status"] = "created"
-            active += 1
-            save_state(state_path, state)
-
-        unfinished = sum(
-            not job.get("failed")
-            and "result" not in job.get("grade", {})
-            and not job.get("grade_failed")
-            for job in state["jobs"]
-        )
-        counts = Counter(
-            (
-                "skipped"
-                if job.get("failed")
-                else (
-                    "failed"
-                    if job.get("grade_failed")
-                    else job.get("grade", {}).get("status", "pending")
-                )
-            )
-            for job in state["jobs"]
-        )
-        print(f"grade: {dict(counts)}", flush=True)
-        if unfinished == 0:
-            return
-        time.sleep(poll_seconds)
-
-
-def cancel_inflight(api: PaperMachineApi, state: dict[str, Any]) -> int:
-    cancelled = 0
-    for job in state.get("jobs", []):
-        for phase in ("research", "grade"):
-            phase_state = job.get(phase) or {}
-            if phase_state.get("status") not in {"created", "running", "paused"}:
-                continue
-            attempts = phase_state.get("attempts") or []
-            if not attempts:
-                continue
-            attempt = attempts[-1]
-            try:
-                api.post_empty(f"/workflows/{attempt['workflow_id']}/cancel")
-            except ApiError as error:
-                attempt["cancel_error"] = str(error)
-            else:
-                attempt["status"] = "cancel_requested"
-                attempt["cancelled_by_runner"] = True
-                phase_state["status"] = "cancel_requested"
-                cancelled += 1
-    return cancelled
-
-
-def save_state(path: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = utc_now()
-    atomic_write_json(path, state)
-
-
-def reopen_terminal_failures(state: dict[str, Any]) -> int:
-    reopened = 0
-    for job in state["jobs"]:
-        if job.pop("failed", False):
-            job.setdefault("research", {"attempts": []})["status"] = "pending_retry"
-            reopened += 1
-        if job.pop("grade_failed", False) and "result" in job.get("research", {}):
-            job.setdefault("grade", {"attempts": []})["status"] = "pending_retry"
-            reopened += 1
-    return reopened
+    drive_phase(
+        api,
+        state,
+        state_path,
+        tasks,
+        "grade",
+        lambda job, task: launch_grader_run(api, project_id, job, task, grader_model),
+        lambda job, view: capture_grader_result(
+            view, grades_dir / f"{job['key']}.json"
+        ),
+        is_retryable_error,
+        poll_seconds,
+        max_attempts,
+        max_parallel_runs,
+    )
 
 
 def runtime_fingerprint(
     root: Path, runtime_artifacts: dict[str, str] | None = None
 ) -> dict[str, str]:
-    fingerprint = {
-        relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
-        for relative in RUNTIME_FILES
-    }
-    fingerprint.update(runtime_artifacts or {})
-    return fingerprint
+    return shared_runtime_fingerprint(root, RUNTIME_FILES, runtime_artifacts)
 
 
 def record_runtime_snapshot(
     state: dict[str, Any], root: Path, runtime_artifacts: dict[str, str]
 ) -> dict[str, str]:
-    current = runtime_fingerprint(root, runtime_artifacts)
-    history = state.setdefault("runtime_source_history", [])
-    original = state.get("runtime_source_sha256")
-    if original and not any(item.get("files_sha256") == original for item in history):
-        history.insert(
-            0,
-            {
-                "observed_at": state.get("created_at", utc_now()),
-                "files_sha256": original,
-            },
-        )
-    if not history or history[-1].get("files_sha256") != current:
-        history.append({"observed_at": utc_now(), "files_sha256": current})
-    state["current_runtime_source_sha256"] = current
-    return current
-
-
-def mean(values: list[float]) -> float:
-    return statistics.mean(values) if values else 0.0
-
-
-def operational_usage(job: dict[str, Any], phase: str) -> dict[str, int]:
-    keys = ("input_tokens", "output_tokens", "cached_input_tokens")
-    total = {key: 0 for key in keys}
-    phase_state = job.get(phase) or {}
-    result_usage = (phase_state.get("result") or {}).get("usage") or {}
-    for key in keys:
-        total[key] += int(result_usage.get(key, 0))
-    for attempt in phase_state.get("attempts") or []:
-        usage = attempt.get("usage") or {}
-        for key in keys:
-            total[key] += int(usage.get(key, 0))
-    total["uncached_input_tokens"] = max(
-        0, total["input_tokens"] - total["cached_input_tokens"]
-    )
-    total["effective_tokens"] = total["uncached_input_tokens"] + total["output_tokens"]
-    return total
+    return record_shared_runtime_snapshot(state, root, RUNTIME_FILES, runtime_artifacts)
 
 
 def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
@@ -1293,7 +939,7 @@ def aggregate(jobs: list[dict[str, Any]], condition: str) -> dict[str, Any]:
         "grader_effective_mean": mean(
             [usage["effective_tokens"] for usage in grader_usage]
         ),
-        "research_failures": sum(bool(job.get("failed")) for job in selected),
+        "research_failures": sum(bool(job.get("research_failed")) for job in selected),
         "grade_failures": sum(bool(job.get("grade_failed")) for job in selected),
         "model_transports": dict(transports),
         "prompt_cache_modes": dict(cache_modes),
@@ -1451,37 +1097,17 @@ def render_report(state: dict[str, Any], tasks: dict[str, dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
-def validate_workflows(
-    api: PaperMachineApi,
-    project_id: str,
-    required: set[str],
-) -> None:
-    available = {
-        item["manifest"]["slug"]
-        for item in api.get(f"/projects/{project_id}/workflow-programs")
-    }
-    missing = sorted(required - available)
-    if missing:
-        raise RuntimeError(
-            f"server is missing workflows {missing}; restart PaperMachine"
-        )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-config", type=Path)
     parser.add_argument("--server-bin", type=Path)
     parser.add_argument("--task-keys", default="0,20,22,23,40,47,66,83")
-    parser.add_argument(
-        "--conditions", default="single_agent,coverage_r1,coverage_r2"
-    )
+    parser.add_argument("--conditions", default="single_agent,coverage_r1,coverage_r2")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260806)
     parser.add_argument("--model", default="deepseek-flash")
     parser.add_argument("--grader-model", default="deepseek-flash")
-    parser.add_argument(
-        "--run-name", default="deepseek-baseline-8x3x2-2026-08-07"
-    )
+    parser.add_argument("--run-name", default="deepseek-baseline-8x3x2-2026-08-07")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--max-parallel-runs", type=int, default=2)
@@ -1583,7 +1209,6 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
     project_id = ensure_project(
         api,
         f"LiveDRBench research - {args.run_name}",
-        "Structured claim-discovery runs with isolated upstream-rubric post-write grading.",
         run_dir / "project",
     )
     install_project_workflow(
@@ -1640,7 +1265,9 @@ def main() -> int:
     args.server_config = (
         args.server_config or repository_root / "papermachine.toml"
     ).resolve()
-    args.server_bin = (args.server_bin or default_server_binary(repository_root)).resolve()
+    args.server_bin = (
+        args.server_bin or default_server_binary(repository_root)
+    ).resolve()
     run_dir = Path(__file__).resolve().parent / "runs" / args.run_name
     with isolated_server(
         repository_root, run_dir, args.server_config, args.server_bin
