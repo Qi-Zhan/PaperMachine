@@ -84,30 +84,27 @@ fn seatbelt_profile(policy: &ResolvedSandboxPolicy) -> String {
         rules.push(format!("(deny file-read* (subpath \"{path}\"))"));
         rules.push(format!("(deny file-write* (subpath \"{path}\"))"));
     }
-    for root in &policy.workspace_roots {
-        if let Some(regex) = sensitive_path_regex(root, &policy.sensitive_workspace_names) {
-            rules.push(format!("(deny file-read* (regex #\"{regex}\"))"));
-            rules.push(format!("(deny file-write* (regex #\"{regex}\"))"));
-        }
+    if let Some(regex) = sensitive_path_regex(&policy.sensitive_path_names) {
+        rules.push(format!("(deny file-read* (regex #\"{regex}\"))"));
+        rules.push(format!("(deny file-write* (regex #\"{regex}\"))"));
     }
     rules.join("\n")
 }
 
-fn sensitive_path_regex(root: &Path, names: &[String]) -> Option<String> {
+fn sensitive_path_regex(names: &[String]) -> Option<String> {
     if names.is_empty() {
         return None;
     }
     let mut alternatives = BTreeSet::new();
     for name in names {
         if name == ".env" {
-            alternatives.insert(r"\.env(?:\.[^/]*)?".to_string());
+            alternatives.insert(r"\.env(\.[^/]*)?".to_string());
         } else {
             alternatives.insert(regex_escape(name));
         }
     }
     Some(format!(
-        "^{}/(?:.*/)?(?:{})(?:/.*)?$",
-        regex_escape(&root.to_string_lossy()),
+        "^/(.*/)?({})(/.*)?$",
         alternatives.into_iter().collect::<Vec<_>>().join("|")
     ))
 }
@@ -144,11 +141,10 @@ mod tests {
             filesystem_write: FilesystemPolicy::Scoped,
             read_roots: vec!["/workspace".into()],
             write_roots: vec!["/workspace".into()],
-            workspace_roots: vec!["/workspace".into()],
             unreadable_roots: vec!["/managed".into()],
             read_only_roots: vec!["/workspace/.git".into()],
             sensitive_paths: vec!["/workspace/.env".into()],
-            sensitive_workspace_names: vec![".env".to_string(), ".npmrc".to_string()],
+            sensitive_path_names: vec![".env".to_string(), ".npmrc".to_string()],
             network: NetworkPolicy::Deny,
             environment: EnvironmentAuthorization {
                 inherit_core: true,
@@ -161,6 +157,6 @@ mod tests {
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("/managed"));
         assert!(profile.contains("/workspace/.git"));
-        assert!(profile.contains(r"\.env(?:\.[^/]*)?"));
+        assert!(profile.contains(r"\.env(\.[^/]*)?"));
     }
 }

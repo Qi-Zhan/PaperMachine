@@ -87,8 +87,8 @@ pub enum ToolError {
     PathInsideManagedState(String),
     #[error("path is protected Workspace metadata: {0}")]
     ProtectedWorkspaceMetadata(String),
-    #[error("path may contain Workspace credentials and is denied: {0}")]
-    SensitiveWorkspacePath(String),
+    #[error("path may contain credentials and is denied: {0}")]
+    SensitivePath(String),
     #[error("tool I/O failed: {0}")]
     Io(String),
     #[error("command timed out after {seconds} seconds")]

@@ -9,7 +9,12 @@ use futures::stream::BoxStream;
 use papermachine_protocol::HostedTool;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelRequest;
+use papermachine_protocol::ModelRouteCapabilities;
+use papermachine_protocol::ModelRouteSnapshot;
+use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::TokenUsage;
+use sha2::Digest;
+use sha2::Sha256;
 use thiserror::Error;
 
 pub use openai::DEFAULT_MODEL_CONTEXT_WINDOW;
@@ -84,4 +89,65 @@ pub trait ModelClient: Send + Sync {
     fn supports_hosted_tool(&self, _model: &str, _tool: HostedTool) -> bool {
         false
     }
+
+    fn resolve_route_snapshot(
+        &self,
+        profile: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+        fallback_context_window: usize,
+    ) -> Result<ModelRouteSnapshot, ModelError> {
+        let capabilities = ModelRouteCapabilities {
+            hosted_web_search: self.supports_hosted_tool(profile, HostedTool::WebSearch),
+        };
+        let context_window = self
+            .model_context_window(profile)
+            .unwrap_or(fallback_context_window);
+        let config_sha256 = hash_route_config(&serde_json::json!({
+            "profile": profile,
+            "provider": "direct",
+            "upstream_model": profile,
+            "context_window": context_window,
+            "capabilities": capabilities,
+            "reasoning_effort": reasoning_effort,
+        }))?;
+        let snapshot = ModelRouteSnapshot {
+            profile: profile.to_string(),
+            provider: "direct".to_string(),
+            upstream_model: profile.to_string(),
+            context_window,
+            capabilities,
+            reasoning_effort,
+            config_sha256,
+        };
+        snapshot.validate().map_err(ModelError::Configuration)?;
+        Ok(snapshot)
+    }
+
+    fn validate_route_snapshot(
+        &self,
+        snapshot: &ModelRouteSnapshot,
+        fallback_context_window: usize,
+    ) -> Result<(), ModelError> {
+        snapshot.validate().map_err(ModelError::Configuration)?;
+        let current = self.resolve_route_snapshot(
+            &snapshot.profile,
+            snapshot.reasoning_effort,
+            fallback_context_window,
+        )?;
+        if current != *snapshot {
+            return Err(ModelError::Configuration(format!(
+                "model route configuration changed for profile {:?}",
+                snapshot.profile
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn hash_route_config(value: &serde_json::Value) -> Result<String, ModelError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| ModelError::Configuration(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
 }

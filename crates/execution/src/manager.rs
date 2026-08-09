@@ -113,13 +113,11 @@ pub(crate) struct ResolvedSandboxPolicy {
     pub filesystem_write: crate::FilesystemPolicy,
     pub read_roots: Vec<PathBuf>,
     pub write_roots: Vec<PathBuf>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub workspace_roots: Vec<PathBuf>,
     pub unreadable_roots: Vec<PathBuf>,
     pub read_only_roots: Vec<PathBuf>,
     pub sensitive_paths: Vec<PathBuf>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub sensitive_workspace_names: Vec<String>,
+    pub sensitive_path_names: Vec<String>,
     pub network: crate::NetworkPolicy,
     pub environment: papermachine_protocol::EnvironmentAuthorization,
     pub requires_platform_sandbox: bool,
@@ -146,7 +144,7 @@ fn resolve_policy(
     deduplicate_paths(&mut read_roots);
     deduplicate_paths(&mut write_roots);
 
-    let sensitive_names = policy.sensitive_workspace_names;
+    let sensitive_names = policy.sensitive_path_names;
     let sensitive_paths = scan_sensitive_paths(&workspace_roots, &sensitive_names)?;
     let platform_state_root = unreadable_roots
         .first()
@@ -157,11 +155,10 @@ fn resolve_policy(
         filesystem_write: policy.filesystem_write,
         read_roots,
         write_roots,
-        workspace_roots,
         unreadable_roots,
         read_only_roots,
         sensitive_paths,
-        sensitive_workspace_names: sensitive_names,
+        sensitive_path_names: sensitive_names,
         network: policy.network,
         environment: policy.environment,
         requires_platform_sandbox,

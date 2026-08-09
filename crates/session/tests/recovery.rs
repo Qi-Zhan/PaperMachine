@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use papermachine_model::ModelClient;
 use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::MessageRole;
@@ -125,6 +126,28 @@ async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
     )));
 }
 
+#[tokio::test]
+async fn workflow_restart_fails_closed_when_the_model_route_changes() {
+    let fixture = workflow_recovery_fixture(true, None);
+    let error = fixture
+        .runtime_with_context_window(64_000)
+        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .await
+        .expect_err("a changed model route must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("model route configuration changed")
+    );
+    assert!(
+        fixture
+            .model
+            .requests()
+            .expect("requests should load")
+            .is_empty()
+    );
+}
+
 struct WorkflowRecoveryFixture {
     _directory: TempDir,
     store: Arc<Store>,
@@ -139,6 +162,10 @@ struct WorkflowRecoveryFixture {
 
 impl WorkflowRecoveryFixture {
     fn runtime(&self) -> SessionRuntime {
+        self.runtime_with_context_window(128_000)
+    }
+
+    fn runtime_with_context_window(&self, model_context_window: usize) -> SessionRuntime {
         SessionRuntime::new(
             Arc::clone(&self.store),
             Arc::new(self.model.clone()),
@@ -146,7 +173,7 @@ impl WorkflowRecoveryFixture {
             Arc::clone(&self.skills),
             SessionRuntimeConfig {
                 default_model: "test-model".to_string(),
-                model_context_window: 128_000,
+                model_context_window,
                 max_concurrent_turns: 1,
             },
         )
@@ -218,6 +245,10 @@ fn workflow_recovery_fixture(
     let attempt = store
         .start_action_attempt(invocation.id)
         .expect("attempt should start");
+    let model = ScriptedModelClient::new([response("recovered")]);
+    let model_route = model
+        .resolve_route_snapshot("test-model", None, 128_000)
+        .expect("test model route should resolve");
     let tool_set = catalog
         .materialize_action_tools(&requested_tools, AccessPreset::Research, true)
         .expect("Action tool set should materialize");
@@ -227,9 +258,8 @@ fn workflow_recovery_fixture(
             participant.session_id,
             TurnOrigin::Workflow,
             "recover",
-            "test-model",
+            model_route,
             empty_prompt_snapshot(),
-            None,
             true,
             AccessPreset::Research,
             tool_set,
@@ -273,7 +303,6 @@ fn workflow_recovery_fixture(
             .id
     });
 
-    let model = ScriptedModelClient::new([response("recovered")]);
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
         .ensure_project(project.id)

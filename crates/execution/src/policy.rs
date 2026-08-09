@@ -28,7 +28,7 @@ pub struct SandboxPolicy {
     pub workspace_roots: Vec<PathBuf>,
     pub unreadable_roots: Vec<PathBuf>,
     pub read_only_roots: Vec<PathBuf>,
-    pub sensitive_workspace_names: Vec<String>,
+    pub sensitive_path_names: Vec<String>,
     pub protected_workspace_metadata: Vec<String>,
     pub network: NetworkPolicy,
     pub environment: EnvironmentAuthorization,
@@ -42,13 +42,15 @@ impl SandboxPolicy {
         timeout: Duration,
     ) -> Result<Self, ExecutionError> {
         let workspace_roots = vec![absolute_path(&authorization.workspace_root)?];
-        let unreadable_roots = paths(&authorization.filesystem.managed_roots)?;
+        let mut unreadable_roots = paths(&authorization.filesystem.managed_roots)?;
+        unreadable_roots.extend(paths(&authorization.filesystem.sensitive_roots)?);
         let (filesystem_read, read_roots) =
             scope_roots(authorization.filesystem.read, &workspace_roots);
         let (filesystem_write, write_roots) =
             scope_roots(authorization.filesystem.write, &workspace_roots);
-        let protects_workspace =
-            filesystem_read != FilesystemPolicy::Host || filesystem_write != FilesystemPolicy::Host;
+        let protects_workspace = filesystem_write != FilesystemPolicy::Host;
+        let protects_credentials =
+            authorization.preset != papermachine_protocol::AccessPreset::FullAccess;
         Ok(Self {
             filesystem_read,
             filesystem_write,
@@ -70,8 +72,8 @@ impl SandboxPolicy {
             } else {
                 Vec::new()
             },
-            sensitive_workspace_names: if protects_workspace {
-                let mut names = authorization.filesystem.sensitive_workspace_files.clone();
+            sensitive_path_names: if protects_credentials {
+                let mut names = authorization.filesystem.sensitive_path_names.clone();
                 names.push(".env".to_string());
                 names
             } else {
@@ -111,7 +113,7 @@ impl SandboxPolicy {
             workspace_roots: Vec::new(),
             unreadable_roots: Vec::new(),
             read_only_roots: Vec::new(),
-            sensitive_workspace_names: Vec::new(),
+            sensitive_path_names: Vec::new(),
             protected_workspace_metadata: Vec::new(),
             network: NetworkPolicy::Deny,
             environment: EnvironmentAuthorization {
@@ -135,7 +137,7 @@ impl SandboxPolicy {
             workspace_roots: Vec::new(),
             unreadable_roots: Vec::new(),
             read_only_roots: Vec::new(),
-            sensitive_workspace_names: Vec::new(),
+            sensitive_path_names: Vec::new(),
             protected_workspace_metadata: Vec::new(),
             network: NetworkPolicy::Allow,
             environment: EnvironmentAuthorization {
@@ -156,7 +158,7 @@ impl SandboxPolicy {
             || self.network == NetworkPolicy::Deny
             || !self.unreadable_roots.is_empty()
             || !self.read_only_roots.is_empty()
-            || !self.sensitive_workspace_names.is_empty()
+            || !self.sensitive_path_names.is_empty()
     }
 }
 
@@ -202,19 +204,24 @@ mod tests {
         .expect("authorization");
         let policy = SandboxPolicy::from_authorization(&authorization, Duration::from_secs(7))
             .expect("sandbox policy");
-        assert_eq!(policy.filesystem_read, FilesystemPolicy::Scoped);
+        assert_eq!(policy.filesystem_read, FilesystemPolicy::Host);
         assert_eq!(policy.write_roots, vec![PathBuf::from("/workspace")]);
-        assert_eq!(policy.unreadable_roots, vec![PathBuf::from("/managed")]);
+        assert_eq!(
+            policy.unreadable_roots.first(),
+            Some(&PathBuf::from("/managed"))
+        );
+        assert!(
+            policy
+                .unreadable_roots
+                .iter()
+                .any(|path| path.ends_with(".ssh"))
+        );
         assert_eq!(policy.network, NetworkPolicy::Deny);
         assert!(
             policy
                 .read_only_roots
                 .contains(&PathBuf::from("/workspace/.git"))
         );
-        assert!(
-            policy
-                .sensitive_workspace_names
-                .contains(&".env".to_string())
-        );
+        assert!(policy.sensitive_path_names.contains(&".env".to_string()));
     }
 }

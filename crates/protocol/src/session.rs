@@ -1,8 +1,8 @@
 use crate::AccessPreset;
 use crate::ModelResponseFormat;
+use crate::ModelRouteSnapshot;
 use crate::ProjectId;
 use crate::PromptSnapshot;
-use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::StepId;
 use crate::TokenUsage;
@@ -86,10 +86,9 @@ pub struct Turn {
     pub origin: TurnOrigin,
     pub input: String,
     pub output: Option<String>,
-    pub model: String,
-    /// Per-Turn model compute policy. `None` inherits the server/provider
-    /// default.
-    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Immutable provider route and effective compute policy resolved before
+    /// this Turn was created.
+    pub model_route: ModelRouteSnapshot,
     pub prompt: PromptSnapshot,
     /// Immutable Workspace and materialized authorization captured when this
     /// Turn is created.

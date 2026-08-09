@@ -146,6 +146,45 @@ pub enum ReasoningEffort {
     Max,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ModelRouteCapabilities {
+    pub hosted_web_search: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ModelRouteSnapshot {
+    pub profile: String,
+    pub provider: String,
+    pub upstream_model: String,
+    pub context_window: usize,
+    pub capabilities: ModelRouteCapabilities,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub config_sha256: String,
+}
+
+impl ModelRouteSnapshot {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.profile.trim().is_empty()
+            || self.provider.trim().is_empty()
+            || self.upstream_model.trim().is_empty()
+        {
+            return Err("model route identifiers must be non-empty".to_string());
+        }
+        if self.context_window < 4_096 {
+            return Err("model route context window must be at least 4096".to_string());
+        }
+        if self.config_sha256.len() != 64
+            || !self
+                .config_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("model route config_sha256 must be a SHA-256 hex digest".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl ReasoningEffort {
     pub const fn as_str(self) -> &'static str {
         match self {

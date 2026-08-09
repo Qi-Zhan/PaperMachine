@@ -344,7 +344,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
     let directory = tempdir().expect("temporary workspace should be created");
     std::fs::write(directory.path().join("evidence.txt"), "evidence")
         .expect("fixture should be written");
-    let request = AgentTurnRequest::new(
+    let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         TurnId::new(),
@@ -354,6 +354,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
         "Research carefully.",
         "Read the evidence.",
     );
+    request.hosted_web_search_supported = true;
 
     let result = runtime
         .run(request, CancellationToken::new())

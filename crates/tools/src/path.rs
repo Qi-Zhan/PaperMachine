@@ -21,18 +21,15 @@ pub(crate) async fn resolve_tool_path(
     operation: PathOperation,
 ) -> Result<PathBuf, ToolError> {
     let requested = Path::new(requested_path);
-    if requested.as_os_str().is_empty()
-        || requested
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
+    if requested.as_os_str().is_empty() {
         return Err(ToolError::PathOutsideWorkspace(requested_path.to_string()));
     }
-    let candidate = if requested.is_absolute() {
+    let candidate = normalize_absolute(&if requested.is_absolute() {
         requested.to_path_buf()
     } else {
         Path::new(&authorization.cwd).join(requested)
-    };
+    })
+    .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_string()))?;
     let mut existing = candidate.as_path();
     let mut missing = Vec::new();
     loop {
@@ -60,6 +57,24 @@ pub(crate) async fn resolve_tool_path(
         .authorize_path(&resolved, operation)
         .map_err(|failure| map_authorization_failure(failure, requested_path))?;
     Ok(resolved)
+}
+
+fn normalize_absolute(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized.is_absolute().then_some(normalized)
 }
 
 /// Read through directory handles after authorization. Every path component is
@@ -196,8 +211,8 @@ fn map_authorization_failure(failure: PathAuthorizationFailure, requested_path: 
         PathAuthorizationFailure::ManagedState => {
             ToolError::PathInsideManagedState(requested_path.to_string())
         }
-        PathAuthorizationFailure::SensitiveWorkspacePath => {
-            ToolError::SensitiveWorkspacePath(requested_path.to_string())
+        PathAuthorizationFailure::SensitivePath => {
+            ToolError::SensitivePath(requested_path.to_string())
         }
         PathAuthorizationFailure::ProtectedWorkspaceMetadata => {
             ToolError::ProtectedWorkspaceMetadata(requested_path.to_string())

@@ -16,7 +16,25 @@ use std::path::Path;
 use std::path::PathBuf;
 
 const PROTECTED_WORKSPACE_METADATA: [&str; 3] = [".git", ".agents", ".codex"];
-const SENSITIVE_WORKSPACE_FILES: [&str; 3] = [".git-credentials", ".npmrc", ".pypirc"];
+const SENSITIVE_PATH_NAMES: [&str; 7] = [
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "application_default_credentials.json",
+    "credentials",
+    "credentials.json",
+];
+const USER_CREDENTIAL_PATHS: [&str; 8] = [
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".config/gcloud",
+    ".config/gh",
+];
 
 /// Stable user-facing choices. These values order Workflow ceilings, but all
 /// enforcement consumes [`AuthorizationContext`] instead of this preset.
@@ -89,9 +107,11 @@ pub struct FilesystemAuthorization {
     /// Root-relative metadata directories that remain read-only below full
     /// access, matching Codex workspace-write defaults.
     pub read_only_workspace_metadata: Vec<String>,
-    /// Credential-bearing filenames denied for reads and writes below full
-    /// access. `.env` and `.env.*` are matched separately as a family.
-    pub sensitive_workspace_files: Vec<String>,
+    /// Credential-bearing path-component names denied below full access.
+    /// `.env` and `.env.*` are matched separately as a family.
+    pub sensitive_path_names: Vec<String>,
+    /// Absolute user credential roots denied below full access.
+    pub sensitive_roots: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -161,7 +181,7 @@ pub enum PathAuthorizationFailure {
     OutsideWorkspace,
     ReadDenied,
     WriteDenied,
-    SensitiveWorkspacePath,
+    SensitivePath,
     ProtectedWorkspaceMetadata,
 }
 
@@ -189,19 +209,19 @@ impl AuthorizationContext {
                 NetworkCapabilities::default(),
             ),
             AccessPreset::ReadOnly => (
-                FilesystemScope::Workspace,
+                FilesystemScope::Host,
                 FilesystemScope::None,
                 preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::Workspace => (
-                FilesystemScope::Workspace,
+                FilesystemScope::Host,
                 FilesystemScope::Workspace,
                 preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::Research => (
-                FilesystemScope::Workspace,
+                FilesystemScope::Host,
                 FilesystemScope::Workspace,
                 preset.tool_capabilities(),
                 NetworkCapabilities {
@@ -234,10 +254,15 @@ impl AuthorizationContext {
                     .into_iter()
                     .map(str::to_string)
                     .collect(),
-                sensitive_workspace_files: SENSITIVE_WORKSPACE_FILES
+                sensitive_path_names: SENSITIVE_PATH_NAMES
                     .into_iter()
                     .map(str::to_string)
                     .collect(),
+                sensitive_roots: if preset == AccessPreset::FullAccess {
+                    Vec::new()
+                } else {
+                    user_credential_roots()
+                },
             },
             tools,
             network,
@@ -286,16 +311,27 @@ impl AuthorizationContext {
                     PathOperation::Write => PathAuthorizationFailure::WriteDenied,
                 });
             }
-            FilesystemScope::Host => return Ok(()),
-            FilesystemScope::Workspace => {}
+            FilesystemScope::Host | FilesystemScope::Workspace => {}
         }
 
+        if self.preset != AccessPreset::FullAccess
+            && (is_sensitive_path(&candidate, &self.filesystem.sensitive_path_names)
+                || self
+                    .filesystem
+                    .sensitive_roots
+                    .iter()
+                    .map(Path::new)
+                    .any(|root| candidate.starts_with(root)))
+        {
+            return Err(PathAuthorizationFailure::SensitivePath);
+        }
+
+        if scope == FilesystemScope::Host {
+            return Ok(());
+        }
         let relative = candidate
             .strip_prefix(&self.workspace_root)
             .map_err(|_| PathAuthorizationFailure::OutsideWorkspace)?;
-        if is_sensitive_workspace_path(relative, &self.filesystem.sensitive_workspace_files) {
-            return Err(PathAuthorizationFailure::SensitiveWorkspacePath);
-        }
         if operation == PathOperation::Write
             && first_normal_component(relative).is_some_and(|component| {
                 self.filesystem
@@ -388,7 +424,7 @@ fn first_normal_component(path: &Path) -> Option<&str> {
     })
 }
 
-fn is_sensitive_workspace_path(path: &Path, exact_names: &[String]) -> bool {
+fn is_sensitive_path(path: &Path, exact_names: &[String]) -> bool {
     path.components().any(|component| {
         let Component::Normal(value) = component else {
             return false;
@@ -400,6 +436,19 @@ fn is_sensitive_workspace_path(path: &Path, exact_names: &[String]) -> bool {
             || name.starts_with(".env.")
             || exact_names.iter().any(|candidate| candidate == name)
     })
+}
+
+fn user_credential_roots() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    if !home.is_absolute() {
+        return Vec::new();
+    }
+    USER_CREDENTIAL_PATHS
+        .into_iter()
+        .map(|relative| home.join(relative).to_string_lossy().into_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -428,7 +477,7 @@ mod tests {
                 Path::new("/workspace/config/.env.local"),
                 PathOperation::Read
             ),
-            Err(PathAuthorizationFailure::SensitiveWorkspacePath)
+            Err(PathAuthorizationFailure::SensitivePath)
         );
         assert_eq!(
             policy.authorize_path(
@@ -438,7 +487,15 @@ mod tests {
             Err(PathAuthorizationFailure::ManagedState)
         );
         assert_eq!(
-            policy.authorize_path(Path::new("/outside/secret"), PathOperation::Read),
+            policy.authorize_path(Path::new("/outside/ordinary"), PathOperation::Read),
+            Ok(())
+        );
+        assert_eq!(
+            policy.authorize_path(Path::new("/outside/.env.local"), PathOperation::Read),
+            Err(PathAuthorizationFailure::SensitivePath)
+        );
+        assert_eq!(
+            policy.authorize_path(Path::new("/outside/file"), PathOperation::Write),
             Err(PathAuthorizationFailure::OutsideWorkspace)
         );
         assert_eq!(
@@ -452,6 +509,10 @@ mod tests {
         let policy = policy(AccessPreset::FullAccess);
         assert_eq!(
             policy.authorize_path(Path::new("/outside/secret"), PathOperation::Write),
+            Ok(())
+        );
+        assert_eq!(
+            policy.authorize_path(Path::new("/outside/.env"), PathOperation::Read),
             Ok(())
         );
         assert_eq!(

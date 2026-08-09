@@ -93,8 +93,7 @@ export interface Turn {
   origin: TurnOrigin
   input: string
   output: string | null
-  model: string
-  reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  model_route: ModelRouteSnapshot
   prompt: PromptSnapshot
   environment: TurnEnvironmentSnapshot
   tool_set: ToolSetSnapshot
@@ -109,6 +108,18 @@ export interface Turn {
   error: string | null
   created_at: string
   updated_at: string
+}
+
+export interface ModelRouteSnapshot {
+  profile: string
+  provider: string
+  upstream_model: string
+  context_window: number
+  capabilities: {
+    hosted_web_search: boolean
+  }
+  reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  config_sha256: string
 }
 
 export interface TurnEnvironmentSnapshot {
@@ -449,6 +460,8 @@ export interface ModelProfile {
   model: string
   context_window: number
   capabilities: string[]
+  default_reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  config_sha256: string
 }
 
 export interface ModelProvider {

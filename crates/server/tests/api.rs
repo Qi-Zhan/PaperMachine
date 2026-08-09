@@ -307,6 +307,27 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
     assert!(!managed.exists());
 }
 
+#[tokio::test]
+async fn project_removal_unloads_an_initialized_runtime_before_retiring_state() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let project = create_project(&app, directory.path(), "Loaded runtime removal").await;
+    let managed = directory
+        .path()
+        .join("app-data/projects")
+        .join(project.id.to_string());
+
+    let removed = app
+        .oneshot(empty_request(
+            "DELETE",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project removal should complete");
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(!managed.exists());
+}
+
 fn copy_directory(source: &Path, destination: &Path) {
     std::fs::create_dir_all(destination).expect("destination should be created");
     for entry in std::fs::read_dir(source).expect("source directory should be readable") {
@@ -369,6 +390,8 @@ async fn test_app_with_model_profiles(
             model: "research-upstream".to_string(),
             context_window: 128_000,
             capabilities: Vec::new(),
+            default_reasoning_effort: None,
+            config_sha256: String::new(),
         },
         ModelProfile {
             id: "review-model".to_string(),
@@ -376,6 +399,8 @@ async fn test_app_with_model_profiles(
             model: "review-upstream".to_string(),
             context_window: 128_000,
             capabilities: Vec::new(),
+            default_reasoning_effort: None,
+            config_sha256: String::new(),
         },
     ];
     let providers = HashMap::from([(
@@ -1230,6 +1255,28 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
             other => panic!("unexpected Agent class {other:?}"),
         };
         assert_eq!(session["model"], expected);
+        let session_id = session_id
+            .as_str()
+            .expect("participant Session id should be a string");
+        let session_view = app
+            .clone()
+            .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+            .await
+            .expect("participant Session should load");
+        let session_view = response_json(session_view).await;
+        let route = &session_view["turns"][0]["model_route"];
+        assert_eq!(route["profile"], expected);
+        assert_eq!(route["provider"], "scripted");
+        assert_eq!(
+            route["upstream_model"],
+            if expected == "research-model" {
+                "research-upstream"
+            } else {
+                "review-upstream"
+            }
+        );
+        assert_eq!(route["context_window"], 128_000);
+        assert_eq!(route["config_sha256"].as_str().map(str::len), Some(64));
     }
 
     let upstream_models = scripted

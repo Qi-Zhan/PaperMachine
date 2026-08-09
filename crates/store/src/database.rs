@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -587,9 +587,8 @@ impl Store {
         session_id: SessionId,
         origin: TurnOrigin,
         input: impl Into<String>,
-        model: impl Into<String>,
+        model_route: ModelRouteSnapshot,
         prompt: PromptSnapshot,
-        reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
         expected_access: AccessPreset,
         tool_set: papermachine_protocol::ToolSetSnapshot,
@@ -602,9 +601,8 @@ impl Store {
             session_id,
             origin,
             input,
-            model,
+            model_route,
             prompt,
-            reasoning_effort,
             tools_enabled,
             expected_access,
             tool_set,
@@ -621,9 +619,8 @@ impl Store {
         session_id: SessionId,
         origin: TurnOrigin,
         input: impl Into<String>,
-        model: impl Into<String>,
+        model_route: ModelRouteSnapshot,
         prompt: PromptSnapshot,
-        reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
         expected_access: AccessPreset,
         tool_set: papermachine_protocol::ToolSetSnapshot,
@@ -642,6 +639,7 @@ impl Store {
             ));
         }
         tool_set.validate().map_err(StoreError::Invariant)?;
+        model_route.validate().map_err(StoreError::Invariant)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
                 "cannot add a Turn to an archived Session".to_string(),
@@ -696,8 +694,7 @@ impl Store {
             origin,
             input,
             output: None,
-            model: model.into(),
-            reasoning_effort,
+            model_route,
             prompt,
             environment,
             tool_set,

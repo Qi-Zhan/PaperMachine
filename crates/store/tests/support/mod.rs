@@ -1,5 +1,7 @@
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocation;
+use papermachine_protocol::ModelRouteCapabilities;
+use papermachine_protocol::ModelRouteSnapshot;
 use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::Session;
 use papermachine_protocol::ToolSetSnapshot;
@@ -100,9 +102,8 @@ impl ActionHarness {
             self.participant.session_id,
             origin,
             input,
-            "test-model",
+            model_route("test-model"),
             PromptSnapshot::default(),
-            None,
             true,
             expected_access,
             ToolSetSnapshot::materialize(Vec::new()).map_err(StoreError::Invariant)?,
@@ -111,6 +112,18 @@ impl ActionHarness {
             Vec::new(),
         )?;
         Ok(ActionTurn { invocation, turn })
+    }
+}
+
+pub fn model_route(profile: &str) -> ModelRouteSnapshot {
+    ModelRouteSnapshot {
+        profile: profile.to_string(),
+        provider: "test".to_string(),
+        upstream_model: profile.to_string(),
+        context_window: 128_000,
+        capabilities: ModelRouteCapabilities::default(),
+        reasoning_effort: None,
+        config_sha256: "0".repeat(64),
     }
 }
 

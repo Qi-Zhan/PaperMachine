@@ -10,6 +10,7 @@ use papermachine_agent::AgentEventSink;
 use papermachine_agent::AgentRuntime;
 use papermachine_agent::AgentTurnRequest;
 use papermachine_model::ModelClient;
+use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::ContextReplacementReason;
@@ -256,14 +257,18 @@ impl SessionRuntime {
             session.access,
             tools_enabled,
         )?;
+        let model_route = self.inner.model.resolve_route_snapshot(
+            &model,
+            reasoning_effort,
+            self.inner.model_context_window,
+        )?;
         Ok(self.inner.store.create_turn_for_attempt(
             action_attempt_id,
             session_id,
             origin,
             input,
-            model,
+            model_route,
             prompt,
-            reasoning_effort,
             tools_enabled,
             session.access,
             tool_set,
@@ -334,6 +339,9 @@ async fn run_scheduled_turn_inner(
     };
     let turn = inner.store.start_turn(turn_id)?;
     verify_prompt_snapshot(&turn.prompt)?;
+    inner
+        .model
+        .validate_route_snapshot(&turn.model_route, inner.model_context_window)?;
     let tools = inner.tools.registry_for_snapshot(&turn.tool_set)?;
     let session = inner.store.get_session(turn.session_id)?;
     let rollout = inner.store.reconstruct_session_rollout(session.id)?;
@@ -405,7 +413,7 @@ async fn run_scheduled_turn_inner(
             .join("runtime/sandboxes")
             .join(session.id.to_string())
             .join(turn.id.to_string()),
-        turn.model.clone(),
+        turn.model_route.profile.clone(),
         turn.prompt.rendered.clone(),
         turn.input.clone(),
     );
@@ -418,14 +426,12 @@ async fn run_scheduled_turn_inner(
     request.hosted_search_calls_used = active_rollout.hosted_search_calls_used;
     request.resume_current_turn = resume_current_turn;
     request.checkpoint_message = active_rollout.checkpoint_message;
-    request.reasoning_effort = turn.reasoning_effort;
+    request.reasoning_effort = turn.model_route.reasoning_effort;
     request.tools_enabled = turn.tools_enabled;
     request.web_search_context_size = turn.web_search_context_size;
     request.response_format = turn.response_format;
-    request.model_context_window = inner
-        .model
-        .model_context_window(&turn.model)
-        .unwrap_or(inner.model_context_window);
+    request.model_context_window = turn.model_route.context_window;
+    request.hosted_web_search_supported = turn.model_route.capabilities.hosted_web_search;
     match runtime.run(request, cancellation).await {
         Ok(result) => {
             papermachine_store::process_fault::reach_process_fault_boundary(
@@ -1218,6 +1224,8 @@ impl SessionAgentEventSink {
 pub enum SessionRuntimeError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Model(#[from] ModelError),
     #[error(transparent)]
     Agent(#[from] AgentError),
     #[error(transparent)]

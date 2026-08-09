@@ -390,13 +390,51 @@ async fn write_then_read_stays_in_workspace() {
 }
 
 #[tokio::test]
-async fn parent_path_escape_is_rejected() {
+async fn relative_paths_resolve_from_the_workspace_cwd() {
     let directory = tempdir().expect("temporary directory should be created");
-    let error = ReadFileTool
-        .execute(context(directory.path()), json!({"path": "../secret"}))
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    std::fs::write(directory.path().join("host-note.txt"), "host note")
+        .expect("host fixture should be written");
+    let output = ReadFileTool
+        .execute(context(&workspace), json!({"path": "../host-note.txt"}))
         .await
-        .expect_err("escape should fail");
-    assert!(matches!(error, ToolError::PathOutsideWorkspace(_)));
+        .expect("relative host read should be resolved from the Workspace cwd");
+    assert_eq!(output.value["content"], "host note");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn research_can_read_host_files_but_not_host_credentials() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    let ordinary = directory.path().join("ordinary.txt");
+    let credential = directory.path().join(".env.local");
+    std::fs::write(&ordinary, "ordinary host data").expect("host fixture should be written");
+    std::fs::write(&credential, "API_KEY=private").expect("credential fixture should be written");
+    let access = context_with_access(&workspace, AccessPreset::Research);
+
+    let hosts = ReadFileTool
+        .execute(access.clone(), json!({"path": "/etc/hosts"}))
+        .await
+        .expect("research should read a normal host file");
+    assert!(
+        !hosts.value["content"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    let ordinary = ReadFileTool
+        .execute(access.clone(), json!({"path": ordinary}))
+        .await
+        .expect("research should read a host file outside the Workspace");
+    assert_eq!(ordinary.value["content"], "ordinary host data");
+    let error = ReadFileTool
+        .execute(access, json!({"path": credential}))
+        .await
+        .expect_err("research must not read host credentials");
+    assert!(matches!(error, ToolError::SensitivePath(_)));
 }
 
 #[tokio::test]
@@ -422,7 +460,7 @@ async fn workspace_presets_cannot_read_credentials_or_write_protected_metadata()
         .await
         .expect_err("workspace preset must not mutate protected metadata");
 
-    assert!(matches!(read_error, ToolError::SensitiveWorkspacePath(_)));
+    assert!(matches!(read_error, ToolError::SensitivePath(_)));
     assert!(matches!(
         write_error,
         ToolError::ProtectedWorkspaceMetadata(_)
@@ -461,23 +499,29 @@ async fn command_heredoc_uses_the_session_temp_directory() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn command_cannot_read_or_write_outside_its_workspace() {
+async fn command_can_read_the_host_but_cannot_write_outside_its_workspace() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should be created");
     let secret = directory.path().join("host-secret.txt");
-    std::fs::write(&secret, "must-not-leak").expect("probe secret should be written");
+    std::fs::write(&secret, "ordinary host data").expect("probe file should be written");
+    let credential = directory.path().join(".env.host");
+    std::fs::write(&credential, "API_KEY=private").expect("credential should be written");
     let outside_write = directory.path().join("escaped.txt");
     let command = format!(
-        "if /bin/cat '{}' >/dev/null 2>&1; then printf read-leaked; else printf read-denied; fi; if printf escaped >'{}' 2>/dev/null; then printf write-leaked; else printf write-denied; fi",
+        "if /bin/cat /etc/hosts '{}' >/dev/null 2>&1; then printf host-read; else printf host-denied; fi; if /bin/cat '{}' >/dev/null 2>&1; then printf credential-read; else printf credential-denied; fi; if printf escaped >'{}' 2>/dev/null; then printf write-leaked; else printf write-denied; fi",
         secret.display(),
+        credential.display(),
         outside_write.display(),
     );
     let output = ExecCommandTool
         .execute(context(&workspace), json!({"command": command}))
         .await
         .expect("sandboxed command should run");
-    assert_eq!(output.value["stdout"], "read-deniedwrite-denied");
+    assert_eq!(
+        output.value["stdout"],
+        "host-readcredential-deniedwrite-denied"
+    );
     assert!(!outside_write.exists());
 }
 

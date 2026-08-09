@@ -80,6 +80,7 @@ pub struct AgentTurnRequest {
     pub resume_current_turn: bool,
     pub checkpoint_message: Option<String>,
     pub hosted_tools: Vec<HostedTool>,
+    pub hosted_web_search_supported: bool,
     pub web_search_context_size: Option<WebSearchContextSize>,
     pub tools_enabled: bool,
     pub response_format: Option<ModelResponseFormat>,
@@ -118,6 +119,7 @@ impl AgentTurnRequest {
             resume_current_turn: false,
             checkpoint_message: None,
             hosted_tools: vec![HostedTool::WebSearch],
+            hosted_web_search_supported: false,
             web_search_context_size: None,
             tools_enabled: true,
             response_format: None,
@@ -369,13 +371,9 @@ impl AgentRuntime {
         };
         let hosted_tools = if request.tools_enabled
             && request.environment.authorization.network.hosted_web_search
+            && request.hosted_web_search_supported
         {
-            request
-                .hosted_tools
-                .iter()
-                .copied()
-                .filter(|tool| self.model.supports_hosted_tool(&request.model, *tool))
-                .collect()
+            request.hosted_tools.clone()
         } else {
             Vec::new()
         };

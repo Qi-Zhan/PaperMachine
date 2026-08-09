@@ -38,6 +38,7 @@ use tempfile::tempdir;
 
 mod support;
 use support::ActionHarness;
+use support::model_route;
 
 fn empty_tool_set() -> ToolSetSnapshot {
     ToolSetSnapshot::materialize(Vec::new()).expect("empty tool set should be valid")
@@ -846,9 +847,8 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
             participant.session_id,
             papermachine_protocol::TurnOrigin::Workflow,
             "Research",
-            "test-model",
+            model_route("test-model"),
             papermachine_protocol::PromptSnapshot::default(),
-            None,
             true,
             AccessPreset::Research,
             empty_tool_set(),
@@ -1127,9 +1127,8 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
             participant.session_id,
             papermachine_protocol::TurnOrigin::User,
             "Inspect the cache.",
-            "test-model",
+            model_route("test-model"),
             papermachine_protocol::PromptSnapshot::default(),
-            None,
             true,
             AccessPreset::Research,
             empty_tool_set(),
@@ -1164,9 +1163,8 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
                 participant.session_id,
                 papermachine_protocol::TurnOrigin::User,
                 "A different message",
-                "test-model",
+                model_route("test-model"),
                 papermachine_protocol::PromptSnapshot::default(),
-                None,
                 true,
                 AccessPreset::Research,
                 empty_tool_set(),

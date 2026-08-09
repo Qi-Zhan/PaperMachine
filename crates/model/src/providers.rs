@@ -7,11 +7,15 @@ use crate::OpenAiPromptCacheMode;
 use crate::OpenAiReasoningEffort;
 use crate::OpenAiResponsesClient;
 use crate::OpenAiResponsesConfig;
+use crate::hash_route_config;
 use async_trait::async_trait;
 use futures::StreamExt;
 use papermachine_protocol::HostedTool;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelRequest;
+use papermachine_protocol::ModelRouteCapabilities;
+use papermachine_protocol::ModelRouteSnapshot;
+use papermachine_protocol::ReasoningEffort;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,6 +33,8 @@ pub struct ModelProfile {
     pub model: String,
     pub context_window: usize,
     pub capabilities: Vec<ModelCapability>,
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub config_sha256: String,
 }
 
 impl ModelProfile {
@@ -124,6 +130,8 @@ impl ConfiguredModels {
         let mut clients: HashMap<String, Arc<dyn ModelClient>> = HashMap::new();
         let mut providers = Vec::with_capacity(provider_configs.len());
         let mut unavailable_providers = HashSet::new();
+        let mut provider_config_sha256 = HashMap::new();
+        let mut provider_reasoning_effort = HashMap::new();
         for (provider_id, provider) in provider_configs {
             validate_identifier("provider", &provider_id)?;
             if provider.kind != ProviderKind::OpenAiResponses {
@@ -176,6 +184,25 @@ impl ConfiguredModels {
             )?;
             let prompt_cache_mode = provider.prompt_cache_mode.unwrap_or_default();
             let responses_websockets = provider.responses_websockets.unwrap_or(true);
+            let max_request_retries = provider.max_request_retries.unwrap_or(2);
+            let store_responses = provider.store_responses.unwrap_or(false);
+            let default_reasoning_effort = provider.reasoning_effort.map(protocol_reasoning_effort);
+            let provider_sha256 = hash_route_config(&serde_json::json!({
+                "provider": provider_id,
+                "kind": "openai_responses",
+                "endpoint": endpoint.to_string(),
+                "api_key_env": provider.api_key_env,
+                "optional": provider.optional,
+                "organization": provider.organization,
+                "project": provider.project,
+                "max_request_retries": max_request_retries,
+                "request_timeout_seconds": request_timeout.as_secs(),
+                "stream_idle_timeout_seconds": stream_idle_timeout.as_secs(),
+                "reasoning_effort": default_reasoning_effort,
+                "store_responses": store_responses,
+                "responses_websockets": responses_websockets,
+                "prompt_cache_mode": prompt_cache_mode_name(prompt_cache_mode),
+            }))?;
             let hosted_web_search = model_configs.values().any(|profile| {
                 profile.provider == provider_id
                     && profile
@@ -186,13 +213,13 @@ impl ConfiguredModels {
                 provider_id: provider_id.clone(),
                 endpoint: endpoint.clone(),
                 api_key,
-                organization: provider.organization,
-                project: provider.project,
-                max_request_retries: provider.max_request_retries.unwrap_or(2),
+                organization: provider.organization.clone(),
+                project: provider.project.clone(),
+                max_request_retries,
                 request_timeout,
                 stream_idle_timeout,
                 reasoning_effort: provider.reasoning_effort,
-                store_responses: provider.store_responses.unwrap_or(false),
+                store_responses,
                 responses_websockets,
                 hosted_web_search,
                 prompt_cache_mode,
@@ -201,12 +228,14 @@ impl ConfiguredModels {
                 id: provider_id.clone(),
                 kind: "openai_responses".to_string(),
                 endpoint: endpoint.to_string(),
-                max_request_retries: provider.max_request_retries.unwrap_or(2),
+                max_request_retries,
                 request_timeout_seconds: request_timeout.as_secs(),
                 stream_idle_timeout_seconds: stream_idle_timeout.as_secs(),
                 responses_websockets,
                 prompt_cache_mode: prompt_cache_mode_name(prompt_cache_mode).to_string(),
             });
+            provider_config_sha256.insert(provider_id.clone(), provider_sha256);
+            provider_reasoning_effort.insert(provider_id.clone(), default_reasoning_effort);
             clients.insert(provider_id, Arc::new(client));
         }
 
@@ -250,12 +279,27 @@ impl ConfiguredModels {
                     profile.provider
                 )));
             }
+            let default_reasoning_effort = provider_reasoning_effort
+                .get(&profile.provider)
+                .copied()
+                .flatten();
+            let config_sha256 = hash_route_config(&serde_json::json!({
+                "profile": profile_id,
+                "provider": profile.provider,
+                "upstream_model": profile.model,
+                "context_window": profile.context_window,
+                "capabilities": profile.capabilities,
+                "default_reasoning_effort": default_reasoning_effort,
+                "provider_config_sha256": provider_config_sha256.get(&profile.provider),
+            }))?;
             profiles.push(ModelProfile {
                 id: profile_id,
                 provider: profile.provider,
                 model: profile.model,
                 context_window: profile.context_window,
                 capabilities: profile.capabilities,
+                default_reasoning_effort,
+                config_sha256,
             });
         }
         profiles.sort_by(|left, right| left.id.cmp(&right.id));
@@ -303,7 +347,17 @@ impl ModelRouter {
         providers: HashMap<String, Arc<dyn ModelClient>>,
     ) -> Result<Self, ModelError> {
         let mut routes = HashMap::with_capacity(profiles.len());
-        for profile in profiles {
+        for mut profile in profiles {
+            if profile.config_sha256.is_empty() {
+                profile.config_sha256 = hash_route_config(&serde_json::json!({
+                    "profile": profile.id,
+                    "provider": profile.provider,
+                    "upstream_model": profile.model,
+                    "context_window": profile.context_window,
+                    "capabilities": profile.capabilities,
+                    "default_reasoning_effort": profile.default_reasoning_effort,
+                }))?;
+            }
             let client = providers.get(&profile.provider).cloned().ok_or_else(|| {
                 ModelError::Configuration(format!(
                     "model profile {:?} references unknown provider {:?}",
@@ -377,6 +431,58 @@ impl ModelClient for ModelRouter {
                     .client
                     .supports_hosted_tool(&route.profile.model, tool)
         })
+    }
+
+    fn resolve_route_snapshot(
+        &self,
+        profile: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+        _fallback_context_window: usize,
+    ) -> Result<ModelRouteSnapshot, ModelError> {
+        let route = self.routes.get(profile).ok_or_else(|| {
+            let mut available = self.routes.keys().cloned().collect::<Vec<_>>();
+            available.sort();
+            ModelError::Configuration(format!(
+                "unknown model profile {profile:?}; configured profiles: {}",
+                available.join(", ")
+            ))
+        })?;
+        let snapshot = ModelRouteSnapshot {
+            profile: route.profile.id.clone(),
+            provider: route.profile.provider.clone(),
+            upstream_model: route.profile.model.clone(),
+            context_window: route.profile.context_window,
+            capabilities: ModelRouteCapabilities {
+                hosted_web_search: route.profile.supports(ModelCapability::HostedWebSearch)
+                    && route
+                        .client
+                        .supports_hosted_tool(&route.profile.model, HostedTool::WebSearch),
+            },
+            reasoning_effort: reasoning_effort.or(route.profile.default_reasoning_effort),
+            config_sha256: route.profile.config_sha256.clone(),
+        };
+        snapshot.validate().map_err(ModelError::Configuration)?;
+        Ok(snapshot)
+    }
+
+    fn validate_route_snapshot(
+        &self,
+        snapshot: &ModelRouteSnapshot,
+        fallback_context_window: usize,
+    ) -> Result<(), ModelError> {
+        snapshot.validate().map_err(ModelError::Configuration)?;
+        let current = self.resolve_route_snapshot(
+            &snapshot.profile,
+            snapshot.reasoning_effort,
+            fallback_context_window,
+        )?;
+        if current != *snapshot {
+            return Err(ModelError::Configuration(format!(
+                "model route configuration changed for profile {:?}",
+                snapshot.profile
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -458,6 +564,17 @@ const fn prompt_cache_mode_name(mode: OpenAiPromptCacheMode) -> &'static str {
     }
 }
 
+const fn protocol_reasoning_effort(value: OpenAiReasoningEffort) -> ReasoningEffort {
+    match value {
+        OpenAiReasoningEffort::None => ReasoningEffort::None,
+        OpenAiReasoningEffort::Low => ReasoningEffort::Low,
+        OpenAiReasoningEffort::Medium => ReasoningEffort::Medium,
+        OpenAiReasoningEffort::High => ReasoningEffort::High,
+        OpenAiReasoningEffort::Xhigh => ReasoningEffort::Xhigh,
+        OpenAiReasoningEffort::Max => ReasoningEffort::Max,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +626,7 @@ base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 responses_websockets = false
 prompt_cache_mode = "implicit"
+reasoning_effort = "medium"
 
 [providers.openai]
 kind = "open_ai_responses"
@@ -576,6 +694,36 @@ capabilities = []
         );
         let debug = format!("{configured:?}");
         assert!(!debug.contains("secret-for"));
+        let route = configured
+            .router
+            .resolve_route_snapshot("deepseek-flash", None, 128_000)
+            .expect("route should resolve");
+        assert_eq!(route.provider, "deepseek");
+        assert_eq!(route.upstream_model, "deepseek-v4-flash");
+        assert_eq!(route.context_window, 1_000_000);
+        assert_eq!(route.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert!(route.capabilities.hosted_web_search);
+        configured
+            .router
+            .validate_route_snapshot(&route, 128_000)
+            .expect("unchanged route should validate");
+        let independently_loaded = ConfiguredModels::from_toml_with_key_lookup(source, |name| {
+            Some(format!("different-secret-for-{name}"))
+        })
+        .expect("provider config should reload with a different key");
+        let reloaded_route = independently_loaded
+            .router
+            .resolve_route_snapshot("deepseek-flash", None, 128_000)
+            .expect("reloaded route should resolve");
+        assert_eq!(route.config_sha256, reloaded_route.config_sha256);
+        let mut drifted = route;
+        drifted.context_window -= 1;
+        assert!(
+            configured
+                .router
+                .validate_route_snapshot(&drifted, 128_000)
+                .is_err()
+        );
     }
 
     #[test]
@@ -687,6 +835,8 @@ context_window = 1000000
                 model: "deepseek-v4-flash".to_string(),
                 context_window: 1_000_000,
                 capabilities: vec![ModelCapability::HostedWebSearch],
+                default_reasoning_effort: None,
+                config_sha256: String::new(),
             }],
             providers,
         )
