@@ -1,20 +1,38 @@
-from papermachine import Agent, action, publish_artifact, wait, workflow
+from papermachine import Agent, action, publish_project_home, wait, workflow
 
 
 class ProjectSummaryAgent(Agent):
     access = "model_only"
     role = "project progress curator"
-    system_prompt = """Build an honest, useful project progress page from the supplied PaperMachine snapshot. Treat Session Turns, Workflow outputs, and Artifact metadata as evidence. Separate completed findings, work in progress, unresolved questions, and recommended next actions. Preserve important uncertainty and failures instead of smoothing them over. Use the Project's working language. Never claim access to material absent from the snapshot."""
+    system_prompt = """You maintain the Project home page.
 
-    @action
-    async def render_progress_page(self, snapshot: dict):
-        """Return one complete, self-contained HTML document for the Project overview. Use semantic HTML and an inline <style>; do not use scripts, external assets, remote fonts, Markdown fences, or invented citations. Include a compact headline/status area, current conclusions with their Session or Workflow provenance, active work, blockers/open questions, and concrete next actions. The page is embedded in a sandboxed iframe, so make it responsive and readable on white or light neutral backgrounds."""
+Inspect the current Project, its evidence, and the existing home page. Update the page so that it is an accurate and useful map of the Project now.
+
+Use the available Project-home tools to edit the page incrementally. Inspect the actual materialized result after editing, verify important claims against Project evidence, and fix any problems you find. You may make as many editing and inspection passes as needed.
+
+Prioritize the Project's objective, current state, verified conclusions, important evidence and deliverables, unresolved contradictions, blockers, and concrete next actions. Remove stale, duplicated, unsupported, or operational detail.
+
+Do not organize the page around Agents, Sessions, Workflows, Runs, or Artifacts. They may be referenced only when they provide useful evidence or provenance.
+
+Clearly distinguish verified, tentative, contradicted, blocked, and unknown claims. Never invent evidence, results, decisions, or completion. Work in the Project's language.
+
+Finish only when the preview is accurate, coherent, useful, and supported by the available Project evidence."""
+
+    @action(
+        tools=[
+            "read_project_home",
+            "patch_project_home",
+            "preview_project_home",
+        ]
+    )
+    async def maintain_project_home(self, project_changes: dict):
+        """Maintain the Project home page using the supplied Project snapshot or delta. First read the existing page. Use stable block IDs and patch only what should change; absence from a delta does not invalidate earlier content. Preview the complete materialized page, inspect it for missing or unsupported claims, duplication, stale conclusions, confusing hierarchy, and malformed or empty sections, and keep editing until the result is sound. Do not return page markup in your final message; the page must be created through the tools."""
 
 
 @workflow(
     slug="project-summary",
     name="Project summary",
-    description="Generate the Project Page progress report once or refresh it on a durable timer. Optional Run instructions are the user's summary policy.",
+    description="Generate or periodically refresh the Project home page.",
     params_schema={
         "type": "object",
         "properties": {
@@ -23,7 +41,7 @@ class ProjectSummaryAgent(Agent):
                 "title": "Refresh interval (minutes)",
                 "minimum": 0,
                 "default": 60,
-                "description": "Use 0 for one refresh; a positive value keeps this Workflow scheduled.",
+                "description": "Use 0 for a one-time update.",
             },
             "max_sessions": {
                 "type": "integer",
@@ -85,23 +103,19 @@ async def main(ctx):
                 policy="coalesce",
             )
             continue
-        html = _normalize_html(await summarizer.render_progress_page(snapshot))
-        refresh_count += 1
-        artifact = await publish_artifact(
-            "project-progress.html",
-            html,
-            kind="report",
-            media_type="text/html; charset=utf-8",
+        await summarizer.maintain_project_home(snapshot)
+        next_refresh_count = refresh_count + 1
+        artifact = await publish_project_home(
+            agent=summarizer,
             metadata={
-                "role": "project_summary",
                 "captured_at": snapshot["captured_at"],
                 "snapshot_mode": snapshot["mode"],
                 "updated_after": snapshot["updated_after"],
-                "refresh_count": refresh_count,
+                "refresh_count": next_refresh_count,
                 "scheduled": interval_minutes > 0,
             },
-            agent=summarizer,
         )
+        refresh_count = next_refresh_count
         artifact_id = artifact.id
         snapshot_cursor = next_cursor
         if interval_minutes <= 0:
@@ -115,24 +129,3 @@ async def main(ctx):
 
 def _has_project_changes(snapshot):
     return bool(snapshot["sessions"] or snapshot["workflows"] or snapshot["artifacts"])
-
-
-def _normalize_html(value):
-    text = str(value or "").strip()
-    if text.startswith("```") and text.endswith("```"):
-        text = text[3:-3].strip()
-        if text.lower().startswith("html"):
-            text = text[4:].lstrip()
-    lowered = text.lower()
-    if "<html" in lowered or "<!doctype html" in lowered:
-        return text
-    escaped = (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{{margin:0;padding:32px;color:#252b28;background:#f7f8f7;font:15px/1.65 system-ui,sans-serif}}article{{max-width:900px;margin:auto;padding:28px;background:white;border:1px solid #dfe3e1;border-radius:12px}}pre{{white-space:pre-wrap;font:inherit}}</style></head>
-<body><article><h1>Project progress</h1><pre>{escaped}</pre></article></body></html>"""

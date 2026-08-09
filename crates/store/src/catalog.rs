@@ -68,7 +68,6 @@ impl ProjectCatalog {
     pub fn create_project(
         &self,
         name: impl Into<String>,
-        description: impl Into<String>,
         workspace: impl AsRef<Path>,
     ) -> Result<CatalogProject, StoreError> {
         let _guard = self.mutation.lock().map_err(|_| StoreError::LockPoisoned)?;
@@ -91,8 +90,7 @@ impl ProjectCatalog {
         let mut published = false;
         let result = (|| {
             let store = Store::create(&staging)?;
-            let project =
-                store.create_project_with_id(project_id, name, description, workspace.as_path())?;
+            let project = store.create_project_with_id(project_id, name, workspace.as_path())?;
             drop(store);
             std::fs::rename(&staging, &destination)
                 .map_err(|error| StoreError::Io(error.to_string()))?;

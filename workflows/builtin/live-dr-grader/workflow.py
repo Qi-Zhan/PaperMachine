@@ -19,6 +19,7 @@ Return indices into the supplied arrays, never copy reference answers into expla
 
     @action(
         reasoning_effort="high",
+        tools=[],
     )
     async def judge(
         self,
@@ -229,7 +230,7 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
 @workflow(
     slug="live-dr-grader",
     name="LiveDRBench grader",
-    description="Blindly apply the upstream LiveDRBench semantic claim-matching rubric, then compute precision, recall, and F1 deterministically.",
+    description="Evaluate a report with the LiveDRBench claim-matching rubric and compute precision, recall, and F1.",
     params_schema={
         "type": "object",
         "properties": {
@@ -241,7 +242,6 @@ def _grade(category, ground_truth, prediction, eval_info, judgment):
                 "type": "string",
                 "format": "model-profile",
                 "title": "Grader model",
-                "description": "Optional model profile for the Judge; empty inherits the Run model.",
             },
         },
         "required": ["category", "ground_truth", "prediction", "eval_info"],

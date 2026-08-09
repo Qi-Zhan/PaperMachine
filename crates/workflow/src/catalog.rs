@@ -1,7 +1,9 @@
 use chrono::Utc;
 use hex::encode;
+use papermachine_protocol::DiagnosticSeverity;
 use papermachine_protocol::Project;
 use papermachine_protocol::ProjectId;
+use papermachine_protocol::WorkflowDiagnostic;
 use papermachine_protocol::WorkflowProgram;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
@@ -11,6 +13,7 @@ use papermachine_store::StoreError;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -48,6 +51,7 @@ pub struct WorkflowProgramCatalog {
     builtins_root: PathBuf,
     python_runtime_root: PathBuf,
     python: PathBuf,
+    known_tools: BTreeSet<String>,
     entries: BTreeMap<WorkflowKey, LoadedWorkflowProgram>,
 }
 
@@ -56,6 +60,7 @@ impl WorkflowProgramCatalog {
         workflows_root: impl AsRef<Path>,
         python_runtime_root: impl AsRef<Path>,
         store: &Store,
+        known_tools: impl IntoIterator<Item = String>,
     ) -> Result<Self, WorkflowProgramCatalogError> {
         let builtins_root = workflows_root.as_ref().join("builtin");
         let python_runtime_root = python_runtime_root.as_ref().to_path_buf();
@@ -70,6 +75,7 @@ impl WorkflowProgramCatalog {
             builtins_root,
             python_runtime_root,
             python,
+            known_tools: known_tools.into_iter().collect(),
             entries: BTreeMap::new(),
         };
         for path in workflow_files(&catalog.builtins_root)? {
@@ -122,7 +128,45 @@ impl WorkflowProgramCatalog {
         &self,
         source: &str,
     ) -> Result<WorkflowValidation, WorkflowProgramCatalogError> {
-        validate_with_python(&self.python, &self.python_runtime_root, source)
+        let mut validation = validate_with_python(&self.python, &self.python_runtime_root, source)?;
+        for agent in &validation.agents {
+            for action in &agent.actions {
+                let mut seen = BTreeSet::new();
+                for tool in &action.tools {
+                    let message = if tool.trim().is_empty() {
+                        Some(format!(
+                            "Action {}.{} declares an empty tool name",
+                            agent.class_name, action.name
+                        ))
+                    } else if !seen.insert(tool.as_str()) {
+                        Some(format!(
+                            "Action {}.{} declares duplicate tool {tool:?}",
+                            agent.class_name, action.name
+                        ))
+                    } else if !self.known_tools.contains(tool) {
+                        Some(format!(
+                            "Action {}.{} declares unknown tool {tool:?}",
+                            agent.class_name, action.name
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(message) = message {
+                        validation.diagnostics.push(WorkflowDiagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message,
+                            line: None,
+                            column: None,
+                        });
+                    }
+                }
+            }
+        }
+        validation.valid = !validation
+            .diagnostics
+            .iter()
+            .any(|item| item.severity == DiagnosticSeverity::Error);
+        Ok(validation)
     }
 
     pub fn save_user(

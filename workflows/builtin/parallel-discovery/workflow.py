@@ -9,6 +9,7 @@ class Researcher(Agent):
     @action(
         search_context_size="low",
         reasoning_effort="high",
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def investigate(
         self,
@@ -24,7 +25,7 @@ class ContextAnalyst(Agent):
     role = "prior Project context analyst"
     system_prompt = "Extract a compact, provenance-preserving set of relevant leads from prior Project work. Never turn an earlier conclusion into verified evidence and never include unrelated history."
 
-    @action(reasoning_effort="medium")
+    @action(reasoning_effort="medium", tools=[])
     async def distill(self, question: str, project_context: dict):
         """Return a compact brief covering relevant prior findings, source leads, contradictions, unresolved gaps, and work to avoid repeating for this question."""
 
@@ -34,7 +35,7 @@ class Synthesizer(Agent):
     role = "research synthesis"
     system_prompt = "Compare independent findings and keep conclusions bounded by the evidence."
 
-    @action(reasoning_effort="high")
+    @action(reasoning_effort="high", tools=[])
     async def synthesize(self, question: str, findings: list[str]):
         """Synthesize the findings into a concise answer. Identify agreements, conflicts, missing evidence, and the strongest defensible conclusion."""
 
@@ -42,7 +43,7 @@ class Synthesizer(Agent):
 @workflow(
     slug="parallel-discovery",
     name="Parallel discovery",
-    description="Run independent research Sessions concurrently, then synthesize their evidence in a dedicated Session.",
+    description="Investigate a request from independent directions, then combine the evidence.",
     params_schema={
         "type": "object",
         "properties": {
@@ -55,13 +56,11 @@ class Synthesizer(Agent):
                 "type": "string",
                 "format": "model-profile",
                 "title": "Research model",
-                "description": "Optional model profile for every Researcher; empty inherits the Run model.",
             },
             "synthesis_model": {
                 "type": "string",
                 "format": "model-profile",
                 "title": "Synthesis model",
-                "description": "Optional model profile for the Synthesizer; empty inherits the Run model.",
             },
         },
         "additionalProperties": False,

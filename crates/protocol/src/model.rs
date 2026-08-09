@@ -2,6 +2,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +42,57 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     #[serde(default)]
     pub supports_parallel: bool,
+}
+
+/// Exact local tool surface captured for one Turn.
+///
+/// Definitions are sorted by name before hashing so the same host-selected
+/// tool set has one stable identity across process recovery.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ToolSetSnapshot {
+    pub definitions: Vec<ToolDefinition>,
+    pub sha256: String,
+}
+
+impl ToolSetSnapshot {
+    pub fn materialize(mut definitions: Vec<ToolDefinition>) -> Result<Self, String> {
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut names = BTreeSet::new();
+        for definition in &definitions {
+            if definition.name.trim().is_empty() {
+                return Err("tool definition name must not be empty".to_string());
+            }
+            if !names.insert(definition.name.as_str()) {
+                return Err(format!("duplicate tool definition: {}", definition.name));
+            }
+        }
+        let sha256 = tool_definitions_sha256(&definitions)?;
+        Ok(Self {
+            definitions,
+            sha256,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let materialized = Self::materialize(self.definitions.clone())?;
+        if materialized.definitions != self.definitions || materialized.sha256 != self.sha256 {
+            return Err(
+                "Turn tool-set snapshot is not canonical or its hash is invalid".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+    }
+}
+
+fn tool_definitions_sha256(definitions: &[ToolDefinition]) -> Result<String, String> {
+    let bytes = serde_json::to_vec(definitions).map_err(|error| error.to_string())?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

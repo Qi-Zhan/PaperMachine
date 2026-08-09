@@ -107,7 +107,6 @@ impl WorkflowStatus {
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
-    pub description: String,
     /// User-owned filesystem attached to this managed Project. PaperMachine
     /// runtime state is stored separately and is never placed in these roots.
     pub workspace: WorkspaceAttachment,
@@ -300,6 +299,9 @@ pub struct ActionInvocation {
     /// data only when the program invokes this Action.
     pub contract: String,
     pub arguments: Value,
+    /// Local tools requested by this Action declaration. The Turn stores the
+    /// exact host-materialized subset after applying its access ceiling.
+    pub requested_tools: Vec<String>,
     /// Direct HumanRequest whose answered string became this Action Turn's
     /// user message. `None` means the Turn was dispatched as workflow work.
     pub source_human_request_id: Option<HumanRequestId>,

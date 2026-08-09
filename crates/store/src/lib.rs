@@ -5,6 +5,7 @@ mod catalog;
 mod database;
 #[doc(hidden)]
 pub mod process_fault;
+mod project_home;
 mod rollout;
 
 use papermachine_protocol::AccessPreset;
@@ -28,6 +29,14 @@ use tokio::sync::broadcast;
 pub use catalog::CatalogProject;
 pub use catalog::ProjectCatalog;
 pub use database::Store;
+pub use project_home::PROJECT_HOME_MEDIA_TYPE;
+pub use project_home::PROJECT_HOME_ROLE;
+pub use project_home::PROJECT_HOME_SOURCE_MEDIA_TYPE;
+pub use project_home::PROJECT_HOME_SOURCE_ROLE;
+pub use project_home::ProjectHomeBlock;
+pub use project_home::ProjectHomeDraft;
+pub use project_home::ProjectHomePatchOperation;
+pub use project_home::ProjectHomeSource;
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflow {

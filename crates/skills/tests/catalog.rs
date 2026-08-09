@@ -9,7 +9,7 @@ fn skill_packages_are_hashed_materialized_and_recovered_from_snapshots() {
     let managed = directory.path().join("managed");
     let store = Arc::new(Store::open_in_memory(&managed).expect("store should open"));
     let project = store
-        .create_project("Skills", "", directory.path().join("project"))
+        .create_project("Skills", directory.path().join("project"))
         .expect("project should be created");
     let catalog = ProjectSkillCatalog::new(store);
     let project_id = project.id;
@@ -54,7 +54,7 @@ fn invalid_slugs_and_incomplete_skill_documents_are_rejected() {
         Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
     );
     let project = store
-        .create_project("Invalid skills", "", directory.path().join("project"))
+        .create_project("Invalid skills", directory.path().join("project"))
         .expect("project should be created");
     let catalog = ProjectSkillCatalog::new(store);
     let project_id = project.id;

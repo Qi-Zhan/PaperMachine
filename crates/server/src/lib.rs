@@ -1,6 +1,7 @@
 //! HTTP and realtime API for PaperMachine.
 
 mod demo_model;
+mod directory_picker;
 pub mod paths;
 
 use anyhow::Context;
@@ -39,8 +40,11 @@ use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
+use papermachine_tools::PatchProjectHomeTool;
+use papermachine_tools::PreviewProjectHomeTool;
 use papermachine_tools::ReadFileTool;
-use papermachine_tools::ToolRegistry;
+use papermachine_tools::ReadProjectHomeTool;
+use papermachine_tools::ToolCatalog;
 use papermachine_tools::WriteFileTool;
 use papermachine_workflow::ProjectSnapshotOptions;
 use papermachine_workflow::PythonWorkflowRuntime;
@@ -69,8 +73,6 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::Any;
-use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
@@ -87,6 +89,7 @@ pub enum ServerModelConfig {
 pub struct ServerConfig {
     pub resource_root: PathBuf,
     pub data_dir: PathBuf,
+    pub default_workspace_root: PathBuf,
     pub models: ServerModelConfig,
     pub max_concurrent_runs: usize,
     pub max_parallel_actions: usize,
@@ -104,6 +107,7 @@ type InitializedModels = (
 #[derive(Clone)]
 pub struct AppState {
     catalog: Arc<ProjectCatalog>,
+    default_workspace_root: PathBuf,
     projects: Arc<RwLock<HashMap<ProjectId, ProjectRuntime>>>,
     runtime_factory: Arc<ProjectRuntimeFactory>,
     generator: WorkflowGenerator,
@@ -171,7 +175,6 @@ struct ProjectRuntimeFactory {
     workflows_root: PathBuf,
     python_runtime_root: PathBuf,
     model: Arc<dyn ModelClient>,
-    tools: ToolRegistry,
     default_model: String,
     model_context_window: usize,
     turn_permits: Arc<Semaphore>,
@@ -180,9 +183,29 @@ struct ProjectRuntimeFactory {
 
 impl ProjectRuntimeFactory {
     async fn build(&self, project: &Project, store: Arc<Store>) -> anyhow::Result<ProjectRuntime> {
-        let mut catalog =
-            WorkflowProgramCatalog::scan(&self.workflows_root, &self.python_runtime_root, &store)
-                .context("failed to load built-in Workflow catalog")?;
+        let tools = ToolCatalog::builder()
+            .register_workspace(ReadFileTool)
+            .context("failed to register read_file")?
+            .register_workspace(WriteFileTool)
+            .context("failed to register write_file")?
+            .register_workspace(FetchUrlTool)
+            .context("failed to register fetch_url")?
+            .register_workspace(ExecCommandTool)
+            .context("failed to register exec_command")?
+            .register_project(ReadProjectHomeTool::new(Arc::clone(&store)))
+            .context("failed to register read_project_home")?
+            .register_project(PatchProjectHomeTool::new(Arc::clone(&store)))
+            .context("failed to register patch_project_home")?
+            .register_project(PreviewProjectHomeTool::new(Arc::clone(&store)))
+            .context("failed to register preview_project_home")?
+            .build();
+        let mut catalog = WorkflowProgramCatalog::scan(
+            &self.workflows_root,
+            &self.python_runtime_root,
+            &store,
+            tools.names().map(str::to_string),
+        )
+        .context("failed to load built-in Workflow catalog")?;
         catalog
             .load_project(project, &store)
             .with_context(|| format!("failed to load Workflows for Project {}", project.id))?;
@@ -191,7 +214,7 @@ impl ProjectRuntimeFactory {
         let sessions = SessionRuntime::new_with_permits(
             Arc::clone(&store),
             Arc::clone(&self.model),
-            self.tools.clone(),
+            tools.clone(),
             Arc::clone(&skills),
             SessionRuntimeConfig {
                 default_model: self.default_model.clone(),
@@ -231,6 +254,10 @@ impl ProjectRuntimeFactory {
 }
 
 pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
+    anyhow::ensure!(
+        config.default_workspace_root.is_absolute(),
+        "PaperMachine default Workspace root must be absolute"
+    );
     let workflows_root = config.resource_root.join("workflows");
     let builtins_root = workflows_root.join("builtin");
     anyhow::ensure!(
@@ -278,21 +305,10 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         }
     };
 
-    let tools = ToolRegistry::builder()
-        .register(ReadFileTool)
-        .context("failed to register read_file")?
-        .register(WriteFileTool)
-        .context("failed to register write_file")?
-        .register(FetchUrlTool)
-        .context("failed to register fetch_url")?
-        .register(ExecCommandTool)
-        .context("failed to register exec_command")?
-        .build();
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
         workflows_root,
         python_runtime_root,
         model: Arc::clone(&model),
-        tools,
         default_model: default_model.clone(),
         model_context_window,
         turn_permits: Arc::new(Semaphore::new(
@@ -313,6 +329,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
 
     Ok(AppState {
         catalog,
+        default_workspace_root: config.default_workspace_root.clone(),
         projects: Arc::new(RwLock::new(projects)),
         runtime_factory,
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
@@ -327,6 +344,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
 pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
+        .route("/workspaces/pick-directory", post(pick_workspace_directory))
         .route("/projects", get(list_projects).post(create_project))
         .route(
             "/projects/{project_id}",
@@ -411,12 +429,6 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(web_dist).fallback(ServeFile::new(index)))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_headers(Any)
-                .allow_methods(Any),
-        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -494,8 +506,7 @@ fn workspace_attachment_available(workspace: &WorkspaceAttachment) -> bool {
 struct CreateProjectRequest {
     name: String,
     #[serde(default)]
-    description: String,
-    workspace: WorkspaceSelection,
+    workspace: Option<WorkspaceSelection>,
 }
 
 async fn create_project(
@@ -505,12 +516,12 @@ async fn create_project(
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("Project name must not be empty"));
     }
-    let workspace = canonical_workspace_selection(&request.workspace, true)?;
-    let entry = state.catalog.create_project(
-        request.name.trim(),
-        request.description.trim(),
-        &workspace,
-    )?;
+    let name = request.name.trim();
+    let workspace = match request.workspace.as_ref() {
+        Some(selection) => canonical_workspace_selection(selection, true)?,
+        None => next_default_workspace(&state, name)?,
+    };
+    let entry = state.catalog.create_project(name, &workspace)?;
     let project = entry.project;
     let store = Arc::new(entry.store);
     let runtime = match state.runtime_factory.build(&project, store).await {
@@ -529,6 +540,79 @@ async fn create_project(
             workspace_available: true,
         }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PickWorkspaceDirectoryRequest {}
+
+#[derive(Serialize)]
+struct PickWorkspaceDirectoryResponse {
+    path: Option<String>,
+}
+
+async fn pick_workspace_directory(
+    Json(_request): Json<PickWorkspaceDirectoryRequest>,
+) -> ApiResult<Json<PickWorkspaceDirectoryResponse>> {
+    let selection = tokio::task::spawn_blocking(directory_picker::pick_directory)
+        .await
+        .map_err(|error| ApiError::internal(format!("Directory picker task failed: {error}")))?
+        .map_err(ApiError::internal)?;
+    Ok(Json(PickWorkspaceDirectoryResponse {
+        path: selection.map(|path| path.to_string_lossy().into_owned()),
+    }))
+}
+
+fn next_default_workspace(state: &AppState, project_name: &str) -> ApiResult<PathBuf> {
+    let attached = state
+        .catalog
+        .scan()?
+        .into_iter()
+        .flat_map(|entry| entry.project.workspace.roots.into_iter())
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let directory_name = default_workspace_directory_name(project_name);
+    for index in 1_u64.. {
+        let candidate = if index == 1 {
+            state.default_workspace_root.join(&directory_name)
+        } else {
+            state
+                .default_workspace_root
+                .join(format!("{directory_name} {index}"))
+        };
+        if !candidate.exists() && !attached.iter().any(|path| path == &candidate) {
+            return canonical_workspace(candidate.to_string_lossy().as_ref(), true);
+        }
+    }
+    unreachable!("the default Workspace suffix space is unbounded")
+}
+
+fn default_workspace_directory_name(project_name: &str) -> String {
+    let mut name = String::new();
+    for character in project_name.trim().chars().take(80) {
+        if character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+        {
+            if !name.ends_with('-') {
+                name.push('-');
+            }
+        } else {
+            name.push(character);
+        }
+    }
+    let name = name
+        .trim_matches(|character: char| {
+            character.is_whitespace() || character == '.' || character == '-'
+        })
+        .to_string();
+    if name.is_empty() {
+        "Project".to_string()
+    } else {
+        name
+    }
 }
 
 #[derive(Deserialize)]

@@ -611,7 +611,7 @@ mod tests {
                 .expect("store should open in memory"),
         );
         let research = store
-            .create_project("Scheduler", "", directory.path().join("project"))
+            .create_project("Scheduler", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -649,7 +649,7 @@ mod tests {
                 .expect("store should open in memory"),
         );
         let research = store
-            .create_project("Restart", "", directory.path().join("project"))
+            .create_project("Restart", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -698,7 +698,7 @@ mod tests {
                 .expect("store should open in memory"),
         );
         let project = store
-            .create_project("Cancellation", "", directory.path().join("workspace"))
+            .create_project("Cancellation", directory.path().join("workspace"))
             .expect("Project should be created");
         let session = store
             .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -753,7 +753,7 @@ mod tests {
                 .expect("store should open in memory"),
         );
         let research = store
-            .create_project("Suspension", "", directory.path().join("project"))
+            .create_project("Suspension", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -817,7 +817,7 @@ mod tests {
                 .expect("store should open in memory"),
         );
         let research = store
-            .create_project("Signals", "", directory.path().join("project"))
+            .create_project("Signals", directory.path().join("project"))
             .expect("research should be created");
         let session = store
             .create_session(research.id, "Origin", "", "test-model", Vec::new())

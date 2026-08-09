@@ -13,7 +13,10 @@ End every response with exactly one of these control lines as its final non-empt
 
 Use active whenever any required work remains or completion is not proved. Use complete only after auditing the whole objective against current evidence and verifying that every requested outcome is achieved. Use blocked only when the same external blocking condition has prevented meaningful progress for at least three consecutive Goal Turns. The control line is for the Workflow runtime; do not explain or quote it. The runtime automatically starts another Turn only while the status remains active."""
 
-    @action(search_context_size="high")
+    @action(
+        search_context_size="high",
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+    )
     async def work(
         self,
         objective: str,
@@ -25,7 +28,7 @@ Use active whenever any required work remains or completion is not proved. Use c
 @workflow(
     slug="goal",
     name="Goal",
-    description="Keep one persistent Agent working automatically until it verifies that the user's objective is complete.",
+    description="Keep working on an objective until it is complete.",
     params_schema={
         "type": "object",
         "properties": {
@@ -38,14 +41,13 @@ Use active whenever any required work remains or completion is not proved. Use c
                 "type": "string",
                 "title": "Agent system prompt",
                 "default": "",
-                "description": "Additional persistent instructions for the Goal Agent.",
+                "description": "Additional instructions.",
                 "x-ui-order": 2,
             },
             "agent_model": {
                 "type": "string",
                 "format": "model-profile",
                 "title": "Agent model",
-                "description": "Optional model profile; empty inherits the Run model.",
                 "x-ui-order": 3,
             },
             "agent_access": {
@@ -59,7 +61,6 @@ Use active whenever any required work remains or completion is not proved. Use c
                     "full_access",
                 ],
                 "default": "research",
-                "description": "Initial access profile for the persistent Goal Agent.",
                 "x-ui-order": 4,
             },
         },

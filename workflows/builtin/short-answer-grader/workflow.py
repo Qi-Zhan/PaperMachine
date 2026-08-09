@@ -6,7 +6,7 @@ class Grader(Agent):
     role = "independent exact-answer grader"
     system_prompt = """Act only as a blinded answer-equivalence judge. Compare the final answer extractable from the submitted response with the supplied reference answer. Do not browse, solve the question again, repair the response, or award credit for background reasoning when the final answer is absent or ambiguous. Minor formatting differences and a small numerical margin may be accepted; any meaningful inconsistency or non-equivalence is incorrect."""
 
-    @action(reasoning_effort="medium")
+    @action(reasoning_effort="medium", tools=[])
     async def grade(
         self,
         question: str,
@@ -19,7 +19,7 @@ class Grader(Agent):
 @workflow(
     slug="short-answer-grader",
     name="Short-answer grader",
-    description="Blindly judge one final short answer against a supplied reference answer in a separate no-tool Session.",
+    description="Compare a short answer with a supplied reference answer.",
     params_schema={
         "type": "object",
         "properties": {
@@ -30,7 +30,6 @@ class Grader(Agent):
                 "type": "string",
                 "format": "model-profile",
                 "title": "Grader model",
-                "description": "Optional model profile for the Grader; empty inherits the Run model.",
             },
         },
         "required": ["question", "correct_answer", "response"],

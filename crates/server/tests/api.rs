@@ -59,6 +59,7 @@ async fn initialization_validates_resources_before_opening_application_data() {
     let error = initialize(&ServerConfig {
         resource_root: directory.path().join("incomplete-resources"),
         data_dir: data_dir.clone(),
+        default_workspace_root: directory.path().join("workspaces"),
         models: ServerModelConfig::Demo,
         max_concurrent_runs: 1,
         max_parallel_actions: 1,
@@ -82,7 +83,6 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
             "/api/projects",
             json!({
                 "name": "Portable paper",
-                "description": "Project-owned research state",
                 "workspace": {"roots": [workspace], "primary_root": 0},
             }),
         ))
@@ -133,6 +133,56 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
 }
 
 #[tokio::test]
+async fn project_without_a_workspace_uses_a_unique_default_directory() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+
+    let first = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/api/projects",
+            json!({"name": "Default project"}),
+        ))
+        .await
+        .expect("first Project request should complete");
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first = response_json(first).await;
+    let first_workspace = directory
+        .path()
+        .join("default-workspaces")
+        .join("Default project")
+        .canonicalize()
+        .expect("default Workspace should be created");
+    assert_eq!(
+        first["workspace"]["roots"][0],
+        first_workspace.to_string_lossy().as_ref()
+    );
+    assert!(first.get("description").is_none());
+
+    let second = app
+        .oneshot(json_request(
+            "POST",
+            "/api/projects",
+            json!({"name": "Default project"}),
+        ))
+        .await
+        .expect("second Project request should complete");
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let second = response_json(second).await;
+    let second_workspace = directory
+        .path()
+        .join("default-workspaces")
+        .join("Default project 2")
+        .canonicalize()
+        .expect("suffixed default Workspace should be created");
+    assert_eq!(
+        second["workspace"]["roots"][0],
+        second_workspace.to_string_lossy().as_ref()
+    );
+}
+
+#[tokio::test]
 async fn project_workspace_relocates_without_moving_managed_state_and_delete_preserves_workspace() {
     let directory = tempdir().expect("temporary directory should be created");
     let original_root = directory.path().join("research/original");
@@ -145,7 +195,6 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
             "/api/projects",
             json!({
                 "name": "Movable project",
-                "description": "",
                 "workspace": {"roots": [original_root], "primary_root": 0},
             }),
         ))
@@ -243,6 +292,7 @@ async fn test_app(directory: &TempDir) -> Router {
     let state = initialize(&ServerConfig {
         resource_root: directory.path().to_path_buf(),
         data_dir: directory.path().join("app-data"),
+        default_workspace_root: directory.path().join("default-workspaces"),
         models: ServerModelConfig::Demo,
         max_concurrent_runs: 2,
         max_parallel_actions: 4,
@@ -284,6 +334,7 @@ async fn test_app_with_model_profiles(
     let state = initialize(&ServerConfig {
         resource_root: directory.path().to_path_buf(),
         data_dir: directory.path().join("app-data"),
+        default_workspace_root: directory.path().join("default-workspaces"),
         models: ServerModelConfig::Providers(configured_models),
         max_concurrent_runs: 2,
         max_parallel_actions: 4,
@@ -328,7 +379,6 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             "/api/projects",
             json!({
                 "name": name,
-                "description": "API test",
                 "workspace": {
                     "roots": [workspace_root.to_string_lossy()],
                     "primary_root": 0
@@ -1333,7 +1383,7 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn project_summary_publishes_a_sandboxed_html_progress_page() {
+async fn project_summary_publishes_an_html_home_page_fragment() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let (project, _origin) =
@@ -1346,7 +1396,7 @@ async fn project_summary_publishes_a_sandboxed_html_progress_page() {
             &format!("/api/projects/{}/workflows", project.id),
             json!({
                 "program_slug": "project-summary",
-                "request": "Refresh the Project progress page now.",
+                "request": "Refresh the Project home page now.",
                 "instructions": "Lead with verified progress and unresolved blockers.",
                 "params": {
                     "interval_minutes": 0,
@@ -1366,14 +1416,22 @@ async fn project_summary_publishes_a_sandboxed_html_progress_page() {
         .as_str()
         .expect("summary Workflow id should exist");
     let view = wait_for_workflow_status(&app, workflow_id, "completed").await;
-    assert_eq!(view["artifacts"].as_array().map(Vec::len), Some(1));
-    assert_eq!(view["artifacts"][0]["metadata"]["role"], "project_summary");
-    assert_eq!(
-        view["artifacts"][0]["media_type"],
-        "text/html; charset=utf-8"
-    );
+    let artifacts = view["artifacts"]
+        .as_array()
+        .expect("summary Artifacts should be present");
+    assert_eq!(artifacts.len(), 2);
+    let summary = artifacts
+        .iter()
+        .find(|artifact| artifact["metadata"]["role"] == "project_summary")
+        .expect("published Project-home Artifact should exist");
+    let source = artifacts
+        .iter()
+        .find(|artifact| artifact["metadata"]["role"] == "project_summary_source")
+        .expect("Project-home block source Artifact should exist");
+    assert_eq!(summary["media_type"], "text/html; charset=utf-8");
+    assert_eq!(summary["metadata"]["source_artifact_id"], source["id"]);
 
-    let artifact_id = view["artifacts"][0]["id"]
+    let artifact_id = summary["id"]
         .as_str()
         .expect("summary Artifact id should exist");
     let response = app
@@ -1396,7 +1454,48 @@ async fn project_summary_publishes_a_sandboxed_html_progress_page() {
         .await
         .expect("summary HTML should load");
     let html = String::from_utf8(bytes.to_vec()).expect("summary should be UTF-8 HTML");
-    assert!(html.to_ascii_lowercase().contains("<!doctype html>"));
+    assert!(html.to_ascii_lowercase().contains("<article"));
+    assert!(!html.to_ascii_lowercase().contains("<iframe"));
+
+    let session_id = view["participants"][0]["session_id"]
+        .as_str()
+        .expect("summary Agent Session should exist");
+    let session = app
+        .clone()
+        .oneshot(empty_request("GET", &format!("/api/sessions/{session_id}")))
+        .await
+        .expect("summary Agent Session should load");
+    let session = response_json(session).await;
+    let turn_tool_set = &session["turns"][0]["tool_set"];
+    assert_eq!(
+        turn_tool_set["definitions"]
+            .as_array()
+            .expect("summary Turn tool definitions should exist")
+            .iter()
+            .filter_map(|definition| definition["name"].as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "patch_project_home",
+            "preview_project_home",
+            "read_project_home"
+        ]
+    );
+    assert_eq!(turn_tool_set["sha256"].as_str().map(str::len), Some(64));
+    let tool_names = session["steps"]
+        .as_array()
+        .expect("summary Agent Steps should exist")
+        .iter()
+        .filter(|step| step["kind"] == "tool")
+        .filter_map(|step| step["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_names,
+        vec![
+            "read_project_home",
+            "patch_project_home",
+            "preview_project_home"
+        ]
+    );
 
     let overview = app
         .oneshot(empty_request(
@@ -1473,6 +1572,41 @@ async fn api_generates_validates_and_publishes_python_workflows() {
                         .is_some_and(|message| message.contains("Agent access must be one of"))
                 })
             })
+    );
+
+    let unknown_tool_source = r#"from papermachine import Agent, action, workflow
+
+class Worker(Agent):
+    access = "research"
+
+    @action(tools=["unknown_local_tool"])
+    async def work(self):
+        """Do work."""
+
+@workflow(slug="unknown-tool", name="Unknown tool", description="Reject unknown tools.")
+async def main(ctx):
+    await Worker().work()
+"#;
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflow-programs/validate", project.id),
+            json!({"source": unknown_tool_source}),
+        ))
+        .await
+        .expect("unknown Action tool should be validated");
+    assert_eq!(response.status(), StatusCode::OK);
+    let unknown_tool = response_json(response).await;
+    assert_eq!(unknown_tool["valid"], false);
+    assert!(
+        unknown_tool["diagnostics"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("unknown tool"))
+            }))
     );
 
     let response = app

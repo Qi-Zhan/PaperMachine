@@ -8,6 +8,7 @@
 mod builtins;
 mod fetch;
 mod path;
+mod project_home;
 mod registry;
 
 use async_trait::async_trait;
@@ -30,8 +31,12 @@ pub use builtins::ExecCommandTool;
 pub use builtins::ReadFileTool;
 pub use builtins::WriteFileTool;
 pub use fetch::FetchUrlTool;
+pub use project_home::PatchProjectHomeTool;
+pub use project_home::PreviewProjectHomeTool;
+pub use project_home::ReadProjectHomeTool;
+pub use registry::ToolCatalog;
+pub use registry::ToolCatalogBuilder;
 pub use registry::ToolRegistry;
-pub use registry::ToolRegistryBuilder;
 
 #[derive(Clone, Debug)]
 pub struct ToolContext {

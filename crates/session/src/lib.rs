@@ -45,9 +45,10 @@ use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolContext;
+use papermachine_tools::ToolError;
 use papermachine_tools::ToolReconciliation;
-use papermachine_tools::ToolRegistry;
 use papermachine_tools::model_visible_tool_result;
 use serde_json::Value;
 use serde_json::json;
@@ -71,7 +72,7 @@ pub struct SessionRuntime {
 struct SessionRuntimeInner {
     store: Arc<Store>,
     model: Arc<dyn ModelClient>,
-    tools: ToolRegistry,
+    tools: ToolCatalog,
     skills: Arc<ProjectSkillCatalog>,
     default_model: String,
     model_context_window: usize,
@@ -121,7 +122,7 @@ impl SessionRuntime {
     pub fn new(
         store: Arc<Store>,
         model: Arc<dyn ModelClient>,
-        tools: ToolRegistry,
+        tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
         config: SessionRuntimeConfig,
     ) -> Self {
@@ -132,7 +133,7 @@ impl SessionRuntime {
     pub fn new_with_permits(
         store: Arc<Store>,
         model: Arc<dyn ModelClient>,
-        tools: ToolRegistry,
+        tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
         config: SessionRuntimeConfig,
         permits: Arc<Semaphore>,
@@ -164,6 +165,7 @@ impl SessionRuntime {
                 None,
                 Vec::new(),
                 None,
+                None,
                 true,
                 None,
                 None,
@@ -192,6 +194,7 @@ impl SessionRuntime {
                     "runtime:resume-interrupted-turn",
                     "Continue the original task from durable Session context. Inspect any execution_unknown tool outcomes before repeating side effects.",
                 ),
+                None,
                 None,
                 true,
                 None,
@@ -225,6 +228,7 @@ impl SessionRuntime {
                     additional_instructions,
                 ),
                 None,
+                None,
                 true,
                 None,
                 None,
@@ -245,6 +249,7 @@ impl SessionRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
+        requested_tools: Vec<String>,
         tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
@@ -259,6 +264,7 @@ impl SessionRuntime {
                 model_override,
                 prompt_layers,
                 reasoning_effort,
+                Some(requested_tools),
                 tools_enabled,
                 web_search_context_size,
                 response_format,
@@ -330,6 +336,7 @@ impl SessionRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
+        requested_tools: Option<Vec<String>>,
         tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
@@ -353,6 +360,17 @@ impl SessionRuntime {
             .store
             .get_project_system_prompt(session.project_id)?;
         let prompt = build_prompt_snapshot(&session, project_prompt, prompt_layers, &resolved);
+        let tool_set = match requested_tools {
+            Some(requested) => self.inner.tools.materialize_action_tools(
+                &requested,
+                session.access,
+                tools_enabled,
+            )?,
+            None => self
+                .inner
+                .tools
+                .materialize_session_tools(session.access, tools_enabled)?,
+        };
         let turn = if let Some(attempt_id) = action_attempt_id {
             self.inner.store.create_turn_for_attempt(
                 attempt_id,
@@ -363,6 +381,8 @@ impl SessionRuntime {
                 prompt,
                 reasoning_effort,
                 tools_enabled,
+                session.access,
+                tool_set,
                 web_search_context_size,
                 response_format,
                 resolved.snapshots,
@@ -376,6 +396,8 @@ impl SessionRuntime {
                 prompt,
                 reasoning_effort,
                 tools_enabled,
+                session.access,
+                tool_set,
                 web_search_context_size,
                 response_format,
                 resolved.snapshots,
@@ -389,6 +411,8 @@ impl SessionRuntime {
                 prompt,
                 reasoning_effort,
                 tools_enabled,
+                session.access,
+                tool_set,
                 web_search_context_size,
                 response_format,
                 resolved.snapshots,
@@ -461,6 +485,10 @@ impl SessionRuntime {
             return Ok(0);
         }
         let session = self.inner.store.get_session(turn.session_id)?;
+        let registry = self
+            .inner
+            .tools
+            .registry_for_snapshot(&turn.tool_set, workflow_context.is_some())?;
         for step in &steps {
             if step.kind != StepKind::Tool {
                 self.inner.store.finish_step(
@@ -525,7 +553,7 @@ impl SessionRuntime {
                 continue;
             };
 
-            let registered_disposition = self.inner.tools.effect_disposition(&step.name);
+            let registered_disposition = registry.effect_disposition(&step.name);
             if registered_disposition != Some(disposition) {
                 let output = recovery_unknown_output(
                     step,
@@ -568,28 +596,23 @@ impl SessionRuntime {
                     // the tool. A second crash must never see this call as
                     // still safely prepared.
                     self.inner.store.start_tool_execution(step.id)?;
-                    self.inner
-                        .tools
+                    registry
                         .execute(&step.name, tool_context, step.input.clone())
                         .await
                 }
                 ToolExecutionState::Executing => match disposition {
                     ToolEffectDisposition::Pure | ToolEffectDisposition::Idempotent => {
-                        self.inner
-                            .tools
+                        registry
                             .execute(&step.name, tool_context, step.input.clone())
                             .await
                     }
-                    ToolEffectDisposition::Reconcilable => match self
-                        .inner
-                        .tools
+                    ToolEffectDisposition::Reconcilable => match registry
                         .reconcile(&step.name, tool_context.clone(), step.input.clone())
                         .await
                     {
                         Ok(ToolReconciliation::Completed(output)) => Ok(output),
                         Ok(ToolReconciliation::Retry) => {
-                            self.inner
-                                .tools
+                            registry
                                 .execute(&step.name, tool_context, step.input.clone())
                                 .await
                         }
@@ -815,6 +838,9 @@ async fn run_scheduled_turn(
     };
     let turn = inner.store.start_turn(turn_id)?;
     verify_prompt_snapshot(&turn.prompt)?;
+    let tools = inner
+        .tools
+        .registry_for_snapshot(&turn.tool_set, workflow_context.is_some())?;
     let session = inner.store.get_session(turn.session_id)?;
     let rollout = inner.store.reconstruct_session_rollout(session.id)?;
     let active_rollout = rollout.active_turn.ok_or_else(|| {
@@ -849,8 +875,7 @@ async fn run_scheduled_turn(
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
         store: Arc::clone(&inner.store),
     });
-    let runtime = AgentRuntime::new(Arc::clone(&inner.model), inner.tools.clone(), events)
-        .with_control(control);
+    let runtime = AgentRuntime::new(Arc::clone(&inner.model), tools, events).with_control(control);
     let mut request = AgentTurnRequest::new(
         session.project_id,
         session.id,
@@ -1664,6 +1689,8 @@ pub enum SessionRuntimeError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Skill(#[from] SkillError),
+    #[error(transparent)]
+    Tool(#[from] ToolError),
     #[error("turn {0} is already terminal")]
     TerminalTurn(TurnId),
     #[error("turn scheduling failed: {0}")]
@@ -1687,7 +1714,7 @@ mod recovery_tests {
         let store =
             Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
         let project = store
-            .create_project("Tool recovery", "", directory.path().join("project"))
+            .create_project("Tool recovery", directory.path().join("project"))
             .expect("Project should be created");
         let session = store
             .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -1701,6 +1728,9 @@ mod recovery_tests {
                 PromptSnapshot::default(),
                 None,
                 true,
+                papermachine_protocol::AccessPreset::Research,
+                papermachine_protocol::ToolSetSnapshot::materialize(Vec::new())
+                    .expect("empty tool set should be valid"),
                 None,
                 None,
                 Vec::new(),

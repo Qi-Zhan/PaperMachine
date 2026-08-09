@@ -6,7 +6,10 @@ class InteractiveAgent(Agent):
     role = "interactive project agent"
     system_prompt = """Work with the user as a persistent project agent. Treat each Turn as part of one continuing conversation, retain prior conclusions and tool results, and use the Project workspace and enabled skills when they help. Answer the latest human message directly. Use tools when the task requires evidence or concrete changes, make uncertainty visible, and ask the human when a consequential choice cannot be inferred safely."""
 
-    @action(search_context_size="low")
+    @action(
+        search_context_size="low",
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+    )
     async def respond(self, message: HumanMessage):
         """Respond to the human's latest message as the next Turn of this persistent Session. Follow the requested task through to a useful result; do not restate this action contract or expose workflow plumbing."""
 
@@ -14,7 +17,7 @@ class InteractiveAgent(Agent):
 @workflow(
     slug="interactive-agent",
     name="Interactive agent",
-    description="Run one persistent Agent Session that waits for a human message before every Turn. The normal New Session action uses this built-in Workflow.",
+    description="Start an ongoing conversation with an Agent.",
     request_mode="none",
     params_schema={
         "type": "object",
@@ -28,7 +31,7 @@ class InteractiveAgent(Agent):
                 "type": "string",
                 "title": "Agent system prompt",
                 "default": "",
-                "description": "Persistent instructions stored on the Agent Session.",
+                "description": "Instructions for this Session.",
                 "x-ui-order": 2,
             },
             "agent_access": {
@@ -42,7 +45,6 @@ class InteractiveAgent(Agent):
                     "full_access",
                 ],
                 "default": "research",
-                "description": "Initial access profile for the persistent Agent Session.",
                 "x-ui-order": 3,
             },
         },

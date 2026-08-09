@@ -8,7 +8,7 @@ fn project_catalog_uses_atomic_managed_directories_and_preserves_workspace() {
     let workspace = directory.path().join("user/research");
     let catalog = ProjectCatalog::open(&data).expect("catalog should open");
     let created = catalog
-        .create_project("Research world", "", &workspace)
+        .create_project("Research world", &workspace)
         .expect("Project should be created");
     let project_id = created.project.id;
     let managed = data.join("projects").join(project_id.to_string());
@@ -53,10 +53,10 @@ fn catalog_rejects_a_workspace_attached_to_another_project() {
     let catalog = ProjectCatalog::open(directory.path().join("data")).expect("catalog should open");
     let workspace = directory.path().join("workspace");
     catalog
-        .create_project("First", "", &workspace)
+        .create_project("First", &workspace)
         .expect("first Project should be created");
     let error = catalog
-        .create_project("Second", "", &workspace)
+        .create_project("Second", &workspace)
         .err()
         .expect("duplicate Workspace must fail");
     assert!(error.to_string().contains("another Project"));

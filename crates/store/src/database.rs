@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -101,17 +101,15 @@ impl Store {
     pub fn create_project(
         &self,
         name: impl Into<String>,
-        description: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
-        self.create_project_with_id(ProjectId::new(), name, description, workspace_root)
+        self.create_project_with_id(ProjectId::new(), name, workspace_root)
     }
 
     pub fn create_project_with_id(
         &self,
         id: ProjectId,
         name: impl Into<String>,
-        description: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
     ) -> Result<Project, StoreError> {
         let requested_workspace = workspace_root.into();
@@ -142,7 +140,6 @@ impl Store {
         let project = Project {
             id,
             name: name.into(),
-            description: description.into(),
             workspace: WorkspaceAttachment::single(workspace_string),
             created_at: now,
             updated_at: now,
@@ -467,6 +464,8 @@ impl Store {
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
+        expected_access: AccessPreset,
+        tool_set: papermachine_protocol::ToolSetSnapshot,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -481,6 +480,8 @@ impl Store {
             prompt,
             reasoning_effort,
             tools_enabled,
+            expected_access,
+            tool_set,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -497,6 +498,8 @@ impl Store {
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
+        expected_access: AccessPreset,
+        tool_set: papermachine_protocol::ToolSetSnapshot,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -511,6 +514,8 @@ impl Store {
             prompt,
             reasoning_effort,
             tools_enabled,
+            expected_access,
+            tool_set,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -528,6 +533,8 @@ impl Store {
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
+        expected_access: AccessPreset,
+        tool_set: papermachine_protocol::ToolSetSnapshot,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -542,6 +549,8 @@ impl Store {
             prompt,
             reasoning_effort,
             tools_enabled,
+            expected_access,
+            tool_set,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -560,6 +569,8 @@ impl Store {
         prompt: PromptSnapshot,
         reasoning_effort: Option<ReasoningEffort>,
         tools_enabled: bool,
+        expected_access: AccessPreset,
+        tool_set: papermachine_protocol::ToolSetSnapshot,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         skill_snapshots: Vec<SkillSnapshot>,
@@ -569,6 +580,12 @@ impl Store {
         let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
         self.replay_session_rollout_locked(session_id)?;
         let session = self.get_session(session_id)?;
+        if session.access != expected_access {
+            return Err(StoreError::Invariant(
+                "Session access changed while its Turn tool set was materialized".to_string(),
+            ));
+        }
+        tool_set.validate().map_err(StoreError::Invariant)?;
         if session.status == SessionStatus::Archived {
             return Err(StoreError::Invariant(
                 "cannot add a Turn to an archived Session".to_string(),
@@ -654,6 +671,7 @@ impl Store {
             reasoning_effort,
             prompt,
             environment,
+            tool_set,
             tools_enabled,
             web_search_context_size,
             response_format,
@@ -1801,6 +1819,7 @@ impl Store {
         action_name: impl Into<String>,
         contract: impl Into<String>,
         arguments: Value,
+        requested_tools: Vec<String>,
     ) -> Result<ActionInvocation, StoreError> {
         self.create_action_invocation_with_id(
             ActionInvocationId::new(),
@@ -1810,6 +1829,7 @@ impl Store {
             action_name,
             contract,
             arguments,
+            requested_tools,
             None,
         )
     }
@@ -1824,6 +1844,7 @@ impl Store {
         action_name: impl Into<String>,
         contract: impl Into<String>,
         arguments: Value,
+        requested_tools: Vec<String>,
         source_human_request_id: Option<HumanRequestId>,
     ) -> Result<ActionInvocation, StoreError> {
         let participant = self.get_participant(agent_id)?;
@@ -1844,6 +1865,7 @@ impl Store {
             action_name: action_name.into(),
             contract: contract.into(),
             arguments,
+            requested_tools,
             source_human_request_id,
             status: ActionStatus::Scheduled,
             output: None,

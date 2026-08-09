@@ -1,3 +1,4 @@
+use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelContextMutation;
@@ -6,6 +7,7 @@ use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionRolloutItem;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::ToolSetSnapshot;
 use papermachine_protocol::TurnOrigin;
 use papermachine_store::Store;
 use rusqlite::Connection;
@@ -15,13 +17,17 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use tempfile::tempdir;
 
+fn empty_tool_set() -> ToolSetSnapshot {
+    ToolSetSnapshot::materialize(Vec::new()).expect("empty tool set should be valid")
+}
+
 #[test]
 fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let directory = tempdir().expect("temporary directory should be created");
     let managed = directory.path().join("managed");
     let store = Store::create(&managed).expect("Store should be created");
     let project = store
-        .create_project("Rollout", "", directory.path().join("workspace"))
+        .create_project("Rollout", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -35,6 +41,8 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
             PromptSnapshot::default(),
             None,
             true,
+            AccessPreset::Research,
+            empty_tool_set(),
             None,
             None,
             Vec::new(),
@@ -96,7 +104,7 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     let managed = directory.path().join("managed");
     let store = Store::create(&managed).expect("Store should be created");
     let project = store
-        .create_project("Replay", "", directory.path().join("workspace"))
+        .create_project("Replay", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -110,6 +118,8 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
             PromptSnapshot::default(),
             None,
             true,
+            AccessPreset::Research,
+            empty_tool_set(),
             None,
             None,
             Vec::new(),
@@ -180,7 +190,7 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
     let managed = directory.path().join("managed");
     let store = Store::create(&managed).expect("Store should be created");
     let project = store
-        .create_project("Tail repair", "", directory.path().join("workspace"))
+        .create_project("Tail repair", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -229,7 +239,7 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
     let project = store
-        .create_project("Compaction", "", directory.path().join("workspace"))
+        .create_project("Compaction", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -243,6 +253,8 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
             PromptSnapshot::default(),
             None,
             true,
+            AccessPreset::Research,
+            empty_tool_set(),
             None,
             None,
             Vec::new(),
@@ -323,7 +335,7 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
     );
     let project = store
-        .create_project("Writer", "", directory.path().join("workspace"))
+        .create_project("Writer", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -366,7 +378,7 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
     );
     let project = store
-        .create_project("Turn writer", "", directory.path().join("workspace"))
+        .create_project("Turn writer", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -386,6 +398,8 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
                 PromptSnapshot::default(),
                 None,
                 true,
+                AccessPreset::Research,
+                empty_tool_set(),
                 None,
                 None,
                 Vec::new(),

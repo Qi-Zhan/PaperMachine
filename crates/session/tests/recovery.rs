@@ -24,12 +24,13 @@ use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
+use papermachine_tools::ExecCommandTool;
+use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolError;
 use papermachine_tools::ToolExecutor;
 use papermachine_tools::ToolOutput;
 use papermachine_tools::ToolReconciliation;
-use papermachine_tools::ToolRegistry;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -46,11 +47,18 @@ async fn standalone_restart_interrupts_without_sampling_or_replaying_unknown_eff
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
     );
     let project = store
-        .create_project("Standalone", "", directory.path().join("workspace"))
+        .create_project("Standalone", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
+    let tools = ToolCatalog::builder()
+        .register_workspace(ExecCommandTool)
+        .expect("command tool should register")
+        .build();
+    let tool_set = tools
+        .materialize_session_tools(AccessPreset::Research, true)
+        .expect("standalone tool set should materialize");
     let turn = store
         .create_turn(
             session.id,
@@ -60,6 +68,8 @@ async fn standalone_restart_interrupts_without_sampling_or_replaying_unknown_eff
             empty_prompt_snapshot(),
             None,
             true,
+            AccessPreset::Research,
+            tool_set,
             None,
             None,
             Vec::new(),
@@ -101,12 +111,7 @@ async fn standalone_restart_interrupts_without_sampling_or_replaying_unknown_eff
     skills
         .ensure_project(project.id)
         .expect("skill directories should exist");
-    let runtime = runtime(
-        Arc::clone(&store),
-        Arc::new(model.clone()),
-        ToolRegistry::default(),
-        skills,
-    );
+    let runtime = runtime(Arc::clone(&store), Arc::new(model.clone()), tools, skills);
     let recovered = runtime.recover().await.expect("restart should settle Turn");
 
     assert_eq!(recovered, vec![turn.id]);
@@ -145,7 +150,7 @@ async fn standalone_restart_commits_a_durable_terminal_candidate_without_samplin
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
     );
     let project = store
-        .create_project("Terminal", "", directory.path().join("workspace"))
+        .create_project("Terminal", directory.path().join("workspace"))
         .expect("Project should be created");
     let session = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
@@ -159,6 +164,9 @@ async fn standalone_restart_commits_a_durable_terminal_candidate_without_samplin
             empty_prompt_snapshot(),
             None,
             true,
+            AccessPreset::Research,
+            papermachine_protocol::ToolSetSnapshot::materialize(Vec::new())
+                .expect("empty tool set should be valid"),
             None,
             None,
             Vec::new(),
@@ -189,7 +197,7 @@ async fn standalone_restart_commits_a_durable_terminal_candidate_without_samplin
     let runtime = runtime(
         Arc::clone(&store),
         Arc::new(model.clone()),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
     );
     assert_eq!(
@@ -208,7 +216,7 @@ async fn workflow_restart_replays_an_executing_idempotent_tool_once() {
     let runtime = runtime(
         Arc::clone(&fixture.store),
         Arc::new(fixture.model.clone()),
-        fixture.registry.clone(),
+        fixture.catalog.clone(),
         Arc::clone(&fixture.skills),
     );
     let turn = runtime
@@ -239,7 +247,7 @@ async fn workflow_restart_surfaces_unknown_effect_without_executing_it() {
     let runtime = runtime(
         Arc::clone(&fixture.store),
         Arc::new(fixture.model.clone()),
-        fixture.registry.clone(),
+        fixture.catalog.clone(),
         Arc::clone(&fixture.skills),
     );
     let turn = runtime
@@ -275,7 +283,7 @@ async fn workflow_restart_executes_a_prepared_unknown_tool_once() {
     let runtime = runtime(
         Arc::clone(&fixture.store),
         Arc::new(fixture.model.clone()),
-        fixture.registry.clone(),
+        fixture.catalog.clone(),
         Arc::clone(&fixture.skills),
     );
     let turn = runtime
@@ -307,7 +315,7 @@ async fn workflow_restart_reconciles_before_resolving_an_external_effect() {
     let runtime = runtime(
         Arc::clone(&fixture.store),
         Arc::new(fixture.model.clone()),
-        fixture.registry.clone(),
+        fixture.catalog.clone(),
         Arc::clone(&fixture.skills),
     );
     runtime
@@ -330,7 +338,7 @@ struct WorkflowRecoveryFixture {
     _directory: TempDir,
     store: Arc<Store>,
     skills: Arc<ProjectSkillCatalog>,
-    registry: ToolRegistry,
+    catalog: ToolCatalog,
     model: ScriptedModelClient,
     calls: Arc<AtomicUsize>,
     reconciliations: Arc<AtomicUsize>,
@@ -357,7 +365,7 @@ fn workflow_recovery_fixture_with(
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
     );
     let project = store
-        .create_project("Workflow", "", directory.path().join("workspace"))
+        .create_project("Workflow", directory.path().join("workspace"))
         .expect("Project should be created");
     let origin = store
         .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -393,6 +401,19 @@ fn workflow_recovery_fixture_with(
             AccessPreset::Research,
         )
         .expect("participant should be created");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reconciliations = Arc::new(AtomicUsize::new(0));
+    let catalog = ToolCatalog::builder()
+        .register_workspace(CountingTool {
+            name: tool_name.to_string(),
+            disposition,
+            calls: Arc::clone(&calls),
+            reconciliations: Arc::clone(&reconciliations),
+            reconciliation,
+        })
+        .expect("tool should register")
+        .build();
+    let requested_tools = vec![tool_name.to_string()];
     let invocation = store
         .create_action_invocation(
             run.id,
@@ -401,11 +422,15 @@ fn workflow_recovery_fixture_with(
             "recover",
             "recover",
             json!({}),
+            requested_tools.clone(),
         )
         .expect("invocation should be created");
     let attempt = store
         .start_action_attempt(invocation.id)
         .expect("attempt should start");
+    let tool_set = catalog
+        .materialize_action_tools(&requested_tools, AccessPreset::Research, true)
+        .expect("Action tool set should materialize");
     let turn = store
         .create_turn_for_attempt(
             attempt.id,
@@ -416,6 +441,8 @@ fn workflow_recovery_fixture_with(
             empty_prompt_snapshot(),
             None,
             true,
+            AccessPreset::Research,
+            tool_set,
             None,
             None,
             Vec::new(),
@@ -450,18 +477,6 @@ fn workflow_recovery_fixture_with(
             .expect("Tool Step should execute");
     }
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let reconciliations = Arc::new(AtomicUsize::new(0));
-    let registry = ToolRegistry::builder()
-        .register(CountingTool {
-            name: tool_name.to_string(),
-            disposition,
-            calls: Arc::clone(&calls),
-            reconciliations: Arc::clone(&reconciliations),
-            reconciliation,
-        })
-        .expect("tool should register")
-        .build();
     let model = ScriptedModelClient::new([response("recovered")]);
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
@@ -471,7 +486,7 @@ fn workflow_recovery_fixture_with(
         _directory: directory,
         store,
         skills,
-        registry,
+        catalog,
         model,
         calls,
         reconciliations,
@@ -541,7 +556,7 @@ impl ToolExecutor for CountingTool {
 fn runtime(
     store: Arc<Store>,
     model: Arc<ScriptedModelClient>,
-    tools: ToolRegistry,
+    tools: ToolCatalog,
     skills: Arc<ProjectSkillCatalog>,
 ) -> SessionRuntime {
     SessionRuntime::new(

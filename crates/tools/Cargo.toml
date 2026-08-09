@@ -11,6 +11,7 @@ futures.workspace = true
 html2text.workspace = true
 papermachine-execution = { path = "../execution" }
 papermachine-protocol = { path = "../protocol" }
+papermachine-store = { path = "../store" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

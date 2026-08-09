@@ -9,6 +9,10 @@ use papermachine_session::PromptLayerInput;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeError;
 use papermachine_session::WorkflowTurnContext;
+use papermachine_store::PROJECT_HOME_MEDIA_TYPE;
+use papermachine_store::PROJECT_HOME_ROLE;
+use papermachine_store::PROJECT_HOME_SOURCE_MEDIA_TYPE;
+use papermachine_store::PROJECT_HOME_SOURCE_ROLE;
 use papermachine_store::Store;
 use serde::Deserialize;
 use serde::Serialize;
@@ -408,6 +412,7 @@ impl RunEffectContext {
             "ask_human" => self.ask_human(effect_key, payload).await,
             "project_snapshot" => self.project_snapshot(payload),
             "publish_artifact" => self.publish_artifact(effect_key, payload),
+            "publish_project_home" => self.publish_project_home(effect_key, payload),
             "complete" => self.complete(payload).await,
             other => Err(WorkflowRuntimeError::Protocol(format!(
                 "unknown effect kind: {other}"
@@ -648,6 +653,7 @@ impl RunEffectContext {
                     payload.action_name.clone(),
                     payload.prompt.clone(),
                     payload.arguments.clone(),
+                    payload.requested_tools.clone(),
                     source_human_request_id,
                 )?
             }
@@ -656,9 +662,10 @@ impl RunEffectContext {
         if invocation.workflow_id != self.workflow_id
             || invocation.agent_instance_id != agent_id
             || invocation.source_human_request_id != source_human_request_id
+            || invocation.requested_tools != payload.requested_tools
         {
             return Err(WorkflowRuntimeError::Protocol(
-                "replayed ActionInvocation has different Workflow, Agent, or human-message provenance"
+                "replayed ActionInvocation has different Workflow, Agent, requested tools, or human-message provenance"
                     .to_string(),
             ));
         }
@@ -785,6 +792,7 @@ impl RunEffectContext {
                         },
                         prompt_layers,
                         payload.reasoning_effort,
+                        payload.requested_tools.clone(),
                         payload.tools_enabled,
                         payload.web_search_context_size,
                         payload.response_format.clone(),
@@ -1248,6 +1256,160 @@ impl RunEffectContext {
         }))
     }
 
+    fn publish_project_home(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
+        let payload: PublishProjectHomeEffect = serde_json::from_value(payload)?;
+        let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
+            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+        let participant = self.store.get_participant(agent_id)?;
+        if participant.workflow_id != self.workflow_id {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Project-home Agent belongs to another Workflow".to_string(),
+            ));
+        }
+        let invocation = self
+            .store
+            .list_action_invocations(self.workflow_id)?
+            .into_iter()
+            .rev()
+            .find(|invocation| {
+                invocation.agent_instance_id == agent_id
+                    && invocation.status == ActionStatus::Completed
+            })
+            .ok_or_else(|| {
+                WorkflowRuntimeError::Protocol(
+                    "Project home can be published only after the editing Action completes"
+                        .to_string(),
+                )
+            })?;
+        let completed_turn = self
+            .store
+            .list_action_attempts(invocation.id)?
+            .into_iter()
+            .rev()
+            .find(|attempt| attempt.status == ActionStatus::Completed)
+            .and_then(|attempt| attempt.turn_id)
+            .map(|turn_id| self.store.get_turn(turn_id))
+            .transpose()?
+            .ok_or_else(|| {
+                WorkflowRuntimeError::Protocol(
+                    "completed Project-home Action has no durable Turn".to_string(),
+                )
+            })?;
+        if completed_turn.status != TurnStatus::Completed {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Project-home ActionAttempt does not reference a completed Turn".to_string(),
+            ));
+        }
+        let materialized_tools = completed_turn.tool_set.names().collect::<Vec<_>>();
+        for required in [
+            "read_project_home",
+            "patch_project_home",
+            "preview_project_home",
+        ] {
+            if !materialized_tools.contains(&required) {
+                return Err(WorkflowRuntimeError::Protocol(format!(
+                    "Project-home Action Turn did not materialize required tool {required}"
+                )));
+            }
+        }
+        let (base_artifact_id, source) = self
+            .store
+            .project_home_source_for_publish(self.workflow_id, invocation.id)?;
+        let source_content = serde_json::to_string(&source)?;
+        let html = source.html();
+        let workflow = self.store.get_workflow(self.workflow_id)?;
+
+        let source_artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
+            self.workflow_id,
+            effect_key,
+            "project-home-source",
+        ));
+        let source_artifact = match self.store.get_artifact(source_artifact_id) {
+            Ok(artifact) => artifact,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_artifact_with_id(
+                    source_artifact_id,
+                    workflow.project_id,
+                    self.workflow_id,
+                    Some(participant.session_id),
+                    Some(invocation.id),
+                    ArtifactKind::Other,
+                    "project-home.blocks.json",
+                    PROJECT_HOME_SOURCE_MEDIA_TYPE,
+                    json!({
+                        "role": PROJECT_HOME_SOURCE_ROLE,
+                        "revision": source.revision,
+                    }),
+                    source_content.as_bytes(),
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if source_artifact.workflow_id != self.workflow_id
+            || source_artifact.action_invocation_id != Some(invocation.id)
+            || source_artifact.name != "project-home.blocks.json"
+        {
+            return Err(WorkflowRuntimeError::Protocol(
+                "replayed Project-home source Artifact has different ownership or name".to_string(),
+            ));
+        }
+
+        let mut metadata = payload.metadata.as_object().cloned().ok_or_else(|| {
+            WorkflowRuntimeError::Protocol(
+                "Project-home publication metadata must be an object".to_string(),
+            )
+        })?;
+        metadata.insert("role".to_string(), json!(PROJECT_HOME_ROLE));
+        metadata.insert("revision".to_string(), json!(source.revision));
+        metadata.insert("source_artifact_id".to_string(), json!(source_artifact.id));
+        metadata.insert("base_artifact_id".to_string(), json!(base_artifact_id));
+
+        let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
+            self.workflow_id,
+            effect_key,
+            "project-home",
+        ));
+        let artifact = match self.store.get_artifact(artifact_id) {
+            Ok(artifact) => artifact,
+            Err(papermachine_store::StoreError::NotFound { .. }) => {
+                self.store.create_artifact_with_id(
+                    artifact_id,
+                    workflow.project_id,
+                    self.workflow_id,
+                    Some(participant.session_id),
+                    Some(invocation.id),
+                    ArtifactKind::Report,
+                    "project-home.html",
+                    PROJECT_HOME_MEDIA_TYPE,
+                    Value::Object(metadata),
+                    html.as_bytes(),
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if artifact.workflow_id != self.workflow_id
+            || artifact.action_invocation_id != Some(invocation.id)
+            || artifact.name != "project-home.html"
+        {
+            return Err(WorkflowRuntimeError::Protocol(
+                "replayed Project-home Artifact has different ownership or name".to_string(),
+            ));
+        }
+        Ok(json!({
+            "artifact_id": artifact.id,
+            "name": artifact.name,
+            "kind": artifact.kind,
+            "media_type": artifact.media_type,
+            "size_bytes": artifact.size_bytes,
+            "revision": source.revision,
+            "source_artifact_id": source_artifact.id,
+        }))
+    }
+
     async fn complete(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         self.remember_completion(&payload).await?;
         Ok(Value::Null)
@@ -1563,6 +1725,7 @@ struct InvokeActionEffect {
     response_format: Option<ModelResponseFormat>,
     #[serde(default = "default_tools_enabled")]
     tools_enabled: bool,
+    requested_tools: Vec<String>,
     #[serde(default)]
     web_search_context_size: Option<WebSearchContextSize>,
     #[serde(default)]
@@ -1696,6 +1859,17 @@ struct PublishArtifactEffect {
     #[serde(default)]
     metadata: Value,
     agent_instance_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishProjectHomeEffect {
+    agent_instance_id: String,
+    #[serde(default = "empty_object")]
+    metadata: Value,
+}
+
+fn empty_object() -> Value {
+    json!({})
 }
 
 fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, WorkflowRuntimeError> {

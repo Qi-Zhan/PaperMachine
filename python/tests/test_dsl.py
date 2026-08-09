@@ -11,6 +11,7 @@ from papermachine import (
     _set_runtime,
     action,
     ask_human,
+    publish_project_home,
     together,
 )
 
@@ -27,7 +28,7 @@ class Writer(Agent):
 
 
 class StructuredResearcher(Agent):
-    @action
+    @action(tools=["read_file"])
     async def research(self) -> dict:
         """Return structured evidence."""
 
@@ -50,7 +51,49 @@ class ConversationalAgent(Agent):
         """Respond to the human message."""
 
 
+class ProjectPageAgent(Agent):
+    access = "model_only"
+
+    @action(tools=["read_project_home", "patch_project_home"])
+    async def maintain(self) -> str:
+        """Maintain the page with its declared tools."""
+
+
 class ActionOptionsTest(unittest.TestCase):
+    def test_tools_are_action_scoped_and_project_home_publish_is_explicit(self) -> None:
+        effects: list[tuple[str, dict[str, Any]]] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            effects.append((kind, payload))
+            if kind == "create_agent":
+                return {"agent_instance_id": "page-agent", "session_id": "page-session"}
+            if kind == "invoke_action":
+                return {"output": "Page checked."}
+            if kind == "publish_project_home":
+                return {
+                    "artifact_id": "page-artifact",
+                    "name": "project-home.html",
+                    "kind": "report",
+                    "media_type": "text/html; charset=utf-8",
+                    "size_bytes": 42,
+                }
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> str:
+            _set_runtime(_Runtime(send))
+            agent = ProjectPageAgent()
+            await agent.maintain()
+            artifact = await publish_project_home(agent=agent)
+            return artifact.id
+
+        self.assertEqual(asyncio.run(invoke()), "page-artifact")
+        action = next(payload for kind, payload in effects if kind == "invoke_action")
+        self.assertEqual(
+            action["requested_tools"], ["read_project_home", "patch_project_home"]
+        )
+        publication = effects[-1][1]
+        self.assertEqual(publication["agent_instance_id"], "page-agent")
+
     def test_after_search_finalization_uses_same_session_without_tools(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []
 
@@ -79,6 +122,7 @@ class ActionOptionsTest(unittest.TestCase):
         )
         self.assertTrue(action_effects[0]["tools_enabled"])
         self.assertFalse(action_effects[1]["tools_enabled"])
+        self.assertEqual(action_effects[1]["requested_tools"], [])
         self.assertEqual(action_effects[1]["agent_instance_id"], "agent")
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
@@ -234,6 +278,7 @@ class ActionOptionsTest(unittest.TestCase):
         repair = effects[-1][1]
         self.assertEqual(repair["agent_instance_id"], "agent")
         self.assertFalse(repair["tools_enabled"])
+        self.assertEqual(repair["requested_tools"], [])
 
     def test_typed_action_stops_after_two_failed_repairs(self) -> None:
         calls = 0
@@ -279,7 +324,26 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertTrue(effects[-1][1]["tools_enabled"])
         self.assertEqual(effects[-1][1]["web_search_context_size"], "low")
         self.assertEqual(effects[-1][1]["reasoning_effort"], "low")
+        self.assertEqual(effects[-1][1]["requested_tools"], [])
         self.assertEqual(effects[0][1]["access"], "model_only")
+
+    def test_bare_action_defaults_to_no_local_tools(self) -> None:
+        self.assertEqual(RouteResearcher.investigate.tools, [])
+
+    def test_action_rejects_invalid_or_duplicate_tool_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty names"):
+
+            class EmptyName(Agent):
+                @action(tools=[""])
+                async def run(self) -> str:
+                    """Invalid Action."""
+
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+
+            class DuplicateName(Agent):
+                @action(tools=["read_file", "read_file"])
+                async def run(self) -> str:
+                    """Invalid Action."""
 
     def test_constructor_override_and_dynamic_access_change_emit_profiles(self) -> None:
         effects: list[tuple[str, dict[str, Any]]] = []

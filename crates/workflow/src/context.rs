@@ -66,8 +66,6 @@ pub fn build_project_snapshot(
     }
 
     let mut text = SnapshotTextBudget::new(max_text_chars);
-    let (project_description, project_description_truncated) =
-        text.take(&project.description, 12_000);
     let mut project_sessions = store
         .list_sessions(project.id)?
         .into_iter()
@@ -170,10 +168,12 @@ pub fn build_project_snapshot(
         .list_project_artifacts(project.id)?
         .into_iter()
         .filter(|artifact| {
-            artifact.metadata.get("role").and_then(Value::as_str) != Some("project_summary")
-                && options
-                    .updated_after
-                    .is_none_or(|updated_after| artifact.created_at > updated_after)
+            !matches!(
+                artifact.metadata.get("role").and_then(Value::as_str),
+                Some("project_summary" | "project_summary_source")
+            ) && options
+                .updated_after
+                .is_none_or(|updated_after| artifact.created_at > updated_after)
         })
         .take(max_artifacts)
         .map(|artifact| {
@@ -211,8 +211,6 @@ pub fn build_project_snapshot(
         "project": {
             "id": project.id,
             "name": project.name,
-            "description": project_description,
-            "description_truncated": project_description_truncated,
         },
         "focus_session_id": options.focus_session_id,
         "sessions": sessions,
@@ -329,11 +327,7 @@ mod tests {
         let store =
             Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
         let project = store
-            .create_project(
-                "Context Project",
-                "A stable description",
-                directory.path().join("project"),
-            )
+            .create_project("Context Project", directory.path().join("project"))
             .expect("Project should be created");
         let older = store
             .create_session(project.id, "Older Session", "", "test-model", Vec::new())
@@ -385,7 +379,7 @@ mod tests {
 
         assert_eq!(snapshot["focus_session_id"], focus.id.to_string());
         assert_eq!(snapshot["sessions"][0]["id"], focus.id.to_string());
-        assert_eq!(snapshot["project"]["description"], "A stable description");
+        assert_eq!(snapshot["project"]["name"], "Context Project");
         assert_eq!(snapshot["artifacts"][0]["content"], "原始证据内容");
         assert_eq!(snapshot["artifacts"][0]["content_truncated"], false);
         assert_eq!(snapshot["limits"]["include_artifact_content"], true);
@@ -397,11 +391,7 @@ mod tests {
         let store =
             Store::open_in_memory(directory.path().join("artifacts")).expect("store should open");
         let project = store
-            .create_project(
-                "Incremental context",
-                "Stable Project metadata",
-                directory.path().join("project"),
-            )
+            .create_project("Incremental context", directory.path().join("project"))
             .expect("Project should be created");
         store
             .create_session(project.id, "Before cursor", "", "test-model", Vec::new())

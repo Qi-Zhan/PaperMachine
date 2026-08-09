@@ -129,6 +129,8 @@ class Validator(ast.NodeVisitor):
                 self.features["background_tasks"] += 1
             elif name == "publish_artifact":
                 self.features["artifacts"] += 1
+            elif name == "publish_project_home":
+                self.features["artifacts"] += 1
             elif name == "wait":
                 values = literal_call_keywords(node)
                 seconds = values.get("seconds")
@@ -167,26 +169,79 @@ class Validator(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         if any(isinstance(base, ast.Name) and base.id == "Agent" for base in node.bases):
-            actions = []
+            actions: list[dict[str, Any]] = []
             access = "research"
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_decorator(item, "action"):
-                    actions.append(item.name)
-                if not (
+                    actions.append(
+                        {
+                            "name": item.name,
+                            "tools": self.action_tools(item),
+                        }
+                    )
+                if (
                     isinstance(item, (ast.Assign, ast.AnnAssign))
                     and assignment_name(item) == "access"
                 ):
-                    continue
-                value = item.value
-                if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-                    self.error(item, "Agent access must be a literal profile name")
-                elif value.value not in ACCESS_PROFILES:
-                    expected = ", ".join(sorted(ACCESS_PROFILES))
-                    self.error(item, f"Agent access must be one of: {expected}")
-                else:
-                    access = value.value
-            self.agents.append({"class_name": node.name, "actions": actions, "access": access})
+                    value = item.value
+                    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                        self.error(item, "Agent access must be a literal profile name")
+                    elif value.value not in ACCESS_PROFILES:
+                        expected = ", ".join(sorted(ACCESS_PROFILES))
+                        self.error(item, f"Agent access must be one of: {expected}")
+                    else:
+                        access = value.value
+            self.agents.append(
+                {
+                    "class_name": node.name,
+                    "actions": actions,
+                    "access": access,
+                }
+            )
         self.generic_visit(node)
+
+    def action_tools(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> list[str]:
+        decorator = next(
+            (
+                item
+                for item in node.decorator_list
+                if (
+                    isinstance(item, ast.Name)
+                    and item.id == "action"
+                )
+                or (
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Name)
+                    and item.func.id == "action"
+                )
+            ),
+            None,
+        )
+        if not isinstance(decorator, ast.Call):
+            return []
+        keywords = [item for item in decorator.keywords if item.arg == "tools"]
+        if not keywords:
+            return []
+        if len(keywords) > 1:
+            self.error(decorator, "action tools may be declared only once")
+            return []
+        try:
+            candidate = ast.literal_eval(keywords[0].value)
+        except (ValueError, TypeError, SyntaxError):
+            self.error(keywords[0].value, "action tools must be a literal list of names")
+            return []
+        if not isinstance(candidate, list) or any(
+            not isinstance(value, str) or not value.strip() for value in candidate
+        ):
+            self.error(keywords[0].value, "action tools must be a literal list of non-empty names")
+            return []
+        normalized = [value.strip() for value in candidate]
+        if len(normalized) != len(set(normalized)):
+            self.error(keywords[0].value, "action tools must not contain duplicates")
+            return []
+        return normalized
 
 
 def has_decorator(node: ast.AST, name: str) -> bool:

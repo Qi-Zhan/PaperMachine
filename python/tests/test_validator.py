@@ -41,7 +41,7 @@ async def main(ctx):
             [
                 {
                     "class_name": "Reviewer",
-                    "actions": ["assess"],
+                    "actions": [{"name": "assess", "tools": []}],
                     "access": "model_only",
                 }
             ],
@@ -66,6 +66,70 @@ async def main(ctx):
 
         self.assertTrue(result["valid"])
         self.assertEqual(result["manifest"]["request_mode"], "none")
+
+    def test_extracts_literal_action_tools(self) -> None:
+        result = validate(
+            '''
+from papermachine import Agent, action, workflow
+
+class Curator(Agent):
+    access = "model_only"
+
+    @action(tools=["read_project_home", "patch_project_home"])
+    async def maintain(self):
+        """Maintain the page."""
+
+@workflow(
+    slug="maintain-page",
+    name="Maintain page",
+    description="Maintain one Project page.",
+)
+async def main(ctx):
+    await Curator().maintain()
+'''
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(
+            result["agents"][0]["actions"],
+            [
+                {
+                    "name": "maintain",
+                    "tools": ["read_project_home", "patch_project_home"],
+                }
+            ],
+        )
+
+    def test_rejects_dynamic_duplicate_and_invalid_action_tools(self) -> None:
+        template = '''
+from papermachine import Agent, action, workflow
+
+TOOLS = {tools}
+
+class Worker(Agent):
+    @action(tools={declaration})
+    async def work(self):
+        """Work."""
+
+@workflow(slug="tool-check", name="Tool check", description="Check tools.")
+async def main(ctx):
+    await Worker().work()
+'''
+        cases = [
+            ("['read_file']", "TOOLS", "literal list"),
+            ("[]", "['read_file', 'read_file']", "duplicates"),
+            ("[]", "['']", "non-empty"),
+        ]
+        for tools, declaration, expected in cases:
+            with self.subTest(expected=expected):
+                result = validate(template.format(tools=tools, declaration=declaration))
+                self.assertFalse(result["valid"])
+                self.assertTrue(
+                    any(
+                        expected in item["message"]
+                        for item in result["diagnostics"]
+                    )
+                )
 
     def test_rejects_forbidden_imports(self) -> None:
         result = validate(

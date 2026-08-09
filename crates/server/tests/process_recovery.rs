@@ -48,7 +48,7 @@ class ProcessWorker(Agent):
     access = "workspace"
     role = "process recovery test worker"
 
-    @action
+    @action(tools=["exec_command"])
     async def work(self, task: str):
         """Execute the supplied deterministic process recovery test task."""
 
@@ -473,7 +473,6 @@ context_window = 128000
                 "/api/projects",
                 Some(json!({
                     "name": name,
-                    "description": "process recovery integration test",
                     "workspace": {
                         "roots": [self.workspace.to_string_lossy()],
                         "primary_root": 0,

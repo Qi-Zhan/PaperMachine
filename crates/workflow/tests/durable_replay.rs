@@ -9,7 +9,7 @@ use papermachine_protocol::{
 use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::{NewWorkflow, Store};
-use papermachine_tools::ToolRegistry;
+use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
     PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
     resolve_python_executable,
@@ -151,9 +151,9 @@ async def main(ctx):
     conservative = Conservative(name="Conservative")
     elevated = Elevated(name="Elevated")
     clamped = Clamped(name="Clamped")
-    first = await conservative.inspect(ctx.context["project"]["description"])
-    second = await elevated.compare(ctx.context["project"]["description"])
-    third = await clamped.verify(ctx.context["project"]["description"])
+    first = await conservative.inspect(ctx.context["project"]["name"])
+    second = await elevated.compare(ctx.context["project"]["name"])
+    third = await clamped.verify(ctx.context["project"]["name"])
     return {
         "context": ctx.context,
         "answers": [first, second, third],
@@ -184,7 +184,7 @@ fn runtime_with(
     store: Arc<Store>,
     work_root: &Path,
     model: Arc<dyn ModelClient>,
-    tools: ToolRegistry,
+    tools: ToolCatalog,
 ) -> PythonWorkflowRuntime {
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     let sessions = SessionRuntime::new(
@@ -212,7 +212,7 @@ fn runtime(store: Arc<Store>, work_root: &Path) -> PythonWorkflowRuntime {
         store,
         work_root,
         Arc::new(ScriptedModelClient::default()),
-        ToolRegistry::builder().build(),
+        ToolCatalog::default(),
     )
 }
 
@@ -240,11 +240,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project(
-            "Configured run",
-            "Captured evidence",
-            directory.path().join("project"),
-        )
+        .create_project("Configured run", directory.path().join("project"))
         .expect("Project should be created");
     let launch_context = WorkflowLaunchContext {
         mode: WorkflowContextMode::ProjectSnapshot,
@@ -253,7 +249,6 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             "project": {
                 "id": project.id,
                 "name": project.name,
-                "description": project.description,
             },
         })),
     };
@@ -289,7 +284,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
         Arc::clone(&store),
         &directory.path().join("runtime"),
         Arc::new(model),
-        ToolRegistry::builder().build(),
+        ToolCatalog::default(),
     )
     .execute(workflow.id, CancellationToken::new())
     .await
@@ -340,7 +335,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             "launch context must not be injected as instructions"
         );
         assert!(
-            turn.input.contains("Captured evidence"),
+            turn.input.contains("Configured run"),
             "the Workflow explicitly passed ctx.context as Action Turn data"
         );
     }
@@ -354,7 +349,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project("Durable replay", "", directory.path().join("project"))
+        .create_project("Durable replay", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
         .create_workflow(NewWorkflow {
@@ -475,7 +470,7 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project("Durable timer", "", directory.path().join("project"))
+        .create_project("Durable timer", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
         .create_workflow(NewWorkflow {
@@ -544,7 +539,7 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project("Durable signal", "", directory.path().join("project"))
+        .create_project("Durable signal", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
         .create_workflow(NewWorkflow {
@@ -599,7 +594,7 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project("Timer plus human", "", directory.path().join("project"))
+        .create_project("Timer plus human", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
         .create_workflow(NewWorkflow {

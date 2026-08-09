@@ -6,6 +6,7 @@ use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::StepId;
 use crate::TokenUsage;
+use crate::ToolSetSnapshot;
 use crate::TurnEnvironmentSnapshot;
 use crate::TurnId;
 use crate::WebSearchContextSize;
@@ -104,8 +105,10 @@ pub struct Turn {
     /// Immutable Workspace and materialized authorization captured when this
     /// Turn is created.
     pub environment: TurnEnvironmentSnapshot,
+    /// Exact host-materialized local tool surface for this Turn. Hosted tools
+    /// remain a separate provider capability.
+    pub tool_set: ToolSetSnapshot,
     /// Internal Action policy used by finalization and JSON-repair Turns.
-    /// Ordinary user and Workflow Turns enable tools according to `access`.
     pub tools_enabled: bool,
     /// Hosted web-search retrieval size for this Turn. `None` inherits the
     /// provider default.

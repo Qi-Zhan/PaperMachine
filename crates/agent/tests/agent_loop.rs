@@ -26,6 +26,7 @@ use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkspaceAttachment;
 use papermachine_tools::ReadFileTool;
+use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolRegistry;
 use papermachine_tools::WriteFileTool;
 use std::sync::Arc;
@@ -56,6 +57,34 @@ fn turn_environment(
         preset,
     )
     .expect("fixture environment should materialize")
+}
+
+fn read_tools() -> ToolRegistry {
+    let catalog = ToolCatalog::builder()
+        .register_workspace(ReadFileTool)
+        .expect("read tool should register")
+        .build();
+    let snapshot = catalog
+        .materialize_session_tools(AccessPreset::Research, true)
+        .expect("read tool set should materialize");
+    catalog
+        .registry_for_snapshot(&snapshot, false)
+        .expect("read registry should rebuild")
+}
+
+fn read_write_tools() -> ToolRegistry {
+    let catalog = ToolCatalog::builder()
+        .register_workspace(ReadFileTool)
+        .expect("read tool should register")
+        .register_workspace(WriteFileTool)
+        .expect("write tool should register")
+        .build();
+    let snapshot = catalog
+        .materialize_session_tools(AccessPreset::Research, true)
+        .expect("read-write tool set should materialize");
+    catalog
+        .registry_for_snapshot(&snapshot, false)
+        .expect("read-write registry should rebuild")
 }
 
 #[derive(Clone, Copy)]
@@ -120,12 +149,7 @@ async fn agent_executes_a_tool_then_follows_up() {
             },
         ],
     ]);
-    let tools = ToolRegistry::builder()
-        .register(ReadFileTool)
-        .expect("read tool should register")
-        .register(WriteFileTool)
-        .expect("write tool should register")
-        .build();
+    let tools = read_write_tools();
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
@@ -223,10 +247,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
             },
         ],
     ]);
-    let tools = ToolRegistry::builder()
-        .register(ReadFileTool)
-        .expect("read tool should register")
-        .build();
+    let tools = read_tools();
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
@@ -275,14 +296,7 @@ async fn tools_enabled_false_omits_local_and_hosted_tools() {
         },
     ]]);
     let events = RecordingAgentEventSink::default();
-    let runtime = AgentRuntime::new(
-        Arc::new(model.clone()),
-        ToolRegistry::builder()
-            .register(ReadFileTool)
-            .expect("read tool should register")
-            .build(),
-        Arc::new(events),
-    );
+    let runtime = AgentRuntime::new(Arc::new(model.clone()), read_tools(), Arc::new(events));
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
@@ -323,10 +337,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
     ]]);
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        ToolRegistry::builder()
-            .register(ReadFileTool)
-            .expect("read tool should register")
-            .build(),
+        read_tools(),
         Arc::new(RecordingAgentEventSink::default()),
     )
     .with_control(Arc::new(FinishNowControl));
@@ -363,7 +374,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
 }
 
 #[tokio::test]
-async fn model_only_access_omits_local_and_hosted_tools() {
+async fn empty_turn_registry_omits_local_tools_and_model_only_omits_hosted_tools() {
     let model = ScriptedModelClient::new([vec![
         ModelEvent::OutputTextDelta {
             delta: "No tools needed.".to_string(),
@@ -374,12 +385,7 @@ async fn model_only_access_omits_local_and_hosted_tools() {
     ]]);
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        ToolRegistry::builder()
-            .register(ReadFileTool)
-            .expect("read tool should register")
-            .register(WriteFileTool)
-            .expect("write tool should register")
-            .build(),
+        ToolRegistry::default(),
         Arc::new(RecordingAgentEventSink::default()),
     );
     let directory = tempdir().expect("temporary workspace should be created");
@@ -711,7 +717,7 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        ToolRegistry::builder().build(),
+        ToolRegistry::default(),
         Arc::new(events.clone()),
     );
     let directory = tempdir().expect("temporary workspace should be created");
@@ -783,7 +789,7 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        ToolRegistry::builder().build(),
+        ToolRegistry::default(),
         Arc::new(events.clone()),
     );
     let directory = tempdir().expect("temporary workspace should be created");

@@ -45,21 +45,31 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     "artifacts": [],
                 }
             if kind == "invoke_action":
-                self.assertEqual(payload["arguments"]["snapshot"]["project"]["name"], "PaperMachine")
-                return {
-                    "output": "<!doctype html><html><body><h1>Current progress</h1></body></html>"
-                }
-            if kind == "publish_artifact":
-                self.assertEqual(payload["media_type"], "text/html; charset=utf-8")
-                self.assertEqual(payload["metadata"]["role"], "project_summary")
+                self.assertEqual(
+                    payload["arguments"]["project_changes"]["project"]["name"],
+                    "PaperMachine",
+                )
+                self.assertEqual(payload["action_name"], "maintain_project_home")
+                self.assertEqual(
+                    payload["requested_tools"],
+                    [
+                        "read_project_home",
+                        "patch_project_home",
+                        "preview_project_home",
+                    ],
+                )
+                self.assertIsNone(payload["response_format"])
+                return {"output": "The Project home page is current."}
+            if kind == "publish_project_home":
+                self.assertEqual(payload["agent_instance_id"], "agent-summary")
                 self.assertEqual(payload["metadata"]["snapshot_mode"], "full")
-                self.assertIn("<h1>Current progress</h1>", payload["content"])
+                self.assertEqual(payload["metadata"]["refresh_count"], 1)
                 return {
                     "artifact_id": "artifact-summary",
-                    "name": payload["name"],
-                    "kind": payload["kind"],
-                    "media_type": payload["media_type"],
-                    "size_bytes": len(payload["content"]),
+                    "name": "project-home.html",
+                    "kind": "report",
+                    "media_type": "text/html; charset=utf-8",
+                    "size_bytes": 128,
                 }
             raise AssertionError(f"unexpected effect: {kind}")
 
@@ -78,13 +88,27 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         self.assertEqual(output, {"artifact_id": "artifact-summary", "refresh_count": 1})
         self.assertEqual(
             [kind for kind, _ in effects],
-            ["project_snapshot", "create_agent", "invoke_action", "publish_artifact"],
+            [
+                "project_snapshot",
+                "create_agent",
+                "invoke_action",
+                "publish_project_home",
+            ],
         )
 
-    def test_non_html_model_output_is_escaped_into_a_safe_document(self) -> None:
-        html = WORKFLOW["_normalize_html"]("finding < uncertain & unresolved")
-        self.assertIn("<!doctype html>", html)
-        self.assertIn("finding &lt; uncertain &amp; unresolved", html)
+    def test_summary_prompt_delegates_iteration_to_one_tool_capable_action(self) -> None:
+        agent_type = WORKFLOW["ProjectSummaryAgent"]
+        self.assertEqual(
+            agent_type.maintain_project_home.tools,
+            [
+                "read_project_home",
+                "patch_project_home",
+                "preview_project_home",
+            ],
+        )
+        prompt = agent_type.system_prompt
+        self.assertIn("as many editing and inspection passes as needed", prompt)
+        self.assertNotIn("complete or continue", prompt.lower())
 
     def test_delta_change_detection_ignores_an_empty_tick(self) -> None:
         self.assertFalse(

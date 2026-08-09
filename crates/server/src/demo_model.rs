@@ -7,7 +7,10 @@ use papermachine_model::ModelStream;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelRequest;
+use papermachine_protocol::ModelToolCall;
 use papermachine_protocol::TokenUsage;
+use serde_json::Value;
+use serde_json::json;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DemoModelClient;
@@ -15,6 +18,13 @@ pub struct DemoModelClient;
 #[async_trait]
 impl ModelClient for DemoModelClient {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_project_home")
+        {
+            return Ok(stream::iter(project_home_response(&request).into_iter().map(Ok)).boxed());
+        }
         let prompt = request
             .input
             .iter()
@@ -45,6 +55,78 @@ impl ModelClient for DemoModelClient {
         ])
         .boxed())
     }
+}
+
+fn project_home_response(request: &ModelRequest) -> Vec<ModelEvent> {
+    let tool_output = |call_id: &str| {
+        request.input.iter().rev().find_map(|item| match item {
+            ModelInputItem::FunctionCallOutput {
+                call_id: found,
+                output,
+            } if found == call_id => Some(output),
+            _ => None,
+        })
+    };
+    let usage = TokenUsage {
+        input_tokens: 160,
+        output_tokens: 40,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+    };
+    if tool_output("demo-project-home-read").is_none() {
+        return tool_call(
+            "demo-project-home-read",
+            "read_project_home",
+            json!({}),
+            usage,
+        );
+    }
+    if tool_output("demo-project-home-patch").is_none() {
+        let revision = tool_output("demo-project-home-read")
+            .and_then(|output| output.pointer("/result/revision"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return tool_call(
+            "demo-project-home-patch",
+            "patch_project_home",
+            json!({
+                "base_revision": revision,
+                "operations": [{
+                    "kind": "upsert",
+                    "id": "overview",
+                    "html": "<header><h1>Project overview</h1><p>This page was maintained through the Project-home editing and preview tool loop.</p></header><section><h2>Current state</h2><p>Demo mode verifies the runtime path but does not claim evidence-bearing research results.</p></section><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section>"
+                }]
+            }),
+            usage,
+        );
+    }
+    if tool_output("demo-project-home-preview").is_none() {
+        return tool_call(
+            "demo-project-home-preview",
+            "preview_project_home",
+            json!({}),
+            usage,
+        );
+    }
+    vec![
+        ModelEvent::OutputTextDelta {
+            delta: "The Project home page has been edited and previewed.".to_string(),
+        },
+        ModelEvent::Completed { usage },
+    ]
+}
+
+fn tool_call(call_id: &str, name: &str, arguments: Value, usage: TokenUsage) -> Vec<ModelEvent> {
+    vec![
+        ModelEvent::ToolCallCompleted {
+            call: ModelToolCall {
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                arguments: serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string()),
+            },
+        },
+        ModelEvent::Completed { usage },
+    ]
 }
 
 fn demo_research_response(prompt: &str) -> String {

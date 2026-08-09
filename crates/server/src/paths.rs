@@ -9,20 +9,32 @@ enum Platform {
 }
 
 pub fn default_data_dir() -> anyhow::Result<PathBuf> {
-    let platform = if cfg!(target_os = "macos") {
-        Platform::MacOs
-    } else if cfg!(target_os = "windows") {
-        Platform::Windows
-    } else {
-        Platform::Linux
-    };
     resolve_data_dir(
-        platform,
+        current_platform(),
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
     )
     .context("could not determine the PaperMachine user data directory")
+}
+
+pub fn default_workspace_root() -> anyhow::Result<PathBuf> {
+    resolve_workspace_root(
+        current_platform(),
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    )
+    .context("could not determine the default PaperMachine Workspace directory")
+}
+
+fn current_platform() -> Platform {
+    if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    }
 }
 
 fn resolve_data_dir(
@@ -45,6 +57,18 @@ fn resolve_data_dir(
             .context("LOCALAPPDATA is not set")?
             .join("PaperMachine")),
     }
+}
+
+fn resolve_workspace_root(
+    platform: Platform,
+    home: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let user_root = match platform {
+        Platform::MacOs | Platform::Linux => home.context("HOME is not set")?,
+        Platform::Windows => user_profile.context("USERPROFILE is not set")?,
+    };
+    Ok(user_root.join("Documents").join("PaperMachine"))
 }
 
 #[cfg(test)]
@@ -100,6 +124,28 @@ mod tests {
             )
             .expect("Windows data directory should resolve"),
             PathBuf::from("C:/Users/researcher/AppData/Local/PaperMachine")
+        );
+    }
+
+    #[test]
+    fn workspaces_default_to_a_user_visible_documents_folder() {
+        assert_eq!(
+            resolve_workspace_root(
+                Platform::MacOs,
+                Some(PathBuf::from("/Users/researcher")),
+                None,
+            )
+            .expect("macOS Workspace root should resolve"),
+            PathBuf::from("/Users/researcher/Documents/PaperMachine")
+        );
+        assert_eq!(
+            resolve_workspace_root(
+                Platform::Windows,
+                None,
+                Some(PathBuf::from("C:/Users/researcher")),
+            )
+            .expect("Windows Workspace root should resolve"),
+            PathBuf::from("C:/Users/researcher/Documents/PaperMachine")
         );
     }
 }

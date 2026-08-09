@@ -357,8 +357,7 @@ impl AgentRuntime {
         let execution_gate = Arc::new(RwLock::new(()));
         let mut total_usage = request.initial_usage;
         let tool_definitions = if request.tools_enabled {
-            self.tools
-                .definitions_for(&request.environment.authorization)
+            self.tools.definitions()
         } else {
             Vec::new()
         };

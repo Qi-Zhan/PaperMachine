@@ -4,6 +4,7 @@ use papermachine_model::ConfiguredModels;
 use papermachine_server::ServerConfig;
 use papermachine_server::ServerModelConfig;
 use papermachine_server::paths::default_data_dir;
+use papermachine_server::paths::default_workspace_root;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -108,6 +109,7 @@ async fn run_server() -> anyhow::Result<()> {
     let config = ServerConfig {
         resource_root: resource_root.clone(),
         data_dir: data_dir.clone(),
+        default_workspace_root: default_workspace_root()?,
         models,
         max_concurrent_runs: args.max_concurrent_runs,
         max_parallel_actions: args.max_parallel_actions,

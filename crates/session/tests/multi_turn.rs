@@ -26,7 +26,7 @@ use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
-use papermachine_tools::ToolRegistry;
+use papermachine_tools::ToolCatalog;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -87,7 +87,7 @@ async fn cancelling_a_turn_closes_its_running_model_step() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_project("Cancellation", "", directory.path().join("project"))
+        .create_project("Cancellation", directory.path().join("project"))
         .expect("research should be created");
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
@@ -99,7 +99,7 @@ async fn cancelling_a_turn_closes_its_running_model_step() {
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
         Arc::new(BlockingModelClient),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
@@ -154,11 +154,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
         Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
     );
     let project = store
-        .create_project(
-            "Action cancellation",
-            "",
-            directory.path().join("workspace"),
-        )
+        .create_project("Action cancellation", directory.path().join("workspace"))
         .expect("Project should be created");
     let origin = store
         .create_session(project.id, "Origin", "", "test-model", Vec::new())
@@ -202,6 +198,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             "investigate",
             "Wait",
             serde_json::json!({}),
+            Vec::new(),
         )
         .expect("invocation should be created");
     let attempt = store
@@ -211,7 +208,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
         Arc::new(BlockingModelClient),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
@@ -234,6 +231,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
                     None,
                     Vec::new(),
                     None,
+                    Vec::new(),
                     true,
                     None,
                     None,
@@ -293,11 +291,7 @@ async fn later_turns_reuse_the_completed_session_history() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_project(
-            "Persistent conversation",
-            "",
-            directory.path().join("project"),
-        )
+        .create_project("Persistent conversation", directory.path().join("project"))
         .expect("research should be created");
     let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
     skills
@@ -313,7 +307,7 @@ async fn later_turns_reuse_the_completed_session_history() {
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
         Arc::new(model.clone()),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
@@ -373,7 +367,7 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let project = store
-        .create_project("Prompt snapshots", "", directory.path().join("project"))
+        .create_project("Prompt snapshots", directory.path().join("project"))
         .expect("Project should be created");
     store
         .set_project_system_prompt(project.id, "Project prompt one.")
@@ -392,7 +386,7 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
         Arc::new(model.clone()),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
@@ -476,7 +470,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
         Store::open_in_memory(directory.path().join("artifacts")).expect("store should open"),
     );
     let research = store
-        .create_project("Usage", "", directory.path().join("project"))
+        .create_project("Usage", directory.path().join("project"))
         .expect("research should be created");
     let origin = store
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
@@ -520,6 +514,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             "investigate",
             "Research",
             serde_json::json!({}),
+            Vec::new(),
         )
         .expect("invocation should be created");
     let attempt = store
@@ -534,7 +529,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
     let runtime = SessionRuntime::new(
         Arc::clone(&store),
         Arc::new(model),
-        ToolRegistry::default(),
+        ToolCatalog::default(),
         skills,
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
@@ -551,6 +546,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             None,
             Vec::new(),
             None,
+            Vec::new(),
             true,
             None,
             None,

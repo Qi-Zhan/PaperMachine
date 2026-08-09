@@ -1,21 +1,54 @@
+use async_trait::async_trait;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
+use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::ToolEffectDisposition;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WorkflowId;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
+use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolError;
 use papermachine_tools::ToolExecutor;
-use papermachine_tools::ToolRegistry;
+use papermachine_tools::ToolOutput;
 use papermachine_tools::WriteFileTool;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Copy)]
+struct ProjectProbeTool(&'static str);
+
+#[async_trait]
+impl ToolExecutor for ProjectProbeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "project_probe".to_string(),
+            description: self.0.to_string(),
+            input_schema: json!({"type": "object"}),
+            supports_parallel: false,
+        }
+    }
+
+    fn effect_disposition(&self) -> ToolEffectDisposition {
+        ToolEffectDisposition::Pure
+    }
+
+    async fn execute(
+        &self,
+        _context: ToolContext,
+        arguments: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            value: arguments,
+            summary: "runtime probe completed".to_string(),
+        })
+    }
+}
 
 fn context(root: &std::path::Path) -> ToolContext {
     context_with_access(root, AccessPreset::Research)
@@ -55,22 +88,24 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
 }
 
 #[test]
-fn registry_exposes_exact_tools_for_each_access_profile() {
-    let registry = ToolRegistry::builder()
-        .register(ReadFileTool)
+fn catalog_materializes_exact_session_tools_for_each_access_profile() {
+    let catalog = ToolCatalog::builder()
+        .register_workspace(ReadFileTool)
         .expect("read tool should register")
-        .register(WriteFileTool)
+        .register_workspace(WriteFileTool)
         .expect("write tool should register")
-        .register(ExecCommandTool)
+        .register_workspace(ExecCommandTool)
         .expect("command tool should register")
-        .register(FetchUrlTool)
+        .register_workspace(FetchUrlTool)
         .expect("fetch tool should register")
+        .register_project(ProjectProbeTool("Project probe"))
+        .expect("Project tool should register")
         .build();
     let names = |access| {
-        let directory = tempdir().expect("temporary workspace should be created");
-        let context = context_with_access(directory.path(), access);
-        registry
-            .definitions_for(&context.authorization)
+        catalog
+            .materialize_session_tools(access, true)
+            .expect("Session tools should materialize")
+            .definitions
             .into_iter()
             .map(|definition| definition.name)
             .collect::<Vec<_>>()
@@ -90,42 +125,144 @@ fn registry_exposes_exact_tools_for_each_access_profile() {
         names(AccessPreset::FullAccess),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
     );
-    assert_eq!(
-        registry.effect_disposition("read_file"),
-        Some(ToolEffectDisposition::Pure)
-    );
-    assert_eq!(
-        registry.effect_disposition("fetch_url"),
-        Some(ToolEffectDisposition::Pure)
-    );
-    assert_eq!(
-        registry.effect_disposition("write_file"),
-        Some(ToolEffectDisposition::Idempotent)
-    );
-    assert_eq!(
-        registry.effect_disposition("exec_command"),
-        Some(ToolEffectDisposition::Unknown)
-    );
+    assert!(!names(AccessPreset::FullAccess).contains(&"project_probe".to_string()));
 }
 
 #[tokio::test]
-async fn registry_rejects_a_hidden_tool_call() {
+async fn project_tools_are_admitted_only_for_declared_workflow_actions() {
     let directory = tempdir().expect("temporary directory should be created");
-    std::fs::write(directory.path().join("evidence.txt"), "private")
-        .expect("probe should be written");
-    let registry = ToolRegistry::builder()
-        .register(ReadFileTool)
+    let context = context_with_access(directory.path(), AccessPreset::ModelOnly);
+    let catalog = ToolCatalog::builder()
+        .register_workspace(ReadFileTool)
         .expect("read tool should register")
+        .register_project(ProjectProbeTool("Project probe"))
+        .expect("Project tool should register")
         .build();
-    let error = registry
-        .execute(
-            "read_file",
-            context_with_access(directory.path(), AccessPreset::ModelOnly),
-            json!({"path": "evidence.txt"}),
+
+    let standalone = catalog
+        .materialize_session_tools(AccessPreset::FullAccess, true)
+        .expect("standalone tools should materialize");
+    assert_eq!(
+        standalone
+            .definitions
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_file"]
+    );
+    let snapshot = catalog
+        .materialize_action_tools(
+            &["read_file".to_string(), "project_probe".to_string()],
+            AccessPreset::ModelOnly,
+            true,
         )
+        .expect("Action tools should materialize");
+    assert_eq!(
+        snapshot
+            .definitions
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["project_probe"]
+    );
+    assert!(catalog.registry_for_snapshot(&snapshot, false).is_err());
+    let registry = catalog
+        .registry_for_snapshot(&snapshot, true)
+        .expect("Workflow registry should rebuild");
+    let output = registry
+        .execute("project_probe", context.clone(), json!({"value": 7}))
         .await
-        .expect_err("model-only profile must reject a forged read call");
-    assert!(matches!(error, ToolError::PermissionDenied { .. }));
+        .expect("declared Project tool should execute");
+    assert_eq!(output.value, json!({"value": 7}));
+    let denied = registry
+        .execute("read_file", context, json!({"path": "anything"}))
+        .await
+        .expect_err("filtered Workspace tool must not enter the registry");
+    assert!(matches!(denied, ToolError::UnknownTool(_)));
+}
+
+#[test]
+fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift() {
+    assert!(
+        ToolCatalog::builder()
+            .register_workspace(ReadFileTool)
+            .expect("first registration should succeed")
+            .register_project(ReadFileTool)
+            .is_err()
+    );
+
+    let catalog = ToolCatalog::builder()
+        .register_project(ProjectProbeTool("version one"))
+        .expect("Project tool should register")
+        .build();
+    let unknown = catalog
+        .materialize_action_tools(&["missing_tool".to_string()], AccessPreset::Research, true)
+        .expect_err("unknown Action tool must fail validation");
+    assert!(matches!(unknown, ToolError::UnknownTool(_)));
+    assert!(
+        catalog
+            .materialize_action_tools(
+                &["project_probe".to_string(), "project_probe".to_string()],
+                AccessPreset::Research,
+                true,
+            )
+            .is_err()
+    );
+
+    let snapshot = catalog
+        .materialize_action_tools(&["project_probe".to_string()], AccessPreset::Research, true)
+        .expect("snapshot should materialize");
+    assert!(
+        ToolCatalog::default()
+            .registry_for_snapshot(&snapshot, true)
+            .is_err()
+    );
+    let mut corrupt = snapshot.clone();
+    corrupt.sha256 = "0".repeat(64);
+    assert!(catalog.registry_for_snapshot(&corrupt, true).is_err());
+    let changed = ToolCatalog::builder()
+        .register_project(ProjectProbeTool("version two"))
+        .expect("changed Project tool should register")
+        .build();
+    assert!(changed.registry_for_snapshot(&snapshot, true).is_err());
+}
+
+#[test]
+fn one_persistent_agent_can_receive_different_exact_registries_per_action() {
+    let catalog = ToolCatalog::builder()
+        .register_workspace(ReadFileTool)
+        .expect("read tool should register")
+        .register_workspace(WriteFileTool)
+        .expect("write tool should register")
+        .build();
+    let read_turn = catalog
+        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Workspace, true)
+        .expect("read Action should materialize");
+    let write_turn = catalog
+        .materialize_action_tools(&["write_file".to_string()], AccessPreset::Workspace, true)
+        .expect("write Action should materialize");
+
+    assert_ne!(read_turn.sha256, write_turn.sha256);
+    assert_eq!(
+        catalog
+            .registry_for_snapshot(&read_turn, true)
+            .expect("read Registry should rebuild")
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>(),
+        vec!["read_file"]
+    );
+    assert_eq!(
+        catalog
+            .registry_for_snapshot(&write_turn, true)
+            .expect("write Registry should rebuild")
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>(),
+        vec!["write_file"]
+    );
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ class Researcher(Agent):
         search_context_size="low",
         reasoning_effort="high",
         finalize="after_search",
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def research(self, question: str, prior_project_context: dict):
         """Research the complete question with the available live research tools and return only the requested final deliverable. Never claim to have searched or opened a source unless a corresponding tool was available and used. prior_project_context contains optional earlier Project work selected by the user: use it to continue useful leads and avoid repetition, but independently verify material claims and do not expose unrelated history. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
@@ -18,7 +19,7 @@ class Researcher(Agent):
 @workflow(
     slug="single-agent-research",
     name="Single-agent research",
-    description="Let one persistent research Session use its configured live research tools, reason, and produce the exact requested deliverable without evaluator or writer handoffs.",
+    description="Research a request and produce the requested deliverable.",
     params_schema={"type": "object", "properties": {}, "additionalProperties": False},
     output_schema={
         "type": "object",

@@ -104,6 +104,7 @@ class _ActionDescriptor:
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         finalize: str | None = None,
+        tools: list[str] | None = None,
     ) -> None:
         if search_context_size not in {None, "low", "medium", "high"}:
             raise ValueError(
@@ -133,6 +134,7 @@ class _ActionDescriptor:
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
+        self.tools = _normalize_action_tools(tools if tools is not None else [])
 
     def __get__(self, instance: Agent | None, owner: type[Agent]) -> Any:
         if instance is None:
@@ -179,6 +181,7 @@ class _ActionDescriptor:
                 self.search_context_size,
                 self.reasoning_effort,
                 self.finalize,
+                self.tools,
                 self.human_message_parameter,
                 human_message.request_id if human_message is not None else None,
             )
@@ -192,6 +195,7 @@ def action(
     search_context_size: str | None = None,
     reasoning_effort: str | None = None,
     finalize: str | None = None,
+    tools: list[str] | None = None,
 ) -> Any:
     if callable(argument):
         return _ActionDescriptor(
@@ -199,6 +203,7 @@ def action(
             search_context_size=search_context_size,
             reasoning_effort=reasoning_effort,
             finalize=finalize,
+            tools=tools,
         )
     if argument is not None and not isinstance(argument, str):
         raise TypeError("action prompt must be a string")
@@ -210,6 +215,7 @@ def action(
             search_context_size,
             reasoning_effort,
             finalize,
+            tools,
         )
 
     return decorate
@@ -339,6 +345,7 @@ class _ActionCall(Awaitable[Any]):
         search_context_size: str | None,
         reasoning_effort: str | None,
         finalize: str | None,
+        tools: list[str],
         human_message_parameter: str | None,
         human_request_id: str | None,
     ) -> None:
@@ -351,6 +358,7 @@ class _ActionCall(Awaitable[Any]):
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
+        self.tools = list(tools)
         self.human_message_parameter = human_message_parameter
         self.human_request_id = human_request_id
 
@@ -446,6 +454,7 @@ class _ActionCall(Awaitable[Any]):
                 "arguments": self.arguments if arguments is None else arguments,
                 "response_format": self.response_format,
                 "tools_enabled": tools_enabled,
+                "requested_tools": self.tools if tools_enabled else [],
                 "web_search_context_size": (
                     self.search_context_size
                     if search_context_size is None
@@ -751,6 +760,30 @@ async def publish_artifact(
     )
 
 
+async def publish_project_home(
+    *,
+    agent: Agent,
+    metadata: dict[str, Any] | None = None,
+) -> ArtifactRef:
+    """Atomically publish the Project-home draft edited by one Agent Action."""
+
+    remote = await agent._ensure_remote()
+    result = await _effect(
+        "publish_project_home",
+        {
+            "agent_instance_id": remote["agent_instance_id"],
+            "metadata": metadata or {},
+        },
+    )
+    return ArtifactRef(
+        id=str(result["artifact_id"]),
+        name=str(result["name"]),
+        kind=str(result["kind"]),
+        media_type=str(result["media_type"]),
+        size_bytes=int(result["size_bytes"]),
+    )
+
+
 class BackgroundTask(Generic[T]):
     def __init__(self, task: asyncio.Task[T]) -> None:
         self._task = task
@@ -921,6 +954,17 @@ def _require_runtime() -> _Runtime:
     return _runtime
 
 
+def _normalize_action_tools(values: list[str]) -> list[str]:
+    if not isinstance(values, list) or any(
+        not isinstance(value, str) or not value.strip() for value in values
+    ):
+        raise ValueError("action tools must be a list of non-empty names")
+    normalized = [value.strip() for value in values]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("action tools must not contain duplicates")
+    return normalized
+
+
 async def _effect(
     kind: str,
     payload: dict[str, Any],
@@ -948,6 +992,7 @@ __all__ = [
     "background",
     "every",
     "publish_artifact",
+    "publish_project_home",
     "relate",
     "scope",
     "together",

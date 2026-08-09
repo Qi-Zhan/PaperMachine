@@ -42,6 +42,28 @@ impl AccessPreset {
             Self::FullAccess => "full_access",
         }
     }
+
+    pub fn tool_capabilities(self) -> ToolCapabilities {
+        match self {
+            Self::ModelOnly => ToolCapabilities::default(),
+            Self::ReadOnly => ToolCapabilities {
+                read_file: true,
+                ..ToolCapabilities::default()
+            },
+            Self::Workspace => ToolCapabilities {
+                read_file: true,
+                write_file: true,
+                exec_command: true,
+                fetch_url: false,
+            },
+            Self::Research | Self::FullAccess => ToolCapabilities {
+                read_file: true,
+                write_file: true,
+                exec_command: true,
+                fetch_url: true,
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for AccessPreset {
@@ -166,38 +188,25 @@ impl AuthorizationContext {
             AccessPreset::ModelOnly => (
                 FilesystemScope::None,
                 FilesystemScope::None,
-                ToolCapabilities::default(),
+                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::ReadOnly => (
                 FilesystemScope::Workspace,
                 FilesystemScope::None,
-                ToolCapabilities {
-                    read_file: true,
-                    ..ToolCapabilities::default()
-                },
+                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::Workspace => (
                 FilesystemScope::Workspace,
                 FilesystemScope::Workspace,
-                ToolCapabilities {
-                    read_file: true,
-                    write_file: true,
-                    exec_command: true,
-                    fetch_url: false,
-                },
+                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::Research => (
                 FilesystemScope::Workspace,
                 FilesystemScope::Workspace,
-                ToolCapabilities {
-                    read_file: true,
-                    write_file: true,
-                    exec_command: true,
-                    fetch_url: true,
-                },
+                preset.tool_capabilities(),
                 NetworkCapabilities {
                     child_process: false,
                     controlled_fetch: true,
@@ -207,12 +216,7 @@ impl AuthorizationContext {
             AccessPreset::FullAccess => (
                 FilesystemScope::Host,
                 FilesystemScope::Host,
-                ToolCapabilities {
-                    read_file: true,
-                    write_file: true,
-                    exec_command: true,
-                    fetch_url: true,
-                },
+                preset.tool_capabilities(),
                 NetworkCapabilities {
                     child_process: true,
                     controlled_fetch: true,
