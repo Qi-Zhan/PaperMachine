@@ -679,7 +679,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
     let directory = tempdir().expect("temporary directory should be created");
     let managed = directory.path().join("managed");
     let artifacts = managed.join("artifacts");
-    let (project_id, workflow_id) = {
+    let (project_id, workflow_id, artifact_path) = {
         let store = Store::create(&managed).expect("store should be created");
         let research = project(&store, &directory, "Persistent");
         let session = store
@@ -703,10 +703,16 @@ fn database_reopens_and_artifacts_are_content_addressed() {
         assert_eq!(artifact.sha256.len(), 64);
         assert!(artifact.relative_path.starts_with(&run.id.to_string()));
         assert!(artifacts.join(&artifact.relative_path).is_file());
-        (research.id, run.id)
+        std::fs::write(artifacts.join("orphan.tmp"), "uncommitted")
+            .expect("orphan fixture should be written");
+        (research.id, run.id, artifact.relative_path)
     };
 
     let reopened = Store::open(&managed).expect("store should reopen");
+    reopened
+        .reconcile_artifacts()
+        .expect("Artifact storage should reconcile");
+    assert!(!artifacts.join("orphan.tmp").exists());
     assert_eq!(
         reopened.list_projects().expect("projects should load")[0].id,
         project_id
@@ -727,6 +733,28 @@ fn database_reopens_and_artifacts_are_content_addressed() {
             .read_artifact(&stored[0])
             .expect("artifact should read"),
         b"evidence"
+    );
+    std::fs::write(artifacts.join(&artifact_path), b"tampered")
+        .expect("artifact corruption fixture should be written");
+    assert!(
+        reopened
+            .read_artifact(&stored[0])
+            .expect_err("corrupted Artifact must fail closed")
+            .to_string()
+            .contains("hash")
+    );
+    std::fs::write(artifacts.join(&artifact_path), b"evidence")
+        .expect("artifact fixture should be restored");
+    drop(reopened);
+    std::fs::remove_file(artifacts.join(&artifact_path))
+        .expect("artifact fixture should be removed");
+    assert!(
+        Store::open(&managed)
+            .expect("database should still open")
+            .reconcile_artifacts()
+            .expect_err("a durable Artifact without its file must fail closed")
+            .to_string()
+            .contains("unavailable")
     );
 }
 

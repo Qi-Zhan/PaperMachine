@@ -217,6 +217,22 @@ async fn run_scheduled(
     workflow_id: WorkflowId,
     cancellation: CancellationToken,
 ) -> WorkflowOutcome {
+    let outcome = run_scheduled_inner(Arc::clone(&inner), workflow_id, cancellation).await;
+    if inner
+        .store
+        .get_workflow(workflow_id)
+        .is_ok_and(|workflow| workflow.status.is_terminal())
+    {
+        let _ = inner.store.cleanup_terminal_workflow_state(workflow_id);
+    }
+    outcome
+}
+
+async fn run_scheduled_inner(
+    inner: Arc<SchedulerInner>,
+    workflow_id: WorkflowId,
+    cancellation: CancellationToken,
+) -> WorkflowOutcome {
     let mut wake_at_hint = None;
     loop {
         let current = inner

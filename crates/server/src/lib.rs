@@ -252,6 +252,19 @@ struct ProjectRuntimeFactory {
 
 impl ProjectRuntimeFactory {
     async fn build(&self, project: &Project, store: Arc<Store>) -> anyhow::Result<ProjectRuntime> {
+        store
+            .reconcile_artifacts()
+            .context("failed to reconcile Artifact storage")?;
+        let workflow_runtime_root = store.managed_root().join("workflow-runtime");
+        reset_ephemeral_directory(&workflow_runtime_root)
+            .context("failed to reset Python Workflow runtime")?;
+        reset_ephemeral_directory(&store.managed_root().join("runtime/sandboxes"))
+            .context("failed to reset Agent sandboxes")?;
+        for workflow in store.list_project_workflows(project.id)? {
+            if workflow.status.is_terminal() {
+                store.cleanup_terminal_workflow_state(workflow.id)?;
+            }
+        }
         let tools = ToolCatalog::builder()
             .register_workspace(ReadFileTool)
             .context("failed to register read_file")?
@@ -297,7 +310,7 @@ impl ProjectRuntimeFactory {
             sessions.clone(),
             catalog.python(),
             catalog.python_runtime_root(),
-            store.managed_root().join("workflow-runtime"),
+            workflow_runtime_root,
         ));
         let scheduler = WorkflowScheduler::new_with_permits(
             Arc::clone(&store),
@@ -316,6 +329,19 @@ impl ProjectRuntimeFactory {
             skills,
         })
     }
+}
+
+fn reset_ephemeral_directory(path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path)?;
+        }
+        Ok(_) => anyhow::bail!("runtime path is not a real directory: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(())
 }
 
 pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {

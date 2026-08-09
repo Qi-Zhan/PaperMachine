@@ -1,6 +1,7 @@
 use crate::Store;
 use crate::StoreError;
 use crate::artifact::store_artifact_file;
+use crate::filesystem::write_atomic;
 use chrono::Utc;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::Artifact;
@@ -243,6 +244,7 @@ impl Store {
             }),
             created_at: now,
         };
+        let source_file_created = source_file.created;
         let page_file = match store_artifact_file(
             &self.managed_root().join("artifacts"),
             workflow_id,
@@ -253,10 +255,13 @@ impl Store {
         ) {
             Ok(file) => file,
             Err(error) => {
-                remove_artifact_file(self, &source_artifact);
+                if source_file_created {
+                    remove_artifact_file(self, &source_artifact);
+                }
                 return Err(error);
             }
         };
+        let page_file_created = page_file.created;
         page_metadata.insert("role".to_string(), json!(PROJECT_HOME_ROLE));
         page_metadata.insert("revision".to_string(), json!(source.revision));
         page_metadata.insert("source_artifact_id".to_string(), json!(source_artifact.id));
@@ -294,8 +299,12 @@ impl Store {
                 changed: true,
             }),
             Err(error) => {
-                remove_artifact_file(self, &source_artifact);
-                remove_artifact_file(self, &artifact);
+                if source_file_created {
+                    remove_artifact_file(self, &source_artifact);
+                }
+                if page_file_created {
+                    remove_artifact_file(self, &artifact);
+                }
                 Err(error)
             }
         }
@@ -374,11 +383,9 @@ impl Store {
 }
 
 fn remove_artifact_file(store: &Store, artifact: &Artifact) {
-    let _ = std::fs::remove_file(
-        store
-            .managed_root()
-            .join("artifacts")
-            .join(&artifact.relative_path),
+    let _ = crate::artifact::remove_artifact_file(
+        &store.managed_root().join("artifacts"),
+        &artifact.relative_path,
     );
 }
 
@@ -602,23 +609,6 @@ fn materialize_html(blocks: &[ProjectHomeBlock]) -> String {
 }
 
 fn write_draft(path: &Path, draft: &ProjectHomeDraft) -> Result<(), StoreError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StoreError::Invariant("Project-home draft has no parent".to_string()))?;
-    std::fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
-    let temporary = parent.join(format!(".project-home-{}.tmp", uuid::Uuid::now_v7()));
     let bytes = serde_json::to_vec(draft)?;
-    let result = (|| {
-        let mut file =
-            std::fs::File::create(&temporary).map_err(|error| StoreError::Io(error.to_string()))?;
-        std::io::Write::write_all(&mut file, &bytes)
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        std::fs::rename(&temporary, path).map_err(|error| StoreError::Io(error.to_string()))
-    })();
-    if result.is_err() && temporary.exists() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    write_atomic(path, &bytes)
 }

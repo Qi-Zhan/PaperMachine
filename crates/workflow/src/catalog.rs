@@ -196,12 +196,12 @@ impl WorkflowProgramCatalog {
         {
             return Ok(existing.clone());
         }
-        let directory = project_workflows_root(store).join(&manifest.slug);
-        fs::create_dir_all(&directory)?;
-        let path = directory.join("workflow.py");
-        let temporary = directory.join("workflow.py.tmp");
-        fs::write(&temporary, source)?;
-        fs::rename(&temporary, &path)?;
+        let path = store.write_managed_file(
+            PathBuf::from("workflows")
+                .join(&manifest.slug)
+                .join("workflow.py"),
+            source.as_bytes(),
+        )?;
         let loaded = LoadedWorkflowProgram {
             registration: WorkflowProgram {
                 project_id: Some(project.id),

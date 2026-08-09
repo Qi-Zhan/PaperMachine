@@ -333,9 +333,10 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
         completed_response("clamped answer", 20, 4),
     ]);
 
+    let work_root = directory.path().join("runtime");
     let execution = runtime_with(
         Arc::clone(&store),
-        &directory.path().join("runtime"),
+        &work_root,
         Arc::new(model),
         ToolCatalog::default(),
     )
@@ -359,6 +360,13 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             .expect("human requests should load")
             .is_empty(),
         "launch-time access choices at or below the ceiling are already authorized"
+    );
+    assert!(!work_root.join(workflow.id.to_string()).exists());
+    assert!(
+        std::fs::read_dir(store.managed_root().join("runtime/sandboxes"))
+            .expect("sandbox root should list")
+            .next()
+            .is_none()
     );
 
     let participants = store

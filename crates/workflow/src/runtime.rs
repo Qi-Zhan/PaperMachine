@@ -283,7 +283,12 @@ impl WorkflowRuntime for PythonWorkflowRuntime {
         workflow_id: WorkflowId,
         cancellation: CancellationToken,
     ) -> Result<WorkflowExecution, String> {
-        match self.execute_inner(workflow_id, cancellation).await {
+        let result = self.execute_inner(workflow_id, cancellation).await;
+        let workspace = self.work_root.join(workflow_id.to_string());
+        if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_dir_all(workspace).await;
+        }
+        match result {
             Ok(output) => Ok(WorkflowExecution::Completed(output)),
             Err(WorkflowRuntimeError::Suspended(suspension)) => {
                 Ok(WorkflowExecution::Suspended(suspension))

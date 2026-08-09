@@ -104,9 +104,13 @@ impl ProjectSkillCatalog {
             yaml_scalar(description.trim())?,
             instructions.trim()
         );
-        let temporary = package.join("SKILL.md.tmp");
-        std::fs::write(&temporary, document)?;
-        std::fs::rename(&temporary, package.join("SKILL.md"))?;
+        if let Err(error) = self.store.write_managed_file(
+            PathBuf::from("skills").join(slug).join("SKILL.md"),
+            document.as_bytes(),
+        ) {
+            let _ = std::fs::remove_dir(&package);
+            return Err(error.into());
+        }
         self.load(project_id, slug)
     }
 

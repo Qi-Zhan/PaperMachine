@@ -575,7 +575,7 @@ mod tests {
             },
         )
         .expect_err("missing Artifact content must fail the snapshot");
-        assert!(error.to_string().contains("store I/O failed"));
+        assert!(error.to_string().contains("Artifact file is unavailable"));
     }
 
     #[test]

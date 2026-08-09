@@ -1,7 +1,12 @@
 use crate::NewWorkflow;
 use crate::StoreError;
 use crate::StoreShared;
+use crate::artifact::read_artifact_file;
+use crate::artifact::reconcile_artifact_files;
+use crate::artifact::remove_artifact_file;
 use crate::artifact::store_artifact_file;
+use crate::filesystem::remove_entry;
+use crate::filesystem::write_atomic;
 use chrono::Duration;
 use chrono::Utc;
 use papermachine_protocol::*;
@@ -104,6 +109,28 @@ impl Store {
 
     pub fn managed_root(&self) -> &Path {
         &self.managed_root
+    }
+
+    pub fn write_managed_file(
+        &self,
+        relative_path: impl AsRef<Path>,
+        content: &[u8],
+    ) -> Result<PathBuf, StoreError> {
+        let relative_path = relative_path.as_ref();
+        if relative_path.as_os_str().is_empty()
+            || relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(StoreError::Invariant(format!(
+                "managed file path must be relative and normalized: {}",
+                relative_path.display()
+            )));
+        }
+        let path = self.managed_root.join(relative_path);
+        write_atomic(&path, content)?;
+        Ok(path)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
@@ -1314,6 +1341,23 @@ impl Store {
 
     pub fn get_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
         self.query_document_by_id("workflows", id.to_string(), "Workflow")
+    }
+
+    pub fn cleanup_terminal_workflow_state(&self, id: WorkflowId) -> Result<(), StoreError> {
+        let workflow = self.get_workflow(id)?;
+        if !workflow.status.is_terminal() {
+            return Err(StoreError::Invariant(format!(
+                "cannot clean runtime state for active Workflow {id}"
+            )));
+        }
+        let draft = self
+            .managed_root
+            .join("runtime/project-home-drafts")
+            .join(id.to_string());
+        if draft.exists() || std::fs::symlink_metadata(&draft).is_ok() {
+            remove_entry(&draft)?;
+        }
+        Ok(())
     }
 
     pub fn list_workflows(
@@ -3215,14 +3259,21 @@ impl Store {
             metadata,
             created_at: Utc::now(),
         };
-        self.insert_indexed_document(
+        let created_file = stored.created;
+        let inserted = self.insert_indexed_document(
             "artifacts",
             &id.to_string(),
             &[workflow_id.to_string()],
             "created",
             artifact.created_at,
             &artifact,
-        )?;
+        );
+        if let Err(error) = inserted {
+            if created_file {
+                let _ = remove_artifact_file(&self.shared.artifact_root, &artifact.relative_path);
+            }
+            return Err(error);
+        }
         Ok(artifact)
     }
 
@@ -3346,21 +3397,16 @@ impl Store {
     }
 
     pub fn read_artifact(&self, artifact: &Artifact) -> Result<Vec<u8>, StoreError> {
-        let path = self.shared.artifact_root.join(&artifact.relative_path);
-        let canonical_root = self
-            .shared
-            .artifact_root
-            .canonicalize()
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        let canonical_path = path
-            .canonicalize()
-            .map_err(|error| StoreError::Io(error.to_string()))?;
-        if !canonical_path.starts_with(canonical_root) {
-            return Err(StoreError::Invariant(
-                "artifact path escaped the artifact root".to_string(),
-            ));
-        }
-        std::fs::read(canonical_path).map_err(|error| StoreError::Io(error.to_string()))
+        read_artifact_file(&self.shared.artifact_root, artifact)
+    }
+
+    /// Reconcile the filesystem side of Artifact commits before this Project
+    /// runtime starts accepting work. Callers must ensure no Artifact write is
+    /// concurrently between its file and database commit.
+    pub fn reconcile_artifacts(&self) -> Result<(), StoreError> {
+        let artifacts: Vec<Artifact> =
+            self.query_documents("SELECT document_json FROM artifacts ORDER BY id ASC", [])?;
+        reconcile_artifact_files(&self.shared.artifact_root, &artifacts)
     }
 
     fn validate_members(
@@ -3819,7 +3865,6 @@ fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "artifacts",
         "workflow-runtime",
         "runtime/sandboxes",
-        "runtime/temp",
         "runtime/skill-snapshots",
     ] {
         std::fs::create_dir_all(root.join(directory))
@@ -3847,7 +3892,6 @@ fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "artifacts",
         "workflow-runtime",
         "runtime/sandboxes",
-        "runtime/temp",
         "runtime/skill-snapshots",
     ] {
         let directory = root.join(relative);
@@ -3910,28 +3954,6 @@ fn reject_prompt_symlink(path: &Path) -> Result<(), StoreError> {
         )));
     }
     Ok(())
-}
-
-fn write_atomic(path: &Path, content: &[u8]) -> Result<(), StoreError> {
-    let parent = path.parent().ok_or_else(|| {
-        StoreError::Invariant(format!("path has no parent directory: {}", path.display()))
-    })?;
-    std::fs::create_dir_all(parent).map_err(|error| StoreError::Io(error.to_string()))?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("prompt"),
-        uuid::Uuid::now_v7()
-    ));
-    std::fs::write(&temporary, content).map_err(|error| StoreError::Io(error.to_string()))?;
-    match std::fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(StoreError::Io(error.to_string()))
-        }
-    }
 }
 
 fn hash_text(content: &str) -> String {

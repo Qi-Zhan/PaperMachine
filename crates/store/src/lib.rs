@@ -3,6 +3,7 @@
 mod artifact;
 mod catalog;
 mod database;
+mod filesystem;
 #[doc(hidden)]
 pub mod process_fault;
 mod project_home;

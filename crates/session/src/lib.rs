@@ -532,6 +532,36 @@ async fn run_scheduled_turn(
     workflow_context: WorkflowTurnContext,
     cancellation: CancellationToken,
 ) -> Result<(), SessionRuntimeError> {
+    let sandbox = inner.store.get_turn(turn_id).ok().map(|turn| {
+        inner
+            .store
+            .managed_root()
+            .join("runtime/sandboxes")
+            .join(turn.session_id.to_string())
+            .join(turn.id.to_string())
+    });
+    let result =
+        run_scheduled_turn_inner(Arc::clone(&inner), turn_id, workflow_context, cancellation).await;
+    if let Some(sandbox) = sandbox
+        && tokio::fs::try_exists(&sandbox).await.unwrap_or(false)
+    {
+        let _ = tokio::fs::remove_dir_all(&sandbox).await;
+        if let Some(session_root) = sandbox.parent()
+            && let Ok(mut entries) = tokio::fs::read_dir(session_root).await
+            && matches!(entries.next_entry().await, Ok(None))
+        {
+            let _ = tokio::fs::remove_dir(session_root).await;
+        }
+    }
+    result
+}
+
+async fn run_scheduled_turn_inner(
+    inner: Arc<SessionRuntimeInner>,
+    turn_id: TurnId,
+    workflow_context: WorkflowTurnContext,
+    cancellation: CancellationToken,
+) -> Result<(), SessionRuntimeError> {
     let _permit = tokio::select! {
         permit = Arc::clone(&inner.permits).acquire_owned() => {
             permit.map_err(|error| SessionRuntimeError::Scheduling(error.to_string()))?

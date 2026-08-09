@@ -6,6 +6,8 @@
 
 use crate::Store;
 use crate::StoreError;
+use crate::filesystem::remove_entry;
+use crate::filesystem::sync_directory;
 use papermachine_protocol::Project;
 use papermachine_protocol::ProjectId;
 use std::path::Path;
@@ -362,26 +364,4 @@ fn sorted_entries(root: &Path) -> Result<Vec<std::fs::DirEntry>, StoreError> {
         .map_err(|error| StoreError::Io(error.to_string()))?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     Ok(entries)
-}
-
-fn remove_entry(path: &Path) -> Result<(), StoreError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|error| StoreError::Io(error.to_string()))?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        std::fs::remove_dir_all(path).map_err(|error| StoreError::Io(error.to_string()))
-    } else {
-        std::fs::remove_file(path).map_err(|error| StoreError::Io(error.to_string()))
-    }
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), StoreError> {
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| StoreError::Io(error.to_string()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
 }
