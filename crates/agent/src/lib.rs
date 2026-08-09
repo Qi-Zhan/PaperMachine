@@ -12,6 +12,7 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::ControlMessageId;
 use papermachine_protocol::HostedTool;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
@@ -201,6 +202,7 @@ pub enum AgentEvent {
         completed_model_steps: u32,
         hosted_search_calls_used: u32,
         message: Option<String>,
+        acknowledged_control_ids: Vec<ControlMessageId>,
     },
 }
 
@@ -209,6 +211,7 @@ pub struct AgentCheckpoint {
     pub guidance: Vec<String>,
     pub interrupt: Option<String>,
     pub finish: Option<String>,
+    pub control_message_ids: Vec<ControlMessageId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,8 +295,11 @@ pub enum AgentError {
     EventSink(String),
     #[error("agent control plane failed: {0}")]
     Control(String),
-    #[error("Turn interrupted by human: {0}")]
-    Interrupted(String),
+    #[error("Turn interrupted by human: {reason}")]
+    Interrupted {
+        reason: String,
+        control_message_ids: Vec<ControlMessageId>,
+    },
 }
 
 #[derive(Clone)]
@@ -412,8 +418,12 @@ impl AgentRuntime {
                 .await
                 .map_err(AgentError::Control)?;
             if let Some(reason) = checkpoint.interrupt {
-                return Err(AgentError::Interrupted(reason));
+                return Err(AgentError::Interrupted {
+                    reason,
+                    control_message_ids: checkpoint.control_message_ids,
+                });
             }
+            let acknowledged_control_ids = checkpoint.control_message_ids;
             if let Some(instruction) = checkpoint.finish {
                 control_forced_final = true;
                 history.push(ModelInputItem::Message {
@@ -493,6 +503,7 @@ impl AgentRuntime {
                     completed_model_steps: step.saturating_sub(1),
                     hosted_search_calls_used,
                     message: None,
+                    acknowledged_control_ids,
                 })
                 .await
                 .map_err(AgentError::EventSink)?;
@@ -728,6 +739,7 @@ impl AgentRuntime {
                     completed_model_steps: step,
                     hosted_search_calls_used,
                     message: calls.is_empty().then_some(message.clone()),
+                    acknowledged_control_ids: Vec::new(),
                 })
                 .await
                 .map_err(AgentError::EventSink)?;
@@ -805,6 +817,7 @@ impl AgentRuntime {
                         completed_model_steps: step,
                         hosted_search_calls_used,
                         message: None,
+                        acknowledged_control_ids: Vec::new(),
                     })
                     .await
                     .map_err(AgentError::EventSink)?;

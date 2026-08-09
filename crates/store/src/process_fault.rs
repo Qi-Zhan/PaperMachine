@@ -7,6 +7,8 @@
 
 pub const ROLLOUT_APPENDED_BEFORE_PROJECTION: &str = "rollout_appended_before_projection";
 pub const FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH: &str = "function_call_committed_before_dispatch";
+pub const MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION: &str =
+    "model_output_committed_before_step_projection";
 pub const TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT: &str =
     "turn_terminal_checkpointed_before_commit";
 

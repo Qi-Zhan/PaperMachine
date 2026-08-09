@@ -269,7 +269,7 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
         })
         .expect("Workflow should be created");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be runnable");
 
     let error = runtime(Arc::clone(&store), &directory.path().join("runtime"))
@@ -325,7 +325,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
         })
         .expect("Workflow should be created");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be runnable");
     let model = ScriptedModelClient::new([
         completed_response("conservative answer", 20, 4),
@@ -429,7 +429,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
         })
         .expect("Workflow should be created");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be running");
 
     let first_runtime = runtime(Arc::clone(&store), &directory.path().join("runtime"));
@@ -550,7 +550,7 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
         })
         .expect("Workflow should be created");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be running");
 
     let first = runtime(Arc::clone(&store), &directory.path().join("runtime"))
@@ -580,7 +580,7 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
     let delay = (wake_at - chrono::Utc::now()).to_std().unwrap_or_default();
     tokio::time::sleep(delay + Duration::from_millis(10)).await;
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("timer Workflow should be runnable");
     let output = runtime(Arc::clone(&store), &directory.path().join("runtime"))
         .execute(workflow.id, CancellationToken::new())

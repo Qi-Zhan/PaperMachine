@@ -15,13 +15,13 @@ use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
-use papermachine_protocol::WorkflowStatus;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
 use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
+use papermachine_store::TurnContextCheckpoint;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolError;
@@ -183,9 +183,7 @@ fn workflow_recovery_fixture(
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("Workflow should run");
+    store.start_workflow(run.id).expect("Workflow should run");
     let participant = store
         .create_participant(
             run.id,
@@ -258,11 +256,14 @@ fn workflow_recovery_fixture(
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append { items },
-            TokenUsage::default(),
-            1,
-            0,
-            None,
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append { items },
+                usage: TokenUsage::default(),
+                completed_model_steps: 1,
+                hosted_search_calls_used: 0,
+                checkpoint_message: None,
+                acknowledged_control_ids: Vec::new(),
+            },
         )
         .expect("context should checkpoint");
     let step_id = create_step.then(|| {

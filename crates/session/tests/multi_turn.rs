@@ -5,6 +5,8 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_model::ModelStream;
 use papermachine_model::ScriptedModelClient;
+use papermachine_protocol::ControlMessageKind;
+use papermachine_protocol::ControlMessageStatus;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
@@ -18,7 +20,6 @@ use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
-use papermachine_protocol::WorkflowStatus;
 use papermachine_protocol::{ProjectId, Turn, Workflow, WorkflowParticipant};
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeConfig;
@@ -90,9 +91,7 @@ fn workflow_agent(
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("Workflow should start");
+    store.start_workflow(run.id).expect("Workflow should start");
     let participant = store
         .create_participant(
             run.id,
@@ -193,9 +192,7 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("Workflow should start");
+    store.start_workflow(run.id).expect("Workflow should start");
     let participant = store
         .create_participant(
             run.id,
@@ -375,6 +372,91 @@ async fn later_turns_reuse_the_completed_session_history() {
 }
 
 #[tokio::test]
+async fn claimed_guidance_is_checkpointed_before_sampling_and_not_lost() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
+    );
+    let project = store
+        .create_project("Guidance", directory.path().join("workspace"))
+        .expect("Project should be created");
+    let (run, participant) = workflow_agent(&store, project.id, "");
+    let invocation = store
+        .create_action_invocation(
+            run.id,
+            None,
+            participant.id,
+            "respond",
+            "Use guidance",
+            serde_json::json!({}),
+            Vec::new(),
+        )
+        .expect("Action should be created");
+    let attempt = store
+        .start_action_attempt(invocation.id)
+        .expect("Attempt should start");
+    let control = store
+        .create_control_message(
+            run.id,
+            participant.session_id,
+            Some(invocation.id),
+            ControlMessageKind::Guide,
+            "Verify the final claim",
+        )
+        .expect("guidance should queue");
+    let model = ScriptedModelClient::new([response("Verified answer.")]);
+    let runtime = SessionRuntime::new(
+        Arc::clone(&store),
+        Arc::new(model.clone()),
+        ToolCatalog::default(),
+        Arc::new(ProjectSkillCatalog::new(Arc::clone(&store))),
+        SessionRuntimeConfig {
+            default_model: "test-model".to_string(),
+            model_context_window: 128_000,
+            max_concurrent_turns: 1,
+        },
+    );
+
+    let turn = runtime
+        .execute_workflow_action(
+            participant.session_id,
+            TurnOrigin::Workflow,
+            "Answer",
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+            true,
+            None,
+            None,
+            WorkflowTurnContext {
+                workflow_id: run.id,
+                action_invocation_id: invocation.id,
+                action_attempt_id: attempt.id,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("Action should complete");
+
+    assert_eq!(turn.output.as_deref(), Some("Verified answer."));
+    let requests = model.requests().expect("model requests should load");
+    assert!(requests[0].input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message { role: MessageRole::User, content }
+            if content.contains("Verify the final claim")
+    )));
+    let applied = store
+        .list_control_messages(run.id)
+        .expect("controls should load")
+        .into_iter()
+        .find(|message| message.id == control.id)
+        .expect("guidance should remain queryable");
+    assert_eq!(applied.status, ControlMessageStatus::Applied);
+    assert_eq!(applied.claimed_turn_id, Some(turn.id));
+}
+
+#[tokio::test]
 async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
@@ -487,9 +569,7 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             agent_access_overrides: Default::default(),
         })
         .expect("run should be created");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("run should start");
+    store.start_workflow(run.id).expect("run should start");
     let participant = store
         .create_participant(
             run.id,

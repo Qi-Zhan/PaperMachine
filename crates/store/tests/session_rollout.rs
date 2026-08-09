@@ -3,13 +3,12 @@ use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelInputItem;
-use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionRolloutItem;
 use papermachine_protocol::TokenUsage;
-use papermachine_protocol::ToolSetSnapshot;
 use papermachine_protocol::TurnOrigin;
 use papermachine_store::Store;
+use papermachine_store::TurnContextCheckpoint;
 use rusqlite::Connection;
 use rusqlite::params;
 use std::io::Write;
@@ -17,9 +16,8 @@ use std::sync::Arc;
 use std::sync::Barrier;
 use tempfile::tempdir;
 
-fn empty_tool_set() -> ToolSetSnapshot {
-    ToolSetSnapshot::materialize(Vec::new()).expect("empty tool set should be valid")
-}
+mod support;
+use support::ActionHarness;
 
 #[test]
 fn rollout_reconstructs_completed_context_without_turn_history_copies() {
@@ -29,23 +27,19 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let project = store
         .create_project("Rollout", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
-    let turn = store
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session = store
+        .get_session(harness.participant.session_id)
+        .expect("participant Session should load");
+    let turn = harness
         .create_turn(
-            session.id,
-            TurnOrigin::User,
+            &store,
+            TurnOrigin::Workflow,
             "question",
-            "test-model",
-            PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
@@ -56,13 +50,16 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append {
-                items: context.clone(),
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: context.clone(),
+                },
+                usage: TokenUsage::default(),
+                completed_model_steps: 1,
+                hosted_search_calls_used: 0,
+                checkpoint_message: Some("answer".to_string()),
+                acknowledged_control_ids: Vec::new(),
             },
-            TokenUsage::default(),
-            1,
-            0,
-            Some("answer".to_string()),
         )
         .expect("context should checkpoint");
     store
@@ -77,7 +74,7 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let rollout_status = store
         .session_rollout_status(session.id)
         .expect("rollout status should load");
-    assert_eq!(rollout_status.version, 1);
+    assert_eq!(rollout_status.version, 2);
     assert!(rollout_status.last_sequence > 0);
     assert_eq!(
         rollout_status.projected_sequence,
@@ -106,23 +103,19 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     let project = store
         .create_project("Replay", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
-    let turn = store
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session = store
+        .get_session(harness.participant.session_id)
+        .expect("participant Session should load");
+    let turn = harness
         .create_turn(
-            session.id,
-            TurnOrigin::User,
+            &store,
+            TurnOrigin::Workflow,
             "resume me",
-            "test-model",
-            PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("Turn should be created");
     let before_checkpoint = store.start_turn(turn.id).expect("Turn should start");
@@ -135,13 +128,16 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append {
-                items: context.clone(),
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: context.clone(),
+                },
+                usage,
+                completed_model_steps: 2,
+                hosted_search_calls_used: 1,
+                checkpoint_message: None,
+                acknowledged_control_ids: Vec::new(),
             },
-            usage,
-            2,
-            1,
-            None,
         )
         .expect("context should checkpoint");
     let records = store
@@ -292,66 +288,71 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
     let project = store
         .create_project("Compaction", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
-    let turn = store
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session = store
+        .get_session(harness.participant.session_id)
+        .expect("participant Session should load");
+    let turn = harness
         .create_turn(
-            session.id,
-            TurnOrigin::User,
+            &store,
+            TurnOrigin::Workflow,
             "large context",
-            "test-model",
-            PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append {
-                items: vec![
-                    message(MessageRole::User, "large context"),
-                    message(MessageRole::Assistant, "old evidence"),
-                ],
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: vec![
+                        message(MessageRole::User, "large context"),
+                        message(MessageRole::Assistant, "old evidence"),
+                    ],
+                },
+                usage: TokenUsage::default(),
+                completed_model_steps: 1,
+                hosted_search_calls_used: 0,
+                checkpoint_message: None,
+                acknowledged_control_ids: Vec::new(),
             },
-            TokenUsage::default(),
-            1,
-            0,
-            None,
         )
         .expect("initial context should checkpoint");
     let compacted = vec![message(MessageRole::User, "compacted evidence summary")];
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Replace {
-                items: compacted.clone(),
-                reason: ContextReplacementReason::Compaction,
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Replace {
+                    items: compacted.clone(),
+                    reason: ContextReplacementReason::Compaction,
+                },
+                usage: TokenUsage::default(),
+                completed_model_steps: 1,
+                hosted_search_calls_used: 0,
+                checkpoint_message: None,
+                acknowledged_control_ids: Vec::new(),
             },
-            TokenUsage::default(),
-            1,
-            0,
-            None,
         )
         .expect("compacted context should checkpoint");
     let final_item = message(MessageRole::Assistant, "done");
     store
         .checkpoint_turn_context(
             turn.id,
-            ModelContextMutation::Append {
-                items: vec![final_item.clone()],
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: vec![final_item.clone()],
+                },
+                usage: TokenUsage::default(),
+                completed_model_steps: 2,
+                hosted_search_calls_used: 0,
+                checkpoint_message: Some("done".to_string()),
+                acknowledged_control_ids: Vec::new(),
             },
-            TokenUsage::default(),
-            2,
-            0,
-            Some("done".to_string()),
         )
         .expect("terminal context should checkpoint");
     store
@@ -431,30 +432,20 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
     let project = store
         .create_project("Turn writer", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session_id = harness.participant.session_id;
     let barrier = Arc::new(Barrier::new(3));
     let mut writers = Vec::new();
     for input in ["first", "second"] {
         let store = Arc::clone(&store);
         let barrier = Arc::clone(&barrier);
+        let harness = harness.clone();
         writers.push(std::thread::spawn(move || {
             barrier.wait();
-            store.create_turn(
-                session.id,
-                TurnOrigin::User,
-                input,
-                "test-model",
-                PromptSnapshot::default(),
-                None,
-                true,
-                AccessPreset::Research,
-                empty_tool_set(),
-                None,
-                None,
-                Vec::new(),
-            )
+            harness.create_turn(&store, TurnOrigin::Workflow, input, AccessPreset::Research)
         }));
     }
     barrier.wait();
@@ -466,7 +457,7 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
     assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
     assert_eq!(
         store
-            .list_turns(session.id)
+            .list_turns(session_id)
             .expect("Turns should load")
             .len(),
         1

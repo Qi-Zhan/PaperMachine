@@ -1,6 +1,7 @@
 use crate::NewWorkflow;
 use crate::StoreError;
 use crate::StoreShared;
+use crate::TurnContextCheckpoint;
 use crate::artifact::read_artifact_file;
 use crate::artifact::reconcile_artifact_files;
 use crate::artifact::remove_artifact_file;
@@ -29,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -316,7 +317,7 @@ impl Store {
 
     fn insert_session(&self, session: Session) -> Result<Session, StoreError> {
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -454,7 +455,7 @@ impl Store {
         session.status = status;
         session.updated_at = Utc::now();
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_status_document_tx(
             &transaction,
             "sessions",
@@ -580,39 +581,6 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn create_turn(
-        &self,
-        session_id: SessionId,
-        origin: TurnOrigin,
-        input: impl Into<String>,
-        model: impl Into<String>,
-        prompt: PromptSnapshot,
-        reasoning_effort: Option<ReasoningEffort>,
-        tools_enabled: bool,
-        expected_access: AccessPreset,
-        tool_set: papermachine_protocol::ToolSetSnapshot,
-        web_search_context_size: Option<WebSearchContextSize>,
-        response_format: Option<ModelResponseFormat>,
-        skill_snapshots: Vec<SkillSnapshot>,
-    ) -> Result<Turn, StoreError> {
-        self.create_turn_inner(
-            None,
-            session_id,
-            origin,
-            input,
-            model,
-            prompt,
-            reasoning_effort,
-            tools_enabled,
-            expected_access,
-            tool_set,
-            web_search_context_size,
-            response_format,
-            skill_snapshots,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn create_turn_for_attempt(
         &self,
         attempt_id: ActionAttemptId,
@@ -630,7 +598,7 @@ impl Store {
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
         self.create_turn_inner(
-            Some(attempt_id),
+            attempt_id,
             session_id,
             origin,
             input,
@@ -649,7 +617,7 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     fn create_turn_inner(
         &self,
-        attempt_id: Option<ActionAttemptId>,
+        attempt_id: ActionAttemptId,
         session_id: SessionId,
         origin: TurnOrigin,
         input: impl Into<String>,
@@ -679,31 +647,27 @@ impl Store {
                 "cannot add a Turn to an archived Session".to_string(),
             ));
         }
-        let mut attempt = attempt_id
-            .map(|id| self.get_action_attempt(id))
-            .transpose()?;
-        if let Some(attempt) = attempt.as_ref() {
-            let invocation = self.get_action_invocation(attempt.invocation_id)?;
-            let valid_origin = match (origin, invocation.source_human_request_id) {
-                (TurnOrigin::Workflow, None) => true,
-                (TurnOrigin::User, Some(request_id)) => {
-                    let request = self.get_human_request(request_id)?;
-                    request.workflow_id == invocation.workflow_id
-                        && request.session_id == session_id
-                        && request.status == HumanRequestStatus::Answered
-                        && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
-                }
-                _ => false,
-            };
-            if !valid_origin
-                || attempt.status.is_terminal()
-                || attempt.turn_id.is_some()
-                || invocation.session_id != session_id
-            {
-                return Err(StoreError::Invariant(
-                    "ActionAttempt cannot attach this Turn".to_string(),
-                ));
+        let mut attempt = self.get_action_attempt(attempt_id)?;
+        let invocation = self.get_action_invocation(attempt.invocation_id)?;
+        let valid_origin = match (origin, invocation.source_human_request_id) {
+            (TurnOrigin::Workflow, None) => true,
+            (TurnOrigin::User, Some(request_id)) => {
+                let request = self.get_human_request(request_id)?;
+                request.workflow_id == invocation.workflow_id
+                    && request.session_id == session_id
+                    && request.status == HumanRequestStatus::Answered
+                    && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
             }
+            _ => false,
+        };
+        if !valid_origin
+            || attempt.status.is_terminal()
+            || attempt.turn_id.is_some()
+            || invocation.session_id != session_id
+        {
+            return Err(StoreError::Invariant(
+                "ActionAttempt cannot attach this Turn".to_string(),
+            ));
         }
         let active = self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
@@ -749,10 +713,8 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        if let Some(attempt) = attempt.as_mut() {
-            attempt.turn_id = Some(turn.id);
-            attempt.updated_at = now;
-        }
+        attempt.turn_id = Some(turn.id);
+        attempt.updated_at = now;
         let event = pending_session_event(
             session_id,
             Some(turn.id),
@@ -763,7 +725,7 @@ impl Store {
             session_id,
             SessionRolloutItem::TurnCreated {
                 turn: turn.clone(),
-                action_attempt: attempt,
+                action_attempt: Some(attempt),
                 events: vec![event],
             },
         )?;
@@ -782,7 +744,33 @@ impl Store {
     }
 
     pub fn start_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
-        self.set_turn_status(id, TurnStatus::Running, None)
+        self.transition_turn(
+            id,
+            &[TurnStatus::Queued, TurnStatus::Paused, TurnStatus::Running],
+            TurnStatus::Running,
+            None,
+            Vec::new(),
+        )
+    }
+
+    pub fn pause_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
+        self.transition_turn(
+            id,
+            &[TurnStatus::Running, TurnStatus::Paused],
+            TurnStatus::Paused,
+            None,
+            Vec::new(),
+        )
+    }
+
+    pub fn resume_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
+        self.transition_turn(
+            id,
+            &[TurnStatus::Paused, TurnStatus::Running],
+            TurnStatus::Running,
+            None,
+            Vec::new(),
+        )
     }
 
     pub fn complete_turn(
@@ -809,13 +797,25 @@ impl Store {
             )));
         }
         let mut turn = self.get_turn(id)?;
+        if turn.status != TurnStatus::Running {
+            return Err(StoreError::Invariant(format!(
+                "cannot complete Turn {id} from {:?}",
+                turn.status
+            )));
+        }
         turn.output = Some(output);
         turn.usage = usage;
-        self.persist_turn_status_locked(turn, TurnStatus::Completed, None)
+        self.persist_turn_status_locked(turn, TurnStatus::Completed, None, Vec::new())
     }
 
     pub fn fail_turn(&self, id: TurnId, error: impl Into<String>) -> Result<Turn, StoreError> {
-        self.set_turn_status(id, TurnStatus::Failed, Some(error.into()))
+        self.transition_turn(
+            id,
+            &[TurnStatus::Queued, TurnStatus::Running, TurnStatus::Paused],
+            TurnStatus::Failed,
+            Some(error.into()),
+            Vec::new(),
+        )
     }
 
     pub fn interrupt_turn(
@@ -823,39 +823,63 @@ impl Store {
         id: TurnId,
         reason: impl Into<String>,
     ) -> Result<Turn, StoreError> {
-        self.set_turn_status(id, TurnStatus::Interrupted, Some(reason.into()))
+        self.interrupt_turn_with_controls(id, reason, &[])
     }
 
-    pub fn cancel_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
-        self.set_turn_status(
+    pub fn interrupt_turn_with_controls(
+        &self,
+        id: TurnId,
+        reason: impl Into<String>,
+        control_message_ids: &[ControlMessageId],
+    ) -> Result<Turn, StoreError> {
+        self.transition_turn(
             id,
-            TurnStatus::Cancelled,
-            Some("cancelled by user".to_string()),
+            &[TurnStatus::Running, TurnStatus::Paused],
+            TurnStatus::Interrupted,
+            Some(reason.into()),
+            control_message_ids.to_vec(),
         )
     }
 
-    pub fn set_turn_status(
+    pub fn cancel_turn(&self, id: TurnId) -> Result<Turn, StoreError> {
+        self.transition_turn(
+            id,
+            &[TurnStatus::Queued, TurnStatus::Running, TurnStatus::Paused],
+            TurnStatus::Cancelled,
+            Some("cancelled by user".to_string()),
+            Vec::new(),
+        )
+    }
+
+    fn transition_turn(
         &self,
         id: TurnId,
+        allowed_from: &[TurnStatus],
         status: TurnStatus,
         error: Option<String>,
+        acknowledged_control_ids: Vec<ControlMessageId>,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
         let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
         let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
         self.replay_session_rollout_locked(existing.session_id)?;
         let turn = self.get_turn(id)?;
-        self.persist_turn_status_locked(turn, status, error)
+        if turn.status == status {
+            return Ok(turn);
+        }
+        if !allowed_from.contains(&turn.status) {
+            return Err(StoreError::Invariant(format!(
+                "cannot change Turn {id} from {:?} to {status:?}",
+                turn.status
+            )));
+        }
+        self.persist_turn_status_locked(turn, status, error, acknowledged_control_ids)
     }
 
     pub fn checkpoint_turn_context(
         &self,
         id: TurnId,
-        mutation: ModelContextMutation,
-        usage: TokenUsage,
-        completed_model_steps: u32,
-        hosted_search_calls_used: u32,
-        checkpoint_message: Option<String>,
+        checkpoint: TurnContextCheckpoint,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
         let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
@@ -871,11 +895,12 @@ impl Store {
             turn.session_id,
             SessionRolloutItem::ContextCheckpoint {
                 turn_id: id,
-                mutation,
-                usage,
-                completed_model_steps,
-                hosted_search_calls_used,
-                checkpoint_message,
+                mutation: checkpoint.mutation,
+                usage: checkpoint.usage,
+                completed_model_steps: checkpoint.completed_model_steps,
+                hosted_search_calls_used: checkpoint.hosted_search_calls_used,
+                checkpoint_message: checkpoint.checkpoint_message,
+                acknowledged_control_ids: checkpoint.acknowledged_control_ids,
             },
         )?;
         self.get_turn(id)
@@ -886,6 +911,7 @@ impl Store {
         mut turn: Turn,
         status: TurnStatus,
         error: Option<String>,
+        acknowledged_control_ids: Vec<ControlMessageId>,
     ) -> Result<Turn, StoreError> {
         if turn.status.is_terminal() {
             return Err(StoreError::Invariant(format!(
@@ -929,6 +955,7 @@ impl Store {
                 turn: turn.clone(),
                 session,
                 events: vec![turn_event, session_event],
+                acknowledged_control_ids,
             },
         )?;
         Ok(turn)
@@ -1317,7 +1344,7 @@ impl Store {
             updated_at: now,
         };
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO workflows
              (id, project_id, started_from_session_id, program_slug, status, attention_required, updated_at, document_json)
@@ -1596,13 +1623,136 @@ impl Store {
         )
     }
 
-    pub fn set_workflow_status(
+    pub fn start_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[WorkflowStatus::Created, WorkflowStatus::Running],
+            WorkflowStatus::Running,
+            None,
+        )
+    }
+
+    pub fn pause_workflow(
         &self,
         id: WorkflowId,
+        reason: Option<String>,
+    ) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[
+                WorkflowStatus::Running,
+                WorkflowStatus::WaitingForUser,
+                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForSignal,
+                WorkflowStatus::Paused,
+            ],
+            WorkflowStatus::Paused,
+            reason,
+        )
+    }
+
+    pub fn resume_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[
+                WorkflowStatus::Paused,
+                WorkflowStatus::WaitingForUser,
+                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForSignal,
+                WorkflowStatus::Running,
+            ],
+            WorkflowStatus::Running,
+            None,
+        )
+    }
+
+    pub fn wait_workflow_for_user(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[WorkflowStatus::Running, WorkflowStatus::WaitingForUser],
+            WorkflowStatus::WaitingForUser,
+            None,
+        )
+    }
+
+    pub fn wait_workflow_for_timer(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[WorkflowStatus::Running, WorkflowStatus::WaitingForTimer],
+            WorkflowStatus::WaitingForTimer,
+            None,
+        )
+    }
+
+    pub fn wait_workflow_for_signal(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[WorkflowStatus::Running, WorkflowStatus::WaitingForSignal],
+            WorkflowStatus::WaitingForSignal,
+            None,
+        )
+    }
+
+    pub fn fail_workflow(
+        &self,
+        id: WorkflowId,
+        error: impl Into<String>,
+    ) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[
+                WorkflowStatus::Created,
+                WorkflowStatus::Running,
+                WorkflowStatus::WaitingForUser,
+                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForSignal,
+                WorkflowStatus::Paused,
+            ],
+            WorkflowStatus::Failed,
+            Some(error.into()),
+        )
+    }
+
+    pub fn cancel_workflow(
+        &self,
+        id: WorkflowId,
+        reason: impl Into<String>,
+    ) -> Result<Workflow, StoreError> {
+        self.transition_workflow(
+            id,
+            &[
+                WorkflowStatus::Created,
+                WorkflowStatus::Running,
+                WorkflowStatus::WaitingForUser,
+                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForSignal,
+                WorkflowStatus::Paused,
+            ],
+            WorkflowStatus::Cancelled,
+            Some(reason.into()),
+        )
+    }
+
+    fn transition_workflow(
+        &self,
+        id: WorkflowId,
+        allowed_from: &[WorkflowStatus],
         status: WorkflowStatus,
         reason: Option<String>,
     ) -> Result<Workflow, StoreError> {
-        let mut run = self.get_workflow(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut run: Workflow =
+            load_document_tx(&transaction, "workflows", &id.to_string(), "workflow")?;
+        if run.status == status {
+            return Ok(run);
+        }
+        if !allowed_from.contains(&run.status) {
+            return Err(StoreError::Invariant(format!(
+                "cannot change Workflow {id} from {:?} to {status:?}",
+                run.status
+            )));
+        }
         run.status = status;
         run.error = if status == WorkflowStatus::Failed {
             reason.clone()
@@ -1613,8 +1763,6 @@ impl Store {
             run.attention_required = false;
         }
         run.updated_at = Utc::now();
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         if status.is_terminal() {
             terminalize_workflow_resources_tx(&transaction, run.id, status, run.updated_at)?;
         }
@@ -1632,14 +1780,21 @@ impl Store {
     }
 
     pub fn complete_workflow(&self, id: WorkflowId, output: Value) -> Result<Workflow, StoreError> {
-        let mut run = self.get_workflow(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut run: Workflow =
+            load_document_tx(&transaction, "workflows", &id.to_string(), "workflow")?;
+        if run.status != WorkflowStatus::Running {
+            return Err(StoreError::Invariant(format!(
+                "cannot complete Workflow {id} from {:?}",
+                run.status
+            )));
+        }
         run.status = WorkflowStatus::Completed;
         run.output = Some(output.clone());
         run.error = None;
         run.attention_required = false;
         run.updated_at = Utc::now();
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         terminalize_workflow_resources_tx(
             &transaction,
             run.id,
@@ -1667,41 +1822,14 @@ impl Store {
         // Read and update under one database lock. Workflow actions can finish in
         // parallel, so a separate get followed by update loses concurrent deltas.
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let document = transaction.query_row(
             "SELECT document_json FROM workflows WHERE id = ?1",
             [id.to_string()],
             |row| row.get::<_, String>(0),
         )?;
         let mut run: Workflow = serde_json::from_str(&document)?;
-        run.usage.agents_created = run
-            .usage
-            .agents_created
-            .saturating_add(delta.agents_created);
-        run.usage.actions_started = run
-            .usage
-            .actions_started
-            .saturating_add(delta.actions_started);
-        run.usage.actions_completed = run
-            .usage
-            .actions_completed
-            .saturating_add(delta.actions_completed);
-        run.usage.action_steps = run.usage.action_steps.saturating_add(delta.action_steps);
-        run.usage.timer_fires = run.usage.timer_fires.saturating_add(delta.timer_fires);
-        run.usage.hosted_search_calls = run
-            .usage
-            .hosted_search_calls
-            .saturating_add(delta.hosted_search_calls);
-        run.usage.tokens.saturating_add_assign(delta.tokens);
-        run.usage.wall_time_seconds = run
-            .usage
-            .wall_time_seconds
-            .saturating_add(delta.wall_time_seconds);
-        run.usage.estimated_cost_usd =
-            match (run.usage.estimated_cost_usd, delta.estimated_cost_usd) {
-                (Some(left), Some(right)) => Some(left + right),
-                (value, None) | (None, value) => value,
-            };
+        apply_workflow_usage_delta(&mut run.usage, delta);
         run.updated_at = Utc::now();
         update_workflow_tx(&transaction, &run)?;
         let event = append_workflow_event_tx(
@@ -1758,23 +1886,31 @@ impl Store {
         skills: Vec<String>,
         access: AccessPreset,
     ) -> Result<WorkflowParticipant, StoreError> {
-        let mut run = self.get_workflow(workflow_id)?;
-        if run.status.is_terminal() {
-            return Err(StoreError::Invariant(
-                "cannot add an Agent to a terminal Workflow".to_string(),
-            ));
-        }
         let system_prompt = system_prompt.into();
         validate_system_prompt(&system_prompt)?;
         let now = Utc::now();
         let name = name.into();
         let role = role.into();
+        let requested_model = model.into();
+        let class_name = class_name.into();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &workflow_id.to_string(),
+            "workflow",
+        )?;
+        if run.status != WorkflowStatus::Running {
+            return Err(StoreError::Invariant(
+                "cannot add an Agent unless its Workflow is running".to_string(),
+            ));
+        }
         let model = {
-            let value = model.into();
-            if value.trim().is_empty() {
+            if requested_model.trim().is_empty() {
                 run.default_model.clone()
             } else {
-                value
+                requested_model
             }
         };
         let session = Session {
@@ -1797,7 +1933,7 @@ impl Store {
             id: participant_id,
             workflow_id: run.id,
             session_id: session.id,
-            class_name: class_name.into(),
+            class_name,
             name,
             role,
             system_prompt: session.system_prompt.clone(),
@@ -1809,8 +1945,6 @@ impl Store {
         };
         run.usage.agents_created = run.usage.agents_created.saturating_add(1);
         run.updated_at = now;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1920,15 +2054,25 @@ impl Store {
         &self,
         id: AgentInstanceId,
     ) -> Result<WorkflowParticipant, StoreError> {
-        let mut participant = self.get_participant(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut participant: WorkflowParticipant = load_document_tx(
+            &transaction,
+            "workflow_participants",
+            &id.to_string(),
+            "workflow participant",
+        )?;
         if participant.status == ParticipantStatus::Retired {
             return Ok(participant);
         }
         participant.status = ParticipantStatus::Retired;
         participant.updated_at = Utc::now();
-        let run = self.get_workflow(participant.workflow_id)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &participant.workflow_id.to_string(),
+            "workflow",
+        )?;
         update_status_document_tx(
             &transaction,
             "workflow_participants",
@@ -1987,14 +2131,33 @@ impl Store {
         requested_tools: Vec<String>,
         source_human_request_id: Option<HumanRequestId>,
     ) -> Result<ActionInvocation, StoreError> {
-        let participant = self.get_participant(agent_id)?;
+        let action_name = action_name.into();
+        let contract = contract.into();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let participant: WorkflowParticipant = load_document_tx(
+            &transaction,
+            "workflow_participants",
+            &agent_id.to_string(),
+            "workflow participant",
+        )?;
         if participant.workflow_id != workflow_id || participant.status != ParticipantStatus::Active
         {
             return Err(StoreError::Invariant(
                 "action Agent is not active in this Workflow".to_string(),
             ));
         }
-        let run = self.get_workflow(workflow_id)?;
+        let run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &workflow_id.to_string(),
+            "workflow",
+        )?;
+        if run.status != WorkflowStatus::Running {
+            return Err(StoreError::Invariant(
+                "cannot schedule an Action unless its Workflow is running".to_string(),
+            ));
+        }
         let now = Utc::now();
         let invocation = ActionInvocation {
             id: invocation_id,
@@ -2002,8 +2165,8 @@ impl Store {
             task_scope_id: scope_id,
             agent_instance_id: agent_id,
             session_id: participant.session_id,
-            action_name: action_name.into(),
-            contract: contract.into(),
+            action_name,
+            contract,
             arguments,
             requested_tools,
             source_human_request_id,
@@ -2013,9 +2176,6 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
         insert_indexed_document_tx(
             &transaction,
             "action_invocations",
@@ -2059,12 +2219,44 @@ impl Store {
         &self,
         invocation_id: ActionInvocationId,
     ) -> Result<ActionAttempt, StoreError> {
-        let mut invocation = self.get_action_invocation(invocation_id)?;
-        let mut run = self.get_workflow(invocation.workflow_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut invocation: ActionInvocation = load_document_tx(
+            &transaction,
+            "action_invocations",
+            &invocation_id.to_string(),
+            "action invocation",
+        )?;
+        if !matches!(
+            invocation.status,
+            ActionStatus::Scheduled | ActionStatus::Interrupted
+        ) {
+            return Err(StoreError::Invariant(format!(
+                "cannot start Action {} from {:?}",
+                invocation.id, invocation.status
+            )));
+        }
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &invocation.workflow_id.to_string(),
+            "workflow",
+        )?;
         if run.status != WorkflowStatus::Running {
             return Err(StoreError::Invariant("Workflow is not running".to_string()));
         }
-        let number = self.connection()?.query_row(
+        let has_active = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM action_attempts
+             WHERE invocation_id = ?1 AND status = 'running')",
+            [invocation_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_active {
+            return Err(StoreError::Invariant(
+                "Action invocation already has a running attempt".to_string(),
+            ));
+        }
+        let number = transaction.query_row(
             "SELECT COALESCE(MAX(number), 0) + 1 FROM action_attempts WHERE invocation_id = ?1",
             [invocation_id.to_string()],
             |row| row.get::<_, u32>(0),
@@ -2087,8 +2279,6 @@ impl Store {
         invocation.updated_at = now;
         run.usage.actions_started = run.usage.actions_started.saturating_add(1);
         run.updated_at = now;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         update_status_document_tx(
             &transaction,
             "action_invocations",
@@ -2175,12 +2365,39 @@ impl Store {
                 "finish_action requires a terminal status".to_string(),
             ));
         }
-        let mut invocation = self.get_action_invocation(invocation_id)?;
-        let mut attempt = self.get_action_attempt(attempt_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut invocation: ActionInvocation = load_document_tx(
+            &transaction,
+            "action_invocations",
+            &invocation_id.to_string(),
+            "action invocation",
+        )?;
+        let mut attempt: ActionAttempt = load_document_tx(
+            &transaction,
+            "action_attempts",
+            &attempt_id.to_string(),
+            "action attempt",
+        )?;
         if attempt.invocation_id != invocation.id {
             return Err(StoreError::Invariant(
                 "ActionAttempt does not belong to invocation".to_string(),
             ));
+        }
+        if invocation.status == status && attempt.status == status {
+            if invocation.output == output && invocation.error == error && attempt.error == error {
+                return Ok(invocation);
+            }
+            return Err(StoreError::Invariant(format!(
+                "terminal Action {} cannot accept a different result",
+                invocation.id
+            )));
+        }
+        if invocation.status != ActionStatus::Running || attempt.status != ActionStatus::Running {
+            return Err(StoreError::Invariant(format!(
+                "cannot finish Action {} from invocation {:?} and attempt {:?}",
+                invocation.id, invocation.status, attempt.status
+            )));
         }
         let now = Utc::now();
         invocation.status = status;
@@ -2190,13 +2407,16 @@ impl Store {
         attempt.status = status;
         attempt.error = error;
         attempt.updated_at = now;
-        let mut run = self.get_workflow(invocation.workflow_id)?;
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &invocation.workflow_id.to_string(),
+            "workflow",
+        )?;
         if status == ActionStatus::Completed {
             run.usage.actions_completed = run.usage.actions_completed.saturating_add(1);
             run.updated_at = now;
         }
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         update_status_document_tx(
             &transaction,
             "action_invocations",
@@ -2632,7 +2852,14 @@ impl Store {
         id: TimerId,
         effect_key: Option<&str>,
     ) -> Result<WorkflowTimer, StoreError> {
-        let mut timer = self.get_timer(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut timer: WorkflowTimer = load_document_tx(
+            &transaction,
+            "workflow_timers",
+            &id.to_string(),
+            "workflow timer",
+        )?;
         if effect_key.is_some_and(|key| timer.last_fire_effect_key.as_deref() == Some(key)) {
             return Ok(timer);
         }
@@ -2646,11 +2873,19 @@ impl Store {
             now + Duration::milliseconds(i64::try_from(timer.interval_ms).unwrap_or(i64::MAX));
         timer.last_fire_effect_key = effect_key.map(str::to_string);
         timer.updated_at = now;
-        let mut run = self.get_workflow(timer.workflow_id)?;
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &timer.workflow_id.to_string(),
+            "workflow",
+        )?;
+        if run.status.is_terminal() {
+            return Err(StoreError::Invariant(
+                "cannot fire a timer for a terminal Workflow".to_string(),
+            ));
+        }
         run.usage.timer_fires = run.usage.timer_fires.saturating_add(1);
         run.updated_at = now;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         update_status_document_tx(
             &transaction,
             "workflow_timers",
@@ -2887,10 +3122,18 @@ impl Store {
         question: impl Into<String>,
         response_schema: Value,
     ) -> Result<HumanRequest, StoreError> {
-        let mut run = self.get_workflow(workflow_id)?;
-        if run.status.is_terminal() {
+        let question = question.into();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &workflow_id.to_string(),
+            "workflow",
+        )?;
+        if !matches!(run.status, WorkflowStatus::Running | WorkflowStatus::Paused) {
             return Err(StoreError::Invariant(
-                "cannot request human input for a terminal Workflow".to_string(),
+                "cannot request human input unless its Workflow is running or paused".to_string(),
             ));
         }
         let now = Utc::now();
@@ -2898,7 +3141,7 @@ impl Store {
             id: request_id,
             workflow_id,
             session_id,
-            question: question.into(),
+            question,
             response_schema,
             status: HumanRequestStatus::Open,
             answer: None,
@@ -2911,9 +3154,6 @@ impl Store {
             run.status = WorkflowStatus::WaitingForUser;
         }
         run.updated_at = now;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
         transaction.execute(
             "INSERT INTO human_requests
              (id, workflow_id, session_id, status, created_at, document_json)
@@ -3001,7 +3241,14 @@ impl Store {
         id: HumanRequestId,
         answer: Value,
     ) -> Result<HumanRequest, StoreError> {
-        let mut request = self.get_human_request(id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut request: HumanRequest = load_document_tx(
+            &transaction,
+            "human_requests",
+            &id.to_string(),
+            "human request",
+        )?;
         if request.status != HumanRequestStatus::Open {
             return Err(StoreError::Invariant(
                 "human request is already resolved".to_string(),
@@ -3010,12 +3257,16 @@ impl Store {
         request.status = HumanRequestStatus::Answered;
         request.answer = Some(answer);
         request.resolved_at = Some(Utc::now());
-        let mut run = self.get_workflow(request.workflow_id)?;
+        let mut run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &request.workflow_id.to_string(),
+            "workflow",
+        )?;
         let previous_status = run.status;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
         let changed = transaction.execute(
-            "UPDATE human_requests SET status = ?1, document_json = ?2 WHERE id = ?3",
+            "UPDATE human_requests SET status = ?1, document_json = ?2
+             WHERE id = ?3 AND status = 'open'",
             params![
                 enum_string(request.status)?,
                 serde_json::to_string(&request)?,
@@ -3084,11 +3335,39 @@ impl Store {
         kind: ControlMessageKind,
         content: impl Into<String>,
     ) -> Result<ControlMessage, StoreError> {
-        let run = self.get_workflow(workflow_id)?;
+        let content = content.into();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run: Workflow = load_document_tx(
+            &transaction,
+            "workflows",
+            &workflow_id.to_string(),
+            "workflow",
+        )?;
         if run.status.is_terminal() {
             return Err(StoreError::Invariant(
                 "cannot control a terminal Workflow".to_string(),
             ));
+        }
+        let session: Session =
+            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
+        if session.project_id != run.project_id {
+            return Err(StoreError::Invariant(
+                "control Session does not belong to the Workflow Project".to_string(),
+            ));
+        }
+        if let Some(invocation_id) = invocation_id {
+            let invocation: ActionInvocation = load_document_tx(
+                &transaction,
+                "action_invocations",
+                &invocation_id.to_string(),
+                "action invocation",
+            )?;
+            if invocation.workflow_id != workflow_id || invocation.session_id != session_id {
+                return Err(StoreError::Invariant(
+                    "control Action does not belong to the target Workflow Session".to_string(),
+                ));
+            }
         }
         let message = ControlMessage {
             id: ControlMessageId::new(),
@@ -3096,18 +3375,17 @@ impl Store {
             session_id,
             action_invocation_id: invocation_id,
             kind,
-            content: content.into(),
+            content,
             status: ControlMessageStatus::Pending,
             created_at: Utc::now(),
+            claimed_turn_id: None,
+            claimed_at: None,
             applied_at: None,
         };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
         transaction.execute(
             "INSERT INTO control_messages
-             (id, workflow_id, session_id, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (id, workflow_id, session_id, status, claimed_turn_id, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
             params![
                 message.id.to_string(),
                 workflow_id.to_string(),
@@ -3133,47 +3411,66 @@ impl Store {
         Ok(message)
     }
 
-    pub fn take_control_messages(
+    pub fn claim_control_messages(
         &self,
         workflow_id: WorkflowId,
         session_id: SessionId,
         invocation_id: Option<ActionInvocationId>,
+        turn_id: TurnId,
     ) -> Result<Vec<ControlMessage>, StoreError> {
-        let mut messages: Vec<ControlMessage> = self.query_documents(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
+        let turn: Turn = load_document_tx(&transaction, "turns", &turn_id.to_string(), "turn")?;
+        if turn.session_id != session_id || turn.status.is_terminal() {
+            return Err(StoreError::Invariant(
+                "control messages can only be claimed by their active target Turn".to_string(),
+            ));
+        }
+        let mut statement = transaction.prepare(
             "SELECT document_json FROM control_messages
-             WHERE workflow_id = ?1 AND session_id = ?2 AND status = 'pending'
-             ORDER BY created_at ASC",
-            params![workflow_id.to_string(), session_id.to_string()],
+             WHERE workflow_id = ?1 AND session_id = ?2
+               AND (status = 'pending' OR (status = 'claimed' AND claimed_turn_id = ?3))
+             ORDER BY created_at ASC, id ASC",
         )?;
+        let rows = statement.query_map(
+            params![
+                workflow_id.to_string(),
+                session_id.to_string(),
+                turn_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        let documents = rows.collect::<Result<Vec<String>, _>>()?;
+        drop(statement);
+        let mut messages = documents
+            .into_iter()
+            .map(|document| serde_json::from_str(&document))
+            .collect::<Result<Vec<ControlMessage>, _>>()?;
         messages.retain(|message| {
             message.action_invocation_id.is_none() || message.action_invocation_id == invocation_id
         });
+        let claimed_at = Utc::now();
         for message in &mut messages {
-            message.status = ControlMessageStatus::Applied;
-            message.applied_at = Some(Utc::now());
-            self.update_status_document(
-                "control_messages",
-                &message.id.to_string(),
-                message.status,
-                message,
-            )?;
-            self.append_workflow_event(
-                workflow_id,
-                WorkflowEventPayload::ControlMessageApplied {
-                    control_message_id: message.id,
-                },
-            )?;
-            self.append_session_event(
-                session_id,
-                None,
-                None,
-                SessionEventPayload::ControlMessageApplied {
-                    workflow_id,
-                    control_message_id: message.id,
-                    kind: message.kind,
-                },
-            )?;
+            if message.status == ControlMessageStatus::Pending {
+                message.status = ControlMessageStatus::Claimed;
+                message.claimed_turn_id = Some(turn_id);
+                message.claimed_at = Some(claimed_at);
+                let changed = transaction.execute(
+                    "UPDATE control_messages
+                     SET status = 'claimed', claimed_turn_id = ?1, updated_at = ?2, document_json = ?3
+                     WHERE id = ?4 AND status = 'pending'",
+                    params![
+                        turn_id.to_string(),
+                        claimed_at.to_rfc3339(),
+                        serde_json::to_string(message)?,
+                        message.id.to_string(),
+                    ],
+                )?;
+                ensure_one(changed, "control_messages")?;
+            }
         }
+        transaction.commit()?;
         Ok(messages)
     }
 
@@ -3524,7 +3821,8 @@ impl Store {
         self.replay_session_rollout_locked(session_id)?;
 
         let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_rollout_item_tx(&transaction, &item)?;
         assign_rollout_event_sequences_tx(&transaction, session_id, &mut item)?;
         let last_sequence = self
             .shared
@@ -3557,22 +3855,32 @@ impl Store {
         crate::process_fault::reach_process_fault_boundary(
             crate::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION,
         );
-        let projection = (|| -> Result<(), StoreError> {
-            apply_rollout_record_tx(&transaction, &record)?;
+        let projection = (|| -> Result<ProjectionEvents, StoreError> {
+            let events = apply_rollout_record_tx(&transaction, &record)?;
             set_rollout_projection_tx(&transaction, session_id, sequence)?;
             transaction.commit()?;
-            Ok(())
+            Ok(events)
         })();
         drop(connection);
-        if let Err(initial_error) = projection
-            && let Err(replay_error) = self.replay_session_rollout_locked(session_id)
-        {
-            return Err(StoreError::Invariant(format!(
-                "Session rollout is durable but projection failed ({initial_error}) and immediate replay failed ({replay_error})"
-            )));
-        }
+        let projection_events = match projection {
+            Ok(events) => events,
+            Err(initial_error) => {
+                if let Err(replay_error) = self.replay_session_rollout_locked(session_id) {
+                    return Err(StoreError::Invariant(format!(
+                        "Session rollout is durable but projection failed ({initial_error}) and immediate replay failed ({replay_error})"
+                    )));
+                }
+                ProjectionEvents::default()
+            }
+        };
         for event in rollout_events(&record.item) {
             self.shared.publish_session(event.clone());
+        }
+        for event in projection_events.workflow {
+            self.shared.publish_workflow(event);
+        }
+        for event in projection_events.session {
+            self.shared.publish_session(event);
         }
         Ok(record)
     }
@@ -3650,7 +3958,8 @@ impl Store {
             )));
         }
         if projected < last_sequence {
-            let transaction = connection.transaction()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for record in records.iter().filter(|record| record.sequence > projected) {
                 apply_rollout_record_tx(&transaction, record)?;
             }
@@ -3775,28 +4084,6 @@ impl Store {
             &format!("UPDATE {table} SET updated_at = ?1, document_json = ?2 WHERE id = ?3"),
             params![
                 updated_at.to_rfc3339(),
-                serde_json::to_string(document)?,
-                id
-            ],
-        )?;
-        ensure_one(changed, table)
-    }
-
-    fn update_status_document<T: Serialize, S: Serialize>(
-        &self,
-        table: &str,
-        id: &str,
-        status: S,
-        document: &T,
-    ) -> Result<(), StoreError> {
-        let now = Utc::now();
-        let changed = self.connection()?.execute(
-            &format!(
-                "UPDATE {table} SET status = ?1, updated_at = ?2, document_json = ?3 WHERE id = ?4"
-            ),
-            params![
-                enum_string(status)?,
-                now.to_rfc3339(),
                 serde_json::to_string(document)?,
                 id
             ],
@@ -4120,9 +4407,12 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          CREATE TABLE IF NOT EXISTS control_messages (
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
            session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
+           claimed_turn_id TEXT REFERENCES turns(id),
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
+         CREATE INDEX IF NOT EXISTS control_messages_claim
+           ON control_messages(workflow_id, session_id, status, claimed_turn_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS artifacts (
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
@@ -4247,6 +4537,73 @@ fn ensure_workflow_accepts_effect_tx(
     Ok(())
 }
 
+fn load_document_tx<T: DeserializeOwned>(
+    transaction: &Transaction<'_>,
+    table: &str,
+    id: &str,
+    entity: &'static str,
+) -> Result<T, StoreError> {
+    let document = transaction
+        .query_row(
+            &format!("SELECT document_json FROM {table} WHERE id = ?1"),
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity,
+            id: id.to_string(),
+        })?;
+    Ok(serde_json::from_str(&document)?)
+}
+
+fn message_workflow_project_id_tx(
+    transaction: &Transaction<'_>,
+    workflow_id: WorkflowId,
+) -> Result<ProjectId, StoreError> {
+    let workflow: Workflow = load_document_tx(
+        transaction,
+        "workflows",
+        &workflow_id.to_string(),
+        "workflow",
+    )?;
+    Ok(workflow.project_id)
+}
+
+fn apply_workflow_usage_delta(usage: &mut WorkflowUsage, delta: WorkflowUsage) {
+    usage.agents_created = usage.agents_created.saturating_add(delta.agents_created);
+    usage.actions_started = usage.actions_started.saturating_add(delta.actions_started);
+    usage.actions_completed = usage
+        .actions_completed
+        .saturating_add(delta.actions_completed);
+    usage.action_steps = usage.action_steps.saturating_add(delta.action_steps);
+    usage.timer_fires = usage.timer_fires.saturating_add(delta.timer_fires);
+    usage.hosted_search_calls = usage
+        .hosted_search_calls
+        .saturating_add(delta.hosted_search_calls);
+    usage.tokens.saturating_add_assign(delta.tokens);
+    usage.wall_time_seconds = usage
+        .wall_time_seconds
+        .saturating_add(delta.wall_time_seconds);
+    usage.estimated_cost_usd = match (usage.estimated_cost_usd, delta.estimated_cost_usd) {
+        (Some(left), Some(right)) => Some(left + right),
+        (value, None) | (None, value) => value,
+    };
+}
+
+fn token_usage_delta(current: TokenUsage, previous: TokenUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+        cached_input_tokens: current
+            .cached_input_tokens
+            .saturating_sub(previous.cached_input_tokens),
+        cache_write_input_tokens: current
+            .cache_write_input_tokens
+            .saturating_sub(previous.cache_write_input_tokens),
+    }
+}
+
 fn terminalize_workflow_resources_tx(
     transaction: &Transaction<'_>,
     workflow_id: WorkflowId,
@@ -4258,7 +4615,7 @@ fn terminalize_workflow_resources_tx(
         "UPDATE control_messages
          SET status = 'cancelled', updated_at = ?2,
              document_json = json_set(document_json, '$.status', 'cancelled')
-         WHERE workflow_id = ?1 AND status = 'pending'",
+         WHERE workflow_id = ?1 AND status IN ('pending', 'claimed')",
         params![workflow_id.to_string(), now],
     )?;
     transaction.execute(
@@ -4401,10 +4758,119 @@ fn rollout_events_mut(item: &mut SessionRolloutItem) -> Vec<&mut SessionEvent> {
     }
 }
 
+#[derive(Default)]
+struct ProjectionEvents {
+    workflow: Vec<WorkflowEvent>,
+    session: Vec<SessionEvent>,
+}
+
+fn validate_rollout_item_tx(
+    transaction: &Transaction<'_>,
+    item: &SessionRolloutItem,
+) -> Result<(), StoreError> {
+    let (turn_id, acknowledged_control_ids) = match item {
+        SessionRolloutItem::ContextCheckpoint {
+            turn_id,
+            acknowledged_control_ids,
+            ..
+        } => (*turn_id, acknowledged_control_ids),
+        SessionRolloutItem::TurnUpdated {
+            turn,
+            acknowledged_control_ids,
+            ..
+        } => (turn.id, acknowledged_control_ids),
+        _ => return Ok(()),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for control_id in acknowledged_control_ids {
+        if !seen.insert(*control_id) {
+            return Err(StoreError::Invariant(format!(
+                "duplicate acknowledged control message {control_id}"
+            )));
+        }
+        let message: ControlMessage = load_document_tx(
+            transaction,
+            "control_messages",
+            &control_id.to_string(),
+            "control message",
+        )?;
+        if message.status != ControlMessageStatus::Claimed
+            || message.claimed_turn_id != Some(turn_id)
+        {
+            return Err(StoreError::Invariant(format!(
+                "control message {control_id} is not claimed by Turn {turn_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_control_acknowledgements_tx(
+    transaction: &Transaction<'_>,
+    turn_id: TurnId,
+    control_ids: &[ControlMessageId],
+    occurred_at: chrono::DateTime<Utc>,
+) -> Result<ProjectionEvents, StoreError> {
+    let mut events = ProjectionEvents::default();
+    for control_id in control_ids {
+        let mut message: ControlMessage = load_document_tx(
+            transaction,
+            "control_messages",
+            &control_id.to_string(),
+            "control message",
+        )?;
+        if message.status == ControlMessageStatus::Applied {
+            continue;
+        }
+        if message.status != ControlMessageStatus::Claimed
+            || message.claimed_turn_id != Some(turn_id)
+        {
+            return Err(StoreError::Invariant(format!(
+                "control message {control_id} is not claimed by Turn {turn_id}"
+            )));
+        }
+        message.status = ControlMessageStatus::Applied;
+        message.applied_at = Some(occurred_at);
+        let changed = transaction.execute(
+            "UPDATE control_messages
+             SET status = 'applied', updated_at = ?1, document_json = ?2
+             WHERE id = ?3 AND status = 'claimed' AND claimed_turn_id = ?4",
+            params![
+                occurred_at.to_rfc3339(),
+                serde_json::to_string(&message)?,
+                control_id.to_string(),
+                turn_id.to_string(),
+            ],
+        )?;
+        ensure_one(changed, "control_messages")?;
+        events.workflow.push(append_workflow_event_tx(
+            transaction,
+            message_workflow_project_id_tx(transaction, message.workflow_id)?,
+            message.workflow_id,
+            WorkflowEventPayload::ControlMessageApplied {
+                control_message_id: *control_id,
+            },
+        )?);
+        events.session.push(append_session_event_tx(
+            transaction,
+            message.session_id,
+            Some(turn_id),
+            None,
+            SessionEventPayload::ControlMessageApplied {
+                workflow_id: message.workflow_id,
+                control_message_id: *control_id,
+                kind: message.kind,
+            },
+        )?);
+    }
+    Ok(events)
+}
+
 fn apply_rollout_record_tx(
     transaction: &Transaction<'_>,
     record: &SessionRolloutRecord,
-) -> Result<(), StoreError> {
+) -> Result<ProjectionEvents, StoreError> {
+    let mut projected_events = ProjectionEvents::default();
     match &record.item {
         SessionRolloutItem::TurnCreated {
             turn,
@@ -4441,6 +4907,7 @@ fn apply_rollout_record_tx(
             completed_model_steps,
             hosted_search_calls_used,
             checkpoint_message,
+            acknowledged_control_ids,
             ..
         } => {
             let document = transaction
@@ -4455,6 +4922,9 @@ fn apply_rollout_record_tx(
                     id: turn_id.to_string(),
                 })?;
             let mut turn: Turn = serde_json::from_str(&document)?;
+            let token_delta = token_usage_delta(*usage, turn.usage);
+            let hosted_search_delta =
+                hosted_search_calls_used.saturating_sub(turn.hosted_search_calls_used);
             turn.usage = *usage;
             turn.completed_model_steps = *completed_model_steps;
             turn.hosted_search_calls_used = *hosted_search_calls_used;
@@ -4467,11 +4937,61 @@ fn apply_rollout_record_tx(
                 turn.status,
                 &turn,
             )?;
+            if token_delta != TokenUsage::default() || hosted_search_delta > 0 {
+                let workflow_id = transaction
+                    .query_row(
+                        "SELECT workflow_id FROM action_attempts
+                         WHERE json_extract(document_json, '$.turn_id') = ?1",
+                        [turn_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        StoreError::Invariant(format!(
+                            "Turn {turn_id} has no owning Workflow ActionAttempt"
+                        ))
+                    })?;
+                let workflow_id = WorkflowId::from_str(&workflow_id)
+                    .map_err(|error| StoreError::Invariant(error.to_string()))?;
+                let mut workflow: Workflow = load_document_tx(
+                    transaction,
+                    "workflows",
+                    &workflow_id.to_string(),
+                    "workflow",
+                )?;
+                apply_workflow_usage_delta(
+                    &mut workflow.usage,
+                    WorkflowUsage {
+                        tokens: token_delta,
+                        hosted_search_calls: hosted_search_delta,
+                        ..WorkflowUsage::default()
+                    },
+                );
+                workflow.updated_at = record.occurred_at;
+                update_workflow_tx(transaction, &workflow)?;
+                projected_events.workflow.push(append_workflow_event_tx(
+                    transaction,
+                    workflow.project_id,
+                    workflow.id,
+                    WorkflowEventPayload::UsageUpdated {
+                        usage: workflow.usage,
+                    },
+                )?);
+            }
+            let control_events = apply_control_acknowledgements_tx(
+                transaction,
+                *turn_id,
+                acknowledged_control_ids,
+                record.occurred_at,
+            )?;
+            projected_events.workflow.extend(control_events.workflow);
+            projected_events.session.extend(control_events.session);
         }
         SessionRolloutItem::TurnUpdated {
             turn,
             session,
             events,
+            acknowledged_control_ids,
         } => {
             update_status_document_tx(
                 transaction,
@@ -4489,6 +5009,29 @@ fn apply_rollout_record_tx(
             )?;
             for event in events {
                 insert_session_event_exact_tx(transaction, event)?;
+            }
+            let control_events = apply_control_acknowledgements_tx(
+                transaction,
+                turn.id,
+                acknowledged_control_ids,
+                record.occurred_at,
+            )?;
+            projected_events.workflow.extend(control_events.workflow);
+            projected_events.session.extend(control_events.session);
+            if turn.status.is_terminal() {
+                transaction.execute(
+                    "UPDATE control_messages
+                     SET status = 'pending', claimed_turn_id = NULL, updated_at = ?1,
+                         document_json = json_set(
+                             json_set(
+                                 json_set(document_json, '$.status', 'pending'),
+                                 '$.claimed_turn_id', NULL
+                             ),
+                             '$.claimed_at', NULL
+                         )
+                     WHERE status = 'claimed' AND claimed_turn_id = ?2",
+                    params![record.occurred_at.to_rfc3339(), turn.id.to_string()],
+                )?;
             }
         }
         SessionRolloutItem::StepsCreated { steps } => {
@@ -4524,7 +5067,7 @@ fn apply_rollout_record_tx(
             insert_session_event_exact_tx(transaction, event)?;
         }
     }
-    Ok(())
+    Ok(projected_events)
 }
 
 fn insert_session_event_exact_tx(

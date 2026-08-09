@@ -8,6 +8,7 @@ use axum::http::StatusCode as AxumStatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use papermachine_store::process_fault::FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH;
+use papermachine_store::process_fault::MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION;
 use papermachine_store::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION;
 use papermachine_store::process_fault::TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT;
 use reqwest::Client;
@@ -681,6 +682,35 @@ async fn terminal_checkpoint_commits_without_resampling_after_sigkill() {
     restarted.stop().await;
 }
 
+async fn model_checkpoint_preserves_usage_before_step_projection() {
+    let mut scenario = Scenario::new().await;
+    scenario.mock.enqueue_text("durable sampled answer").await;
+    let (mut server, marker) = scenario
+        .start(Some(MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION))
+        .await;
+    let project_id = scenario.create_project("Model projection crash").await;
+    scenario.publish_workflow(&project_id).await;
+    let workflow_id = scenario
+        .launch_workflow(&project_id, "Preserve sampled usage.")
+        .await;
+    wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
+    server.sigkill().await;
+
+    let calls_before_restart = scenario.mock.call_count().await;
+    let (mut restarted, _) = scenario.start(None).await;
+    let workflow = scenario.wait_workflow_terminal(&workflow_id).await;
+    assert_eq!(scenario.mock.call_count().await, calls_before_restart);
+    assert_eq!(workflow["workflow"]["usage"]["tokens"]["input_tokens"], 20);
+    assert_eq!(workflow["workflow"]["usage"]["tokens"]["output_tokens"], 5);
+    let session_id = workflow["sessions"][0]["id"]
+        .as_str()
+        .expect("Session id should exist");
+    let view = scenario.session_view(session_id).await;
+    assert_eq!(view["turns"][0]["output"], "durable sampled answer");
+    assert_rollout_projected(&view);
+    restarted.stop().await;
+}
+
 async fn workflow_inflight_sample_resumes_automatically_after_sigkill() {
     let mut scenario = Scenario::new().await;
     let (mut server, _) = scenario.start(None).await;
@@ -764,6 +794,7 @@ async fn canonical_tool_call_is_aborted_without_dispatch_after_sigkill() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn process_sigkill_recovery_matrix_preserves_durable_boundaries() {
     rollout_ahead_of_projection_is_replayed_after_sigkill().await;
+    model_checkpoint_preserves_usage_before_step_projection().await;
     terminal_checkpoint_commits_without_resampling_after_sigkill().await;
     workflow_inflight_sample_resumes_automatically_after_sigkill().await;
     canonical_tool_call_is_aborted_without_dispatch_after_sigkill().await;

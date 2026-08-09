@@ -10,9 +10,12 @@ mod project_home;
 mod rollout;
 
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::ControlMessageId;
+use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionId;
+use papermachine_protocol::TokenUsage;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgramSnapshot;
@@ -57,6 +60,16 @@ pub struct NewWorkflow {
     pub enabled_skills: Vec<String>,
     pub launch_context: WorkflowLaunchContext,
     pub agent_access_overrides: BTreeMap<String, AccessPreset>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TurnContextCheckpoint {
+    pub mutation: ModelContextMutation,
+    pub usage: TokenUsage,
+    pub completed_model_steps: u32,
+    pub hosted_search_calls_used: u32,
+    pub checkpoint_message: Option<String>,
+    pub acknowledged_control_ids: Vec<ControlMessageId>,
 }
 
 #[derive(Debug, Error)]

@@ -177,6 +177,7 @@ pub(crate) fn reconstruct(
                 completed_model_steps,
                 hosted_search_calls_used,
                 checkpoint_message,
+                ..
             } => {
                 let active = state.active_turn.as_mut().ok_or_else(|| {
                     StoreError::Invariant(format!(

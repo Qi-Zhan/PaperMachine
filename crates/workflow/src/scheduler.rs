@@ -146,11 +146,9 @@ impl WorkflowScheduler {
                 status: run.status,
             });
         }
-        self.inner.store.set_workflow_status(
-            workflow_id,
-            WorkflowStatus::Paused,
-            Some("paused by user".to_string()),
-        )?;
+        self.inner
+            .store
+            .pause_workflow(workflow_id, Some("paused by user".to_string()))?;
         Ok(())
     }
 
@@ -162,9 +160,7 @@ impl WorkflowScheduler {
                 status: run.status,
             });
         }
-        self.inner
-            .store
-            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)?;
+        self.inner.store.resume_workflow(workflow_id)?;
         self.start(workflow_id).await?;
         Ok(())
     }
@@ -177,11 +173,9 @@ impl WorkflowScheduler {
                 status: run.status,
             });
         }
-        self.inner.store.set_workflow_status(
-            workflow_id,
-            WorkflowStatus::Cancelled,
-            Some("cancelled by user".to_string()),
-        )?;
+        self.inner
+            .store
+            .cancel_workflow(workflow_id, "cancelled by user")?;
         if let Some(handle) = self.inner.handles.lock().await.get(&workflow_id) {
             handle.cancellation.cancel();
         }
@@ -271,7 +265,7 @@ async fn run_scheduled_inner(
         if run.status == WorkflowStatus::Created {
             run = inner
                 .store
-                .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                .start_workflow(workflow_id)
                 .map_err(|error| error.to_string())?;
         }
         if run.status != WorkflowStatus::Running {
@@ -306,11 +300,7 @@ async fn run_scheduled_inner(
             if !current.status.is_terminal() {
                 inner
                     .store
-                    .set_workflow_status(
-                        workflow_id,
-                        WorkflowStatus::Cancelled,
-                        Some("cancelled by user".to_string()),
-                    )
+                    .cancel_workflow(workflow_id, "cancelled by user")
                     .map_err(|error| error.to_string())?;
             }
             return Err("cancelled by user".to_string());
@@ -328,17 +318,28 @@ async fn run_scheduled_inner(
             }
             Ok(WorkflowExecution::Suspended(suspension)) => {
                 if current.status != suspension.status {
-                    inner
-                        .store
-                        .set_workflow_status(workflow_id, suspension.status, None)
-                        .map_err(|error| error.to_string())?;
+                    match suspension.status {
+                        WorkflowStatus::WaitingForUser => {
+                            inner.store.wait_workflow_for_user(workflow_id)
+                        }
+                        WorkflowStatus::WaitingForTimer => {
+                            inner.store.wait_workflow_for_timer(workflow_id)
+                        }
+                        WorkflowStatus::WaitingForSignal => {
+                            inner.store.wait_workflow_for_signal(workflow_id)
+                        }
+                        status => Err(StoreError::Invariant(format!(
+                            "Workflow runtime returned invalid suspension status {status:?}"
+                        ))),
+                    }
+                    .map_err(|error| error.to_string())?;
                 }
                 wake_at_hint = suspension.wake_at;
             }
             Err(error) => {
                 inner
                     .store
-                    .set_workflow_status(workflow_id, WorkflowStatus::Failed, Some(error.clone()))
+                    .fail_workflow(workflow_id, error.clone())
                     .map_err(|store_error| store_error.to_string())?;
                 return Err(error);
             }
@@ -395,7 +396,7 @@ async fn wait_until_runnable(
                     || (run.status == WorkflowStatus::WaitingForUser && !open_direct_human_request)
                 {
                     store
-                        .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                        .resume_workflow(workflow_id)
                         .map_err(|error| error.to_string())?;
                     return Ok(());
                 }
@@ -403,7 +404,7 @@ async fn wait_until_runnable(
                     let wait = (next_fire_at - Utc::now()).to_std().unwrap_or_default();
                     if wait.is_zero() {
                         store
-                            .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                            .resume_workflow(workflow_id)
                             .map_err(|error| error.to_string())?;
                         return Ok(());
                     }
@@ -411,7 +412,7 @@ async fn wait_until_runnable(
                         _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
                         _ = tokio::time::sleep(wait) => {
                             store
-                                .set_workflow_status(workflow_id, WorkflowStatus::Running, None)
+                                .resume_workflow(workflow_id)
                                 .map_err(|error| error.to_string())?;
                             return Ok(());
                         }
@@ -673,7 +674,7 @@ mod tests {
             .expect("session should be created");
         let running_run = create_test_workflow(&store, &session, "Running");
         store
-            .set_workflow_status(running_run.id, WorkflowStatus::Running, None)
+            .start_workflow(running_run.id)
             .expect("run should be running");
         let created_run = create_test_workflow(&store, &session, "Created");
 
@@ -817,7 +818,7 @@ mod tests {
             .expect("other Workflow should complete");
 
         store
-            .set_workflow_status(suspended_run.id, WorkflowStatus::Running, None)
+            .resume_workflow(suspended_run.id)
             .expect("suspended Workflow should be resumed");
         tokio::time::timeout(Duration::from_secs(5), scheduler.wait(suspended_run.id))
             .await

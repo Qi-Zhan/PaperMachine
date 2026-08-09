@@ -1,5 +1,6 @@
 use crate::ActionAttempt;
 use crate::AgentStep;
+use crate::ControlMessageId;
 use crate::ModelInputItem;
 use crate::Session;
 use crate::SessionEvent;
@@ -13,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub const SESSION_ROLLOUT_VERSION: u32 = 1;
+pub const SESSION_ROLLOUT_VERSION: u32 = 2;
 
 /// Observable relationship between the canonical JSONL rollout and its
 /// SQLite query projection.
@@ -75,11 +76,13 @@ pub enum SessionRolloutItem {
         completed_model_steps: u32,
         hosted_search_calls_used: u32,
         checkpoint_message: Option<String>,
+        acknowledged_control_ids: Vec<ControlMessageId>,
     },
     TurnUpdated {
         turn: Turn,
         session: Session,
         events: Vec<SessionEvent>,
+        acknowledged_control_ids: Vec<ControlMessageId>,
     },
     StepsCreated {
         steps: Vec<AgentStep>,

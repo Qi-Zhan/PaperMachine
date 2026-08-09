@@ -41,6 +41,7 @@ use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_store::TurnContextCheckpoint;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolError;
 use serde_json::Value;
@@ -365,13 +366,16 @@ async fn run_scheduled_turn_inner(
         if repaired.len() != rollout_context.len() {
             inner.store.checkpoint_turn_context(
                 turn.id,
-                ModelContextMutation::Append {
-                    items: repaired[rollout_context.len()..].to_vec(),
+                TurnContextCheckpoint {
+                    mutation: ModelContextMutation::Append {
+                        items: repaired[rollout_context.len()..].to_vec(),
+                    },
+                    usage: active_rollout.usage,
+                    completed_model_steps: active_rollout.completed_model_steps,
+                    hosted_search_calls_used: active_rollout.hosted_search_calls_used,
+                    checkpoint_message: active_rollout.checkpoint_message.clone(),
+                    acknowledged_control_ids: Vec::new(),
                 },
-                active_rollout.usage,
-                active_rollout.completed_model_steps,
-                active_rollout.hosted_search_calls_used,
-                active_rollout.checkpoint_message.clone(),
             )?;
             rollout_context = repaired;
         }
@@ -383,6 +387,7 @@ async fn run_scheduled_turn_inner(
         turn.id,
         Some(workflow_context.workflow_id),
         rollout_context,
+        active_rollout.completed_model_steps,
     ));
     let events: Arc<dyn AgentEventSink> = event_sink.clone();
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
@@ -438,11 +443,18 @@ async fn run_scheduled_turn_inner(
             inner.store.cancel_turn(turn.id)?;
             Err(SessionRuntimeError::Cancelled)
         }
-        Err(AgentError::Interrupted(reason)) => {
+        Err(AgentError::Interrupted {
+            reason,
+            control_message_ids,
+        }) => {
             event_sink
                 .finish_pending(StepStatus::Cancelled, &reason)
                 .await?;
-            inner.store.interrupt_turn(turn.id, reason.clone())?;
+            inner.store.interrupt_turn_with_controls(
+                turn.id,
+                reason.clone(),
+                &control_message_ids,
+            )?;
             Err(SessionRuntimeError::Interrupted(reason))
         }
         Err(error) => {
@@ -485,7 +497,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         .map_err(|error| error.to_string())?;
                     if turn.status != TurnStatus::Paused {
                         self.store
-                            .set_turn_status(context.turn_id, TurnStatus::Paused, None)
+                            .pause_turn(context.turn_id)
                             .map_err(|error| error.to_string())?;
                     }
                     let mut events = self.store.subscribe();
@@ -504,6 +516,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         guidance: Vec::new(),
                         interrupt: Some(format!("Workflow entered {:?}", run.status)),
                         finish: None,
+                        control_message_ids: Vec::new(),
                     });
                 }
             }
@@ -514,19 +527,21 @@ impl AgentControlPlane for StoreAgentControlPlane {
             .map_err(|error| error.to_string())?;
         if turn.status == TurnStatus::Paused {
             self.store
-                .set_turn_status(context.turn_id, TurnStatus::Running, None)
+                .resume_turn(context.turn_id)
                 .map_err(|error| error.to_string())?;
         }
         let messages = self
             .store
-            .take_control_messages(
+            .claim_control_messages(
                 workflow_id,
                 context.session_id,
                 context.action_invocation_id,
+                context.turn_id,
             )
             .map_err(|error| error.to_string())?;
         let mut checkpoint = AgentCheckpoint::default();
         for message in messages {
+            checkpoint.control_message_ids.push(message.id);
             match message.kind {
                 ControlMessageKind::Guide => checkpoint.guidance.push(message.content),
                 ControlMessageKind::Interrupt => checkpoint.interrupt = Some(message.content),
@@ -834,6 +849,7 @@ struct SessionAgentEventSink {
 struct RolloutCheckpointState {
     context: Vec<ModelInputItem>,
     replacement_reason: Option<ContextReplacementReason>,
+    completed_model_steps: u32,
 }
 
 impl SessionAgentEventSink {
@@ -843,6 +859,7 @@ impl SessionAgentEventSink {
         turn_id: TurnId,
         workflow_id: Option<WorkflowId>,
         context: Vec<ModelInputItem>,
+        completed_model_steps: u32,
     ) -> Self {
         Self {
             store,
@@ -855,6 +872,7 @@ impl SessionAgentEventSink {
             checkpoint: Mutex::new(RolloutCheckpointState {
                 context,
                 replacement_reason: None,
+                completed_model_steps,
             }),
         }
     }
@@ -901,17 +919,6 @@ impl AgentEventSink for SessionAgentEventSink {
                     )
                     .map_err(|error| error.to_string())?;
                 self.charge_action_step().await?;
-                if let Some(workflow_id) = self.workflow_id {
-                    self.store
-                        .add_workflow_usage(
-                            workflow_id,
-                            WorkflowUsage {
-                                tokens: usage,
-                                ..WorkflowUsage::default()
-                            },
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
                 self.append(Some(stored.id), SessionEventPayload::ModelStepCompleted)
             }
             AgentEvent::ModelStepFailed {
@@ -1014,19 +1021,6 @@ impl AgentEventSink for SessionAgentEventSink {
                         None,
                     )
                     .map_err(|error| error.to_string())?;
-                if tool_name == "web_search"
-                    && let Some(workflow_id) = self.workflow_id
-                {
-                    self.store
-                        .add_workflow_usage(
-                            workflow_id,
-                            WorkflowUsage {
-                                hosted_search_calls: 1,
-                                ..WorkflowUsage::default()
-                            },
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
                 self.charge_action_step().await?;
                 self.append(Some(step.id), SessionEventPayload::HostedToolCompleted)
             }
@@ -1077,17 +1071,6 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                if let Some(workflow_id) = self.workflow_id {
-                    self.store
-                        .add_workflow_usage(
-                            workflow_id,
-                            WorkflowUsage {
-                                tokens: usage,
-                                ..WorkflowUsage::default()
-                            },
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
                 self.checkpoint.lock().await.replacement_reason =
                     Some(ContextReplacementReason::Compaction);
                 self.append(
@@ -1108,6 +1091,7 @@ impl AgentEventSink for SessionAgentEventSink {
                 completed_model_steps,
                 hosted_search_calls_used,
                 message,
+                acknowledged_control_ids,
             } => {
                 let mut checkpoint = self.checkpoint.lock().await;
                 let mutation = if history == checkpoint.context {
@@ -1126,18 +1110,29 @@ impl AgentEventSink for SessionAgentEventSink {
                         reason,
                     }
                 };
+                let model_advanced = completed_model_steps > checkpoint.completed_model_steps;
                 self.store
                     .checkpoint_turn_context(
                         self.turn_id,
-                        mutation,
-                        usage,
-                        completed_model_steps,
-                        hosted_search_calls_used,
-                        message,
+                        TurnContextCheckpoint {
+                            mutation,
+                            usage,
+                            completed_model_steps,
+                            hosted_search_calls_used,
+                            checkpoint_message: message,
+                            acknowledged_control_ids,
+                        },
                     )
                     .map_err(|error| error.to_string())?;
                 checkpoint.context = history;
                 checkpoint.replacement_reason = None;
+                checkpoint.completed_model_steps = completed_model_steps;
+                drop(checkpoint);
+                if model_advanced {
+                    papermachine_store::process_fault::reach_process_fault_boundary(
+                        papermachine_store::process_fault::MODEL_OUTPUT_COMMITTED_BEFORE_STEP_PROJECTION,
+                    );
+                }
                 Ok(())
             }
         }

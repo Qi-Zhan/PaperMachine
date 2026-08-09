@@ -421,6 +421,7 @@ pub enum ControlMessageKind {
 #[serde(rename_all = "snake_case")]
 pub enum ControlMessageStatus {
     Pending,
+    Claimed,
     Applied,
     Cancelled,
 }
@@ -435,6 +436,8 @@ pub struct ControlMessage {
     pub content: String,
     pub status: ControlMessageStatus,
     pub created_at: DateTime<Utc>,
+    pub claimed_turn_id: Option<TurnId>,
+    pub claimed_at: Option<DateTime<Utc>>,
     pub applied_at: Option<DateTime<Utc>>,
 }
 

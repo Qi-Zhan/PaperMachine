@@ -5,11 +5,15 @@ use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
 use papermachine_protocol::HumanRequestId;
 use papermachine_protocol::HumanRequestStatus;
+use papermachine_protocol::MessageRole;
+use papermachine_protocol::ModelContextMutation;
+use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
 use papermachine_protocol::TaskScopeStatus;
 use papermachine_protocol::TimerPolicy;
 use papermachine_protocol::TimerStatus;
+use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolSetSnapshot;
 use papermachine_protocol::WorkflowContextMode;
 use papermachine_protocol::WorkflowEffectStatus;
@@ -20,15 +24,20 @@ use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
-use papermachine_protocol::WorkflowStatus;
 use papermachine_protocol::WorkflowUsage;
 use papermachine_store::NewWorkflow;
 use papermachine_store::ProjectHomePatchOperation;
 use papermachine_store::Store;
+use papermachine_store::TurnContextCheckpoint;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Barrier;
 use tempfile::TempDir;
 use tempfile::tempdir;
+
+mod support;
+use support::ActionHarness;
 
 fn empty_tool_set() -> ToolSetSnapshot {
     ToolSetSnapshot::materialize(Vec::new()).expect("empty tool set should be valid")
@@ -95,31 +104,24 @@ fn turn_creation_requires_the_attached_workspace_to_be_available() {
     let project = store
         .create_project("Detached", &workspace)
         .expect("Project should be created");
-    let session = store
+    let origin = store
         .create_session(project.id, "Session", "", "test-model", Vec::new())
         .expect("Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
     std::fs::remove_dir(&workspace).expect("empty Workspace should be removed");
 
-    let error = store
+    let error = harness
         .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
             "Do work",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect_err("Turn creation must stop before sampling without a Workspace");
     assert!(error.to_string().contains("Workspace is unavailable"));
     assert!(
         store
-            .list_turns(session.id)
+            .list_turns(harness.participant.session_id)
             .expect("Turns should list")
             .is_empty()
     );
@@ -130,29 +132,23 @@ fn archived_session_stays_hidden_when_its_active_turn_finishes() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Archived Session");
-    let session = store
+    let origin = store
         .create_session(research.id, "Conversation", "", "test-model", Vec::new())
         .expect("session should be created");
-    let turn = store
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session_id = harness.participant.session_id;
+    let turn = harness
         .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
             "Long-running task",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("turn should be created");
 
     store
         .set_session_status(
-            session.id,
+            session_id,
             papermachine_protocol::SessionStatus::Archived,
             Some("closed by user".to_string()),
         )
@@ -163,7 +159,7 @@ fn archived_session_stays_hidden_when_its_active_turn_finishes() {
 
     assert_eq!(
         store
-            .get_session(session.id)
+            .get_session(session_id)
             .expect("archived session should remain")
             .status,
         papermachine_protocol::SessionStatus::Archived
@@ -172,7 +168,8 @@ fn archived_session_stays_hidden_when_its_active_turn_finishes() {
         store
             .list_sessions(research.id)
             .expect("visible sessions should load")
-            .is_empty()
+            .into_iter()
+            .all(|session| session.id != session_id)
     );
 }
 
@@ -399,30 +396,20 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Access snapshots");
-    let session = store
-        .create_session_with_access(
-            research.id,
-            "Workspace session",
-            "",
-            "test-model",
-            Vec::new(),
-            AccessPreset::Workspace,
-        )
-        .expect("session should be created");
-    let first = store
+    let origin = store
+        .create_session(research.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session_id = harness.participant.session_id;
+    store
+        .set_session_access(session_id, AccessPreset::Workspace)
+        .expect("participant should start with Workspace access");
+    let first = harness
         .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
             "First",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Workspace,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("first turn should be created");
     assert_eq!(first.environment.workspace.id, research.workspace.id);
@@ -433,14 +420,14 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     );
     assert!(
         store
-            .set_session_access(session.id, AccessPreset::Research)
+            .set_session_access(session_id, AccessPreset::Research)
             .is_err(),
         "an active Turn must block access changes"
     );
 
     store.cancel_turn(first.id).expect("first turn should end");
     let updated = store
-        .set_session_access(session.id, AccessPreset::Research)
+        .set_session_access(session_id, AccessPreset::Research)
         .expect("access should change between turns");
     assert_eq!(updated.access, AccessPreset::Research);
     let relocated_root = directory.path().join("relocated-workspace");
@@ -459,20 +446,12 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
             .preset,
         AccessPreset::Workspace
     );
-    let second = store
+    let second = harness
         .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
             "Second",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("second turn should be created");
     assert_eq!(
@@ -501,41 +480,38 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Prompt locking");
-    let session = store
+    let origin = store
         .create_session(
             project.id,
-            "Prompted session",
+            "Origin",
             "Original prompt",
             "test-model",
             Vec::new(),
         )
         .expect("session should be created");
-    let turn = store
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let session_id = harness.participant.session_id;
+    store
+        .set_session_system_prompt(session_id, "Original prompt")
+        .expect("participant prompt should initialize");
+    let turn = harness
         .create_turn(
-            session.id,
-            papermachine_protocol::TurnOrigin::User,
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
             "Question",
-            "test-model",
-            papermachine_protocol::PromptSnapshot::default(),
-            None,
-            true,
             AccessPreset::Research,
-            empty_tool_set(),
-            None,
-            None,
-            Vec::new(),
         )
         .expect("Turn should be queued");
 
     assert!(
         store
-            .set_session_system_prompt(session.id, "Changed too early")
+            .set_session_system_prompt(session_id, "Changed too early")
             .is_err(),
         "a queued Turn must lock the Session prompt"
     );
     assert_eq!(
         store
-            .get_session(session.id)
+            .get_session(session_id)
             .expect("Session should load")
             .system_prompt,
         "Original prompt"
@@ -543,7 +519,7 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
 
     store.cancel_turn(turn.id).expect("Turn should end");
     let updated = store
-        .set_session_system_prompt(session.id, "Changed between Turns")
+        .set_session_system_prompt(session_id, "Changed between Turns")
         .expect("prompt should change after the Turn ends");
     assert_eq!(updated.system_prompt, "Changed between Turns");
 }
@@ -557,9 +533,7 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
         .create_session(research.id, "Claim audit", "", "test-model", Vec::new())
         .expect("origin Session should be created");
     let run = workflow_for_session(&store, &origin, "Research a claim");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("run should start");
+    store.start_workflow(run.id).expect("run should start");
 
     let researcher = store
         .create_participant(
@@ -767,9 +741,7 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         .create_session(research.id, "Origin", "", "test-model", Vec::new())
         .expect("Session should exist");
     let run = workflow_for_session(&store, &origin, "Finish cleanly");
-    store
-        .set_workflow_status(run.id, WorkflowStatus::Running, None)
-        .expect("run should start");
+    store.start_workflow(run.id).expect("run should start");
     let request = store
         .create_human_request_with_id(
             HumanRequestId::new(),
@@ -793,8 +765,8 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         .expect("timer should start");
 
     store
-        .complete_workflow(run.id, json!({"ok": true}))
-        .expect("run should complete");
+        .cancel_workflow(run.id, "test cleanup")
+        .expect("run should cancel");
 
     assert_eq!(
         store
@@ -815,7 +787,7 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
     );
     assert_eq!(
         store.get_timer(timer.id).expect("timer should load").status,
-        TimerStatus::Completed
+        TimerStatus::Cancelled
     );
     assert!(
         store
@@ -840,7 +812,7 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
         .expect("origin Session should be created");
     let workflow = workflow_for_session(&store, &origin, "Attach one Turn");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be running");
     let participant = store
         .create_participant(
@@ -905,7 +877,7 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .expect("origin Session should be created");
     let workflow = workflow_for_session(&store, &origin, "Maintain the Project home");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be running");
     let participant = store
         .create_participant(
@@ -1106,7 +1078,7 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
         .expect("origin Session should be created");
     let workflow = workflow_for_session(&store, &origin, "Interactive conversation");
     store
-        .set_workflow_status(workflow.id, WorkflowStatus::Running, None)
+        .start_workflow(workflow.id)
         .expect("Workflow should be running");
     let participant = store
         .create_participant(
@@ -1311,4 +1283,279 @@ fn concurrent_usage_updates_do_not_lose_deltas() {
             .hosted_search_calls,
         WORKERS * UPDATES_PER_WORKER
     );
+}
+
+#[test]
+fn concurrent_action_start_admits_exactly_one_attempt() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
+    );
+    let project = project(&store, &directory, "Concurrent Action");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let invocation = store
+        .create_action_invocation(
+            harness.workflow.id,
+            None,
+            harness.participant.id,
+            "one_attempt",
+            "Start once",
+            json!({}),
+            Vec::new(),
+        )
+        .expect("Action should be created");
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = (0..2)
+        .map(|_| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.start_action_attempt(invocation.id)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker should join"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    assert_eq!(
+        store
+            .list_action_attempts(invocation.id)
+            .expect("attempts should load")
+            .len(),
+        1
+    );
+    let attempt_id = results
+        .iter()
+        .find_map(|result| result.as_ref().ok().map(|attempt| attempt.id))
+        .expect("one attempt should have started");
+    let barrier = Arc::new(Barrier::new(3));
+    let finishers = (0..2)
+        .map(|_| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.finish_action(
+                    invocation.id,
+                    attempt_id,
+                    papermachine_protocol::ActionStatus::Completed,
+                    Some(json!({"answer": 1})),
+                    None,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    assert!(
+        finishers
+            .into_iter()
+            .all(|worker| worker.join().expect("finisher should join").is_ok())
+    );
+    assert_eq!(
+        store
+            .get_workflow(harness.workflow.id)
+            .expect("Workflow should load")
+            .usage
+            .actions_completed,
+        1
+    );
+    assert!(
+        store
+            .finish_action(
+                invocation.id,
+                attempt_id,
+                papermachine_protocol::ActionStatus::Completed,
+                Some(json!({"answer": 2})),
+                None,
+            )
+            .is_err(),
+        "a terminal Action must reject a conflicting replay"
+    );
+}
+
+#[test]
+fn concurrent_human_answers_use_one_open_request_cas() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Arc::new(
+        Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
+    );
+    let project = project(&store, &directory, "Human CAS");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let request = store
+        .create_human_request_with_id(
+            HumanRequestId::new(),
+            harness.workflow.id,
+            harness.participant.session_id,
+            "Choose once",
+            json!({"type": "string"}),
+        )
+        .expect("HumanRequest should open");
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = ["first", "second"]
+        .into_iter()
+        .map(|answer| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.answer_human_request(request.id, json!(answer))
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker should join"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    let resolved = store
+        .get_human_request(request.id)
+        .expect("HumanRequest should load");
+    assert_eq!(resolved.status, HumanRequestStatus::Answered);
+    assert!(matches!(resolved.answer, Some(value) if value == "first" || value == "second"));
+}
+
+#[test]
+fn claimed_control_is_recovered_by_the_same_turn_and_applied_by_its_checkpoint() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
+    let project = project(&store, &directory, "Control checkpoint");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let created = harness
+        .create_action_turn(
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
+            "Work",
+            AccessPreset::Research,
+        )
+        .expect("Action Turn should be created");
+    let invocation = created.invocation;
+    let turn = created.turn;
+    store.start_turn(turn.id).expect("Turn should start");
+    let control = store
+        .create_control_message(
+            harness.workflow.id,
+            harness.participant.session_id,
+            Some(invocation.id),
+            ControlMessageKind::Guide,
+            "Check the durable evidence",
+        )
+        .expect("control should queue");
+
+    let first_claim = store
+        .claim_control_messages(
+            harness.workflow.id,
+            harness.participant.session_id,
+            Some(invocation.id),
+            turn.id,
+        )
+        .expect("control should claim");
+    let recovered_claim = store
+        .claim_control_messages(
+            harness.workflow.id,
+            harness.participant.session_id,
+            Some(invocation.id),
+            turn.id,
+        )
+        .expect("the same Turn should recover its claim");
+    assert_eq!(first_claim, recovered_claim);
+    assert_eq!(first_claim[0].status, ControlMessageStatus::Claimed);
+    assert_eq!(first_claim[0].claimed_turn_id, Some(turn.id));
+
+    store
+        .checkpoint_turn_context(
+            turn.id,
+            TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: vec![ModelInputItem::Message {
+                        role: MessageRole::User,
+                        content:
+                            "Human guidance for this running action:\nCheck the durable evidence"
+                                .to_string(),
+                    }],
+                },
+                usage: TokenUsage::default(),
+                completed_model_steps: 0,
+                hosted_search_calls_used: 0,
+                checkpoint_message: None,
+                acknowledged_control_ids: vec![control.id],
+            },
+        )
+        .expect("canonical context should acknowledge the control");
+    let applied = store
+        .list_control_messages(harness.workflow.id)
+        .expect("controls should load")
+        .into_iter()
+        .find(|message| message.id == control.id)
+        .expect("control should remain queryable");
+    assert_eq!(applied.status, ControlMessageStatus::Applied);
+    assert!(applied.applied_at.is_some());
+}
+
+#[test]
+fn interrupt_applies_its_claim_in_the_turn_terminal_transaction() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
+    let project = project(&store, &directory, "Interrupt control");
+    let origin = store
+        .create_session(project.id, "Origin", "", "test-model", Vec::new())
+        .expect("origin Session should be created");
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let created = harness
+        .create_action_turn(
+            &store,
+            papermachine_protocol::TurnOrigin::Workflow,
+            "Work",
+            AccessPreset::Research,
+        )
+        .expect("Action Turn should be created");
+    let invocation = created.invocation;
+    let turn = created.turn;
+    store.start_turn(turn.id).expect("Turn should start");
+    let control = store
+        .create_control_message(
+            harness.workflow.id,
+            harness.participant.session_id,
+            Some(invocation.id),
+            ControlMessageKind::Interrupt,
+            "Stop and preserve the partial result",
+        )
+        .expect("interrupt should queue");
+    store
+        .claim_control_messages(
+            harness.workflow.id,
+            harness.participant.session_id,
+            Some(invocation.id),
+            turn.id,
+        )
+        .expect("interrupt should claim");
+    store
+        .interrupt_turn_with_controls(
+            turn.id,
+            "Stop and preserve the partial result",
+            &[control.id],
+        )
+        .expect("Turn should interrupt atomically");
+    let applied = store
+        .list_control_messages(harness.workflow.id)
+        .expect("controls should load")
+        .into_iter()
+        .find(|message| message.id == control.id)
+        .expect("control should remain queryable");
+    assert_eq!(applied.status, ControlMessageStatus::Applied);
 }
