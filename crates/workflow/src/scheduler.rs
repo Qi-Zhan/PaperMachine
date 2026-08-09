@@ -1,20 +1,17 @@
 use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Utc;
-use papermachine_protocol::ChannelId;
 use papermachine_protocol::HumanRequestStatus;
-use papermachine_protocol::TimerStatus;
-use papermachine_protocol::WorkflowEffectStatus;
 use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkflowStatus;
 use papermachine_protocol::WorkflowUsage;
+#[cfg(test)]
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_store::StoreHandle;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
@@ -403,12 +400,6 @@ async fn run_scheduled_inner(
                                 .call(move |store| store.wait_workflow_for_timer(workflow_id))
                                 .await
                         }
-                        WorkflowStatus::WaitingForSignal => {
-                            inner
-                                .store
-                                .call(move |store| store.wait_workflow_for_signal(workflow_id))
-                                .await
-                        }
                         status => Err(StoreError::Invariant(format!(
                             "Workflow runtime returned invalid suspension status {status:?}"
                         ))),
@@ -463,97 +454,56 @@ async fn wait_until_runnable(
                     _ = events.recv() => {}
                 }
             }
-            WorkflowStatus::WaitingForUser
-            | WorkflowStatus::WaitingForTimer
-            | WorkflowStatus::WaitingForSignal => {
-                let (open_direct_human_request, durable_timer, ready_signal) = store
+            WorkflowStatus::WaitingForUser => {
+                let open_request = store
                     .call(move |store| {
-                        let open_direct_human_request = store
-                            .list_human_requests(workflow_id)?
-                            .into_iter()
-                            .any(|request| request.status == HumanRequestStatus::Open);
-                        let durable_timer = store
-                            .list_timers(workflow_id)?
-                            .into_iter()
-                            .filter(|timer| timer.status == TimerStatus::Active)
-                            .map(|timer| timer.next_fire_at)
-                            .min();
-                        Ok::<_, StoreError>((
-                            open_direct_human_request,
-                            durable_timer,
-                            workflow_has_ready_signal(store, workflow_id)?,
-                        ))
+                        Ok::<_, StoreError>(
+                            store
+                                .list_human_requests(workflow_id)?
+                                .into_iter()
+                                .any(|request| request.status == HumanRequestStatus::Open),
+                        )
                     })
                     .await
                     .map_err(|error| error.to_string())?;
-                let next_timer = durable_timer
-                    .into_iter()
-                    .chain(wake_at_hint.iter().cloned())
-                    .min();
-
-                if ready_signal
-                    || (run.status == WorkflowStatus::WaitingForUser && !open_direct_human_request)
-                {
+                if !open_request {
                     store
                         .call(move |store| store.resume_workflow(workflow_id))
                         .await
                         .map_err(|error| error.to_string())?;
                     return Ok(());
                 }
-                if let Some(next_fire_at) = next_timer {
-                    let wait = (next_fire_at - Utc::now()).to_std().unwrap_or_default();
-                    if wait.is_zero() {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                    _ = events.recv() => {}
+                }
+            }
+            WorkflowStatus::WaitingForTimer => {
+                let wake_at = wake_at_hint.ok_or_else(|| {
+                    "Workflow timer suspension is missing its wake time".to_string()
+                })?;
+                let wait = (wake_at - Utc::now()).to_std().unwrap_or_default();
+                if wait.is_zero() {
+                    store
+                        .call(move |store| store.resume_workflow(workflow_id))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                tokio::select! {
+                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                    _ = tokio::time::sleep(wait) => {
                         store
                             .call(move |store| store.resume_workflow(workflow_id))
                             .await
                             .map_err(|error| error.to_string())?;
                         return Ok(());
                     }
-                    tokio::select! {
-                        _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
-                        _ = tokio::time::sleep(wait) => {
-                            store
-                                .call(move |store| store.resume_workflow(workflow_id))
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            return Ok(());
-                        }
-                        _ = events.recv() => {}
-                    }
-                } else {
-                    tokio::select! {
-                        _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
-                        _ = events.recv() => {}
-                    }
+                    _ = events.recv() => {}
                 }
             }
         }
     }
-}
-
-fn workflow_has_ready_signal(store: &Store, workflow_id: WorkflowId) -> Result<bool, StoreError> {
-    for effect in store
-        .list_workflow_effects(workflow_id)?
-        .into_iter()
-        .filter(|effect| {
-            effect.kind == "wait_signal" && effect.status == WorkflowEffectStatus::Started
-        })
-    {
-        let Some(channel_id) = effect.payload.get("channel_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let channel_id = ChannelId::from_str(channel_id)
-            .map_err(|error| StoreError::Invariant(error.to_string()))?;
-        let after_sequence = effect
-            .payload
-            .get("after_sequence")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        if !store.list_signals(channel_id, after_sequence)?.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[derive(Debug, Error)]
@@ -581,7 +531,6 @@ mod tests {
     use papermachine_protocol::WorkflowProgramSource;
     use papermachine_store::NewWorkflow;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
@@ -595,11 +544,6 @@ mod tests {
         suspended: StdMutex<HashSet<WorkflowId>>,
     }
 
-    struct SignalWaitExecutor {
-        waiting: WorkflowId,
-        executions: StdMutex<HashMap<WorkflowId, usize>>,
-    }
-
     struct BlockingExecutor;
 
     #[async_trait]
@@ -611,32 +555,6 @@ mod tests {
         ) -> Result<WorkflowExecution, String> {
             cancellation.cancelled().await;
             Err("cancelled by scheduler".to_string())
-        }
-    }
-
-    #[async_trait]
-    impl WorkflowRuntime for SignalWaitExecutor {
-        async fn execute(
-            &self,
-            workflow_id: WorkflowId,
-            _cancellation: CancellationToken,
-        ) -> Result<WorkflowExecution, String> {
-            *self
-                .executions
-                .lock()
-                .map_err(|error| error.to_string())?
-                .entry(workflow_id)
-                .or_default() += 1;
-            if workflow_id == self.waiting {
-                Ok(WorkflowExecution::Suspended(WorkflowSuspension::new(
-                    WorkflowStatus::WaitingForSignal,
-                    None,
-                )))
-            } else {
-                Ok(WorkflowExecution::Completed(json!({
-                    "workflow_id": workflow_id
-                })))
-            }
         }
     }
 
@@ -934,85 +852,5 @@ mod tests {
             .expect("resumed Workflow should finish")
             .expect("resumed Workflow should remain scheduled")
             .expect("resumed Workflow should complete");
-    }
-
-    #[tokio::test]
-    async fn unrelated_workflow_events_do_not_replay_a_signal_waiter() {
-        let directory = tempdir().expect("temporary directory should be created");
-        let store = Arc::new(
-            Store::open_in_memory(directory.path().join("managed"))
-                .expect("store should open in memory"),
-        );
-        let research = store
-            .create_project("Signals", directory.path().join("project"))
-            .expect("research should be created");
-        let session = store
-            .create_session(research.id, "Origin", "", "test-model", Vec::new())
-            .expect("session should be created");
-        let waiting_run = create_test_workflow(&store, &session, "Wait for signal");
-        let other_run = create_test_workflow(&store, &session, "Unrelated work");
-        let executor = Arc::new(SignalWaitExecutor {
-            waiting: waiting_run.id,
-            executions: StdMutex::new(HashMap::new()),
-        });
-        let scheduler = WorkflowScheduler::new(
-            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
-            Arc::clone(&executor) as Arc<dyn WorkflowRuntime>,
-            1,
-        );
-
-        scheduler
-            .start(waiting_run.id)
-            .await
-            .expect("signal waiter should start");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if store
-                    .get_workflow(waiting_run.id)
-                    .expect("Workflow should load")
-                    .status
-                    == WorkflowStatus::WaitingForSignal
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("Workflow should wait for a signal");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        scheduler
-            .start(other_run.id)
-            .await
-            .expect("unrelated Workflow should start");
-        scheduler
-            .wait(other_run.id)
-            .await
-            .expect("unrelated Workflow should remain scheduled")
-            .expect("unrelated Workflow should complete");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(
-            executor
-                .executions
-                .lock()
-                .expect("execution counts should remain available")
-                .get(&waiting_run.id),
-            Some(&1),
-            "an unrelated Workflow event must not replay the signal waiter",
-        );
-
-        scheduler
-            .cancel(waiting_run.id)
-            .await
-            .expect("signal waiter should be cancellable");
-        assert!(
-            scheduler
-                .wait(waiting_run.id)
-                .await
-                .expect("cancelled Workflow should remain scheduled")
-                .is_err()
-        );
     }
 }

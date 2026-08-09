@@ -63,18 +63,6 @@ class Validator(ast.NodeVisitor):
     def __init__(self) -> None:
         self.diagnostics: list[dict[str, Any]] = []
         self.agents: list[dict[str, Any]] = []
-        self.features: dict[str, Any] = {
-            "parallel_blocks": 0,
-            "teams": [],
-            "relations": 0,
-            "scopes": [],
-            "channels": [],
-            "timers": [],
-            "human_checkpoints": 0,
-            "background_tasks": 0,
-            "project_snapshots": 0,
-            "artifacts": 0,
-        }
 
     def error(self, node: ast.AST, message: str) -> None:
         self.diagnostics.append(
@@ -110,57 +98,6 @@ class Validator(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
             self.error(node, f"call to `{node.func.id}` is disabled")
-        if isinstance(node.func, ast.Name):
-            name = node.func.id
-            if name == "together":
-                self.features["parallel_blocks"] += 1
-            elif name == "Team":
-                self.features["teams"].append(literal_string_arg(node))
-            elif name == "relate":
-                self.features["relations"] += 1
-            elif name == "scope":
-                self.features["scopes"].append(literal_string_arg(node))
-            elif name == "Channel":
-                self.features["channels"].append(literal_string_arg(node))
-            elif name == "ask_human":
-                self.features["human_checkpoints"] += 1
-            elif name == "background":
-                self.features["background_tasks"] += 1
-            elif name == "publish_artifact":
-                self.features["artifacts"] += 1
-            elif name == "publish_project_home":
-                self.features["artifacts"] += 1
-            elif name == "wait":
-                values = literal_call_keywords(node)
-                seconds = values.get("seconds")
-                minutes = values.get("minutes")
-                interval = seconds if isinstance(seconds, (int, float)) else None
-                if interval is None and isinstance(minutes, (int, float)):
-                    interval = minutes * 60
-                self.features["timers"].append(
-                    {
-                        "callback": values.get("name", "wait"),
-                        "seconds": float(interval) if interval is not None else None,
-                    }
-                )
-        elif isinstance(node.func, ast.Attribute) and node.func.attr == "snapshot":
-            self.features["project_snapshots"] += 1
-        self.generic_visit(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        for decorator in node.decorator_list:
-            if not (isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name)):
-                continue
-            if decorator.func.id != "every":
-                continue
-            values = literal_call_keywords(decorator)
-            seconds = values.get("seconds")
-            self.features["timers"].append(
-                {
-                    "callback": node.name,
-                    "seconds": float(seconds) if isinstance(seconds, (int, float)) else None,
-                }
-            )
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -256,24 +193,6 @@ def assignment_name(node: ast.Assign | ast.AnnAssign) -> str | None:
     return node.targets[0].id
 
 
-def literal_string_arg(node: ast.Call) -> str:
-    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-        return node.args[0].value
-    return "dynamic"
-
-
-def literal_call_keywords(node: ast.Call) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    for keyword in node.keywords:
-        if keyword.arg is None:
-            continue
-        try:
-            values[keyword.arg] = ast.literal_eval(keyword.value)
-        except (ValueError, TypeError, SyntaxError):
-            continue
-    return values
-
-
 def literal_keywords(decorator: ast.Call) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for keyword in decorator.keywords:
@@ -302,7 +221,7 @@ def validate(source: str) -> dict[str, Any]:
     diagnostics: list[dict[str, Any]] = []
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
         diagnostics.append({"severity": "error", "message": "workflow source exceeds 128 KiB", "line": None, "column": None})
-        return {"valid": False, "manifest": None, "agents": [], "features": Validator().features, "diagnostics": diagnostics}
+        return {"valid": False, "manifest": None, "agents": [], "diagnostics": diagnostics}
     try:
         tree = ast.parse(source, filename="workflow.py")
     except SyntaxError as error:
@@ -314,7 +233,7 @@ def validate(source: str) -> dict[str, Any]:
                 "column": error.offset,
             }
         )
-        return {"valid": False, "manifest": None, "agents": [], "features": Validator().features, "diagnostics": diagnostics}
+        return {"valid": False, "manifest": None, "agents": [], "diagnostics": diagnostics}
 
     validator = Validator()
     validator.visit(tree)
@@ -326,7 +245,7 @@ def validate(source: str) -> dict[str, Any]:
         diagnostics.append({"severity": "error", "message": f"workflow metadata must contain literal values: {error}", "line": None, "column": None})
     if metadata is None:
         diagnostics.append({"severity": "error", "message": "source must define exactly one function decorated with @workflow(...) ", "line": getattr(node, "lineno", None), "column": getattr(node, "col_offset", None)})
-        return {"valid": False, "manifest": None, "agents": validator.agents, "features": validator.features, "diagnostics": diagnostics}
+        return {"valid": False, "manifest": None, "agents": validator.agents, "diagnostics": diagnostics}
 
     slug = str(metadata.get("slug", ""))
     name = str(metadata.get("name", ""))
@@ -366,7 +285,6 @@ def validate(source: str) -> dict[str, Any]:
         "valid": not any(item["severity"] == "error" for item in diagnostics),
         "manifest": manifest,
         "agents": validator.agents,
-        "features": validator.features,
         "diagnostics": diagnostics,
     }
 

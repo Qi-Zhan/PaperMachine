@@ -581,16 +581,6 @@
               </div>
             </details>
 
-            <div v-if="workflowView.timers.length" class="workflow-action-list">
-              <div v-for="timer in workflowView.timers" :key="timer.id">
-                <AlarmClock :size="13" />
-                <span>
-                  <strong>{{ timer.name }}</strong>
-                  <small>{{ t('session.timerFires', { count: timer.fire_count }) }}</small>
-                </span>
-                <span class="status-pin" :data-status="timer.status" />
-              </div>
-            </div>
             <div v-if="workflowView.artifacts.length" class="inspector-artifact-list">
               <button
                 v-for="artifact in workflowView.artifacts"
@@ -615,7 +605,6 @@
 import {
   Activity,
   Archive,
-  AlarmClock,
   ArrowLeft,
   ArrowUp,
   BrainCircuit,

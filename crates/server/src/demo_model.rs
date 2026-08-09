@@ -152,7 +152,7 @@ fn generated_workflow(prompt: &str) -> String {
         .filter(|value| !value.starts_with("derive "))
         .unwrap_or("generated-evidence-review");
     format!(
-        r#"from papermachine import Agent, action, relate, scope, together, workflow
+        r#"from papermachine import Agent, action, together, workflow
 
 
 class EvidenceResearcher(Agent):
@@ -184,13 +184,10 @@ async def main(ctx):
     primary = EvidenceResearcher(name="Primary evidence")
     challenge = EvidenceResearcher(name="Challenge", role="counterevidence")
     reviewer = Reviewer(name="Review")
-    await relate(primary, reviewer, kind="reports_to")
-    await relate(challenge, reviewer, kind="challenges")
-    async with scope("Independent evidence", ctx.request):
-        findings = await together(
-            primary.investigate(ctx.request, "primary evidence"),
-            challenge.investigate(ctx.request, "counterevidence and boundary cases"),
-        )
+    findings = await together(
+        primary.investigate(ctx.request, "primary evidence"),
+        challenge.investigate(ctx.request, "counterevidence and boundary cases"),
+    )
     summary = await reviewer.review(ctx.request, list(findings))
     return {{"summary": summary}}
 "#

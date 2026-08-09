@@ -490,7 +490,7 @@ impl RunEffectContext {
         {
             WorkflowStatus::WaitingForTimer
         } else {
-            WorkflowStatus::WaitingForSignal
+            WorkflowStatus::WaitingForTimer
         };
         let wake_at = suspensions
             .values()
@@ -510,16 +510,7 @@ impl RunEffectContext {
             "set_agent_access" => self.set_agent_access(effect_key, payload).await,
             "retire_agent" => self.retire_agent(payload).await,
             "invoke_action" => self.invoke_action(effect_key, payload).await,
-            "create_team" => self.create_team(effect_key, payload).await,
-            "set_team_members" => self.set_team_members(payload).await,
-            "set_relation" => self.set_relation(effect_key, payload).await,
-            "open_scope" => self.open_scope(effect_key, payload).await,
-            "close_scope" => self.close_scope(payload).await,
-            "register_timer" => self.register_timer(effect_key, payload).await,
-            "wait_timer" => self.wait_timer(effect_key, payload).await,
-            "create_channel" => self.create_channel(effect_key, payload).await,
-            "publish_signal" => self.publish_signal(effect_key, payload).await,
-            "wait_signal" => self.wait_signal(payload).await,
+            "wait" => self.wait(effect_key, payload).await,
             "ask_human" => self.ask_human(effect_key, payload).await,
             "project_snapshot" => self.project_snapshot(payload).await,
             "publish_artifact" => self.publish_artifact(effect_key, payload).await,
@@ -544,8 +535,7 @@ impl RunEffectContext {
             WorkflowStatus::Created | WorkflowStatus::Running => Ok(()),
             WorkflowStatus::Paused
             | WorkflowStatus::WaitingForUser
-            | WorkflowStatus::WaitingForTimer
-            | WorkflowStatus::WaitingForSignal => Err(WorkflowRuntimeError::Suspended(
+            | WorkflowStatus::WaitingForTimer => Err(WorkflowRuntimeError::Suspended(
                 WorkflowSuspension::new(run.status, None),
             )),
             WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
@@ -754,12 +744,6 @@ impl RunEffectContext {
         let payload: InvokeActionEffect = serde_json::from_value(payload)?;
         let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let scope_id = payload
-            .task_scope_id
-            .as_deref()
-            .map(TaskScopeId::from_str)
-            .transpose()
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
@@ -783,7 +767,6 @@ impl RunEffectContext {
                     Err(StoreError::NotFound { .. }) => store.create_action_invocation_with_id(
                         invocation_id,
                         workflow_id,
-                        scope_id,
                         agent_id,
                         stored_payload.action_name.clone(),
                         stored_payload.prompt.clone(),
@@ -848,17 +831,16 @@ impl RunEffectContext {
         let _agent_guard = gate.lock().await;
         let invocation_id = invocation.id;
         let workflow_id = self.workflow_id;
-        let (run, relationship_context, mut recovered_attempt) = self
+        let (run, mut recovered_attempt) = self
             .store
             .call(move |store| {
                 let run = store.get_workflow(workflow_id)?;
-                let relationship_context = relationship_instructions(store, workflow_id, agent_id)?;
                 let recovered_attempt = store
                     .list_action_attempts(invocation_id)?
                     .into_iter()
                     .rev()
                     .find(|attempt| !attempt.status.is_terminal());
-                Ok::<_, WorkflowRuntimeError>((run, relationship_context, recovered_attempt))
+                Ok::<_, WorkflowRuntimeError>((run, recovered_attempt))
             })
             .await?;
         let mut interruption_guidance = None;
@@ -938,14 +920,6 @@ impl RunEffectContext {
                             run.id, payload.action_name
                         ),
                         &action_contract,
-                    ));
-                }
-                if !relationship_context.trim().is_empty() {
-                    prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Workflow,
-                        "Agent collaboration context",
-                        format!("workflow:{}:relations", run.id),
-                        relationship_context.clone(),
                     ));
                 }
                 if let Some(value) = guidance.as_ref() {
@@ -1055,292 +1029,36 @@ impl RunEffectContext {
         }
     }
 
-    async fn create_team(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: TeamEffect = serde_json::from_value(payload)?;
-        let members = parse_ids(&payload.member_ids)?;
-        let team_id = TeamId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "team"));
-        let workflow_id = self.workflow_id;
-        let team = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_team(team_id) {
-                Ok(team) => Ok(team),
-                Err(StoreError::NotFound { .. }) => {
-                    Ok(store.create_team_with_id(team_id, workflow_id, payload.name, members)?)
-                }
-                Err(error) => Err(error.into()),
-            })
-            .await?;
-        Ok(json!({"team_id": team.id}))
-    }
-
-    async fn set_team_members(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
-        let payload: SetTeamEffect = serde_json::from_value(payload)?;
-        let team_id = TeamId::from_str(&payload.team_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let members = parse_ids(&payload.member_ids)?;
-        self.store
-            .call(move |store| store.set_team_members(team_id, members))
-            .await?;
-        Ok(Value::Null)
-    }
-
-    async fn set_relation(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: RelationEffect = serde_json::from_value(payload)?;
-        let source = AgentInstanceId::from_str(&payload.source_agent_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let target = AgentInstanceId::from_str(&payload.target_agent_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let relation_id = RelationId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "relation",
-        ));
-        let workflow_id = self.workflow_id;
-        let relation = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| {
-                match store.get_relation(relation_id) {
-                    Ok(relation) => Ok(relation),
-                    Err(StoreError::NotFound { .. }) => Ok(store.set_relation_with_id(
-                        relation_id,
-                        workflow_id,
-                        source,
-                        target,
-                        payload.kind,
-                        payload.instructions,
-                    )?),
-                    Err(error) => Err(error.into()),
-                }
-            })
-            .await?;
-        Ok(json!({"relation_id": relation.id}))
-    }
-
-    async fn open_scope(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: OpenScopeEffect = serde_json::from_value(payload)?;
-        let parent = payload
-            .parent_id
-            .as_deref()
-            .map(TaskScopeId::from_str)
-            .transpose()
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let scope_id = TaskScopeId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "task-scope",
-        ));
-        let workflow_id = self.workflow_id;
-        let scope = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_task_scope(scope_id) {
-                Ok(scope) => Ok(scope),
-                Err(StoreError::NotFound { .. }) => Ok(store.create_task_scope_with_id(
-                    scope_id,
-                    workflow_id,
-                    parent,
-                    payload.name,
-                    payload.objective,
-                )?),
-                Err(error) => Err(error.into()),
-            })
-            .await?;
-        Ok(json!({"task_scope_id": scope.id}))
-    }
-
-    async fn close_scope(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
-        let payload: CloseScopeEffect = serde_json::from_value(payload)?;
-        let id = TaskScopeId::from_str(&payload.task_scope_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let status = match payload.status.as_str() {
-            "completed" => TaskScopeStatus::Completed,
-            "cancelled" => TaskScopeStatus::Cancelled,
-            other => {
-                return Err(WorkflowRuntimeError::Protocol(format!(
-                    "invalid scope status: {other}"
-                )));
-            }
-        };
-        self.store
-            .call(move |store| store.set_task_scope_status(id, status))
-            .await?;
-        Ok(Value::Null)
-    }
-
-    async fn register_timer(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: TimerEffect = serde_json::from_value(payload)?;
-        let timer_id =
-            TimerId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "timer"));
-        let workflow_id = self.workflow_id;
-        let timer = self
-            .store
-            .call::<_, StoreError, _>(move |store| {
-                if let Some(timer) = store.list_timers(workflow_id)?.into_iter().find(|timer| {
-                    timer.name == payload.name
-                        && matches!(timer.status, TimerStatus::Active | TimerStatus::Paused)
-                }) {
-                    return Ok(timer);
-                }
-                match store.get_timer(timer_id) {
-                    Ok(timer) => Ok(timer),
-                    Err(StoreError::NotFound { .. }) => Ok(store.create_timer_with_id(
-                        timer_id,
-                        workflow_id,
-                        payload.name,
-                        payload.interval_ms,
-                    )?),
-                    Err(error) => Err(error),
-                }
-            })
-            .await?;
-        Ok(json!({"timer_id": timer.id}))
-    }
-
-    async fn wait_timer(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let timer_id = id_field::<TimerId>(&payload, "timer_id")?;
-        self.checkpoint().await?;
-        let effect_key = effect_key.to_string();
-        let (timer, fired) = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| {
-                let timer = store.get_timer(timer_id)?;
-                if timer.status != TimerStatus::Active {
-                    return Err(WorkflowRuntimeError::Protocol(
-                        "timer is no longer active".to_string(),
-                    ));
-                }
-                let wait = (timer.next_fire_at - Utc::now())
-                    .to_std()
-                    .unwrap_or_default();
-                let fired = if wait.is_zero() {
-                    Some(store.fire_timer_for_effect(timer_id, &effect_key)?)
-                } else {
-                    None
-                };
-                Ok::<_, WorkflowRuntimeError>((timer, fired))
-            })
-            .await?;
-        if let Some(fired) = fired {
-            return Ok(json!({"fire_count": fired.fire_count, "fired_at": fired.last_fired_at}));
+    async fn wait(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+        let payload: WaitEffect = serde_json::from_value(payload)?;
+        if payload.interval_ms == 0 {
+            return Err(WorkflowRuntimeError::Protocol(
+                "wait interval must be positive".to_string(),
+            ));
         }
-        Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
-            WorkflowStatus::WaitingForTimer,
-            Some(timer.next_fire_at),
-        )))
-    }
-
-    async fn create_channel(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: ChannelEffect = serde_json::from_value(payload)?;
-        let channel_id = ChannelId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "channel",
-        ));
-        let workflow_id = self.workflow_id;
-        let channel = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| {
-                if let Some(channel) = store
-                    .list_channels(workflow_id)?
-                    .into_iter()
-                    .find(|item| item.name == payload.name)
-                {
-                    return Ok(channel);
-                }
-                match store.get_channel(channel_id) {
-                    Ok(channel) => Ok(channel),
-                    Err(StoreError::NotFound { .. }) => Ok(store.create_channel_with_id(
-                        channel_id,
-                        workflow_id,
-                        payload.name,
-                        payload.schema,
-                    )?),
-                    Err(error) => Err(error.into()),
-                }
-            })
-            .await?;
-        Ok(json!({"channel_id": channel.id}))
-    }
-
-    async fn publish_signal(
-        &self,
-        effect_key: &str,
-        payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let payload: PublishSignalEffect = serde_json::from_value(payload)?;
-        let channel_id = ChannelId::from_str(&payload.channel_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let sender = payload
-            .sender_agent_id
-            .as_deref()
-            .map(AgentInstanceId::from_str)
-            .transpose()
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let signal_id =
-            SignalId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "signal"));
-        let signal = self
-            .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_signal(signal_id) {
-                Ok(signal) => Ok(signal),
-                Err(StoreError::NotFound { .. }) => Ok(store.publish_signal_with_id(
-                    signal_id,
-                    channel_id,
-                    sender,
-                    payload.value,
-                )?),
-                Err(error) => Err(error.into()),
-            })
-            .await?;
-        Ok(json!({"signal_id": signal.id, "sequence": signal.sequence}))
-    }
-
-    async fn wait_signal(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
-        let payload: WaitSignalEffect = serde_json::from_value(payload)?;
-        let channel_id = ChannelId::from_str(&payload.channel_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         self.checkpoint().await?;
-        let signal = self
+        let workflow_id = self.workflow_id;
+        let effect_key = effect_key.to_string();
+        let started_at = self
             .store
-            .call::<_, StoreError, _>(move |store| {
+            .call(move |store| {
                 Ok::<_, StoreError>(
                     store
-                        .list_signals(channel_id, payload.after_sequence)?
-                        .into_iter()
-                        .next(),
+                        .get_workflow_effect(workflow_id, &effect_key)?
+                        .started_at,
                 )
             })
             .await?;
-        if let Some(signal) = signal {
-            return Ok(
-                json!({"signal_id": signal.id, "sequence": signal.sequence, "value": signal.value}),
+        let wake_at = started_at
+            + chrono::Duration::milliseconds(
+                i64::try_from(payload.interval_ms).unwrap_or(i64::MAX),
             );
+        if wake_at <= Utc::now() {
+            return Ok(json!({"fired_at": wake_at}));
         }
         Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
-            WorkflowStatus::WaitingForSignal,
-            None,
+            WorkflowStatus::WaitingForTimer,
+            Some(wake_at),
         )))
     }
 
@@ -1771,43 +1489,6 @@ fn protocol_frame_preview(frame: &[u8]) -> String {
     preview
 }
 
-fn relationship_instructions(
-    store: &Store,
-    workflow_id: WorkflowId,
-    agent_id: AgentInstanceId,
-) -> Result<String, WorkflowRuntimeError> {
-    let participants = store
-        .list_participants(workflow_id)?
-        .into_iter()
-        .map(|participant| (participant.id, participant.name))
-        .collect::<HashMap<_, _>>();
-    let mut lines = Vec::new();
-    for relation in store.list_relations(workflow_id)? {
-        if relation.source_agent_id == agent_id || relation.target_agent_id == agent_id {
-            let source = participants
-                .get(&relation.source_agent_id)
-                .cloned()
-                .unwrap_or_else(|| relation.source_agent_id.to_string());
-            let target = participants
-                .get(&relation.target_agent_id)
-                .cloned()
-                .unwrap_or_else(|| relation.target_agent_id.to_string());
-            lines.push(format!(
-                "- {source} --{}--> {target}: {}",
-                relation.kind, relation.instructions
-            ));
-        }
-    }
-    if lines.is_empty() {
-        Ok(String::new())
-    } else {
-        Ok(format!(
-            "Collaboration relations relevant to this Agent:\n{}",
-            lines.join("\n")
-        ))
-    }
-}
-
 fn format_action_turn_input(arguments: &Value) -> String {
     if arguments.as_object().is_some_and(serde_json::Map::is_empty) {
         "No Action arguments were supplied.".to_string()
@@ -1943,16 +1624,6 @@ fn validate_effect_key(key: &str) -> Result<(), WorkflowRuntimeError> {
     Ok(())
 }
 
-fn parse_ids(values: &[String]) -> Result<Vec<AgentInstanceId>, WorkflowRuntimeError> {
-    values
-        .iter()
-        .map(|value| {
-            AgentInstanceId::from_str(value)
-                .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))
-        })
-        .collect()
-}
-
 #[derive(Debug, Deserialize)]
 struct EffectRequest {
     id: String,
@@ -2000,7 +1671,6 @@ struct InvokeActionEffect {
     web_search_context_size: Option<WebSearchContextSize>,
     #[serde(default)]
     reasoning_effort: Option<ReasoningEffort>,
-    task_scope_id: Option<String>,
     #[serde(default)]
     human_request_id: Option<String>,
     #[serde(default)]
@@ -2012,65 +1682,8 @@ const fn default_tools_enabled() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct TeamEffect {
-    name: String,
-    member_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SetTeamEffect {
-    team_id: String,
-    member_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RelationEffect {
-    source_agent_id: String,
-    target_agent_id: String,
-    kind: String,
-    #[serde(default)]
-    instructions: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenScopeEffect {
-    name: String,
-    #[serde(default)]
-    objective: String,
-    parent_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CloseScopeEffect {
-    task_scope_id: String,
-    status: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TimerEffect {
-    name: String,
+struct WaitEffect {
     interval_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChannelEffect {
-    name: String,
-    #[serde(default)]
-    schema: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct PublishSignalEffect {
-    channel_id: String,
-    sender_agent_id: Option<String>,
-    value: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitSignalEffect {
-    channel_id: String,
-    #[serde(default)]
-    after_sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]

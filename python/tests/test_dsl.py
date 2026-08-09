@@ -408,10 +408,12 @@ class ActionOptionsTest(unittest.TestCase):
 
         asyncio.run(invoke())
         self.assertEqual(
-            [kind for kind, _ in effects], ["create_agent", "set_agent_access"]
+            [kind for kind, _ in effects],
+            ["create_agent", "set_agent_access", "set_agent_access"],
         )
-        self.assertEqual(effects[0][1]["access"], "workspace")
-        self.assertEqual(effects[1][1]["access"], "research")
+        self.assertEqual(effects[0][1]["access"], "read_only")
+        self.assertEqual(effects[1][1]["access"], "workspace")
+        self.assertEqual(effects[2][1]["access"], "research")
 
     def test_invalid_access_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Agent access must be one of"):

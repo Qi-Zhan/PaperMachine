@@ -1,4 +1,4 @@
-from papermachine import Agent, Team, action, relate, scope, together, workflow
+from papermachine import Agent, action, together, workflow
 
 
 class Planner(Agent):
@@ -269,35 +269,18 @@ async def main(ctx):
         )
         for route in routes
     ]
-    team = Team("Evidence routes", *researchers)
-    await team.activate()
-    for researcher in researchers:
-        await relate(
-            researcher,
-            evaluator,
-            kind="reviewed_by",
-            instructions="Evaluate evidence coverage, provenance, contradictions, and gaps.",
-        )
-    await relate(
-        evaluator,
-        writer,
-        kind="briefs",
-        instructions="Give the Writer only evidence-grounded conclusions and explicit gaps.",
-    )
-
-    async with scope("Initial evidence routes", str(plan["deliverable"])):
-        reports = await together(
-            *(
-                researcher.research(
-                    ctx.request,
-                    plan,
-                    str(route["objective"]),
-                    prior_context_brief,
-                    "initial",
-                )
-                for researcher, route in zip(researchers, routes)
+    reports = await together(
+        *(
+            researcher.research(
+                ctx.request,
+                plan,
+                str(route["objective"]),
+                prior_context_brief,
+                "initial",
             )
+            for researcher, route in zip(researchers, routes)
         )
+    )
     ledger = [
         {
             "route_index": index,
@@ -325,22 +308,18 @@ async def main(ctx):
             break
         round_number += 1
         reused_sessions = True
-        async with scope(
-            f"Follow-up round {round_number}",
-            str(evaluation.get("rationale") or "Close remaining evidence gaps."),
-        ):
-            reports = await together(
-                *(
-                    researchers[item["route_index"]].research(
-                        ctx.request,
-                        plan,
-                        str(item["objective"]),
-                        prior_context_brief,
-                        "follow_up",
-                    )
-                    for item in follow_ups
+        reports = await together(
+            *(
+                researchers[item["route_index"]].research(
+                    ctx.request,
+                    plan,
+                    str(item["objective"]),
+                    prior_context_brief,
+                    "follow_up",
                 )
+                for item in follow_ups
             )
+        )
         ledger.extend(
             {
                 "route_index": item["route_index"],

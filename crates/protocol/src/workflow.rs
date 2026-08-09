@@ -66,8 +66,6 @@ pub struct WorkflowValidation {
     #[serde(default)]
     pub agents: Vec<WorkflowAgentDeclaration>,
     #[serde(default)]
-    pub features: WorkflowFeatureSummary,
-    #[serde(default)]
     pub diagnostics: Vec<WorkflowDiagnostic>,
 }
 
@@ -82,26 +80,6 @@ pub struct WorkflowAgentDeclaration {
 pub struct WorkflowActionDeclaration {
     pub name: String,
     pub tools: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowFeatureSummary {
-    pub parallel_blocks: u32,
-    pub teams: Vec<String>,
-    pub relations: u32,
-    pub scopes: Vec<String>,
-    pub channels: Vec<String>,
-    pub timers: Vec<WorkflowTimerDeclaration>,
-    pub human_checkpoints: u32,
-    pub background_tasks: u32,
-    pub project_snapshots: u32,
-    pub artifacts: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowTimerDeclaration {
-    pub callback: String,
-    pub seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

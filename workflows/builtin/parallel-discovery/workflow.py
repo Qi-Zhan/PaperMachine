@@ -1,4 +1,4 @@
-from papermachine import Agent, Team, action, relate, scope, together, workflow
+from papermachine import Agent, action, together, workflow
 
 
 class Researcher(Agent):
@@ -81,32 +81,21 @@ async def main(ctx):
         )
         for index, perspective in enumerate(perspectives)
     ]
-    team = Team("Discovery routes", *researchers)
     synthesizer = Synthesizer(name="Synthesis", model=synthesis_model)
     context_analyst = ContextAnalyst(name="Prior context", model=synthesis_model)
     prior_context_brief = ""
     if ctx.context:
         prior_context_brief = await context_analyst.distill(ctx.request, ctx.context)
-    await team.activate()
-    for researcher in researchers:
-        await relate(
-            researcher,
-            synthesizer,
-            kind="reports_to",
-            instructions="Send evidence and uncertainty to the synthesis Session.",
-        )
-
-    async with scope("Independent discovery", ctx.request):
-        findings = await together(
-            *(
-                researcher.investigate(
-                    ctx.request,
-                    perspective,
-                    prior_context_brief,
-                )
-                for researcher, perspective in zip(researchers, perspectives)
+    findings = await together(
+        *(
+            researcher.investigate(
+                ctx.request,
+                perspective,
+                prior_context_brief,
             )
+            for researcher, perspective in zip(researchers, perspectives)
         )
+    )
 
     summary = await synthesizer.synthesize(ctx.request, list(findings))
     return {"summary": summary}

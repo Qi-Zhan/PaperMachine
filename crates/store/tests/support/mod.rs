@@ -89,7 +89,6 @@ impl ActionHarness {
     ) -> Result<ActionTurn, StoreError> {
         let invocation = store.create_action_invocation(
             self.workflow.id,
-            None,
             self.participant.id,
             "test_action",
             "Exercise the Turn store",

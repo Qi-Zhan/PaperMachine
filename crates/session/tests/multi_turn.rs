@@ -117,7 +117,6 @@ async fn execute_action(
     let invocation = store
         .create_action_invocation(
             run.id,
-            None,
             participant.id,
             "respond",
             "Respond",
@@ -208,7 +207,6 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
     let invocation = store
         .create_action_invocation(
             run.id,
-            None,
             participant.id,
             "investigate",
             "Wait",
@@ -387,7 +385,6 @@ async fn claimed_guidance_is_checkpointed_before_sampling_and_not_lost() {
     let invocation = store
         .create_action_invocation(
             run.id,
-            None,
             participant.id,
             "respond",
             "Use guidance",
@@ -590,7 +587,6 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
     let invocation = store
         .create_action_invocation(
             run.id,
-            None,
             participant.id,
             "investigate",
             "Research",

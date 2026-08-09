@@ -179,10 +179,6 @@ async def run() -> None:
         result = await function(context)
         await _effect("complete", {"output": result})
     finally:
-        for task in tuple(runtime.tasks):
-            task.cancel()
-        if runtime.tasks:
-            await asyncio.gather(*runtime.tasks, return_exceptions=True)
         reader.cancel()
         await asyncio.gather(reader, return_exceptions=True)
         transport.close()

@@ -115,27 +115,6 @@
                   <p v-else class="workflow-structure-empty">{{ t('workflow.noAgentClasses') }}</p>
                 </section>
 
-                <section class="workflow-structure-section">
-                  <header><Network :size="15" /><h3>{{ t('workflow.coordination') }}</h3></header>
-                  <dl class="workflow-feature-list">
-                    <div><dt>{{ t('workflow.parallelBlocks') }}</dt><dd>{{ validation.features.parallel_blocks }}</dd></div>
-                    <div><dt>{{ t('workflow.teams') }}</dt><dd>{{ namedFeature(validation.features.teams) }}</dd></div>
-                    <div><dt>{{ t('workflow.relations') }}</dt><dd>{{ validation.features.relations }}</dd></div>
-                    <div><dt>{{ t('workflow.taskScopes') }}</dt><dd>{{ namedFeature(validation.features.scopes) }}</dd></div>
-                    <div><dt>{{ t('workflow.channels') }}</dt><dd>{{ namedFeature(validation.features.channels) }}</dd></div>
-                  </dl>
-                </section>
-
-                <section class="workflow-structure-section">
-                  <header><Clock3 :size="15" /><h3>{{ t('workflow.longRunning') }}</h3></header>
-                  <dl class="workflow-feature-list">
-                    <div><dt>{{ t('workflow.timers') }}</dt><dd>{{ timerSummary }}</dd></div>
-                    <div><dt>{{ t('workflow.backgroundTasks') }}</dt><dd>{{ validation.features.background_tasks }}</dd></div>
-                    <div><dt>{{ t('workflow.humanCheckpoints') }}</dt><dd>{{ validation.features.human_checkpoints }}</dd></div>
-                    <div><dt>{{ t('workflow.projectSnapshots') }}</dt><dd>{{ validation.features.project_snapshots }}</dd></div>
-                    <div><dt>{{ t('workflow.publishedArtifacts') }}</dt><dd>{{ validation.features.artifacts }}</dd></div>
-                  </dl>
-                </section>
               </div>
 
               <section v-if="validation?.diagnostics.length" class="workflow-diagnostics">
@@ -190,10 +169,8 @@ import {
   Boxes,
   CheckCircle2,
   ChevronRight,
-  Clock3,
   Code2,
   LoaderCircle,
-  Network,
   PanelLeft,
   Plus,
   Save,
@@ -239,12 +216,6 @@ const sourceStats = computed(() => {
   if (!validation.value) return `${lines} · ${t('workflow.validationRequired')}`
   return `${lines} · ${validation.value.valid ? t('workflow.readyToPublish') : t('workflow.needsChanges')}`
 })
-const timerSummary = computed(() => {
-  const timers = validation.value?.features.timers ?? []
-  if (!timers.length) return t('common.none')
-  return timers.map((timer) => `${timer.callback}${timer.seconds ? ` · ${timer.seconds}s` : ''}`).join(', ')
-})
-
 function accessLabel(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnly')
   if (access === 'read_only') return t('access.readOnly')
@@ -369,10 +340,6 @@ function schemaKeys(schema: Record<string, unknown>): string {
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return t('common.none')
   const keys = Object.keys(properties)
   return keys.length ? keys.join(', ') : t('common.none')
-}
-
-function namedFeature(values: string[]): string {
-  return values.length ? values.join(', ') : t('common.none')
 }
 
 function sourceLabel(source: 'builtin' | 'user'): string {

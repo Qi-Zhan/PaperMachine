@@ -2,7 +2,6 @@ use crate::ActionAttemptId;
 use crate::ActionInvocationId;
 use crate::ActionStatus;
 use crate::AgentInstanceId;
-use crate::ChannelId;
 use crate::ControlMessageId;
 use crate::ControlMessageKind;
 use crate::EventId;
@@ -10,11 +9,7 @@ use crate::HumanRequestId;
 use crate::ProjectId;
 use crate::SessionId;
 use crate::SessionStatus;
-use crate::SignalId;
 use crate::StepId;
-use crate::TaskScopeId;
-use crate::TeamId;
-use crate::TimerId;
 use crate::TurnId;
 use crate::TurnStatus;
 use crate::WorkflowId;
@@ -59,19 +54,6 @@ pub enum WorkflowEventPayload {
     ParticipantRetired {
         agent_instance_id: AgentInstanceId,
     },
-    TeamChanged {
-        team_id: TeamId,
-        member_ids: Vec<AgentInstanceId>,
-    },
-    RelationChanged {
-        source_agent_id: AgentInstanceId,
-        target_agent_id: AgentInstanceId,
-        kind: String,
-    },
-    TaskScopeChanged {
-        task_scope_id: TaskScopeId,
-        status: String,
-    },
     ActionChanged {
         action_invocation_id: ActionInvocationId,
         action_attempt_id: Option<ActionAttemptId>,
@@ -79,20 +61,6 @@ pub enum WorkflowEventPayload {
         action_name: String,
         status: ActionStatus,
         error: Option<String>,
-    },
-    TimerChanged {
-        timer_id: TimerId,
-        status: String,
-        fire_count: u32,
-    },
-    ChannelCreated {
-        channel_id: ChannelId,
-        name: String,
-    },
-    SignalPublished {
-        channel_id: ChannelId,
-        signal_id: SignalId,
-        signal_sequence: u64,
     },
     HumanRequestOpened {
         human_request_id: HumanRequestId,

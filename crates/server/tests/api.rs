@@ -1045,9 +1045,6 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
     assert_eq!(view["sessions"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["actions"].as_array().map(Vec::len), Some(3));
     assert_eq!(view["attempts"].as_array().map(Vec::len), Some(3));
-    assert_eq!(view["teams"].as_array().map(Vec::len), Some(1));
-    assert_eq!(view["relations"].as_array().map(Vec::len), Some(2));
-    assert_eq!(view["task_scopes"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         view["workflow"]["request"],
         "Compare two implementation approaches."
@@ -1746,7 +1743,6 @@ async fn api_generates_validates_and_publishes_python_workflows() {
     );
     assert_eq!(generated["validation"]["agents"][0]["access"], "research");
     assert_eq!(generated["validation"]["agents"][1]["access"], "model_only");
-    assert_eq!(generated["validation"]["features"]["parallel_blocks"], 1);
 
     let unknown_tool_source = r#"from papermachine import Agent, action, workflow
 
@@ -2014,7 +2010,7 @@ async fn workflow_access_escalation_requires_a_human_grant() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let (project, _origin) = create_project_and_session(&app, directory.path(), "Escalation").await;
-    let source = r#"from papermachine import Agent, Team, action, workflow
+    let source = r#"from papermachine import Agent, action, workflow
 
 
 class HostInspector(Agent):
@@ -2034,8 +2030,6 @@ class HostInspector(Agent):
 )
 async def main(ctx):
     inspector = HostInspector(name="Host inspector")
-    team = Team("Host team", inspector)
-    await team.activate()
     await inspector.set_access("full_access")
     answer = await inspector.inspect(ctx.request)
     return {"answer": answer}

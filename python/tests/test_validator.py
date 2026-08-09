@@ -45,7 +45,6 @@ async def main(ctx):
                 }
             ],
         )
-        self.assertEqual(result["features"]["human_checkpoints"], 1)
 
     def test_declares_workflow_without_a_launch_user_task(self) -> None:
         result = validate(

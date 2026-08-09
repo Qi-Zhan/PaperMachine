@@ -10,13 +10,10 @@ use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::Project;
 use papermachine_protocol::Session;
-use papermachine_protocol::TaskScopeStatus;
-use papermachine_protocol::TimerStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolSetSnapshot;
 use papermachine_protocol::WorkflowContextMode;
 use papermachine_protocol::WorkflowEffectStatus;
-use papermachine_protocol::WorkflowEventPayload;
 use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
@@ -492,130 +489,6 @@ fn session_system_prompt_cannot_change_while_a_turn_is_queued() {
 }
 
 #[test]
-fn collaboration_state_is_research_owned_and_events_are_ordered() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
-    let research = project(&store, &directory, "Paper");
-    let origin = store
-        .create_session(research.id, "Claim audit", "", "test-model", Vec::new())
-        .expect("origin Session should be created");
-    let run = workflow_for_session(&store, &origin, "Research a claim");
-    store.start_workflow(run.id).expect("run should start");
-
-    let researcher = store
-        .create_participant(
-            run.id,
-            "Researcher",
-            "Evidence",
-            "primary evidence",
-            "Preserve provenance.",
-            "",
-            Vec::new(),
-            AccessPreset::Research,
-        )
-        .expect("researcher should be created");
-    let reviewer = store
-        .create_participant(
-            run.id,
-            "Reviewer",
-            "Review",
-            "critical synthesis",
-            "Compare uncertainty.",
-            "",
-            Vec::new(),
-            AccessPreset::ModelOnly,
-        )
-        .expect("reviewer should be created");
-    let team = store
-        .create_team(run.id, "Review team", vec![researcher.id, reviewer.id])
-        .expect("team should be created");
-    store
-        .set_relation(
-            run.id,
-            researcher.id,
-            reviewer.id,
-            "reports_to",
-            "Report evidence and uncertainty.",
-        )
-        .expect("relation should be created");
-    let scope = store
-        .create_task_scope(run.id, None, "Evidence", "Gather primary evidence")
-        .expect("scope should be created");
-    store
-        .set_task_scope_status(scope.id, TaskScopeStatus::Completed)
-        .expect("scope should complete");
-    let timer = store
-        .create_timer(run.id, "periodic summary", 10)
-        .expect("timer should be created");
-    store.fire_timer(timer.id).expect("timer should fire");
-    let channel = store
-        .create_channel(run.id, "findings", json!({"type": "string"}))
-        .expect("channel should be created");
-    let signal = store
-        .publish_signal(channel.id, Some(researcher.id), json!("evidence"))
-        .expect("signal should publish without locking the Store recursively");
-
-    assert_eq!(
-        store
-            .list_sessions(research.id)
-            .expect("Sessions should load")
-            .len(),
-        3
-    );
-    assert_eq!(
-        store
-            .list_participants(run.id)
-            .expect("participants should load")
-            .len(),
-        2
-    );
-    assert!(
-        store
-            .workflow_involves_session(run.id, origin.id)
-            .expect("origin membership should load")
-    );
-    assert!(
-        store
-            .workflow_involves_session(run.id, researcher.session_id)
-            .expect("participant membership should load")
-    );
-    assert_eq!(
-        store
-            .get_team(team.id)
-            .expect("team should load")
-            .member_ids
-            .len(),
-        2
-    );
-    assert_eq!(
-        store
-            .list_signals(channel.id, 0)
-            .expect("signals should load"),
-        vec![signal]
-    );
-
-    let events = store
-        .list_workflow_events(run.id, 0)
-        .expect("events should load");
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.sequence)
-            .collect::<Vec<_>>(),
-        (1..=events.len() as u64).collect::<Vec<_>>()
-    );
-    assert!(events.iter().any(|event| matches!(
-        event.payload,
-        WorkflowEventPayload::ParticipantCreated { .. }
-    )));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.payload, WorkflowEventPayload::SignalPublished { .. }))
-    );
-}
-
-#[test]
 fn database_reopens_and_artifacts_are_content_addressed() {
     let directory = tempdir().expect("temporary directory should be created");
     let managed = directory.path().join("managed");
@@ -700,7 +573,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
 }
 
 #[test]
-fn terminal_runs_close_pending_human_control_and_timer_state() {
+fn terminal_runs_close_pending_human_and_control_state() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let research = project(&store, &directory, "Terminal cleanup");
@@ -727,10 +600,6 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
             "Finish now",
         )
         .expect("control should queue");
-    let timer = store
-        .create_timer(run.id, "summary", 1000)
-        .expect("timer should start");
-
     store
         .cancel_workflow(run.id, "test cleanup")
         .expect("run should cancel");
@@ -750,10 +619,6 @@ fn terminal_runs_close_pending_human_control_and_timer_state() {
         .expect("control should exist");
     assert_eq!(terminal_control.status, ControlMessageStatus::Applied);
     assert!(terminal_control.applied_at.is_some());
-    assert_eq!(
-        store.get_timer(timer.id).expect("timer should load").status,
-        TimerStatus::Cancelled
-    );
     assert!(
         store
             .create_control_message(
@@ -794,7 +659,6 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
     let invocation = store
         .create_action_invocation(
             workflow.id,
-            None,
             participant.id,
             "research",
             "Research",
@@ -858,7 +722,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
     let invocation = store
         .create_action_invocation(
             workflow.id,
-            None,
             participant.id,
             "maintain_project_home",
             "Maintain the page",
@@ -941,7 +804,6 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         store
             .create_action_invocation(
                 workflow.id,
-                None,
                 participant.id,
                 name,
                 "Maintain the page",
@@ -1073,7 +935,6 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
         .create_action_invocation_with_id(
             ActionInvocationId::new(),
             workflow.id,
-            None,
             participant.id,
             "respond",
             "Respond to the human",
@@ -1108,7 +969,6 @@ fn workflow_action_accepts_only_the_exact_answer_as_a_user_turn() {
         .create_action_invocation_with_id(
             ActionInvocationId::new(),
             workflow.id,
-            None,
             participant.id,
             "respond",
             "Respond to the human",
@@ -1261,7 +1121,6 @@ fn concurrent_action_start_admits_exactly_one_attempt() {
     let invocation = store
         .create_action_invocation(
             harness.workflow.id,
-            None,
             harness.participant.id,
             "one_attempt",
             "Start once",

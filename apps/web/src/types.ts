@@ -158,7 +158,6 @@ export interface WorkflowUsage {
   actions_started: number
   actions_completed: number
   action_steps: number
-  timer_fires: number
   hosted_search_calls: number
   tokens: TokenUsage
   wall_time_seconds: number
@@ -194,13 +193,12 @@ export interface WorkflowLaunchContext {
   snapshot: Record<string, unknown> | null
 }
 
-export type WorkflowTriggerKind = 'user' | 'workflow' | 'timer' | 'manual'
+export type WorkflowTriggerKind = 'user' | 'workflow' | 'manual'
 
 export interface WorkflowTrigger {
   kind: WorkflowTriggerKind
   source_workflow_id: Id | null
   source_session_id: Id | null
-  source_timer_id: Id | null
 }
 
 export interface Workflow {
@@ -254,21 +252,9 @@ export interface WorkflowParticipant {
   updated_at: string
 }
 
-export interface TaskScope {
-  id: Id
-  workflow_id: Id
-  parent_id: Id | null
-  name: string
-  objective: string
-  status: 'open' | 'completed' | 'cancelled'
-  created_at: string
-  updated_at: string
-}
-
 export interface ActionInvocation {
   id: Id
   workflow_id: Id
-  task_scope_id: Id | null
   agent_instance_id: Id
   session_id: Id
   action_name: string
@@ -295,41 +281,6 @@ export interface ActionAttempt {
   created_at: string
   updated_at: string
 }
-
-export interface WorkflowTeam {
-  id: Id
-  workflow_id: Id
-  name: string
-  member_ids: Id[]
-  created_at: string
-  updated_at: string
-}
-
-export interface AgentRelation {
-  id: Id
-  workflow_id: Id
-  source_agent_id: Id
-  target_agent_id: Id
-  kind: string
-  instructions: string
-  created_at: string
-}
-
-export interface WorkflowTimer {
-  id: Id
-  workflow_id: Id
-  name: string
-  interval_ms: number
-  status: 'active' | 'paused' | 'completed' | 'cancelled'
-  fire_count: number
-  next_fire_at: string
-  last_fired_at: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface WorkflowChannel { id: Id; workflow_id: Id; name: string; schema: unknown; created_at: string }
-export interface WorkflowSignal { id: Id; workflow_id: Id; channel_id: Id; sender_agent_id: Id | null; sequence: number; value: unknown; created_at: string }
 
 export interface HumanRequest {
   id: Id
@@ -420,12 +371,6 @@ export interface WorkflowView {
   sessions: Session[]
   actions: ActionInvocation[]
   attempts: ActionAttempt[]
-  teams: WorkflowTeam[]
-  relations: AgentRelation[]
-  task_scopes: TaskScope[]
-  timers: WorkflowTimer[]
-  channels: WorkflowChannel[]
-  signals: WorkflowSignal[]
   human_requests: HumanRequest[]
   control_messages: ControlMessage[]
   artifacts: Artifact[]
@@ -484,25 +429,11 @@ export interface WorkflowAgentDeclaration {
   access: AccessPreset
 }
 export interface WorkflowActionDeclaration { name: string; tools: string[] }
-export interface WorkflowTimerDeclaration { callback: string; seconds: number | null }
-export interface WorkflowFeatureSummary {
-  parallel_blocks: number
-  teams: string[]
-  relations: number
-  scopes: string[]
-  channels: string[]
-  timers: WorkflowTimerDeclaration[]
-  human_checkpoints: number
-  background_tasks: number
-  project_snapshots: number
-  artifacts: number
-}
 export interface WorkflowDiagnostic { severity: 'error' | 'warning'; message: string; line: number | null; column: number | null }
 export interface WorkflowValidation {
   valid: boolean
   manifest: WorkflowProgramManifest | null
   agents: WorkflowAgentDeclaration[]
-  features: WorkflowFeatureSummary
   diagnostics: WorkflowDiagnostic[]
 }
 export interface GeneratedWorkflow { source: string; validation: WorkflowValidation }

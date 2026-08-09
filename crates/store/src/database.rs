@@ -9,7 +9,6 @@ use crate::artifact::store_artifact_file;
 use crate::filesystem::ManagedFs;
 use crate::filesystem::remove_entry;
 use crate::filesystem::write_atomic;
-use chrono::Duration;
 use chrono::Utc;
 use papermachine_protocol::*;
 use rusqlite::Connection;
@@ -31,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 18;
+const SCHEMA_VERSION: u32 = 19;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -1636,7 +1635,6 @@ impl Store {
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
                 WorkflowStatus::WaitingForTimer,
-                WorkflowStatus::WaitingForSignal,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Paused,
@@ -1651,7 +1649,6 @@ impl Store {
                 WorkflowStatus::Paused,
                 WorkflowStatus::WaitingForUser,
                 WorkflowStatus::WaitingForTimer,
-                WorkflowStatus::WaitingForSignal,
                 WorkflowStatus::Running,
             ],
             WorkflowStatus::Running,
@@ -1677,15 +1674,6 @@ impl Store {
         )
     }
 
-    pub fn wait_workflow_for_signal(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
-            id,
-            &[WorkflowStatus::Running, WorkflowStatus::WaitingForSignal],
-            WorkflowStatus::WaitingForSignal,
-            None,
-        )
-    }
-
     pub fn fail_workflow(
         &self,
         id: WorkflowId,
@@ -1698,7 +1686,6 @@ impl Store {
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
                 WorkflowStatus::WaitingForTimer,
-                WorkflowStatus::WaitingForSignal,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Failed,
@@ -1718,7 +1705,6 @@ impl Store {
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
                 WorkflowStatus::WaitingForTimer,
-                WorkflowStatus::WaitingForSignal,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Cancelled,
@@ -1757,7 +1743,7 @@ impl Store {
         }
         run.updated_at = Utc::now();
         if status.is_terminal() {
-            terminalize_workflow_resources_tx(&transaction, run.id, status, run.updated_at)?;
+            terminalize_workflow_resources_tx(&transaction, run.id, run.updated_at)?;
         }
         update_workflow_tx(&transaction, &run)?;
         let event = append_workflow_event_tx(
@@ -1788,12 +1774,7 @@ impl Store {
         run.error = None;
         run.attention_required = false;
         run.updated_at = Utc::now();
-        terminalize_workflow_resources_tx(
-            &transaction,
-            run.id,
-            WorkflowStatus::Completed,
-            run.updated_at,
-        )?;
+        terminalize_workflow_resources_tx(&transaction, run.id, run.updated_at)?;
         update_workflow_tx(&transaction, &run)?;
         let event = append_workflow_event_tx(
             &transaction,
@@ -2091,7 +2072,6 @@ impl Store {
     pub fn create_action_invocation(
         &self,
         workflow_id: WorkflowId,
-        scope_id: Option<TaskScopeId>,
         agent_id: AgentInstanceId,
         action_name: impl Into<String>,
         contract: impl Into<String>,
@@ -2101,7 +2081,6 @@ impl Store {
         self.create_action_invocation_with_id(
             ActionInvocationId::new(),
             workflow_id,
-            scope_id,
             agent_id,
             action_name,
             contract,
@@ -2116,7 +2095,6 @@ impl Store {
         &self,
         invocation_id: ActionInvocationId,
         workflow_id: WorkflowId,
-        scope_id: Option<TaskScopeId>,
         agent_id: AgentInstanceId,
         action_name: impl Into<String>,
         contract: impl Into<String>,
@@ -2155,7 +2133,6 @@ impl Store {
         let invocation = ActionInvocation {
             id: invocation_id,
             workflow_id,
-            task_scope_id: scope_id,
             agent_instance_id: agent_id,
             session_id: participant.session_id,
             action_name,
@@ -2452,656 +2429,6 @@ impl Store {
             self.shared.publish_workflow(event);
         }
         Ok(invocation)
-    }
-
-    pub fn create_team(
-        &self,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        member_ids: Vec<AgentInstanceId>,
-    ) -> Result<WorkflowTeam, StoreError> {
-        self.create_team_with_id(TeamId::new(), workflow_id, name, member_ids)
-    }
-
-    pub fn create_team_with_id(
-        &self,
-        team_id: TeamId,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        member_ids: Vec<AgentInstanceId>,
-    ) -> Result<WorkflowTeam, StoreError> {
-        self.validate_members(workflow_id, &member_ids)?;
-        let run = self.get_workflow(workflow_id)?;
-        let now = Utc::now();
-        let team = WorkflowTeam {
-            id: team_id,
-            workflow_id,
-            name: name.into(),
-            member_ids,
-            created_at: now,
-            updated_at: now,
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        insert_indexed_document_tx(
-            &transaction,
-            "workflow_teams",
-            &team.id.to_string(),
-            &[workflow_id.to_string()],
-            "active",
-            now,
-            &team,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::TeamChanged {
-                team_id: team.id,
-                member_ids: team.member_ids.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(team)
-    }
-
-    pub fn get_team(&self, id: TeamId) -> Result<WorkflowTeam, StoreError> {
-        self.query_document_by_id("workflow_teams", id.to_string(), "workflow team")
-    }
-
-    pub fn list_teams(&self, workflow_id: WorkflowId) -> Result<Vec<WorkflowTeam>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_teams WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn set_team_members(
-        &self,
-        id: TeamId,
-        member_ids: Vec<AgentInstanceId>,
-    ) -> Result<WorkflowTeam, StoreError> {
-        let mut team = self.get_team(id)?;
-        self.validate_members(team.workflow_id, &member_ids)?;
-        if team.member_ids == member_ids {
-            return Ok(team);
-        }
-        team.member_ids = member_ids;
-        team.updated_at = Utc::now();
-        let run = self.get_workflow(team.workflow_id)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let changed = transaction.execute(
-            "UPDATE workflow_teams SET updated_at = ?1, document_json = ?2 WHERE id = ?3",
-            params![
-                team.updated_at.to_rfc3339(),
-                serde_json::to_string(&team)?,
-                id.to_string(),
-            ],
-        )?;
-        ensure_one(changed, "workflow_teams")?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            team.workflow_id,
-            WorkflowEventPayload::TeamChanged {
-                team_id: id,
-                member_ids: team.member_ids.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(team)
-    }
-
-    pub fn list_relations(
-        &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<AgentRelation>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM agent_relations WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn set_relation(
-        &self,
-        workflow_id: WorkflowId,
-        source: AgentInstanceId,
-        target: AgentInstanceId,
-        kind: impl Into<String>,
-        instructions: impl Into<String>,
-    ) -> Result<AgentRelation, StoreError> {
-        self.set_relation_with_id(
-            RelationId::new(),
-            workflow_id,
-            source,
-            target,
-            kind,
-            instructions,
-        )
-    }
-
-    pub fn set_relation_with_id(
-        &self,
-        relation_id: RelationId,
-        workflow_id: WorkflowId,
-        source: AgentInstanceId,
-        target: AgentInstanceId,
-        kind: impl Into<String>,
-        instructions: impl Into<String>,
-    ) -> Result<AgentRelation, StoreError> {
-        self.validate_members(workflow_id, &[source, target])?;
-        if source == target {
-            return Err(StoreError::Invariant(
-                "Agent relation endpoints must be distinct".to_string(),
-            ));
-        }
-        let run = self.get_workflow(workflow_id)?;
-        let relation = AgentRelation {
-            id: relation_id,
-            workflow_id,
-            source_agent_id: source,
-            target_agent_id: target,
-            kind: kind.into(),
-            instructions: instructions.into(),
-            created_at: Utc::now(),
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        insert_indexed_document_tx(
-            &transaction,
-            "agent_relations",
-            &relation.id.to_string(),
-            &[workflow_id.to_string()],
-            "active",
-            relation.created_at,
-            &relation,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::RelationChanged {
-                source_agent_id: source,
-                target_agent_id: target,
-                kind: relation.kind.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(relation)
-    }
-
-    pub fn get_relation(&self, id: RelationId) -> Result<AgentRelation, StoreError> {
-        self.query_document_by_id("agent_relations", id.to_string(), "Agent relation")
-    }
-
-    pub fn create_task_scope(
-        &self,
-        workflow_id: WorkflowId,
-        parent_id: Option<TaskScopeId>,
-        name: impl Into<String>,
-        objective: impl Into<String>,
-    ) -> Result<TaskScope, StoreError> {
-        self.create_task_scope_with_id(TaskScopeId::new(), workflow_id, parent_id, name, objective)
-    }
-
-    pub fn create_task_scope_with_id(
-        &self,
-        scope_id: TaskScopeId,
-        workflow_id: WorkflowId,
-        parent_id: Option<TaskScopeId>,
-        name: impl Into<String>,
-        objective: impl Into<String>,
-    ) -> Result<TaskScope, StoreError> {
-        if let Some(parent_id) = parent_id {
-            let parent = self.get_task_scope(parent_id)?;
-            if parent.workflow_id != workflow_id {
-                return Err(StoreError::Invariant(
-                    "parent scope belongs to another Workflow".to_string(),
-                ));
-            }
-        }
-        let run = self.get_workflow(workflow_id)?;
-        let now = Utc::now();
-        let scope = TaskScope {
-            id: scope_id,
-            workflow_id,
-            parent_id,
-            name: name.into(),
-            objective: objective.into(),
-            status: TaskScopeStatus::Open,
-            created_at: now,
-            updated_at: now,
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        insert_indexed_document_tx(
-            &transaction,
-            "task_scopes",
-            &scope.id.to_string(),
-            &[workflow_id.to_string()],
-            scope.status,
-            now,
-            &scope,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::TaskScopeChanged {
-                task_scope_id: scope.id,
-                status: "open".to_string(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(scope)
-    }
-
-    pub fn get_task_scope(&self, id: TaskScopeId) -> Result<TaskScope, StoreError> {
-        self.query_document_by_id("task_scopes", id.to_string(), "task scope")
-    }
-
-    pub fn list_task_scopes(&self, workflow_id: WorkflowId) -> Result<Vec<TaskScope>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM task_scopes WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn set_task_scope_status(
-        &self,
-        id: TaskScopeId,
-        status: TaskScopeStatus,
-    ) -> Result<TaskScope, StoreError> {
-        let mut scope = self.get_task_scope(id)?;
-        if scope.status == status {
-            return Ok(scope);
-        }
-        scope.status = status;
-        scope.updated_at = Utc::now();
-        let run = self.get_workflow(scope.workflow_id)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        update_status_document_tx(&transaction, "task_scopes", &id.to_string(), status, &scope)?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            scope.workflow_id,
-            WorkflowEventPayload::TaskScopeChanged {
-                task_scope_id: id,
-                status: enum_string(status)?,
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(scope)
-    }
-
-    pub fn create_timer(
-        &self,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        interval_ms: u64,
-    ) -> Result<WorkflowTimer, StoreError> {
-        self.create_timer_with_id(TimerId::new(), workflow_id, name, interval_ms)
-    }
-
-    pub fn create_timer_with_id(
-        &self,
-        timer_id: TimerId,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        interval_ms: u64,
-    ) -> Result<WorkflowTimer, StoreError> {
-        if interval_ms == 0 {
-            return Err(StoreError::Invariant(
-                "timer interval must be positive".to_string(),
-            ));
-        }
-        let run = self.get_workflow(workflow_id)?;
-        let now = Utc::now();
-        let interval = i64::try_from(interval_ms).unwrap_or(i64::MAX);
-        let timer = WorkflowTimer {
-            id: timer_id,
-            workflow_id,
-            name: name.into(),
-            interval_ms,
-            status: TimerStatus::Active,
-            fire_count: 0,
-            next_fire_at: now + Duration::milliseconds(interval),
-            last_fired_at: None,
-            last_fire_effect_key: None,
-            created_at: now,
-            updated_at: now,
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        insert_indexed_document_tx(
-            &transaction,
-            "workflow_timers",
-            &timer.id.to_string(),
-            &[workflow_id.to_string()],
-            timer.status,
-            now,
-            &timer,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::TimerChanged {
-                timer_id: timer.id,
-                status: enum_string(timer.status)?,
-                fire_count: timer.fire_count,
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(timer)
-    }
-
-    pub fn get_timer(&self, id: TimerId) -> Result<WorkflowTimer, StoreError> {
-        self.query_document_by_id("workflow_timers", id.to_string(), "workflow timer")
-    }
-
-    pub fn list_timers(&self, workflow_id: WorkflowId) -> Result<Vec<WorkflowTimer>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_timers WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn fire_timer(&self, id: TimerId) -> Result<WorkflowTimer, StoreError> {
-        self.fire_timer_inner(id, None)
-    }
-
-    pub fn fire_timer_for_effect(
-        &self,
-        id: TimerId,
-        effect_key: &str,
-    ) -> Result<WorkflowTimer, StoreError> {
-        self.fire_timer_inner(id, Some(effect_key))
-    }
-
-    fn fire_timer_inner(
-        &self,
-        id: TimerId,
-        effect_key: Option<&str>,
-    ) -> Result<WorkflowTimer, StoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut timer: WorkflowTimer = load_document_tx(
-            &transaction,
-            "workflow_timers",
-            &id.to_string(),
-            "workflow timer",
-        )?;
-        if effect_key.is_some_and(|key| timer.last_fire_effect_key.as_deref() == Some(key)) {
-            return Ok(timer);
-        }
-        if timer.status != TimerStatus::Active {
-            return Err(StoreError::Invariant("timer is not active".to_string()));
-        }
-        let now = Utc::now();
-        timer.fire_count = timer.fire_count.saturating_add(1);
-        timer.last_fired_at = Some(now);
-        timer.next_fire_at =
-            now + Duration::milliseconds(i64::try_from(timer.interval_ms).unwrap_or(i64::MAX));
-        timer.last_fire_effect_key = effect_key.map(str::to_string);
-        timer.updated_at = now;
-        let mut run: Workflow = load_document_tx(
-            &transaction,
-            "workflows",
-            &timer.workflow_id.to_string(),
-            "workflow",
-        )?;
-        if run.status.is_terminal() {
-            return Err(StoreError::Invariant(
-                "cannot fire a timer for a terminal Workflow".to_string(),
-            ));
-        }
-        run.usage.timer_fires = run.usage.timer_fires.saturating_add(1);
-        run.updated_at = now;
-        update_status_document_tx(
-            &transaction,
-            "workflow_timers",
-            &id.to_string(),
-            timer.status,
-            &timer,
-        )?;
-        update_workflow_tx(&transaction, &run)?;
-        let timer_event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::TimerChanged {
-                timer_id: timer.id,
-                status: enum_string(timer.status)?,
-                fire_count: timer.fire_count,
-            },
-        )?;
-        let usage_event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::UsageUpdated {
-                usage: run.usage.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(timer_event);
-        self.shared.publish_workflow(usage_event);
-        Ok(timer)
-    }
-
-    pub fn set_timer_status(
-        &self,
-        id: TimerId,
-        status: TimerStatus,
-    ) -> Result<WorkflowTimer, StoreError> {
-        let mut timer = self.get_timer(id)?;
-        if timer.status == status {
-            return Ok(timer);
-        }
-        timer.status = status;
-        timer.updated_at = Utc::now();
-        let run = self.get_workflow(timer.workflow_id)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        update_status_document_tx(
-            &transaction,
-            "workflow_timers",
-            &id.to_string(),
-            status,
-            &timer,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::TimerChanged {
-                timer_id: timer.id,
-                status: enum_string(timer.status)?,
-                fire_count: timer.fire_count,
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(timer)
-    }
-
-    pub fn create_channel(
-        &self,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        schema: Value,
-    ) -> Result<WorkflowChannel, StoreError> {
-        self.create_channel_with_id(ChannelId::new(), workflow_id, name, schema)
-    }
-
-    pub fn create_channel_with_id(
-        &self,
-        channel_id: ChannelId,
-        workflow_id: WorkflowId,
-        name: impl Into<String>,
-        schema: Value,
-    ) -> Result<WorkflowChannel, StoreError> {
-        let run = self.get_workflow(workflow_id)?;
-        let channel = WorkflowChannel {
-            id: channel_id,
-            workflow_id,
-            name: name.into(),
-            schema,
-            created_at: Utc::now(),
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        insert_indexed_document_tx(
-            &transaction,
-            "workflow_channels",
-            &channel.id.to_string(),
-            &[workflow_id.to_string()],
-            "active",
-            channel.created_at,
-            &channel,
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::ChannelCreated {
-                channel_id: channel.id,
-                name: channel.name.clone(),
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(channel)
-    }
-
-    pub fn get_channel(&self, id: ChannelId) -> Result<WorkflowChannel, StoreError> {
-        self.query_document_by_id("workflow_channels", id.to_string(), "workflow channel")
-    }
-
-    pub fn list_channels(
-        &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<WorkflowChannel>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_channels WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn publish_signal(
-        &self,
-        channel_id: ChannelId,
-        sender_agent_id: Option<AgentInstanceId>,
-        value: Value,
-    ) -> Result<WorkflowSignal, StoreError> {
-        self.publish_signal_with_id(SignalId::new(), channel_id, sender_agent_id, value)
-    }
-
-    pub fn publish_signal_with_id(
-        &self,
-        signal_id: SignalId,
-        channel_id: ChannelId,
-        sender_agent_id: Option<AgentInstanceId>,
-        value: Value,
-    ) -> Result<WorkflowSignal, StoreError> {
-        let channel = self.get_channel(channel_id)?;
-        if let Some(sender) = sender_agent_id {
-            self.validate_members(channel.workflow_id, &[sender])?;
-        }
-        let project_id = self.get_workflow(channel.workflow_id)?.project_id;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let sequence = transaction.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM workflow_signals WHERE channel_id = ?1",
-            [channel_id.to_string()],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let signal = WorkflowSignal {
-            id: signal_id,
-            workflow_id: channel.workflow_id,
-            channel_id,
-            sender_agent_id,
-            sequence,
-            value,
-            created_at: Utc::now(),
-        };
-        transaction.execute(
-            "INSERT INTO workflow_signals
-             (id, workflow_id, channel_id, sequence, created_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                signal.id.to_string(),
-                signal.workflow_id.to_string(),
-                channel_id.to_string(),
-                sequence,
-                signal.created_at.to_rfc3339(),
-                serde_json::to_string(&signal)?
-            ],
-        )?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            project_id,
-            channel.workflow_id,
-            WorkflowEventPayload::SignalPublished {
-                channel_id,
-                signal_id: signal.id,
-                signal_sequence: sequence,
-            },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(signal)
-    }
-
-    pub fn get_signal(&self, id: SignalId) -> Result<WorkflowSignal, StoreError> {
-        self.query_document_by_id("workflow_signals", id.to_string(), "Workflow signal")
-    }
-
-    pub fn list_signals(
-        &self,
-        channel_id: ChannelId,
-        after_sequence: u64,
-    ) -> Result<Vec<WorkflowSignal>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_signals WHERE channel_id = ?1 AND sequence > ?2
-             ORDER BY sequence ASC",
-            params![channel_id.to_string(), after_sequence],
-        )
-    }
-
-    pub fn list_workflow_signals(
-        &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<WorkflowSignal>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_signals WHERE workflow_id = ?1
-             ORDER BY created_at ASC, id ASC",
-            [workflow_id.to_string()],
-        )
     }
 
     pub fn create_human_request_with_id(
@@ -3722,30 +3049,6 @@ impl Store {
         reconcile_artifact_files(&self.shared.artifact_root, &artifacts)
     }
 
-    fn validate_members(
-        &self,
-        workflow_id: WorkflowId,
-        member_ids: &[AgentInstanceId],
-    ) -> Result<(), StoreError> {
-        let mut unique = std::collections::BTreeSet::new();
-        for id in member_ids {
-            if !unique.insert(*id) {
-                return Err(StoreError::Invariant(format!(
-                    "duplicate Agent in Team or relation: {id}"
-                )));
-            }
-            let participant = self.get_participant(*id)?;
-            if participant.workflow_id != workflow_id
-                || participant.status != ParticipantStatus::Active
-            {
-                return Err(StoreError::Invariant(format!(
-                    "Agent {id} is not active in this Workflow"
-                )));
-            }
-        }
-        Ok(())
-    }
-
     pub fn session_rollout_path(&self, session_id: SessionId) -> PathBuf {
         crate::rollout::path(&self.shared.rollout_root, session_id)
     }
@@ -4337,36 +3640,6 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
            UNIQUE(invocation_id, number)
          );
-         CREATE TABLE IF NOT EXISTS workflow_teams (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS agent_relations (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS task_scopes (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflow_timers (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflow_channels (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflow_signals (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           channel_id TEXT NOT NULL REFERENCES workflow_channels(id), sequence INTEGER NOT NULL,
-           created_at TEXT NOT NULL, document_json TEXT NOT NULL, UNIQUE(channel_id, sequence)
-         );
          CREATE TABLE IF NOT EXISTS human_requests (
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
            session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
@@ -4546,7 +3819,6 @@ fn apply_workflow_usage_delta(usage: &mut WorkflowUsage, delta: WorkflowUsage) {
         .actions_completed
         .saturating_add(delta.actions_completed);
     usage.action_steps = usage.action_steps.saturating_add(delta.action_steps);
-    usage.timer_fires = usage.timer_fires.saturating_add(delta.timer_fires);
     usage.hosted_search_calls = usage
         .hosted_search_calls
         .saturating_add(delta.hosted_search_calls);
@@ -4576,7 +3848,6 @@ fn token_usage_delta(current: TokenUsage, previous: TokenUsage) -> TokenUsage {
 fn terminalize_workflow_resources_tx(
     transaction: &Transaction<'_>,
     workflow_id: WorkflowId,
-    workflow_status: WorkflowStatus,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let now = now.to_rfc3339();
@@ -4600,46 +3871,22 @@ fn terminalize_workflow_resources_tx(
          WHERE workflow_id = ?1 AND status = 'open'",
         params![workflow_id.to_string(), now],
     )?;
-    let timer_status = if workflow_status == WorkflowStatus::Completed {
-        "completed"
-    } else {
-        "cancelled"
-    };
-    transaction.execute(
-        "UPDATE workflow_timers
-         SET status = ?2, updated_at = ?3,
-             document_json = json_set(
-                 json_set(document_json, '$.status', ?2),
-                 '$.updated_at', ?3
-             )
-         WHERE workflow_id = ?1 AND status IN ('active', 'paused')",
-        params![workflow_id.to_string(), timer_status, now],
-    )?;
     Ok(())
 }
 
 fn reconcile_terminal_workflow_resources(connection: &Connection) -> Result<(), StoreError> {
     let workflow_ids = {
         let mut statement = connection.prepare(
-            "SELECT id, status FROM workflows
-             WHERE status IN ('completed', 'failed', 'cancelled')",
+            "SELECT id FROM workflows WHERE status IN ('completed', 'failed', 'cancelled')",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for (id, status) in workflow_ids {
+    for id in workflow_ids {
         let workflow_id =
             WorkflowId::from_str(&id).map_err(|error| StoreError::Invariant(error.to_string()))?;
-        let workflow_status = match status.as_str() {
-            "completed" => WorkflowStatus::Completed,
-            "failed" => WorkflowStatus::Failed,
-            "cancelled" => WorkflowStatus::Cancelled,
-            _ => continue,
-        };
         let transaction = connection.unchecked_transaction()?;
-        terminalize_workflow_resources_tx(&transaction, workflow_id, workflow_status, Utc::now())?;
+        terminalize_workflow_resources_tx(&transaction, workflow_id, Utc::now())?;
         transaction.commit()?;
     }
     Ok(())

@@ -12,7 +12,7 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar, get_origin
+from typing import Any, TypeVar, get_origin
 
 _runtime: _Runtime | None = None
 T = TypeVar("T")
@@ -51,12 +51,6 @@ _effect_cursor: contextvars.ContextVar[_EffectCursor | None] = contextvars.Conte
     "papermachine_effect_cursor",
     default=None,
 )
-_scope_stack: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
-    "papermachine_scope_stack",
-    default=(),
-)
-
-
 def _current_effect_cursor() -> _EffectCursor:
     cursor = _effect_cursor.get()
     if cursor is None:
@@ -286,13 +280,11 @@ class Agent:
 
     async def set_access(self, access: str) -> None:
         access = _normalize_access(access)
-        if self._remote is None:
-            self.access = access
-            return
+        remote = await self._ensure_remote()
         result = await _effect(
             "set_agent_access",
             {
-                "agent_instance_id": self._remote["agent_instance_id"],
+                "agent_instance_id": remote["agent_instance_id"],
                 "access": access,
             },
         )
@@ -478,7 +470,6 @@ class _ActionCall(Awaitable[Any]):
                     if reasoning_effort is None
                     else reasoning_effort
                 ),
-                "task_scope_id": _current_scope_id(),
                 "human_request_id": (
                     self.human_request_id if use_human_message else None
                 ),
@@ -554,157 +545,6 @@ async def together(*actions: Awaitable[T]) -> tuple[T, ...]:
         for index, action in enumerate(actions)
     ]
     return tuple(await asyncio.gather(*branches))
-
-
-class Team:
-    def __init__(self, name: str, *members: Agent) -> None:
-        self.name = name
-        self.members = list(members)
-        self._effect_path = _reserve_effect_path("team")
-        self._remote_lock = asyncio.Lock()
-        self._remote_id: str | None = None
-
-    async def _ensure_remote(self) -> str:
-        async with self._remote_lock:
-            if self._remote_id is None:
-                remotes = [await member._ensure_remote() for member in self.members]
-                result = await _effect(
-                    "create_team",
-                    {
-                        "name": self.name,
-                        "member_ids": [
-                            remote["agent_instance_id"] for remote in remotes
-                        ],
-                    },
-                    effect_id=_effect_id(self._effect_path, "create_team"),
-                )
-                self._remote_id = str(result["team_id"])
-        return self._remote_id
-
-    async def activate(self) -> Team:
-        await self._ensure_remote()
-        return self
-
-    async def add(self, member: Agent) -> None:
-        if member not in self.members:
-            self.members.append(member)
-        await self._sync()
-
-    async def remove(self, member: Agent) -> None:
-        self.members = [
-            candidate for candidate in self.members if candidate is not member
-        ]
-        await self._sync()
-
-    async def _sync(self) -> None:
-        team_id = await self._ensure_remote()
-        remotes = [await member._ensure_remote() for member in self.members]
-        await _effect(
-            "set_team_members",
-            {
-                "team_id": team_id,
-                "member_ids": [remote["agent_instance_id"] for remote in remotes],
-            },
-        )
-
-
-async def relate(
-    source: Agent,
-    target: Agent,
-    *,
-    kind: str,
-    instructions: str = "",
-) -> None:
-    source_remote, target_remote = await together(
-        source._ensure_remote(), target._ensure_remote()
-    )
-    await _effect(
-        "set_relation",
-        {
-            "source_agent_id": source_remote["agent_instance_id"],
-            "target_agent_id": target_remote["agent_instance_id"],
-            "kind": kind,
-            "instructions": instructions,
-        },
-    )
-
-
-class scope:
-    def __init__(self, name: str, objective: str = "") -> None:
-        self.name = name
-        self.objective = objective
-        self.id: str | None = None
-
-    async def __aenter__(self) -> scope:
-        result = await _effect(
-            "open_scope",
-            {
-                "name": self.name,
-                "objective": self.objective,
-                "parent_id": _current_scope_id(),
-            },
-        )
-        self.id = str(result["task_scope_id"])
-        self._scope_token = _scope_stack.set((*_scope_stack.get(), self.id))
-        return self
-
-    async def __aexit__(self, error_type: Any, error: Any, traceback: Any) -> None:
-        if self.id is not None:
-            token = getattr(self, "_scope_token", None)
-            if token is not None:
-                _scope_stack.reset(token)
-            await _effect(
-                "close_scope",
-                {
-                    "task_scope_id": self.id,
-                    "status": "cancelled" if error else "completed",
-                },
-            )
-
-
-def _current_scope_id() -> str | None:
-    stack = _scope_stack.get()
-    return stack[-1] if stack else None
-
-
-class Channel(Generic[T]):
-    def __init__(self, name: str, *, schema: dict[str, Any] | None = None) -> None:
-        self.name = name
-        self.schema = schema or {}
-        self._effect_path = _reserve_effect_path("channel")
-        self._remote_lock = asyncio.Lock()
-        self._remote_id: str | None = None
-        self._last_sequence = 0
-
-    async def _ensure_remote(self) -> str:
-        async with self._remote_lock:
-            if self._remote_id is None:
-                result = await _effect(
-                    "create_channel",
-                    {"name": self.name, "schema": self.schema},
-                    effect_id=_effect_id(self._effect_path, "create_channel"),
-                )
-                self._remote_id = str(result["channel_id"])
-        return self._remote_id
-
-    async def publish(self, value: T, *, sender: Agent | None = None) -> None:
-        channel_id = await self._ensure_remote()
-        sender_id = None
-        if sender is not None:
-            sender_id = (await sender._ensure_remote())["agent_instance_id"]
-        await _effect(
-            "publish_signal",
-            {"channel_id": channel_id, "sender_agent_id": sender_id, "value": value},
-        )
-
-    async def receive(self) -> T:
-        channel_id = await self._ensure_remote()
-        result = await _effect(
-            "wait_signal",
-            {"channel_id": channel_id, "after_sequence": self._last_sequence},
-        )
-        self._last_sequence = int(result["sequence"])
-        return result["value"]
 
 
 async def ask_human(
@@ -800,83 +640,6 @@ async def publish_project_home(
     )
 
 
-class BackgroundTask(Generic[T]):
-    def __init__(self, task: asyncio.Task[T]) -> None:
-        self._task = task
-
-    async def join(self) -> T:
-        return await self._task
-
-    def cancel(self) -> None:
-        self._task.cancel()
-
-
-def background(awaitable: Awaitable[T]) -> BackgroundTask[T]:
-    runtime = _require_runtime()
-    path = _reserve_effect_path("background")
-    task = asyncio.create_task(_run_in_effect_branch(awaitable, path))
-    runtime.tasks.add(task)
-    task.add_done_callback(runtime.tasks.discard)
-    return BackgroundTask(task)
-
-
-class TimerHandle:
-    def __init__(
-        self,
-        function: Callable[[], Awaitable[Any]],
-        *,
-        seconds: float,
-        name: str,
-    ) -> None:
-        self.function = function
-        self.seconds = seconds
-        self.name = name
-        path = _reserve_effect_path("timer")
-        self._task = asyncio.create_task(_run_in_effect_branch(self._run(), path))
-        runtime = _require_runtime()
-        runtime.tasks.add(self._task)
-        self._task.add_done_callback(runtime.tasks.discard)
-
-    async def _run(self) -> None:
-        result = await _effect(
-            "register_timer",
-            {
-                "name": self.name,
-                "interval_ms": max(1, int(self.seconds * 1000)),
-            },
-        )
-        timer_id = result["timer_id"]
-        while True:
-            await _effect("wait_timer", {"timer_id": timer_id})
-            await self.function()
-
-    async def stop(self) -> None:
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-
-
-def every(
-    *,
-    seconds: float | None = None,
-    minutes: float | None = None,
-    name: str | None = None,
-) -> Callable[[Callable[[], Awaitable[Any]]], TimerHandle]:
-    interval = seconds if seconds is not None else (minutes or 0) * 60
-    if interval <= 0:
-        raise ValueError("every() requires a positive seconds or minutes interval")
-    def decorate(function: Callable[[], Awaitable[Any]]) -> TimerHandle:
-        return TimerHandle(
-            function,
-            seconds=interval,
-            name=name or function.__name__,
-        )
-
-    return decorate
-
-
 async def wait(
     *,
     seconds: float | None = None,
@@ -886,14 +649,13 @@ async def wait(
     interval = seconds if seconds is not None else (minutes or 0) * 60
     if interval <= 0:
         raise ValueError("wait() requires a positive seconds or minutes interval")
-    timer = await _effect(
-        "register_timer",
+    return await _effect(
+        "wait",
         {
             "name": name,
             "interval_ms": max(1, int(interval * 1000)),
         },
     )
-    return await _effect("wait_timer", {"timer_id": timer["timer_id"]})
 
 
 class ProjectContext:
@@ -942,14 +704,12 @@ class _Runtime:
         send: Callable[[str, str, dict[str, Any]], Awaitable[Any]],
     ) -> None:
         self.send = send
-        self.tasks: set[asyncio.Task[Any]] = set()
 
 
 def _set_runtime(runtime: _Runtime) -> None:
     global _runtime
     _runtime = runtime
     _effect_cursor.set(_EffectCursor(("root",)))
-    _scope_stack.set(())
 
 
 def _require_runtime() -> _Runtime:
@@ -984,21 +744,13 @@ async def _effect(
 __all__ = [
     "Agent",
     "ArtifactRef",
-    "BackgroundTask",
-    "Channel",
     "HumanMessage",
     "ProjectContext",
-    "Team",
-    "TimerHandle",
     "WorkflowContext",
     "action",
     "ask_human",
-    "background",
-    "every",
     "publish_artifact",
     "publish_project_home",
-    "relate",
-    "scope",
     "together",
     "wait",
     "workflow",

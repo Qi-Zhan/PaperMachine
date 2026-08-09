@@ -11,8 +11,8 @@ use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::{NewWorkflow, Store, StoreHandle};
 use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
-    PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
-    python_runtime_sha256, resolve_python_executable,
+    PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, python_runtime_sha256,
+    resolve_python_executable,
 };
 use serde_json::json;
 use sha2::Digest;
@@ -24,7 +24,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
-const SOURCE: &str = r#"from papermachine import Agent, Team, ask_human, workflow
+const SOURCE: &str = r#"from papermachine import Agent, ask_human, workflow
 
 
 class Observer(Agent):
@@ -40,11 +40,10 @@ class Observer(Agent):
 )
 async def main(ctx):
     observer = Observer(name="Observer")
-    team = Team("Review team", observer)
-    await team.activate()
     decision = await ask_human(
         "Continue after the simulated restart?",
         response_schema={"type": "string"},
+        agent=observer,
     )
     return {"decision": decision}
 "#;
@@ -59,56 +58,8 @@ const TIMER_SOURCE: &str = r#"from papermachine import wait, workflow
     params_schema={"type": "object", "additionalProperties": False},
 )
 async def main(ctx):
-    fired = await wait(seconds=0.05, name="test-wake")
-    return {"fire_count": fired["fire_count"]}
-"#;
-
-const SIGNAL_SOURCE: &str = r#"from papermachine import Channel, together, workflow
-
-
-async def receive(channel):
-    return await channel.receive()
-
-
-async def publish(channel):
-    await channel.publish({"message": "ready"})
-    return "published"
-
-
-@workflow(
-    slug="durable-signal-replay",
-    name="Durable signal replay",
-    description="Synchronize concurrent branches through a durable Channel.",
-    params_schema={"type": "object", "additionalProperties": False},
-)
-async def main(ctx):
-    channel = Channel("handoff", schema={"type": "object"})
-    received, _ = await together(receive(channel), publish(channel))
-    return received
-"#;
-
-const BACKGROUND_TIMER_SOURCE: &str = r#"from papermachine import Agent, ask_human, every, workflow
-
-
-class Coordinator(Agent):
-    access = "model_only"
-
-
-@every(seconds=0.05, name="background-summary")
-async def summarize_on_timer():
-    return None
-
-
-@workflow(
-    slug="background-timer-human",
-    name="Background timer and human",
-    description="Keep a durable timer active while the main flow waits for a human.",
-    params_schema={"type": "object", "additionalProperties": False},
-)
-async def main(ctx):
-    coordinator = Coordinator(name="Coordinator")
-    answer = await ask_human("How should this continue?", agent=coordinator)
-    return {"answer": answer}
+    await wait(seconds=0.05, name="test-wake")
+    return {"completed": True}
 "#;
 
 const LAUNCH_CONTEXT_SOURCE: &str = r#"from papermachine import Agent, action, workflow
@@ -497,13 +448,6 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
     );
     assert_eq!(
         store
-            .list_teams(workflow.id)
-            .expect("teams should load")
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
             .list_human_requests(workflow.id)
             .expect("human requests should load")
             .len(),
@@ -512,13 +456,13 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
     let effects = store
         .list_workflow_effects(workflow.id)
         .expect("effects should load");
-    assert_eq!(effects.len(), 4);
+    assert_eq!(effects.len(), 3);
     assert_eq!(
         effects
             .iter()
             .map(|effect| effect.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["create_agent", "create_team", "ask_human", "complete"]
+        vec!["create_agent", "ask_human", "complete"]
     );
     assert!(
         effects
@@ -577,8 +521,7 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
             .list_workflow_effects(workflow.id)
             .expect("effects should load")
             .iter()
-            .any(|effect| effect.kind == "wait_timer"
-                && effect.status == WorkflowEffectStatus::Started)
+            .any(|effect| effect.kind == "wait" && effect.status == WorkflowEffectStatus::Started)
     );
 
     let delay = (wake_at - chrono::Utc::now()).to_std().unwrap_or_default();
@@ -592,146 +535,6 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
         .expect("due timer should replay");
     assert_eq!(
         output,
-        WorkflowExecution::Completed(json!({"fire_count": 1}))
+        WorkflowExecution::Completed(json!({"completed": true}))
     );
-}
-
-#[tokio::test]
-async fn concurrent_channel_branches_replay_a_signal_published_before_suspension() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts"))
-            .expect("store should open in memory"),
-    );
-    let project = store
-        .create_project("Durable signal", directory.path().join("project"))
-        .expect("project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
-            project_id: project.id,
-            started_from_session_id: None,
-            program: program_with_source("durable-signal-replay", SIGNAL_SOURCE),
-            request: "Coordinate concurrent work.".to_string(),
-            instructions: String::new(),
-            trigger: Default::default(),
-            params: json!({}),
-            default_model: "scripted".to_string(),
-            access: AccessPreset::ModelOnly,
-            enabled_skills: Vec::new(),
-            launch_context: Default::default(),
-            agent_access_overrides: Default::default(),
-        })
-        .expect("Workflow should be created");
-    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
-    let executor = runtime_on_handle(
-        store_handle.clone(),
-        &directory.path().join("runtime"),
-        Arc::new(ScriptedModelClient::default()),
-        ToolCatalog::default(),
-    );
-    let scheduler = WorkflowScheduler::new(store_handle, Arc::new(executor), 1);
-
-    scheduler
-        .start(workflow.id)
-        .await
-        .expect("signal Workflow should start");
-    let output = tokio::time::timeout(Duration::from_secs(10), scheduler.wait(workflow.id))
-        .await
-        .expect("signal Workflow should not deadlock")
-        .expect("signal Workflow should remain scheduled")
-        .expect("signal Workflow should complete");
-    assert_eq!(output, json!({"message": "ready"}));
-    assert_eq!(
-        store
-            .list_signals(
-                store
-                    .list_channels(workflow.id)
-                    .expect("channels should load")[0]
-                    .id,
-                0,
-            )
-            .expect("signals should load")
-            .len(),
-        1,
-        "replay must not publish the signal twice"
-    );
-}
-
-#[tokio::test]
-async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let store = Arc::new(
-        Store::open_in_memory(directory.path().join("artifacts"))
-            .expect("store should open in memory"),
-    );
-    let project = store
-        .create_project("Timer plus human", directory.path().join("project"))
-        .expect("project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
-            project_id: project.id,
-            started_from_session_id: None,
-            program: program_with_source("background-timer-human", BACKGROUND_TIMER_SOURCE),
-            request: "Wait and summarize periodically.".to_string(),
-            instructions: String::new(),
-            trigger: Default::default(),
-            params: json!({}),
-            default_model: "scripted".to_string(),
-            access: AccessPreset::ModelOnly,
-            enabled_skills: Vec::new(),
-            launch_context: Default::default(),
-            agent_access_overrides: Default::default(),
-        })
-        .expect("Workflow should be created");
-    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
-    let executor = runtime_on_handle(
-        store_handle.clone(),
-        &directory.path().join("runtime"),
-        Arc::new(ScriptedModelClient::default()),
-        ToolCatalog::default(),
-    );
-    let scheduler = WorkflowScheduler::new(store_handle, Arc::new(executor), 1);
-    scheduler
-        .start(workflow.id)
-        .await
-        .expect("Workflow should start");
-
-    let request = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let request = store
-                .list_human_requests(workflow.id)
-                .expect("human requests should load")
-                .into_iter()
-                .find(|request| request.status == HumanRequestStatus::Open);
-            let fired = store
-                .list_timers(workflow.id)
-                .expect("timers should load")
-                .first()
-                .is_some_and(|timer| timer.fire_count >= 1);
-            if let Some(request) = request
-                && fired
-            {
-                break request;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "background timer should fire before the human answers: workflow={:?}, effects={:?}, timers={:?}",
-            store.get_workflow(workflow.id),
-            store.list_workflow_effects(workflow.id),
-            store.list_timers(workflow.id),
-        )
-    });
-    store
-        .answer_human_request(request.id, json!("Proceed."))
-        .expect("human answer should be accepted");
-    let output = tokio::time::timeout(Duration::from_secs(10), scheduler.wait(workflow.id))
-        .await
-        .expect("Workflow should finish after the answer")
-        .expect("Workflow should remain scheduled")
-        .expect("Workflow should complete");
-    assert_eq!(output, json!({"answer": "Proceed."}));
 }

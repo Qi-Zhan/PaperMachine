@@ -2,16 +2,10 @@ use crate::ActionAttemptId;
 use crate::ActionInvocationId;
 use crate::AgentInstanceId;
 use crate::ArtifactId;
-use crate::ChannelId;
 use crate::ControlMessageId;
 use crate::HumanRequestId;
 use crate::ProjectId;
-use crate::RelationId;
 use crate::SessionId;
-use crate::SignalId;
-use crate::TaskScopeId;
-use crate::TeamId;
-use crate::TimerId;
 use crate::TokenUsage;
 use crate::TurnId;
 use crate::WorkflowId;
@@ -76,7 +70,6 @@ pub enum WorkflowStatus {
     Running,
     WaitingForUser,
     WaitingForTimer,
-    WaitingForSignal,
     Paused,
     Completed,
     Failed,
@@ -121,8 +114,6 @@ pub enum WorkflowTriggerKind {
     User,
     /// Another durable Workflow launched this Run.
     Workflow,
-    /// A scheduler launched this Run rather than merely waking an existing Run.
-    Timer,
     /// A person or API client launched the Run directly from a Project.
     #[default]
     Manual,
@@ -133,7 +124,6 @@ pub struct WorkflowTrigger {
     pub kind: WorkflowTriggerKind,
     pub source_workflow_id: Option<WorkflowId>,
     pub source_session_id: Option<SessionId>,
-    pub source_timer_id: Option<TimerId>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -201,7 +191,6 @@ pub struct WorkflowUsage {
     pub actions_started: u32,
     pub actions_completed: u32,
     pub action_steps: u32,
-    pub timer_fires: u32,
     pub hosted_search_calls: u32,
     pub tokens: TokenUsage,
     pub wall_time_seconds: u64,
@@ -234,26 +223,6 @@ pub struct WorkflowParticipant {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskScopeStatus {
-    Open,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct TaskScope {
-    pub id: TaskScopeId,
-    pub workflow_id: WorkflowId,
-    pub parent_id: Option<TaskScopeId>,
-    pub name: String,
-    pub objective: String,
-    pub status: TaskScopeStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ActionStatus {
     Scheduled,
     Running,
@@ -276,7 +245,6 @@ impl ActionStatus {
 pub struct ActionInvocation {
     pub id: ActionInvocationId,
     pub workflow_id: WorkflowId,
-    pub task_scope_id: Option<TaskScopeId>,
     pub agent_instance_id: AgentInstanceId,
     pub session_id: SessionId,
     pub action_name: String,
@@ -310,73 +278,6 @@ pub struct ActionAttempt {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowTeam {
-    pub id: TeamId,
-    pub workflow_id: WorkflowId,
-    pub name: String,
-    pub member_ids: Vec<AgentInstanceId>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct AgentRelation {
-    pub id: RelationId,
-    pub workflow_id: WorkflowId,
-    pub source_agent_id: AgentInstanceId,
-    pub target_agent_id: AgentInstanceId,
-    pub kind: String,
-    pub instructions: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TimerStatus {
-    Active,
-    Paused,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowTimer {
-    pub id: TimerId,
-    pub workflow_id: WorkflowId,
-    pub name: String,
-    pub interval_ms: u64,
-    pub status: TimerStatus,
-    pub fire_count: u32,
-    pub next_fire_at: DateTime<Utc>,
-    pub last_fired_at: Option<DateTime<Utc>>,
-    /// Lets an interrupted `wait_timer` effect observe the same durable fire
-    /// instead of incrementing the timer twice during replay.
-    pub last_fire_effect_key: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowChannel {
-    pub id: ChannelId,
-    pub workflow_id: WorkflowId,
-    pub name: String,
-    pub schema: Value,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowSignal {
-    pub id: SignalId,
-    pub workflow_id: WorkflowId,
-    pub channel_id: ChannelId,
-    pub sender_agent_id: Option<AgentInstanceId>,
-    pub sequence: u64,
-    pub value: Value,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

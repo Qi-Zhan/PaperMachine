@@ -236,7 +236,6 @@ fn workflow_recovery_fixture(
     let invocation = store
         .create_action_invocation(
             run.id,
-            None,
             participant.id,
             "recover",
             "recover",
