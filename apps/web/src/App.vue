@@ -88,14 +88,8 @@
         :view="sessionView"
         :events="sessionEvents"
         :live-outputs="liveAssistantOutputs"
-        :skills="projectSkills"
         :workflow-view="workflowView"
-        :workflow-loading="workflowLoading"
         :stream-connected="streamConnected"
-        :skills-busy="skillsBusy"
-        :access-busy="accessBusy"
-        :prompt-busy="promptBusy"
-        :hosted-web-search="sessionHostedWebSearch"
         @toggle-sidebar="toggleSidebar"
         @select-project="selectProject"
         @select-session="selectSession"
@@ -103,17 +97,6 @@
         @send="sendSessionMessage"
         @cancel-turn="cancelTurn"
         @open-workflow="openSessionWorkflowDialog"
-        @inspect-workflow="inspectWorkflow"
-        @pause-workflow="pauseWorkflow"
-        @resume-workflow="resumeWorkflow"
-        @cancel-workflow="cancelWorkflow"
-        @send-control="sendWorkflowControl"
-        @answer-human="answerHumanRequest"
-        @update-skills="updateSessionSkills"
-        @update-access="updateSessionAccess"
-        @update-system-prompt="updateSessionSystemPrompt"
-        @open-artifact="selectedArtifact = $event"
-        @open-workflow-output="selectedWorkflowOutput = $event"
       />
 
       <ProjectOverview
@@ -178,8 +161,6 @@
       @close="closeDialogs"
       @submit="createWorkflow"
     />
-    <ArtifactDialog :artifact="selectedArtifact" @close="selectedArtifact = null" />
-    <WorkflowOutputDialog :workflow="selectedWorkflowOutput" @close="selectedWorkflowOutput = null" />
   </div>
 </template>
 
@@ -204,7 +185,6 @@ import {
   type SessionStreamUpdate,
 } from './sessionEvents'
 import AppSidebar from './components/AppSidebar.vue'
-import ArtifactDialog from './components/ArtifactDialog.vue'
 import NewProjectDialog from './components/NewProjectDialog.vue'
 import ProjectPathDialog from './components/ProjectPathDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
@@ -212,10 +192,8 @@ import ProjectOverview from './components/ProjectOverview.vue'
 import SessionWorkspace from './components/SessionWorkspace.vue'
 import WorkflowLibrary from './components/WorkflowLibrary.vue'
 import StartWorkflowDialog from './components/StartWorkflowDialog.vue'
-import WorkflowOutputDialog from './components/WorkflowOutputDialog.vue'
 import type {
   AccessPreset,
-  Artifact,
   CreateSessionInput,
   Health,
   ProjectCatalogEntry,
@@ -242,7 +220,6 @@ const sessionView = ref<SessionView | null>(null)
 const sessionEvents = ref<SessionEvent[]>([])
 const liveAssistantOutputs = ref<LiveAssistantOutputs>({})
 const workflowView = ref<WorkflowView | null>(null)
-const workflowLoading = ref(false)
 const health = ref<Health | null>(null)
 const online = ref(false)
 const streamConnected = ref(false)
@@ -250,9 +227,6 @@ const initialLoading = ref(true)
 const globalError = ref('')
 const dialogError = ref('')
 const dialogBusy = ref(false)
-const skillsBusy = ref(false)
-const accessBusy = ref(false)
-const promptBusy = ref(false)
 const summaryBusy = ref(false)
 const projectDialogOpen = ref(false)
 const projectPathDialogOpen = ref(false)
@@ -271,8 +245,6 @@ const SIDEBAR_OPEN_STORAGE_KEY = 'papermachine.sidebar.open'
 const sidebarWidth = ref(readSidebarWidth())
 const desktopSidebarOpen = ref(readSidebarOpen())
 const sidebarResizing = ref(false)
-const selectedArtifact = ref<Artifact | null>(null)
-const selectedWorkflowOutput = ref<Workflow | null>(null)
 const workflowLibraryOpen = ref(false)
 
 let sessionEventSource: EventSource | null = null
@@ -282,9 +254,6 @@ let projectRefreshTimer: number | null = null
 
 const selectedProject = computed(
   () => projects.value.find((project) => project.id === selectedProjectId.value) ?? null,
-)
-const projectSkills = computed(() =>
-  selectedProjectId.value ? (skillsByProject[selectedProjectId.value] ?? []) : [],
 )
 const dialogProject = computed(
   () => projects.value.find((project) => project.id === dialogProjectId.value) ?? null,
@@ -307,12 +276,6 @@ const defaultModelLabel = computed(() => {
     (candidate) => candidate.id === health.value?.default_model,
   )
   return profile ? `${profile.provider} · ${profile.model}` : health.value.default_model
-})
-const sessionHostedWebSearch = computed(() => {
-  const profile = health.value?.model_profiles.find(
-    (candidate) => candidate.id === sessionView.value?.session.model,
-  )
-  return profile?.capabilities.includes('hosted_web_search') ?? false
 })
 const projectSummaryBusy = computed(
   () =>
@@ -728,7 +691,6 @@ async function loadWorkflowPrograms(projectId: string, refresh = false) {
 }
 
 async function inspectWorkflow(projectId: string, workflowId: string, quiet = false) {
-  if (!quiet) workflowLoading.value = true
   try {
     const view = await api.getWorkflow(projectId, workflowId)
     if (
@@ -740,8 +702,6 @@ async function inspectWorkflow(projectId: string, workflowId: string, quiet = fa
     }
   } catch (error) {
     if (!quiet) globalError.value = messageOf(error)
-  } finally {
-    if (!quiet) workflowLoading.value = false
   }
 }
 
@@ -960,54 +920,6 @@ async function cancelTurn(turnId: string) {
   }
 }
 
-async function updateSessionSkills(slugs: string[]) {
-  const view = sessionView.value
-  if (!view || skillsBusy.value) return
-  skillsBusy.value = true
-  try {
-    const session = await api.updateSessionSkills(view.session.project_id, view.session.id, slugs)
-    if (sessionView.value?.session.id === session.id) sessionView.value.session = session
-  } catch (error) {
-    globalError.value = messageOf(error)
-    if (sessionView.value) sessionView.value = { ...sessionView.value }
-  } finally {
-    skillsBusy.value = false
-  }
-}
-
-async function updateSessionAccess(access: AccessPreset) {
-  const view = sessionView.value
-  if (!view || accessBusy.value) return
-  accessBusy.value = true
-  try {
-    const session = await api.updateSessionAccess(view.session.project_id, view.session.id, access)
-    if (sessionView.value?.session.id === session.id) sessionView.value.session = session
-    const sessions = sessionsByProject[session.project_id] ?? []
-    sessionsByProject[session.project_id] = [
-      session,
-      ...sessions.filter((candidate) => candidate.id !== session.id),
-    ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
-  } catch (error) {
-    globalError.value = messageOf(error)
-  } finally {
-    accessBusy.value = false
-  }
-}
-
-async function updateSessionSystemPrompt(systemPrompt: string) {
-  const view = sessionView.value
-  if (!view || promptBusy.value) return
-  promptBusy.value = true
-  try {
-    const session = await api.updateSessionSystemPrompt(view.session.project_id, view.session.id, systemPrompt)
-    if (sessionView.value?.session.id === session.id) sessionView.value.session = session
-  } catch (error) {
-    globalError.value = messageOf(error)
-  } finally {
-    promptBusy.value = false
-  }
-}
-
 async function runProjectSummary(input: {
   instructions: string
   intervalMinutes: number
@@ -1129,76 +1041,9 @@ async function waitForWorkflowSessionOrTerminal(projectId: string, workflowId: s
   return null
 }
 
-async function cancelWorkflow(workflowId: string) {
-  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
-  if (!projectId) return
-  try {
-    await api.cancelWorkflow(projectId, workflowId)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function pauseWorkflow(workflowId: string) {
-  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
-  if (!projectId) return
-  try {
-    await api.pauseWorkflow(projectId, workflowId)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function resumeWorkflow(workflowId: string) {
-  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
-  if (!projectId) return
-  try {
-    await api.resumeWorkflow(projectId, workflowId)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function sendWorkflowControl(input: {
-  workflowId: string
-  sessionId: string
-  kind: 'guide' | 'interrupt' | 'finish'
-  content: string
-  actionInvocationId?: string
-}) {
-  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
-  if (!projectId) return
-  try {
-    await api.sendControl(
-      projectId,
-      input.workflowId,
-      input.sessionId,
-      input.kind,
-      input.content,
-      input.actionInvocationId,
-    )
-    await inspectWorkflow(projectId, input.workflowId, true)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function answerHumanRequest(input: { requestId: string; answer: unknown; workflowId: string }) {
-  const projectId = workflowView.value?.workflow.project_id ?? selectedProjectId.value
-  if (!projectId) return
-  try {
-    await api.answerHumanRequest(projectId, input.requestId, input.answer)
-    await inspectWorkflow(projectId, input.workflowId, true)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
 function onKeydown(event: KeyboardEvent) {
   if (event.key !== 'Escape') return
-  if (selectedWorkflowOutput.value) selectedWorkflowOutput.value = null
-  else if (selectedArtifact.value) selectedArtifact.value = null
-  else if (!dialogBusy.value) closeDialogs()
+  if (!dialogBusy.value) closeDialogs()
   mobileSidebarOpen.value = false
 }
 

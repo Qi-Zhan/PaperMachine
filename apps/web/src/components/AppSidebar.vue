@@ -116,7 +116,13 @@
             type="button"
             @click="$emit('select-session', project.id, session.id)"
           >
-            <span class="status-pin" :data-status="session.status" />
+            <span
+              class="status-pin"
+              :data-status="session.status"
+              :title="statusLabel(session.status)"
+              :aria-label="statusLabel(session.status)"
+              role="img"
+            />
             <span class="session-row-copy">
               <span class="session-title">{{ session.title }}</span>
               <span class="session-time">{{ formatDate(session.updated_at) }}</span>
@@ -142,7 +148,7 @@
 <script setup lang="ts">
 import { AlertTriangle, ChevronDown, Folder, FolderPlus, GitBranch, MapPin, MoreHorizontal, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
-import { formatDate } from '../format'
+import { formatDate, statusLabel } from '../format'
 import { useAppI18n } from '../i18n'
 import type { ProjectCatalogEntry, Session } from '../types'
 

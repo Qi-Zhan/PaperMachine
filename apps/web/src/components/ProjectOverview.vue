@@ -47,27 +47,18 @@
       <div v-else-if="summaryHtml" class="project-home-summary" v-html="summaryHtml" />
 
       <section v-else class="project-home-state">
-        <FileText :size="24" />
-        <h2>{{ t(summaryLoadFailed ? 'project.summaryLoadFailed' : 'project.summaryEmptyTitle') }}</h2>
+        <p v-if="summaryLoadFailed" class="project-home-error" role="alert">
+          {{ t('project.summaryLoadFailed') }}
+        </p>
         <button
-          v-if="summaryLoadFailed"
-          class="secondary-button"
-          type="button"
-          @click="loadLatestSummary"
-        >
-          <RefreshCw :size="14" />
-          {{ t('project.summaryRetry') }}
-        </button>
-        <button
-          v-else
-          class="primary-button"
+          :class="summaryLoadFailed ? 'secondary-button' : 'primary-button'"
           type="button"
           :disabled="summaryBusy || !workspaceAvailable"
-          @click="refreshSummary"
+          @click="summaryLoadFailed ? loadLatestSummary() : refreshSummary()"
         >
           <LoaderCircle v-if="summaryBusy" class="spin" :size="14" />
           <RefreshCw v-else :size="14" />
-          {{ t('project.summaryGenerate') }}
+          {{ t(summaryLoadFailed ? 'project.summaryRetry' : 'project.summaryGenerate') }}
         </button>
       </section>
     </main>
@@ -76,7 +67,7 @@
 
 <script setup lang="ts">
 import DOMPurify from 'dompurify'
-import { FileText, GitBranch, LoaderCircle, MessageSquarePlus, PanelLeft, RefreshCw } from '@lucide/vue'
+import { GitBranch, LoaderCircle, MessageSquarePlus, PanelLeft, RefreshCw } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { api } from '../api'
 import { useAppI18n } from '../i18n'

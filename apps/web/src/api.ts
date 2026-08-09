@@ -1,8 +1,5 @@
 import type {
-  AccessPreset,
   Artifact,
-  ControlMessage,
-  ControlMessageKind,
   CreateWorkflowInput,
   GeneratedWorkflow,
   Health,
@@ -80,15 +77,6 @@ export const api = {
     request<void>(`/projects/${projectId}/sessions/${sessionId}`, { method: 'DELETE' }),
   cancelTurn: (projectId: string, turnId: string) =>
     request<void>(`/projects/${projectId}/turns/${turnId}/cancel`, { method: 'POST' }),
-  updateSessionSkills: (projectId: string, sessionId: string, enabledSkills: string[]) =>
-    request<Session>(`/projects/${projectId}/sessions/${sessionId}/skills`, { method: 'PUT', body: JSON.stringify({ enabled_skills: enabledSkills }) }),
-  updateSessionAccess: (projectId: string, sessionId: string, access: AccessPreset) =>
-    request<Session>(`/projects/${projectId}/sessions/${sessionId}/access`, { method: 'PUT', body: JSON.stringify({ access }) }),
-  updateSessionSystemPrompt: (projectId: string, sessionId: string, systemPrompt: string) =>
-    request<Session>(`/projects/${projectId}/sessions/${sessionId}/system-prompt`, {
-      method: 'PUT',
-      body: JSON.stringify({ system_prompt: systemPrompt }),
-    }),
   listSessionEvents: (projectId: string, sessionId: string, after = 0) =>
     request<SessionEvent[]>(`/projects/${projectId}/sessions/${sessionId}/events?after=${after}`),
   createWorkflow: (projectId: string, input: CreateWorkflowInput) =>
@@ -97,23 +85,8 @@ export const api = {
     request<WorkflowView>(`/projects/${projectId}/workflows/${workflowId}`),
   getWorkflowState: (projectId: string, workflowId: string) =>
     request<Workflow>(`/projects/${projectId}/workflows/${workflowId}/state`),
-  pauseWorkflow: (projectId: string, workflowId: string) =>
-    request<void>(`/projects/${projectId}/workflows/${workflowId}/pause`, { method: 'POST' }),
-  resumeWorkflow: (projectId: string, workflowId: string) =>
-    request<void>(`/projects/${projectId}/workflows/${workflowId}/resume`, { method: 'POST' }),
   cancelWorkflow: (projectId: string, workflowId: string) =>
     request<void>(`/projects/${projectId}/workflows/${workflowId}/cancel`, { method: 'POST' }),
-  sendControl: (
-    projectId: string,
-    runId: string,
-    sessionId: string,
-    kind: ControlMessageKind,
-    content: string,
-    actionInvocationId?: string,
-  ) => request<ControlMessage>(`/projects/${projectId}/workflows/${runId}/sessions/${sessionId}/control`, {
-    method: 'POST',
-    body: JSON.stringify({ kind, content, action_invocation_id: actionInvocationId ?? null }),
-  }),
   answerHumanRequest: (projectId: string, requestId: string, answer: unknown) =>
     request<HumanRequest>(`/projects/${projectId}/human-requests/${requestId}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   listWorkflowPrograms: (projectId: string) => request<WorkflowProgram[]>(`/projects/${projectId}/workflow-programs`),
