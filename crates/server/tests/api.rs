@@ -1459,6 +1459,18 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
     assert_eq!(summary["media_type"], "text/html; charset=utf-8");
     assert_eq!(summary["metadata"]["source_artifact_id"], source["id"]);
 
+    let overview = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project overview should load its canonical home");
+    let overview = response_json(overview).await;
+    assert_eq!(overview["project_home"]["artifact_id"], summary["id"]);
+    assert_eq!(overview["project_home"]["source_artifact_id"], source["id"]);
+
     let artifact_id = summary["id"]
         .as_str()
         .expect("summary Artifact id should exist");

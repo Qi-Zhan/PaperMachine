@@ -37,6 +37,7 @@ pub use project_home::ProjectHomeBlock;
 pub use project_home::ProjectHomeDraft;
 pub use project_home::ProjectHomePatchOperation;
 pub use project_home::ProjectHomeSource;
+pub use project_home::PublishedProjectHome;
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflow {

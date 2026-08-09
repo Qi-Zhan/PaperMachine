@@ -45,8 +45,9 @@ a configurable durable timer. Its summary Agent reads a bounded snapshot of
 existing Project Sessions, Workflow results, and Artifact metadata. In one
 ordinary tool-capable Action it reads the existing page, applies semantic block
 patches, previews the complete materialized result, and can keep correcting it
-before the runtime publishes an immutable HTML Artifact. That sanitized
-fragment is the Project home page itself; there is no fixed dashboard around it
+before the runtime publishes an immutable HTML Artifact. The Project stores one
+canonical Artifact/source/revision reference; unchanged refreshes reuse it and
+concurrent stale drafts fail closed. That sanitized fragment is the Project home page itself; there is no fixed dashboard around it
 and no embedded frame. The summary policy is the run's ordinary `instructions`
 field; there is no review Action, hidden summary daemon, or extra instance
 model.
@@ -180,8 +181,7 @@ small packages owned by one Project.
 - Declare every Action's local tools with `@action(tools=[...])`. Rust validates
   names, filters Workspace tools against the Turn access ceiling, and atomically
   stores the resulting sorted definitions and SHA-256 with the Turn. Project
-  tools are admitted only through a Workflow Action declaration and never enter
-  an ordinary user Session. `project-summary` declares only page read, patch,
+  tools are admitted only through a Workflow Action declaration. `project-summary` declares only page read, patch,
   and preview, then calls `publish_project_home(...)`.
 - Launch with either a fresh context or one immutable, bounded Project snapshot.
   The latter is exposed as `ctx.context`; the Workflow explicitly routes raw or

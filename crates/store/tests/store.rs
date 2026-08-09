@@ -962,11 +962,124 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
         .expect_err("active content must be rejected before publication");
     assert!(unsafe_patch.to_string().contains("forbidden <script>"));
 
-    let (_, source) = store
-        .project_home_source_for_publish(workflow.id, invocation.id)
-        .expect("non-empty draft should be publishable");
+    let source = patched.source();
     assert!(source.html().starts_with("<article>"));
     assert!(source.html().contains("Current research state"));
+
+    let published = store
+        .publish_project_home_draft(
+            workflow.id,
+            invocation.id,
+            participant.session_id,
+            papermachine_protocol::ArtifactId::new(),
+            papermachine_protocol::ArtifactId::new(),
+            json!({"test": "initial"}),
+        )
+        .expect("first Project home should publish");
+    assert!(published.changed);
+    assert_eq!(published.home.revision, patched.revision);
+    assert_eq!(
+        store
+            .get_project_home(project.id)
+            .expect("canonical home should load"),
+        Some(published.home.clone())
+    );
+
+    let action = |name: &str| {
+        store
+            .create_action_invocation(
+                workflow.id,
+                None,
+                participant.id,
+                name,
+                "Maintain the page",
+                json!({}),
+                vec![
+                    "read_project_home".to_string(),
+                    "patch_project_home".to_string(),
+                    "preview_project_home".to_string(),
+                ],
+            )
+            .expect("Project-home Action should be created")
+    };
+    let no_op_action = action("no_op");
+    let no_op_draft = store
+        .read_project_home_draft(workflow.id, no_op_action.id)
+        .expect("no-op draft should load current canonical home");
+    assert_eq!(no_op_draft.base_artifact_id, Some(published.artifact.id));
+    let no_op = store
+        .publish_project_home_draft(
+            workflow.id,
+            no_op_action.id,
+            participant.session_id,
+            papermachine_protocol::ArtifactId::new(),
+            papermachine_protocol::ArtifactId::new(),
+            json!({}),
+        )
+        .expect("unchanged Project home should reuse the canonical revision");
+    assert!(!no_op.changed);
+    assert_eq!(no_op.artifact.id, published.artifact.id);
+    assert_eq!(
+        store
+            .list_project_artifacts(project.id)
+            .expect("Artifacts should list")
+            .len(),
+        2
+    );
+
+    let winning_action = action("winning_update");
+    let stale_action = action("stale_update");
+    let winning_base = store
+        .read_project_home_draft(workflow.id, winning_action.id)
+        .expect("winning draft should load");
+    let stale_base = store
+        .read_project_home_draft(workflow.id, stale_action.id)
+        .expect("stale draft should load");
+    store
+        .patch_project_home_draft(
+            workflow.id,
+            winning_action.id,
+            "winning-patch",
+            &winning_base.revision,
+            vec![ProjectHomePatchOperation::Upsert {
+                id: "status".to_string(),
+                html: "<section><h2>Verified status</h2></section>".to_string(),
+            }],
+        )
+        .expect("winning patch should apply");
+    store
+        .patch_project_home_draft(
+            workflow.id,
+            stale_action.id,
+            "stale-patch",
+            &stale_base.revision,
+            vec![ProjectHomePatchOperation::Upsert {
+                id: "status".to_string(),
+                html: "<section><h2>Stale status</h2></section>".to_string(),
+            }],
+        )
+        .expect("concurrent stale draft should patch locally");
+    store
+        .publish_project_home_draft(
+            workflow.id,
+            winning_action.id,
+            participant.session_id,
+            papermachine_protocol::ArtifactId::new(),
+            papermachine_protocol::ArtifactId::new(),
+            json!({}),
+        )
+        .expect("winning revision should publish");
+    let conflict = store
+        .publish_project_home_draft(
+            workflow.id,
+            stale_action.id,
+            participant.session_id,
+            papermachine_protocol::ArtifactId::new(),
+            papermachine_protocol::ArtifactId::new(),
+            json!({}),
+        )
+        .expect_err("stale Project-home base must fail closed");
+    assert!(conflict.to_string().contains("base revision changed"));
 }
 
 #[test]

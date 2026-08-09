@@ -9,6 +9,7 @@ use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use rusqlite::TransactionBehavior;
 use rusqlite::params;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -23,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
@@ -3033,6 +3034,103 @@ impl Store {
         )
     }
 
+    pub fn get_project_home(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Option<ProjectHome>, StoreError> {
+        self.get_project(project_id)?;
+        let document = self
+            .connection()?
+            .query_row(
+                "SELECT document_json FROM project_homes WHERE project_id = ?1",
+                [project_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        document
+            .map(|document| serde_json::from_str(&document).map_err(StoreError::from))
+            .transpose()
+    }
+
+    pub(crate) fn commit_project_home(
+        &self,
+        expected_base: Option<ArtifactId>,
+        home: &ProjectHome,
+        source: &Artifact,
+        page: &Artifact,
+    ) -> Result<ProjectHome, StoreError> {
+        if source.project_id != home.project_id
+            || page.project_id != home.project_id
+            || source.workflow_id != page.workflow_id
+            || source.id != home.source_artifact_id
+            || page.id != home.artifact_id
+        {
+            return Err(StoreError::Invariant(
+                "Project-home publication has inconsistent ownership".to_string(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT document_json FROM project_homes WHERE project_id = ?1",
+                [home.project_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|document| serde_json::from_str::<ProjectHome>(&document))
+            .transpose()?;
+        if let Some(current) = current.as_ref()
+            && current.artifact_id == home.artifact_id
+        {
+            return Ok(current.clone());
+        }
+        if current.as_ref().map(|current| current.artifact_id) != expected_base {
+            return Err(StoreError::Invariant(
+                "Project-home base revision changed before publication".to_string(),
+            ));
+        }
+        insert_indexed_document_tx(
+            &transaction,
+            "artifacts",
+            &source.id.to_string(),
+            &[source.workflow_id.to_string()],
+            "created",
+            source.created_at,
+            source,
+        )?;
+        insert_indexed_document_tx(
+            &transaction,
+            "artifacts",
+            &page.id.to_string(),
+            &[page.workflow_id.to_string()],
+            "created",
+            page.created_at,
+            page,
+        )?;
+        transaction.execute(
+            "INSERT INTO project_homes
+             (project_id, artifact_id, source_artifact_id, revision, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(project_id) DO UPDATE SET
+               artifact_id = excluded.artifact_id,
+               source_artifact_id = excluded.source_artifact_id,
+               revision = excluded.revision,
+               updated_at = excluded.updated_at,
+               document_json = excluded.document_json",
+            params![
+                home.project_id.to_string(),
+                home.artifact_id.to_string(),
+                home.source_artifact_id.to_string(),
+                home.revision,
+                home.updated_at.to_rfc3339(),
+                serde_json::to_string(home)?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(home.clone())
+    }
+
     pub fn get_artifact(&self, id: ArtifactId) -> Result<Artifact, StoreError> {
         self.query_document_by_id("artifacts", id.to_string(), "artifact")
     }
@@ -3763,6 +3861,12 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS project_homes (
+           project_id TEXT PRIMARY KEY REFERENCES projects(id),
+           artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+           source_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+           revision TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );"
     ))?;
     reconcile_terminal_workflow_resources(connection)?;

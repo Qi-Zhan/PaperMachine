@@ -699,6 +699,7 @@ fn ensure_project_can_detach(runtime: &ProjectRuntime) -> ApiResult<()> {
 #[derive(Serialize)]
 struct ProjectOverview {
     project: Project,
+    project_home: Option<ProjectHome>,
     system_prompt: ProjectSystemPrompt,
     sessions: Vec<Session>,
     workflows: Vec<Workflow>,
@@ -722,6 +723,7 @@ async fn get_project_overview(
     }
     Ok(Json(ProjectOverview {
         project: runtime.store.get_project(project_id)?,
+        project_home: runtime.store.get_project_home(project_id)?,
         system_prompt: runtime.store.get_project_system_prompt(project_id)?,
         sessions: runtime.store.list_sessions(project_id)?,
         workflows,

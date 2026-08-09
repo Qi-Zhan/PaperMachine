@@ -483,3 +483,13 @@ pub struct Artifact {
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
 }
+
+/// Canonical Project home revision stored in PaperMachine-managed state.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ProjectHome {
+    pub project_id: ProjectId,
+    pub artifact_id: ArtifactId,
+    pub source_artifact_id: ArtifactId,
+    pub revision: String,
+    pub updated_at: DateTime<Utc>,
+}

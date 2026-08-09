@@ -62,14 +62,15 @@ bounded managed draft keyed to that exact Workflow Action. Semantic patches use 
 unsafe active tags, inline event/style attributes, script URLs, oversized
 blocks, stale revisions, and no-op edits fail as tool results that the same
 Agent can inspect and correct. The publication effect accepts only the latest
-completed Action belonging to that Workflow and Agent, then creates an
-immutable block-source Artifact before making the corresponding page Artifact
-visible.
+completed Action belonging to that Workflow and Agent. It compares the draft's
+base to the canonical Project-home revision, atomically commits the source,
+page, and canonical pointer, and reuses the current revision for a no-op. Generic
+Artifact metadata cannot claim the reserved Project-home roles.
 
 Generated project-summary HTML remains untrusted model output. It is served
 with `nosniff` and a restrictive CSP (`sandbox`, no default network/source
 access, inline style and data images only) for safe raw access. Before the
-newest Artifact becomes the Project home page, the Web client parses its body
+canonical Artifact becomes the Project home page, the Web client parses its body
 and sanitizes it with DOMPurify. Scripts, inline styles, forms, controls,
 frames, embedded objects, external media, SVG/MathML, unsafe attributes, and
 non-Web links are removed. Only that sanitized semantic fragment is rendered

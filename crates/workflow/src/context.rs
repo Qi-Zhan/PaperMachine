@@ -63,6 +63,28 @@ pub fn build_project_snapshot(
     };
 
     let mut text = SnapshotTextBudget::new(max_text_chars);
+    let project_home = match store.get_project_home(project.id)? {
+        Some(home) => {
+            let artifact = store.get_artifact(home.artifact_id)?;
+            let (content, content_truncated) = if options.include_artifact_content {
+                let content = String::from_utf8(store.read_artifact(&artifact)?)
+                    .map_err(|error| StoreError::Invariant(error.to_string()))?;
+                let (content, truncated) = text.take(&content, 48_000);
+                (Some(content), truncated)
+            } else {
+                (None, false)
+            };
+            Some(json!({
+                "artifact_id": home.artifact_id,
+                "source_artifact_id": home.source_artifact_id,
+                "revision": home.revision,
+                "updated_at": home.updated_at,
+                "content": content,
+                "content_truncated": content_truncated,
+            }))
+        }
+        None => None,
+    };
     let mut project_sessions = store
         .list_sessions(project.id)?
         .into_iter()
@@ -163,7 +185,10 @@ pub fn build_project_snapshot(
         .list_project_artifacts(project.id)?
         .into_iter()
         .filter(|artifact| {
-            options.exclude_workflow_id != Some(artifact.workflow_id)
+            !matches!(
+                artifact.metadata.get("role").and_then(Value::as_str),
+                Some("project_summary" | "project_summary_source")
+            ) && options.exclude_workflow_id != Some(artifact.workflow_id)
                 && options
                     .updated_after
                     .is_none_or(|updated_after| artifact.created_at > updated_after)
@@ -205,6 +230,7 @@ pub fn build_project_snapshot(
             "id": project.id,
             "name": project.name,
         },
+        "project_home": project_home,
         "focus_session_id": options.focus_session_id,
         "sessions": sessions,
         "workflows": workflow_summaries,
@@ -351,12 +377,27 @@ mod tests {
                 Some(older.id),
                 None,
                 ArtifactKind::Report,
-                "project-home.html",
+                "evidence.html",
                 "text/html",
-                json!({"role": "project_summary"}),
+                json!({"role": "evidence"}),
                 "<h1>原始证据内容</h1>".as_bytes(),
             )
             .expect("Artifact should be created");
+        for role in ["project_summary", "project_summary_source"] {
+            store
+                .create_artifact(
+                    project.id,
+                    workflow.id,
+                    Some(older.id),
+                    None,
+                    ArtifactKind::Other,
+                    format!("forged-{role}.txt"),
+                    "text/plain",
+                    json!({"role": role}),
+                    b"must not become canonical Project-home context",
+                )
+                .expect("reserved-role fixture should be created");
+        }
 
         let snapshot = build_project_snapshot(
             &store,
@@ -373,6 +414,8 @@ mod tests {
         assert_eq!(snapshot["focus_session_id"], focus.id.to_string());
         assert_eq!(snapshot["sessions"][0]["id"], focus.id.to_string());
         assert_eq!(snapshot["project"]["name"], "Context Project");
+        assert_eq!(snapshot["project_home"], Value::Null);
+        assert_eq!(snapshot["artifacts"].as_array().map(Vec::len), Some(1));
         assert_eq!(snapshot["artifacts"][0]["content"], "<h1>原始证据内容</h1>");
         assert_eq!(snapshot["artifacts"][0]["content_truncated"], false);
         assert_eq!(snapshot["limits"]["include_artifact_content"], true);

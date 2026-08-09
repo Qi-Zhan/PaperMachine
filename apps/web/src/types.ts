@@ -366,6 +366,14 @@ export interface Artifact {
   created_at: string
 }
 
+export interface ProjectHome {
+  project_id: Id
+  artifact_id: Id
+  source_artifact_id: Id
+  revision: string
+  updated_at: string
+}
+
 export interface ProjectSkill {
   slug: string
   name: string
@@ -377,6 +385,7 @@ export interface ProjectSkill {
 
 export interface ProjectOverview {
   project: Project
+  project_home: ProjectHome | null
   system_prompt: ProjectSystemPrompt
   sessions: Session[]
   workflows: Workflow[]

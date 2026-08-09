@@ -105,7 +105,11 @@ const summaryInstructions = computed(
   () => summaryWorkflows.value[0]?.instructions || defaultSummaryInstructions,
 )
 const latestSummaryArtifact = computed(() =>
-  props.overview.artifacts.find((artifact) => artifact.metadata.role === 'project_summary'),
+  props.overview.project_home
+    ? props.overview.artifacts.find(
+        (artifact) => artifact.id === props.overview.project_home?.artifact_id,
+      )
+    : undefined,
 )
 const summaryHtml = ref('')
 const summaryLoading = ref(false)

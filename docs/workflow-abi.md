@@ -213,8 +213,9 @@ The built-in `project-summary` is the reference background program. It reads
 Agent. Inside the existing Agent loop, that Agent can repeatedly call
 `read_project_home`, `patch_project_home`, and `preview_project_home`; there is
 no one-shot HTML return contract and no separate evaluator Action. When the
-Action naturally ends, `publish_project_home(...)` atomically materializes its
-validated block draft as an immutable HTML Artifact. The Workflow may then call
+Action naturally ends, `publish_project_home(...)` commits its validated block
+draft with a canonical revision CAS. Stale drafts fail, and unchanged drafts
+reuse the existing Artifact. The Workflow may then call
 `wait(minutes=...)` before repeating. Its reviewed Agent prompt lives in source;
 the Project Page exposes the run's user-controlled `instructions` and timer
 interval. A scheduled summary is therefore an ordinary durable Workflow, not a

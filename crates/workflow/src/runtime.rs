@@ -9,9 +9,7 @@ use papermachine_session::PromptLayerInput;
 use papermachine_session::SessionRuntime;
 use papermachine_session::SessionRuntimeError;
 use papermachine_session::WorkflowTurnContext;
-use papermachine_store::PROJECT_HOME_MEDIA_TYPE;
 use papermachine_store::PROJECT_HOME_ROLE;
-use papermachine_store::PROJECT_HOME_SOURCE_MEDIA_TYPE;
 use papermachine_store::PROJECT_HOME_SOURCE_ROLE;
 use papermachine_store::Store;
 use serde::Deserialize;
@@ -1183,6 +1181,16 @@ impl RunEffectContext {
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: PublishArtifactEffect = serde_json::from_value(payload)?;
+        if payload
+            .metadata
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| matches!(role, PROJECT_HOME_ROLE | PROJECT_HOME_SOURCE_ROLE))
+        {
+            return Err(WorkflowRuntimeError::Protocol(
+                "Project-home Artifact roles are reserved for publish_project_home".to_string(),
+            ));
+        }
         let name = payload.name.trim();
         if name.is_empty() {
             return Err(WorkflowRuntimeError::Protocol(
@@ -1316,97 +1324,34 @@ impl RunEffectContext {
                 )));
             }
         }
-        let (base_artifact_id, source) = self
-            .store
-            .project_home_source_for_publish(self.workflow_id, invocation.id)?;
-        let source_content = serde_json::to_string(&source)?;
-        let html = source.html();
-        let workflow = self.store.get_workflow(self.workflow_id)?;
-
         let source_artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "project-home-source",
         ));
-        let source_artifact = match self.store.get_artifact(source_artifact_id) {
-            Ok(artifact) => artifact,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_artifact_with_id(
-                    source_artifact_id,
-                    workflow.project_id,
-                    self.workflow_id,
-                    Some(participant.session_id),
-                    Some(invocation.id),
-                    ArtifactKind::Other,
-                    "project-home.blocks.json",
-                    PROJECT_HOME_SOURCE_MEDIA_TYPE,
-                    json!({
-                        "role": PROJECT_HOME_SOURCE_ROLE,
-                        "revision": source.revision,
-                    }),
-                    source_content.as_bytes(),
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if source_artifact.workflow_id != self.workflow_id
-            || source_artifact.action_invocation_id != Some(invocation.id)
-            || source_artifact.name != "project-home.blocks.json"
-        {
-            return Err(WorkflowRuntimeError::Protocol(
-                "replayed Project-home source Artifact has different ownership or name".to_string(),
-            ));
-        }
-
-        let mut metadata = payload.metadata.as_object().cloned().ok_or_else(|| {
-            WorkflowRuntimeError::Protocol(
-                "Project-home publication metadata must be an object".to_string(),
-            )
-        })?;
-        metadata.insert("role".to_string(), json!(PROJECT_HOME_ROLE));
-        metadata.insert("revision".to_string(), json!(source.revision));
-        metadata.insert("source_artifact_id".to_string(), json!(source_artifact.id));
-        metadata.insert("base_artifact_id".to_string(), json!(base_artifact_id));
-
         let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "project-home",
         ));
-        let artifact = match self.store.get_artifact(artifact_id) {
-            Ok(artifact) => artifact,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_artifact_with_id(
-                    artifact_id,
-                    workflow.project_id,
-                    self.workflow_id,
-                    Some(participant.session_id),
-                    Some(invocation.id),
-                    ArtifactKind::Report,
-                    "project-home.html",
-                    PROJECT_HOME_MEDIA_TYPE,
-                    Value::Object(metadata),
-                    html.as_bytes(),
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if artifact.workflow_id != self.workflow_id
-            || artifact.action_invocation_id != Some(invocation.id)
-            || artifact.name != "project-home.html"
-        {
-            return Err(WorkflowRuntimeError::Protocol(
-                "replayed Project-home Artifact has different ownership or name".to_string(),
-            ));
-        }
+        let publication = self.store.publish_project_home_draft(
+            self.workflow_id,
+            invocation.id,
+            participant.session_id,
+            source_artifact_id,
+            artifact_id,
+            payload.metadata,
+        )?;
+        let artifact = publication.artifact;
         Ok(json!({
             "artifact_id": artifact.id,
             "name": artifact.name,
             "kind": artifact.kind,
             "media_type": artifact.media_type,
             "size_bytes": artifact.size_bytes,
-            "revision": source.revision,
-            "source_artifact_id": source_artifact.id,
+            "revision": publication.home.revision,
+            "source_artifact_id": publication.source_artifact.id,
+            "changed": publication.changed,
         }))
     }
 

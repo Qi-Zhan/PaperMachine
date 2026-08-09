@@ -331,7 +331,10 @@ Sampling, dispatch, pause/resume, and recovery rebuild the same exact Registry
 from that snapshot. Missing executors or changed definitions fail closed.
 `project-summary` declares only `read_project_home`, `patch_project_home`, and
 `preview_project_home`, then publishes with one replay-safe
-`publish_project_home(...)` effect after the Agent Action ends.
+`publish_project_home(...)` effect after the Agent Action ends. Publication uses
+the Project's canonical home revision as a CAS base; stale drafts fail and
+unchanged drafts reuse the existing Artifact. Reserved home roles cannot be
+claimed through `publish_artifact(...)`.
 
 Control messages are asynchronous:
 

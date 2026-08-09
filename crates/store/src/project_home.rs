@@ -1,16 +1,23 @@
 use crate::Store;
 use crate::StoreError;
+use crate::artifact::store_artifact_file;
+use chrono::Utc;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::Artifact;
 use papermachine_protocol::ArtifactId;
+use papermachine_protocol::ArtifactKind;
+use papermachine_protocol::ProjectHome;
+use papermachine_protocol::SessionId;
 use papermachine_protocol::WorkflowId;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 pub const PROJECT_HOME_ROLE: &str = "project_summary";
 pub const PROJECT_HOME_SOURCE_ROLE: &str = "project_summary_source";
@@ -48,6 +55,14 @@ pub struct ProjectHomeDraft {
     pub blocks: Vec<ProjectHomeBlock>,
     #[serde(default)]
     applied_effects: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishedProjectHome {
+    pub home: ProjectHome,
+    pub artifact: Artifact,
+    pub source_artifact: Artifact,
+    pub changed: bool,
 }
 
 impl ProjectHomeDraft {
@@ -155,18 +170,135 @@ impl Store {
         Ok(draft)
     }
 
-    pub fn project_home_source_for_publish(
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_project_home_draft(
         &self,
         workflow_id: WorkflowId,
         action_invocation_id: ActionInvocationId,
-    ) -> Result<(Option<ArtifactId>, ProjectHomeSource), StoreError> {
+        session_id: SessionId,
+        source_artifact_id: ArtifactId,
+        artifact_id: ArtifactId,
+        metadata: Value,
+    ) -> Result<PublishedProjectHome, StoreError> {
+        self.validate_project_home_action(workflow_id, action_invocation_id)?;
+        let invocation = self.get_action_invocation(action_invocation_id)?;
+        if invocation.session_id != session_id {
+            return Err(StoreError::Invariant(
+                "Project-home publication Session does not own the Action".to_string(),
+            ));
+        }
+        let workflow = self.get_workflow(workflow_id)?;
         let draft = self.read_project_home_draft(workflow_id, action_invocation_id)?;
+        let current = self.get_project_home(workflow.project_id)?;
+        if current.as_ref().map(|home| home.artifact_id) != draft.base_artifact_id {
+            return Err(StoreError::Invariant(
+                "Project-home base revision changed before publication".to_string(),
+            ));
+        }
+        if let Some(current) = current
+            && current.revision == draft.revision
+        {
+            return Ok(PublishedProjectHome {
+                artifact: self.get_artifact(current.artifact_id)?,
+                source_artifact: self.get_artifact(current.source_artifact_id)?,
+                home: current,
+                changed: false,
+            });
+        }
         if draft.blocks.is_empty() {
             return Err(StoreError::Invariant(
                 "Project-home Agent finished without creating any page blocks".to_string(),
             ));
         }
-        Ok((draft.base_artifact_id, draft.source()))
+        let mut page_metadata = metadata.as_object().cloned().ok_or_else(|| {
+            StoreError::Invariant("Project-home publication metadata must be an object".to_string())
+        })?;
+        let source = draft.source();
+        let source_content = serde_json::to_vec(&source)?;
+        let html = source.html();
+        let now = Utc::now();
+        let source_file = store_artifact_file(
+            &self.managed_root().join("artifacts"),
+            workflow_id,
+            Some(session_id),
+            source_artifact_id,
+            "project-home.blocks.json",
+            &source_content,
+        )?;
+        let source_artifact = Artifact {
+            id: source_artifact_id,
+            project_id: workflow.project_id,
+            workflow_id,
+            session_id: Some(session_id),
+            action_invocation_id: Some(action_invocation_id),
+            kind: ArtifactKind::Other,
+            name: "project-home.blocks.json".to_string(),
+            media_type: PROJECT_HOME_SOURCE_MEDIA_TYPE.to_string(),
+            relative_path: source_file.relative_path,
+            sha256: source_file.sha256,
+            size_bytes: source_file.size_bytes,
+            metadata: json!({
+                "role": PROJECT_HOME_SOURCE_ROLE,
+                "revision": source.revision,
+            }),
+            created_at: now,
+        };
+        let page_file = match store_artifact_file(
+            &self.managed_root().join("artifacts"),
+            workflow_id,
+            Some(session_id),
+            artifact_id,
+            "project-home.html",
+            html.as_bytes(),
+        ) {
+            Ok(file) => file,
+            Err(error) => {
+                remove_artifact_file(self, &source_artifact);
+                return Err(error);
+            }
+        };
+        page_metadata.insert("role".to_string(), json!(PROJECT_HOME_ROLE));
+        page_metadata.insert("revision".to_string(), json!(source.revision));
+        page_metadata.insert("source_artifact_id".to_string(), json!(source_artifact.id));
+        page_metadata.insert(
+            "base_artifact_id".to_string(),
+            json!(draft.base_artifact_id),
+        );
+        let artifact = Artifact {
+            id: artifact_id,
+            project_id: workflow.project_id,
+            workflow_id,
+            session_id: Some(session_id),
+            action_invocation_id: Some(action_invocation_id),
+            kind: ArtifactKind::Report,
+            name: "project-home.html".to_string(),
+            media_type: PROJECT_HOME_MEDIA_TYPE.to_string(),
+            relative_path: page_file.relative_path,
+            sha256: page_file.sha256,
+            size_bytes: page_file.size_bytes,
+            metadata: Value::Object(page_metadata),
+            created_at: now,
+        };
+        let home = ProjectHome {
+            project_id: workflow.project_id,
+            artifact_id: artifact.id,
+            source_artifact_id: source_artifact.id,
+            revision: source.revision,
+            updated_at: now,
+        };
+        match self.commit_project_home(draft.base_artifact_id, &home, &source_artifact, &artifact) {
+            Ok(home) => Ok(PublishedProjectHome {
+                home,
+                artifact,
+                source_artifact,
+                changed: true,
+            }),
+            Err(error) => {
+                remove_artifact_file(self, &source_artifact);
+                remove_artifact_file(self, &artifact);
+                Err(error)
+            }
+        }
     }
 
     fn validate_project_home_action(
@@ -187,46 +319,45 @@ impl Store {
         &self,
         project_id: papermachine_protocol::ProjectId,
     ) -> Result<(Option<ArtifactId>, ProjectHomeSource), StoreError> {
-        let Some(page) = self
-            .list_project_artifacts(project_id)?
-            .into_iter()
-            .find(|artifact| {
-                artifact
-                    .metadata
-                    .get("role")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(PROJECT_HOME_ROLE)
-            })
-        else {
+        let Some(home) = self.get_project_home(project_id)? else {
             return Ok((None, empty_source()?));
         };
-        let Some(source_id) = page
-            .metadata
-            .get("source_artifact_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            // Pre-tool Project-home artifacts intentionally start a fresh block
-            // model. The published page remains visible until the new draft is
-            // atomically committed.
-            return Ok((Some(page.id), empty_source()?));
-        };
-        let source_id = ArtifactId::from_str(source_id)
-            .map_err(|error| StoreError::Invariant(error.to_string()))?;
-        let source_artifact = self.get_artifact(source_id)?;
+        let page = self.get_artifact(home.artifact_id)?;
+        let source_artifact = self.get_artifact(home.source_artifact_id)?;
+        let source_artifact_id = home.source_artifact_id.to_string();
         if source_artifact.project_id != project_id
+            || page.project_id != project_id
             || source_artifact
                 .metadata
                 .get("role")
                 .and_then(serde_json::Value::as_str)
                 != Some(PROJECT_HOME_SOURCE_ROLE)
+            || page.metadata.get("role").and_then(Value::as_str) != Some(PROJECT_HOME_ROLE)
+            || page
+                .metadata
+                .get("source_artifact_id")
+                .and_then(Value::as_str)
+                != Some(source_artifact_id.as_str())
         {
             return Err(StoreError::Invariant(
-                "Project-home source Artifact has invalid ownership or role".to_string(),
+                "Project-home Artifacts have invalid ownership or linkage".to_string(),
             ));
         }
         let source: ProjectHomeSource =
             serde_json::from_slice(&self.read_artifact(&source_artifact)?)?;
         validate_source(&source)?;
+        if source.revision != home.revision
+            || source_artifact
+                .metadata
+                .get("revision")
+                .and_then(Value::as_str)
+                != Some(home.revision.as_str())
+            || page.metadata.get("revision").and_then(Value::as_str) != Some(home.revision.as_str())
+        {
+            return Err(StoreError::Invariant(
+                "Project-home canonical revision does not match its source".to_string(),
+            ));
+        }
         Ok((Some(page.id), source))
     }
 
@@ -240,6 +371,15 @@ impl Store {
             .join(workflow_id.to_string())
             .join(format!("{action_invocation_id}.json"))
     }
+}
+
+fn remove_artifact_file(store: &Store, artifact: &Artifact) {
+    let _ = std::fs::remove_file(
+        store
+            .managed_root()
+            .join("artifacts")
+            .join(&artifact.relative_path),
+    );
 }
 
 fn empty_source() -> Result<ProjectHomeSource, StoreError> {

@@ -426,17 +426,20 @@ draft for as many model/tool steps as it needs and ends naturally when it is
 satisfied; no Workflow-level review state machine or evaluator Action decides
 for it.
 
-After that Action completes, one replay-safe publication effect stores the
-block source and exposes an immutable semantic HTML Artifact. The UI fetches
-the newest page Artifact, removes active content, inline styles, forms, and
+After that Action completes, one replay-safe publication effect compares the
+draft base to the Project's canonical home revision and atomically stores the
+block source, semantic HTML Artifact, and canonical pointer. A stale concurrent
+draft fails closed; an unchanged draft reuses the current revision. The UI fetches
+that canonical page Artifact, removes active content, inline styles, forms, and
 external media, and renders the remaining semantic markup directly as the
 Project home page. There is no fixed Project dashboard and no iframe boundary.
 Manual refreshes are one-shot runs, while an active refresh policy is simply a
 non-terminal scheduled Workflow. Its first refresh is full; later timer firings
 request only changes since the prior `captured_at` cursor and skip model work
 when that delta is empty. The same summary Agent Session retains prior Turns and
-the next draft starts from the last published block source. There is no separate
-summary-instance table or privileged summary daemon.
+the next draft starts from the canonical block source. The canonical reference
+is Project state, not a summary Agent instance or privileged daemon. Historical
+home Artifacts do not consume the ordinary Project snapshot Artifact quota.
 
 ## Skills and workflow roots
 

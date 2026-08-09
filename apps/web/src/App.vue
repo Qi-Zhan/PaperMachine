@@ -1016,9 +1016,7 @@ async function waitForProjectSummary(projectId: string, workflowId: string) {
   for (let attempt = 0; attempt < 240; attempt += 1) {
     const overview = await refreshProjectIndex(projectId)
     const workflow = overview.workflows.find((candidate) => candidate.id === workflowId)
-    const artifact = overview.artifacts.find(
-      (candidate) => candidate.workflow_id === workflowId && candidate.metadata.role === 'project_summary',
-    )
+    const artifact = overview.project_home
     if (workflow?.status === 'failed' || workflow?.status === 'cancelled') {
       throw new Error(workflow.error ?? workflow.status)
     }
