@@ -324,7 +324,7 @@ def ensure_project(
     canonical_root = str(workspace_root.resolve())
     for project in api.get("/projects"):
         workspace = project["workspace"]
-        if workspace["roots"][workspace["primary_root"]] == canonical_root:
+        if workspace["path"] == canonical_root:
             return str(project["id"])
     workspace_root.mkdir(parents=True, exist_ok=True)
     created = api.post(
@@ -332,7 +332,7 @@ def ensure_project(
         {
             "name": name,
             "description": description,
-            "workspace": {"roots": [canonical_root], "primary_root": 0},
+            "workspace": {"path": canonical_root},
         },
     )
     return str(created["id"])

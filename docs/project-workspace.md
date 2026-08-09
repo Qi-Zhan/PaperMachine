@@ -53,24 +53,24 @@ Workspace 具有相同生命周期，删除 Project 时仍会保留。
 An explicitly selected Workspace is represented by the structural payload:
 
 ```json
-{"workspace":{"roots":["/absolute/user/path"],"primary_root":0}}
+{"workspace":{"path":"/absolute/user/path"}}
 ```
 
 The local UI can open the operating system directory picker, and also accepts
-an absolute path directly. The server canonicalizes and validates every root,
+an absolute path directly. The server canonicalizes and validates the path,
 rejects overlap with managed state or another Project attachment, and returns
 the attachment object plus `workspace_available`. Relocation updates only the
 attachment and its revision; it does not move either managed Project state or
 user files.
 
 本地 UI 可以唤起操作系统目录选择器，也允许直接输入绝对路径。server 会
-canonicalize 并校验每个 root，拒绝它与 managed state 或其他 Project attachment
+canonicalize 并校验该路径，拒绝它与 managed state 或其他 Project attachment
 重叠，并返回 attachment object 与 `workspace_available`。Relocation 只更新
 attachment 及 revision，不移动 managed Project state，也不移动用户文件。
 
 ## Runtime connection
 
-Before a Turn is created, the Store verifies that the attached roots still
+Before a Turn is created, the Store verifies that the attached path still
 exist as real directories at their recorded canonical paths. It then
 materializes the Session access preset into a `TurnEnvironmentSnapshot`:
 

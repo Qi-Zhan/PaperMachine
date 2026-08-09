@@ -585,14 +585,12 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
 }
 
 fn workspace_attachment_available(workspace: &WorkspaceAttachment) -> bool {
+    let path = std::path::Path::new(&workspace.path);
     workspace.validate().is_ok()
-        && workspace.roots.iter().all(|root| {
-            let path = std::path::Path::new(root);
-            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-                metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && path.canonicalize().is_ok_and(|canonical| canonical == path)
-            })
+        && std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && path.canonicalize().is_ok_and(|canonical| canonical == path)
         })
 }
 
@@ -671,8 +669,7 @@ fn next_default_workspace(state: &AppState, project_name: &str) -> ApiResult<Pat
         .catalog
         .scan()?
         .into_iter()
-        .flat_map(|entry| entry.project.workspace.roots.into_iter())
-        .map(PathBuf::from)
+        .map(|entry| PathBuf::from(entry.project.workspace.path))
         .collect::<Vec<_>>();
     let directory_name = default_workspace_directory_name(project_name);
     for index in 1_u64.. {
@@ -791,12 +788,7 @@ fn canonical_workspace_selection(
     selection: &WorkspaceSelection,
     create: bool,
 ) -> ApiResult<PathBuf> {
-    if selection.roots.len() != 1 || selection.primary_root != 0 {
-        return Err(ApiError::bad_request(
-            "The current Project API requires exactly one primary Workspace root",
-        ));
-    }
-    canonical_workspace(&selection.roots[0], create)
+    canonical_workspace(&selection.path, create)
 }
 
 fn ensure_project_can_detach(store: &Store) -> ApiResult<()> {

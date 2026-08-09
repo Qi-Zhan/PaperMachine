@@ -150,7 +150,7 @@
       :busy="dialogBusy"
       :error="dialogError"
       :project-name="projectPathDialogProject?.name"
-      :initial-path="projectPathDialogProject ? projectPathDialogProject.workspace.roots[projectPathDialogProject.workspace.primary_root] : undefined"
+      :initial-path="projectPathDialogProject?.workspace.path"
       @close="closeProjectPathDialog"
       @submit="submitProjectPath"
     />

@@ -293,7 +293,7 @@ def create_project(api: Api, name: str, workspace: Path) -> dict[str, Any]:
         "/api/projects",
         {
             "name": name,
-            "workspace": {"roots": [str(workspace)], "primary_root": 0},
+            "workspace": {"path": str(workspace)},
         },
         (201,),
     )
@@ -585,17 +585,14 @@ def main() -> int:
             "PUT",
             f"/api/projects/{project_id}",
             {
-                "workspace": {
-                    "roots": [str(relocated_workspace)],
-                    "primary_root": 0,
-                }
+                "workspace": {"path": str(relocated_workspace)}
             },
         )
         attachment_after = relocated["workspace"]
         if (
             attachment_after["id"] != attachment_before["id"]
             or attachment_after["revision"] != attachment_before["revision"] + 1
-            or attachment_after["roots"] != [str(relocated_workspace.resolve())]
+            or attachment_after["path"] != str(relocated_workspace.resolve())
         ):
             raise RuntimeError(
                 f"Workspace attachment did not revise in place: {attachment_after}"

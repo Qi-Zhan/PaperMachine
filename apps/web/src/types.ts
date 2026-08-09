@@ -44,8 +44,7 @@ export interface Project {
 export interface WorkspaceAttachment {
   id: Id
   revision: number
-  roots: string[]
-  primary_root: number
+  path: string
 }
 
 export interface ProjectCatalogEntry extends Project {
@@ -119,7 +118,7 @@ export interface TurnEnvironmentSnapshot {
   cwd: string
   authorization: {
     preset: AccessPreset
-    workspace_roots: string[]
+    workspace_root: string
     cwd: string
     filesystem: unknown
     tools: unknown

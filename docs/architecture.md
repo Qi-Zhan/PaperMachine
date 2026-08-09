@@ -147,8 +147,8 @@ catalog, Session runtime, and Workflow scheduler; process-wide semaphores still
 bound concurrent work across Projects.
 
 The HTTP representation keeps this boundary structural. Project creation and
-relocation accept `workspace: { roots, primary_root }`; Project listings expose
-that attachment plus `workspace_available`. There is no flattened path field.
+relocation accept `workspace: { path }`; Project listings expose that attachment
+plus `workspace_available`.
 An unavailable attachment affects execution, not Project identity or access to
 managed history. Relocation increments the attachment revision, and every later
 Turn snapshots the new revision.

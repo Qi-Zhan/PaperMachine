@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -142,7 +142,7 @@ impl Store {
         ensure_workspace_is_external(&workspace_root, &self.managed_root)?;
         let workspace_string = workspace_root.to_string_lossy().into_owned();
         let exists = self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace.roots[0]') = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE json_extract(document_json, '$.workspace.path') = ?1)",
             [&workspace_string],
             |row| row.get::<_, bool>(0),
         )?;
@@ -197,8 +197,7 @@ impl Store {
             .map_err(|error| StoreError::Io(error.to_string()))?;
         ensure_workspace_is_external(&workspace_root, &self.managed_root)?;
         let mut project = self.get_project(id)?;
-        project.workspace.roots = vec![workspace_root.to_string_lossy().into_owned()];
-        project.workspace.primary_root = 0;
+        project.workspace.path = workspace_root.to_string_lossy().into_owned();
         project.workspace.revision = project
             .workspace
             .revision
@@ -3780,26 +3779,30 @@ fn ensure_workspace_attachment_available(
     workspace: &WorkspaceAttachment,
 ) -> Result<(), StoreError> {
     workspace.validate().map_err(StoreError::Invariant)?;
-    for root in &workspace.roots {
-        let attached = Path::new(root);
-        let metadata = std::fs::symlink_metadata(attached).map_err(|error| {
-            StoreError::Invariant(format!("Workspace root is unavailable: {root}: {error}"))
-        })?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(StoreError::Invariant(format!(
-                "Workspace root is not a real directory: {root}"
-            )));
-        }
-        let canonical = attached.canonicalize().map_err(|error| {
-            StoreError::Invariant(format!(
-                "Workspace root cannot be resolved: {root}: {error}"
-            ))
-        })?;
-        if canonical != attached {
-            return Err(StoreError::Invariant(format!(
-                "Workspace root no longer matches its attached canonical path: {root}"
-            )));
-        }
+    let attached = Path::new(&workspace.path);
+    let metadata = std::fs::symlink_metadata(attached).map_err(|error| {
+        StoreError::Invariant(format!(
+            "Workspace is unavailable: {}: {error}",
+            workspace.path
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(StoreError::Invariant(format!(
+            "Workspace is not a real directory: {}",
+            workspace.path
+        )));
+    }
+    let canonical = attached.canonicalize().map_err(|error| {
+        StoreError::Invariant(format!(
+            "Workspace cannot be resolved: {}: {error}",
+            workspace.path
+        ))
+    })?;
+    if canonical != attached {
+        return Err(StoreError::Invariant(format!(
+            "Workspace no longer matches its attached canonical path: {}",
+            workspace.path
+        )));
     }
     Ok(())
 }

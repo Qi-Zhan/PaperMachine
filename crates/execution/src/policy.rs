@@ -41,7 +41,7 @@ impl SandboxPolicy {
         authorization: &AuthorizationContext,
         timeout: Duration,
     ) -> Result<Self, ExecutionError> {
-        let workspace_roots = paths(&authorization.workspace_roots)?;
+        let workspace_roots = vec![absolute_path(&authorization.workspace_root)?];
         let unreadable_roots = paths(&authorization.filesystem.managed_roots)?;
         let (filesystem_read, read_roots) =
             scope_roots(authorization.filesystem.read, &workspace_roots);
@@ -161,19 +161,18 @@ impl SandboxPolicy {
 }
 
 fn paths(values: &[String]) -> Result<Vec<PathBuf>, ExecutionError> {
-    values
-        .iter()
-        .map(|value| {
-            let path = PathBuf::from(value);
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Err(ExecutionError::InvalidPolicy(format!(
-                    "sandbox root must be absolute: {value}"
-                )))
-            }
-        })
-        .collect()
+    values.iter().map(|value| absolute_path(value)).collect()
+}
+
+fn absolute_path(value: &str) -> Result<PathBuf, ExecutionError> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(ExecutionError::InvalidPolicy(format!(
+            "sandbox root must be absolute: {value}"
+        )))
+    }
 }
 
 fn scope_roots(
@@ -196,7 +195,7 @@ mod tests {
     fn materialized_authorization_maps_without_reinterpreting_the_preset() {
         let authorization = AuthorizationContext::materialize(
             AccessPreset::Research,
-            vec!["/workspace".to_string()],
+            "/workspace".to_string(),
             "/workspace".to_string(),
             vec!["/managed".to_string()],
         )

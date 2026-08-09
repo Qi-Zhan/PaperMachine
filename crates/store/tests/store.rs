@@ -45,10 +45,7 @@ fn project_creation_separates_managed_state_from_workspace_and_rejects_reuse() {
         .expect("project should be created");
 
     assert_eq!(
-        project
-            .workspace
-            .primary_path()
-            .expect("primary Workspace root"),
+        project.workspace.path,
         root.canonicalize()
             .expect("Project Workspace should be canonicalizable")
             .to_string_lossy()
@@ -119,7 +116,7 @@ fn turn_creation_requires_the_attached_workspace_to_be_available() {
             Vec::new(),
         )
         .expect_err("Turn creation must stop before sampling without a Workspace");
-    assert!(error.to_string().contains("Workspace root is unavailable"));
+    assert!(error.to_string().contains("Workspace is unavailable"));
     assert!(
         store
             .list_turns(session.id)
@@ -485,14 +482,11 @@ fn access_changes_only_between_turns_and_each_turn_keeps_its_snapshot() {
     assert_eq!(second.environment.workspace.id, research.workspace.id);
     assert_eq!(second.environment.workspace.revision, 2);
     assert_eq!(
-        second.environment.workspace.primary_path(),
-        Some(
-            relocated_root
-                .canonicalize()
-                .expect("relocated Workspace should canonicalize")
-                .to_string_lossy()
-                .as_ref()
-        )
+        second.environment.workspace.path,
+        relocated_root
+            .canonicalize()
+            .expect("relocated Workspace should canonicalize")
+            .to_string_lossy()
     );
     let persisted_first = store.get_turn(first.id).expect("first Turn should remain");
     assert_eq!(persisted_first.environment.workspace.revision, 1);

@@ -233,7 +233,7 @@ mod tests {
             .expect("workspace should canonicalize");
         let authorization = AuthorizationContext::materialize(
             papermachine_protocol::AccessPreset::Research,
-            vec![workspace.to_string_lossy().into_owned()],
+            workspace.to_string_lossy().into_owned(),
             workspace.to_string_lossy().into_owned(),
             vec![
                 fixture

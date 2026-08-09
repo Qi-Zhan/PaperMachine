@@ -68,7 +68,7 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
         .expect("managed fixture should canonicalize");
     let authorization = AuthorizationContext::materialize(
         access,
-        vec![workspace_root.to_string_lossy().into_owned()],
+        workspace_root.to_string_lossy().into_owned(),
         workspace_root.to_string_lossy().into_owned(),
         vec![protected_root.to_string_lossy().into_owned()],
     )

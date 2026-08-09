@@ -135,7 +135,7 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
             "/api/projects",
             json!({
                 "name": "Portable paper",
-                "workspace": {"roots": [workspace], "primary_root": 0},
+                "workspace": {"path": workspace},
             }),
         ))
         .await
@@ -210,7 +210,7 @@ async fn project_without_a_workspace_uses_a_unique_default_directory() {
         .canonicalize()
         .expect("default Workspace should be created");
     assert_eq!(
-        first["workspace"]["roots"][0],
+        first["workspace"]["path"],
         first_workspace.to_string_lossy().as_ref()
     );
     assert!(first.get("description").is_none());
@@ -232,7 +232,7 @@ async fn project_without_a_workspace_uses_a_unique_default_directory() {
         .canonicalize()
         .expect("suffixed default Workspace should be created");
     assert_eq!(
-        second["workspace"]["roots"][0],
+        second["workspace"]["path"],
         second_workspace.to_string_lossy().as_ref()
     );
 }
@@ -250,7 +250,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
             "/api/projects",
             json!({
                 "name": "Movable project",
-                "workspace": {"roots": [original_root], "primary_root": 0},
+                "workspace": {"path": original_root},
             }),
         ))
         .await
@@ -278,7 +278,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
         .oneshot(json_request(
             "PUT",
             &format!("/api/projects/{project_id}"),
-            json!({"workspace": {"roots": [relocated_root], "primary_root": 0}}),
+            json!({"workspace": {"path": relocated_root}}),
         ))
         .await
         .expect("Project relocation should complete");
@@ -286,7 +286,7 @@ async fn project_workspace_relocates_without_moving_managed_state_and_delete_pre
     let relocated = response_json(relocated).await;
     assert_eq!(relocated["workspace_available"], true);
     assert_eq!(
-        relocated["workspace"]["roots"][0],
+        relocated["workspace"]["path"],
         relocated_root
             .canonicalize()
             .expect("relocated root should resolve")
@@ -436,10 +436,7 @@ async fn create_project(app: &Router, base: &Path, name: &str) -> Project {
             "/api/projects",
             json!({
                 "name": name,
-                "workspace": {
-                    "roots": [workspace_root.to_string_lossy()],
-                    "primary_root": 0
-                }
+                "workspace": {"path": workspace_root.to_string_lossy()}
             }),
         ))
         .await
@@ -1728,15 +1725,10 @@ async def main(ctx):
             .is_file()
     );
     assert!(
-        std::fs::read_dir(
-            project
-                .workspace
-                .primary_path()
-                .expect("Project should have a primary Workspace root"),
-        )
-        .expect("Workspace should list")
-        .next()
-        .is_none(),
+        std::fs::read_dir(&project.workspace.path)
+            .expect("Workspace should list")
+            .next()
+            .is_none(),
         "publishing a Workflow must not write PaperMachine state into the Workspace"
     );
 

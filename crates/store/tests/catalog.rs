@@ -48,7 +48,7 @@ fn project_catalog_uses_atomic_managed_directories_and_preserves_workspace() {
 }
 
 #[test]
-fn catalog_rejects_a_workspace_attached_to_another_project() {
+fn catalog_rejects_overlapping_project_workspaces() {
     let directory = tempdir().expect("temporary root should be created");
     let catalog = ProjectCatalog::open(directory.path().join("data")).expect("catalog should open");
     let workspace = directory.path().join("workspace");
@@ -59,6 +59,24 @@ fn catalog_rejects_a_workspace_attached_to_another_project() {
         .create_project("Second", &workspace)
         .err()
         .expect("duplicate Workspace must fail");
+    assert!(error.to_string().contains("another Project"));
+
+    let nested = workspace.join("nested");
+    let error = catalog
+        .create_project("Nested", &nested)
+        .err()
+        .expect("nested Workspace must fail");
+    assert!(error.to_string().contains("another Project"));
+
+    let parent = directory.path().join("parent");
+    let child = parent.join("child");
+    catalog
+        .create_project("Child", &child)
+        .expect("non-overlapping child Project should be created");
+    let error = catalog
+        .create_project("Parent", &parent)
+        .err()
+        .expect("parent Workspace must fail");
     assert!(error.to_string().contains("another Project"));
 }
 

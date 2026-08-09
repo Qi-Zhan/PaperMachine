@@ -168,7 +168,7 @@
                   <div class="step-payload">
                     <div>
                       <span>{{ t('session.workspaceAttachment') }} · r{{ turn.environment.workspace.revision }}</span>
-                      <pre>{{ pretty({ id: turn.environment.workspace.id, roots: turn.environment.workspace.roots, primary_root: turn.environment.workspace.primary_root, cwd: turn.environment.cwd }) }}</pre>
+                      <pre>{{ pretty({ id: turn.environment.workspace.id, path: turn.environment.workspace.path, cwd: turn.environment.cwd }) }}</pre>
                     </div>
                     <div>
                       <span>{{ t('session.materializedAuthorization') }} · {{ turn.environment.authorization_sha256 }}</span>

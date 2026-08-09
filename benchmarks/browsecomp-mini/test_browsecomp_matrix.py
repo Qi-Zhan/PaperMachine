@@ -34,10 +34,7 @@ class BrowseCompMatrixTests(unittest.TestCase):
                 return [
                     {
                         "id": "existing-project",
-                        "workspace": {
-                            "roots": [self.workspace_root],
-                            "primary_root": 0,
-                        },
+                        "workspace": {"path": self.workspace_root},
                     }
                 ]
 
@@ -82,7 +79,7 @@ class BrowseCompMatrixTests(unittest.TestCase):
             )
             self.assertEqual(
                 api.payload["workspace"],
-                {"roots": [str(root.resolve())], "primary_root": 0},
+                {"path": str(root.resolve())},
             )
 
     def test_launches_use_project_workflow_api_with_fresh_context(self) -> None:

@@ -138,7 +138,7 @@ pub struct EnvironmentAuthorization {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct AuthorizationContext {
     pub preset: AccessPreset,
-    pub workspace_roots: Vec<String>,
+    pub workspace_root: String,
     pub cwd: String,
     pub filesystem: FilesystemAuthorization,
     pub tools: ToolCapabilities,
@@ -168,20 +168,17 @@ pub enum PathAuthorizationFailure {
 impl AuthorizationContext {
     pub fn materialize(
         preset: AccessPreset,
-        workspace_roots: Vec<String>,
+        workspace_root: String,
         cwd: String,
         managed_roots: Vec<String>,
     ) -> Result<Self, String> {
-        validate_absolute_roots("Workspace", &workspace_roots)?;
+        validate_absolute_path("Workspace", &workspace_root)?;
         validate_absolute_roots("managed", &managed_roots)?;
         if !Path::new(&cwd).is_absolute() {
             return Err("Turn cwd must be absolute".to_string());
         }
-        if !workspace_roots
-            .iter()
-            .any(|root| Path::new(&cwd).starts_with(root))
-        {
-            return Err("Turn cwd must stay inside a Workspace root".to_string());
+        if !Path::new(&cwd).starts_with(&workspace_root) {
+            return Err("Turn cwd must stay inside the Workspace".to_string());
         }
 
         let (read, write, tools, network) = match preset {
@@ -227,7 +224,7 @@ impl AuthorizationContext {
 
         Ok(Self {
             preset,
-            workspace_roots,
+            workspace_root,
             cwd,
             filesystem: FilesystemAuthorization {
                 read,
@@ -293,12 +290,9 @@ impl AuthorizationContext {
             FilesystemScope::Workspace => {}
         }
 
-        let relative = self
-            .workspace_roots
-            .iter()
-            .filter_map(|root| candidate.strip_prefix(root).ok())
-            .min_by_key(|relative| relative.components().count())
-            .ok_or(PathAuthorizationFailure::OutsideWorkspace)?;
+        let relative = candidate
+            .strip_prefix(&self.workspace_root)
+            .map_err(|_| PathAuthorizationFailure::OutsideWorkspace)?;
         if is_sensitive_workspace_path(relative, &self.filesystem.sensitive_workspace_files) {
             return Err(PathAuthorizationFailure::SensitiveWorkspacePath);
         }
@@ -331,13 +325,10 @@ impl TurnEnvironmentSnapshot {
         preset: AccessPreset,
     ) -> Result<Self, String> {
         workspace.validate()?;
-        let cwd = workspace
-            .primary_path()
-            .ok_or_else(|| "Workspace primary root is missing".to_string())?
-            .to_string();
+        let cwd = workspace.path.clone();
         let authorization = AuthorizationContext::materialize(
             preset,
-            workspace.roots.clone(),
+            workspace.path.clone(),
             cwd.clone(),
             vec![managed_root.into()],
         )?;
@@ -361,6 +352,13 @@ fn validate_absolute_roots(label: &str, roots: &[String]) -> Result<(), String> 
         if !Path::new(root).is_absolute() {
             return Err(format!("{label} root must be absolute: {root}"));
         }
+    }
+    Ok(())
+}
+
+fn validate_absolute_path(label: &str, path: &str) -> Result<(), String> {
+    if !Path::new(path).is_absolute() {
+        return Err(format!("{label} path must be absolute: {path}"));
     }
     Ok(())
 }
@@ -411,7 +409,7 @@ mod tests {
     fn policy(preset: AccessPreset) -> AuthorizationContext {
         AuthorizationContext::materialize(
             preset,
-            vec!["/workspace".to_string()],
+            "/workspace".to_string(),
             "/workspace".to_string(),
             vec!["/managed/project".to_string()],
         )
@@ -471,7 +469,7 @@ mod tests {
         let second = policy(AccessPreset::Research);
         let other = AuthorizationContext::materialize(
             AccessPreset::Research,
-            vec!["/other".to_string()],
+            "/other".to_string(),
             "/other".to_string(),
             vec!["/managed/project".to_string()],
         )

@@ -49,7 +49,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({
         name,
-        ...(workspace ? { workspace: { roots: [workspace], primary_root: 0 } } : {}),
+        ...(workspace ? { workspace: { path: workspace } } : {}),
       }),
     })
   },
@@ -59,7 +59,7 @@ export const api = {
       body: JSON.stringify({}),
     }),
   relocateProject: (projectId: string, workspacePath: string) =>
-    request<ProjectCatalogEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace: { roots: [workspacePath], primary_root: 0 } }) }),
+    request<ProjectCatalogEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace: { path: workspacePath } }) }),
   removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
   listSessions: (projectId: string, limit = 100) =>

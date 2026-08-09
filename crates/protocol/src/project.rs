@@ -24,17 +24,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct WorkspaceAttachment {
     pub id: WorkspaceId,
-    /// Monotonically increases whenever the user changes the attached roots.
+    /// Monotonically increases whenever the user changes the attached path.
     pub revision: u64,
-    /// Canonical absolute user-owned filesystem roots. The current UI selects
-    /// one root, while the runtime representation deliberately supports more.
-    pub roots: Vec<String>,
-    /// Index into `roots` used as the default cwd for relative tool paths.
-    pub primary_root: usize,
+    /// Canonical absolute user-owned filesystem directory.
+    pub path: String,
 }
 
 impl WorkspaceAttachment {
@@ -42,27 +40,19 @@ impl WorkspaceAttachment {
         Self {
             id: WorkspaceId::new(),
             revision: 1,
-            roots: vec![path.into()],
-            primary_root: 0,
+            path: path.into(),
         }
-    }
-
-    pub fn primary_path(&self) -> Option<&str> {
-        self.roots.get(self.primary_root).map(String::as_str)
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.roots.is_empty() {
-            return Err("Workspace must contain at least one root".to_string());
-        }
-        if self.primary_root >= self.roots.len() {
-            return Err("Workspace primary_root is outside roots".to_string());
-        }
         if self.revision == 0 {
             return Err("Workspace revision must be positive".to_string());
         }
-        if self.roots.iter().any(|root| root.trim().is_empty()) {
-            return Err("Workspace roots must not be empty".to_string());
+        if self.path.trim().is_empty() {
+            return Err("Workspace path must not be empty".to_string());
+        }
+        if !Path::new(&self.path).is_absolute() {
+            return Err("Workspace path must be absolute".to_string());
         }
         Ok(())
     }
@@ -70,16 +60,12 @@ impl WorkspaceAttachment {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct WorkspaceSelection {
-    pub roots: Vec<String>,
-    pub primary_root: usize,
+    pub path: String,
 }
 
 impl WorkspaceSelection {
     pub fn single(path: impl Into<String>) -> Self {
-        Self {
-            roots: vec![path.into()],
-            primary_root: 0,
-        }
+        Self { path: path.into() }
     }
 }
 
@@ -108,7 +94,7 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     /// User-owned filesystem attached to this managed Project. PaperMachine
-    /// runtime state is stored separately and is never placed in these roots.
+    /// runtime state is stored separately and is never placed in this path.
     pub workspace: WorkspaceAttachment,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -471,10 +471,7 @@ capabilities = []
                 "/api/projects",
                 Some(json!({
                     "name": name,
-                    "workspace": {
-                        "roots": [self.workspace.to_string_lossy()],
-                        "primary_root": 0,
-                    }
+                    "workspace": {"path": self.workspace.to_string_lossy()}
                 })),
             )
             .await;

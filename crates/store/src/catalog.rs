@@ -8,7 +8,6 @@ use crate::Store;
 use crate::StoreError;
 use papermachine_protocol::Project;
 use papermachine_protocol::ProjectId;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -222,19 +221,21 @@ impl ProjectCatalog {
     ) -> Result<(Vec<CatalogProject>, Vec<CatalogFailure>), StoreError> {
         let mut projects = Vec::new();
         let mut failures = Vec::new();
-        let mut workspace_owners = BTreeMap::<PathBuf, ProjectId>::new();
+        let mut workspace_owners = Vec::<(PathBuf, ProjectId)>::new();
         for entry in sorted_entries(&self.projects_root)? {
             let path = entry.path();
             let candidate = load_catalog_project(entry).and_then(|candidate| {
-                for root in &candidate.project.workspace.roots {
-                    let root = PathBuf::from(root);
-                    if let Some(owner) = workspace_owners.get(&root) {
-                        return Err(StoreError::Invariant(format!(
-                            "Workspace {} is attached to Projects {owner} and {}",
-                            root.display(),
-                            candidate.project.id
-                        )));
-                    }
+                let workspace = PathBuf::from(&candidate.project.workspace.path);
+                if let Some((other, owner)) = workspace_owners
+                    .iter()
+                    .find(|(other, _)| paths_overlap(&workspace, other))
+                {
+                    return Err(StoreError::Invariant(format!(
+                        "Workspace {} for Project {} overlaps Workspace {} for Project {owner}",
+                        workspace.display(),
+                        candidate.project.id,
+                        other.display()
+                    )));
                 }
                 Ok(candidate)
             });
@@ -248,9 +249,10 @@ impl ProjectCatalog {
                     continue;
                 }
             };
-            for root in &candidate.project.workspace.roots {
-                workspace_owners.insert(PathBuf::from(root), candidate.project.id);
-            }
+            workspace_owners.push((
+                PathBuf::from(&candidate.project.workspace.path),
+                candidate.project.id,
+            ));
             projects.push(candidate);
         }
         projects.sort_by(|left, right| {
@@ -317,19 +319,18 @@ fn ensure_workspace_is_unique(
 ) -> Result<(), StoreError> {
     if projects.iter().any(|candidate| {
         Some(candidate.project.id) != except
-            && candidate
-                .project
-                .workspace
-                .roots
-                .iter()
-                .any(|root| Path::new(root) == workspace)
+            && paths_overlap(Path::new(&candidate.project.workspace.path), workspace)
     }) {
         return Err(StoreError::Invariant(format!(
-            "Workspace is already attached to another Project: {}",
+            "Workspace overlaps another Project Workspace: {}",
             workspace.display()
         )));
     }
     Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn canonical_workspace(path: &Path, create: bool) -> Result<PathBuf, StoreError> {
