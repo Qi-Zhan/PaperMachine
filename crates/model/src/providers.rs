@@ -15,6 +15,7 @@ use papermachine_protocol::ModelRequest;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -27,6 +28,19 @@ pub struct ModelProfile {
     pub provider: String,
     pub model: String,
     pub context_window: usize,
+    pub capabilities: Vec<ModelCapability>,
+}
+
+impl ModelProfile {
+    pub fn supports(&self, capability: ModelCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    HostedWebSearch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -38,7 +52,6 @@ pub struct ModelProviderInfo {
     pub request_timeout_seconds: u64,
     pub stream_idle_timeout_seconds: u64,
     pub responses_websockets: bool,
-    pub hosted_web_search: bool,
     pub prompt_cache_mode: String,
 }
 
@@ -94,10 +107,24 @@ impl ConfiguredModels {
                 "model config requires at least one provider and one model profile".to_string(),
             ));
         }
+        if !file.models.contains_key(&file.default_model) {
+            return Err(ModelError::Configuration(format!(
+                "default_model {:?} is not defined in [models]",
+                file.default_model
+            )));
+        }
+
+        let ModelConfigFile {
+            default_model,
+            providers: provider_configs,
+            models: model_configs,
+        } = file;
+        let declared_providers = provider_configs.keys().cloned().collect::<HashSet<_>>();
 
         let mut clients: HashMap<String, Arc<dyn ModelClient>> = HashMap::new();
-        let mut providers = Vec::with_capacity(file.providers.len());
-        for (provider_id, provider) in file.providers {
+        let mut providers = Vec::with_capacity(provider_configs.len());
+        let mut unavailable_providers = HashSet::new();
+        for (provider_id, provider) in provider_configs {
             validate_identifier("provider", &provider_id)?;
             if provider.kind != ProviderKind::OpenAiResponses {
                 return Err(ModelError::Configuration(format!(
@@ -109,14 +136,26 @@ impl ConfiguredModels {
                     "provider {provider_id:?} must set api_key_env"
                 )));
             }
-            let api_key = key_lookup(provider.api_key_env.trim())
+            let api_key = match key_lookup(provider.api_key_env.trim())
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    ModelError::Configuration(format!(
+            {
+                Some(api_key) => api_key,
+                None if provider.optional => {
+                    tracing::warn!(
+                        provider = provider_id,
+                        api_key_env = provider.api_key_env,
+                        "optional model provider is unavailable"
+                    );
+                    unavailable_providers.insert(provider_id);
+                    continue;
+                }
+                None => {
+                    return Err(ModelError::Configuration(format!(
                         "provider {provider_id:?} requires non-empty environment variable {}",
                         provider.api_key_env
-                    ))
-                })?;
+                    )));
+                }
+            };
             let endpoint = super::openai::responses_endpoint(&provider.base_url)?;
             if endpoint.scheme() != "https" {
                 tracing::warn!(
@@ -137,7 +176,12 @@ impl ConfiguredModels {
             )?;
             let prompt_cache_mode = provider.prompt_cache_mode.unwrap_or_default();
             let responses_websockets = provider.responses_websockets.unwrap_or(true);
-            let hosted_web_search = provider.hosted_web_search;
+            let hosted_web_search = model_configs.values().any(|profile| {
+                profile.provider == provider_id
+                    && profile
+                        .capabilities
+                        .contains(&ModelCapability::HostedWebSearch)
+            });
             let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
                 provider_id: provider_id.clone(),
                 endpoint: endpoint.clone(),
@@ -161,16 +205,15 @@ impl ConfiguredModels {
                 request_timeout_seconds: request_timeout.as_secs(),
                 stream_idle_timeout_seconds: stream_idle_timeout.as_secs(),
                 responses_websockets,
-                hosted_web_search,
                 prompt_cache_mode: prompt_cache_mode_name(prompt_cache_mode).to_string(),
             });
             clients.insert(provider_id, Arc::new(client));
         }
 
-        let mut profiles = Vec::with_capacity(file.models.len());
-        for (profile_id, profile) in file.models {
+        let mut profiles = Vec::with_capacity(model_configs.len());
+        for (profile_id, profile) in model_configs {
             validate_identifier("model profile", &profile_id)?;
-            if !clients.contains_key(&profile.provider) {
+            if !declared_providers.contains(&profile.provider) {
                 return Err(ModelError::Configuration(format!(
                     "model profile {profile_id:?} references unknown provider {:?}",
                     profile.provider
@@ -186,27 +229,45 @@ impl ConfiguredModels {
                     "model profile {profile_id:?} context_window must be at least 4096"
                 )));
             }
+            if profile.capabilities.iter().collect::<HashSet<_>>().len()
+                != profile.capabilities.len()
+            {
+                return Err(ModelError::Configuration(format!(
+                    "model profile {profile_id:?} contains duplicate capabilities"
+                )));
+            }
+            if unavailable_providers.contains(&profile.provider) {
+                tracing::warn!(
+                    model_profile = profile_id,
+                    provider = profile.provider,
+                    "model profile is unavailable"
+                );
+                continue;
+            }
+            if !clients.contains_key(&profile.provider) {
+                return Err(ModelError::Configuration(format!(
+                    "model profile {profile_id:?} has no available provider {:?}",
+                    profile.provider
+                )));
+            }
             profiles.push(ModelProfile {
                 id: profile_id,
                 provider: profile.provider,
                 model: profile.model,
                 context_window: profile.context_window,
+                capabilities: profile.capabilities,
             });
         }
         profiles.sort_by(|left, right| left.id.cmp(&right.id));
         providers.sort_by(|left, right| left.id.cmp(&right.id));
-        if !profiles
-            .iter()
-            .any(|profile| profile.id == file.default_model)
-        {
+        if !profiles.iter().any(|profile| profile.id == default_model) {
             return Err(ModelError::Configuration(format!(
-                "default_model {:?} is not defined in [models]",
-                file.default_model
+                "default_model {default_model:?} is unavailable; its provider credentials are required"
             )));
         }
         let router = ModelRouter::new(profiles.clone(), clients)?;
         Ok(Self {
-            default_model: file.default_model,
+            default_model,
             profiles,
             providers,
             router,
@@ -310,9 +371,11 @@ impl ModelClient for ModelRouter {
 
     fn supports_hosted_tool(&self, model: &str, tool: HostedTool) -> bool {
         self.routes.get(model).is_some_and(|route| {
-            route
-                .client
-                .supports_hosted_tool(&route.profile.model, tool)
+            matches!(tool, HostedTool::WebSearch)
+                && route.profile.supports(ModelCapability::HostedWebSearch)
+                && route
+                    .client
+                    .supports_hosted_tool(&route.profile.model, tool)
         })
     }
 }
@@ -337,6 +400,8 @@ struct ProviderConfigFile {
     kind: ProviderKind,
     base_url: String,
     api_key_env: String,
+    #[serde(default)]
+    optional: bool,
     organization: Option<String>,
     project: Option<String>,
     max_request_retries: Option<u32>,
@@ -345,7 +410,6 @@ struct ProviderConfigFile {
     reasoning_effort: Option<OpenAiReasoningEffort>,
     store_responses: Option<bool>,
     responses_websockets: Option<bool>,
-    hosted_web_search: bool,
     prompt_cache_mode: Option<OpenAiPromptCacheMode>,
 }
 
@@ -355,6 +419,7 @@ struct ModelProfileFile {
     provider: String,
     model: String,
     context_window: usize,
+    capabilities: Vec<ModelCapability>,
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), ModelError> {
@@ -443,24 +508,30 @@ kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 responses_websockets = false
-hosted_web_search = true
 prompt_cache_mode = "implicit"
 
 [providers.openai]
 kind = "open_ai_responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
-hosted_web_search = false
 
 [models.deepseek-flash]
 provider = "deepseek"
 model = "deepseek-v4-flash"
 context_window = 1000000
+capabilities = ["hosted_web_search"]
 
 [models.openai-main]
 provider = "openai"
 model = "gpt-5.6-sol"
 context_window = 1000000
+capabilities = []
+
+[models.deepseek-no-search]
+provider = "deepseek"
+model = "deepseek-chat"
+context_window = 1000000
+capabilities = []
 "#;
         let configured = ConfiguredModels::from_toml_with_key_lookup(source, |name| {
             Some(format!("secret-for-{name}"))
@@ -468,21 +539,21 @@ context_window = 1000000
         .expect("provider config should load");
 
         assert_eq!(configured.default_model, "deepseek-flash");
-        assert_eq!(configured.profiles.len(), 2);
+        assert_eq!(configured.profiles.len(), 3);
         assert_eq!(configured.providers.len(), 2);
         assert!(
             configured
-                .providers
+                .profiles
                 .iter()
-                .find(|provider| provider.id == "deepseek")
-                .is_some_and(|provider| provider.hosted_web_search)
+                .find(|profile| profile.id == "deepseek-flash")
+                .is_some_and(|profile| profile.supports(ModelCapability::HostedWebSearch))
         );
         assert!(
             configured
-                .providers
+                .profiles
                 .iter()
-                .find(|provider| provider.id == "openai")
-                .is_some_and(|provider| !provider.hosted_web_search)
+                .find(|profile| profile.id == "openai-main")
+                .is_some_and(|profile| !profile.supports(ModelCapability::HostedWebSearch))
         );
         assert!(
             configured
@@ -493,6 +564,11 @@ context_window = 1000000
             !configured
                 .router
                 .supports_hosted_tool("openai-main", HostedTool::WebSearch)
+        );
+        assert!(
+            !configured
+                .router
+                .supports_hosted_tool("deepseek-no-search", HostedTool::WebSearch)
         );
         assert_eq!(
             configured.router.model_context_window("deepseek-flash"),
@@ -510,15 +586,55 @@ default_model = "main"
 kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
-hosted_web_search = true
 [models.main]
 provider = "deepseek"
 model = "deepseek-v4-flash"
 context_window = 1000000
+capabilities = []
 "#;
         let error = ConfiguredModels::from_toml_with_key_lookup(source, |_| None)
             .expect_err("missing key should fail");
         assert!(error.to_string().contains("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn unavailable_optional_provider_and_its_profiles_are_skipped() {
+        let source = r#"
+default_model = "local-main"
+
+[providers.local]
+kind = "open_ai_responses"
+base_url = "https://models.example.test"
+api_key_env = "LOCAL_API_KEY"
+
+[providers.optional]
+kind = "open_ai_responses"
+base_url = "https://optional.example.test"
+api_key_env = "OPTIONAL_API_KEY"
+optional = true
+
+[models.local-main]
+provider = "local"
+model = "main"
+context_window = 100000
+capabilities = []
+
+[models.optional-search]
+provider = "optional"
+model = "search"
+context_window = 100000
+capabilities = ["hosted_web_search"]
+"#;
+        let configured = ConfiguredModels::from_toml_with_key_lookup(source, |name| {
+            (name == "LOCAL_API_KEY").then(|| "available".to_string())
+        })
+        .expect("optional provider should not block available profiles");
+
+        assert_eq!(configured.default_model, "local-main");
+        assert_eq!(configured.profiles.len(), 1);
+        assert_eq!(configured.profiles[0].id, "local-main");
+        assert_eq!(configured.providers.len(), 1);
+        assert_eq!(configured.providers[0].id, "local");
     }
 
     #[test]
@@ -532,6 +648,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 provider = "deepseek"
 model = "deepseek-v4-flash"
 context_window = 1000000
+capabilities = []
 "#;
         let error =
             ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
@@ -540,7 +657,7 @@ context_window = 1000000
     }
 
     #[test]
-    fn hosted_web_search_capability_is_required() {
+    fn model_capabilities_are_required() {
         let source = r#"
 default_model = "main"
 [providers.deepseek]
@@ -555,11 +672,7 @@ context_window = 1000000
         let error =
             ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
                 .expect_err("hosted web search support should be explicit");
-        assert!(
-            error
-                .to_string()
-                .contains("missing field `hosted_web_search`")
-        );
+        assert!(error.to_string().contains("missing field `capabilities`"));
     }
 
     #[tokio::test]
@@ -573,6 +686,7 @@ context_window = 1000000
                 provider: "deepseek".to_string(),
                 model: "deepseek-v4-flash".to_string(),
                 context_window: 1_000_000,
+                capabilities: vec![ModelCapability::HostedWebSearch],
             }],
             providers,
         )

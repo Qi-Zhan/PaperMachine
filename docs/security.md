@@ -172,9 +172,10 @@ memory but is not copied into the provider configuration, SQLite, workflow sourc
 artifacts, or logs. Configuration debug output omits/redacts credentials, and
 child workflow or tool processes receive a cleared environment.
 
-Outside explicit demo mode, startup fails unless a valid PaperMachine provider
-configuration is present and every provider's named credential variable is
-non-empty.
+Outside explicit demo mode, startup requires a valid configuration and an
+available `default_model`. A provider marked `optional = true` and its profiles
+are omitted when its named credential is absent; all other provider credentials
+remain mandatory.
 
 Use an HTTPS provider endpoint. With an explicitly configured plain HTTP base
 URL, the bearer credential, prompts, tool results, and research outputs cross

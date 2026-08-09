@@ -20,6 +20,7 @@ pub use openai::OpenAiReasoningEffort;
 pub use openai::OpenAiResponsesClient;
 pub use openai::OpenAiResponsesConfig;
 pub use providers::ConfiguredModels;
+pub use providers::ModelCapability;
 pub use providers::ModelProfile;
 pub use providers::ModelProviderInfo;
 pub use providers::ModelRouter;

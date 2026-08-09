@@ -360,13 +360,13 @@ max_request_retries = 0
 request_timeout_seconds = 30
 stream_idle_timeout_seconds = 30
 responses_websockets = false
-hosted_web_search = false
 prompt_cache_mode = "implicit"
 
 [models.{MODEL_PROFILE}]
 provider = "process-test"
 model = "process-test-upstream"
 context_window = 128000
+capabilities = []
 "#,
                 mock.base_url
             ),

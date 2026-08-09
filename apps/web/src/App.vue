@@ -312,10 +312,7 @@ const sessionHostedWebSearch = computed(() => {
   const profile = health.value?.model_profiles.find(
     (candidate) => candidate.id === sessionView.value?.session.model,
   )
-  if (!profile) return false
-  return health.value?.model_providers.find(
-    (provider) => provider.id === profile.provider,
-  )?.hosted_web_search ?? false
+  return profile?.capabilities.includes('hosted_web_search') ?? false
 })
 const projectSummaryBusy = computed(
   () =>

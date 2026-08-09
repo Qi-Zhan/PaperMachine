@@ -451,6 +451,7 @@ export interface ModelProfile {
   provider: string
   model: string
   context_window: number
+  capabilities: string[]
 }
 
 export interface ModelProvider {
@@ -461,7 +462,6 @@ export interface ModelProvider {
   request_timeout_seconds: number
   stream_idle_timeout_seconds: number
   responses_websockets: boolean
-  hosted_web_search: boolean
   prompt_cache_mode: string
 }
 

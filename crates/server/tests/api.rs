@@ -368,12 +368,14 @@ async fn test_app_with_model_profiles(
             provider: "scripted".to_string(),
             model: "research-upstream".to_string(),
             context_window: 128_000,
+            capabilities: Vec::new(),
         },
         ModelProfile {
             id: "review-model".to_string(),
             provider: "scripted".to_string(),
             model: "review-upstream".to_string(),
             context_window: 128_000,
+            capabilities: Vec::new(),
         },
     ];
     let providers = HashMap::from([(
