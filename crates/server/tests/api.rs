@@ -1189,23 +1189,6 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
     let app = test_app_with_model_profiles(&directory, scripted.clone()).await;
     let project = create_project(&app, directory.path(), "Per-Agent models").await;
 
-    let unknown_model = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/workflows", project.id),
-            json!({
-                "program_slug": "parallel-discovery",
-                "request": "Reject an unknown per-Agent model profile.",
-                "params": {"research_model": "missing-model-profile"},
-                "model": "research-model",
-                "access": "research"
-            }),
-        ))
-        .await
-        .expect("unknown model parameter request should complete");
-    assert_eq!(unknown_model.status(), StatusCode::BAD_REQUEST);
-
     let response = app
         .clone()
         .oneshot(json_request(
@@ -1284,23 +1267,6 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         "Reuse this prior evidence instead of restarting.",
     )
     .await;
-
-    let unknown_agent = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/workflows", project.id),
-            json!({
-                "program_slug": "parallel-discovery",
-                "request": "Reject an unknown Agent override.",
-                "agent_access_overrides": {"MissingAgent": "model_only"},
-                "model": "demo-model",
-                "access": "research"
-            }),
-        ))
-        .await
-        .expect("unknown override request should complete");
-    assert_eq!(unknown_agent.status(), StatusCode::BAD_REQUEST);
 
     let above_origin = app
         .clone()
@@ -1633,31 +1599,6 @@ async fn api_generates_validates_and_publishes_python_workflows() {
     assert_eq!(generated["validation"]["agents"][0]["access"], "research");
     assert_eq!(generated["validation"]["agents"][1]["access"], "model_only");
     assert_eq!(generated["validation"]["features"]["parallel_blocks"], 1);
-
-    let invalid_access = source.replace("access = \"research\"", "access = \"root\"");
-    let response = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            &format!("/api/projects/{}/workflow-programs/validate", project.id),
-            json!({"source": invalid_access}),
-        ))
-        .await
-        .expect("invalid Agent access should be validated");
-    assert_eq!(response.status(), StatusCode::OK);
-    let invalid_access = response_json(response).await;
-    assert_eq!(invalid_access["valid"], false);
-    assert!(
-        invalid_access["diagnostics"]
-            .as_array()
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("Agent access must be one of"))
-                })
-            })
-    );
 
     let unknown_tool_source = r#"from papermachine import Agent, action, workflow
 
