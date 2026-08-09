@@ -10,6 +10,7 @@ use papermachine_protocol::WorkflowStatus;
 use papermachine_protocol::WorkflowUsage;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -59,7 +60,7 @@ pub struct WorkflowScheduler {
 }
 
 struct SchedulerInner {
-    store: Arc<Store>,
+    store: StoreHandle,
     executor: Arc<dyn WorkflowRuntime>,
     permits: Arc<Semaphore>,
     handles: Mutex<HashMap<WorkflowId, ScheduledRun>>,
@@ -72,7 +73,7 @@ struct ScheduledRun {
 
 impl WorkflowScheduler {
     pub fn new(
-        store: Arc<Store>,
+        store: StoreHandle,
         executor: Arc<dyn WorkflowRuntime>,
         max_concurrent_runs: usize,
     ) -> Self {
@@ -81,7 +82,7 @@ impl WorkflowScheduler {
     }
 
     pub fn new_with_permits(
-        store: Arc<Store>,
+        store: StoreHandle,
         executor: Arc<dyn WorkflowRuntime>,
         permits: Arc<Semaphore>,
     ) -> Self {
@@ -96,7 +97,11 @@ impl WorkflowScheduler {
     }
 
     pub async fn start(&self, workflow_id: WorkflowId) -> Result<bool, WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow(workflow_id)?;
+        let run = self
+            .inner
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         if run.status.is_terminal() {
             return Err(WorkflowSchedulerError::TerminalWorkflow {
                 workflow_id,
@@ -120,6 +125,7 @@ impl WorkflowScheduler {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let outcome = run_scheduled(Arc::clone(&inner), workflow_id, cancellation).await;
+            inner.handles.lock().await.remove(&workflow_id);
             let _ = outcome_tx.send(Some(outcome));
         });
         Ok(true)
@@ -130,7 +136,12 @@ impl WorkflowScheduler {
     /// durable journal; an unfinished Action resumes its checkpointed Turn.
     pub async fn recover(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
         let mut started = Vec::new();
-        for run in self.inner.store.list_recoverable_workflows()? {
+        let workflows = self
+            .inner
+            .store
+            .call(|store| store.list_recoverable_workflows())
+            .await?;
+        for run in workflows {
             if self.start(run.id).await? {
                 started.push(run.id);
             }
@@ -139,7 +150,11 @@ impl WorkflowScheduler {
     }
 
     pub async fn pause(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow(workflow_id)?;
+        let run = self
+            .inner
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         if run.status.is_terminal() {
             return Err(WorkflowSchedulerError::TerminalWorkflow {
                 workflow_id,
@@ -148,25 +163,39 @@ impl WorkflowScheduler {
         }
         self.inner
             .store
-            .pause_workflow(workflow_id, Some("paused by user".to_string()))?;
+            .call(move |store| {
+                store.pause_workflow(workflow_id, Some("paused by user".to_string()))
+            })
+            .await?;
         Ok(())
     }
 
     pub async fn resume(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow(workflow_id)?;
+        let run = self
+            .inner
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         if run.status.is_terminal() {
             return Err(WorkflowSchedulerError::TerminalWorkflow {
                 workflow_id,
                 status: run.status,
             });
         }
-        self.inner.store.resume_workflow(workflow_id)?;
+        self.inner
+            .store
+            .call(move |store| store.resume_workflow(workflow_id))
+            .await?;
         self.start(workflow_id).await?;
         Ok(())
     }
 
     pub async fn cancel(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self.inner.store.get_workflow(workflow_id)?;
+        let run = self
+            .inner
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         if run.status.is_terminal() {
             return Err(WorkflowSchedulerError::TerminalWorkflow {
                 workflow_id,
@@ -175,7 +204,8 @@ impl WorkflowScheduler {
         }
         self.inner
             .store
-            .cancel_workflow(workflow_id, "cancelled by user")?;
+            .call(move |store| store.cancel_workflow(workflow_id, "cancelled by user"))
+            .await?;
         if let Some(handle) = self.inner.handles.lock().await.get(&workflow_id) {
             handle.cancellation.cancel();
         }
@@ -186,23 +216,49 @@ impl WorkflowScheduler {
         &self,
         workflow_id: WorkflowId,
     ) -> Result<WorkflowOutcome, WorkflowSchedulerError> {
-        let mut outcome = self
+        let outcome = self
             .inner
             .handles
             .lock()
             .await
             .get(&workflow_id)
-            .map(|handle| handle.outcome.clone())
-            .ok_or(WorkflowSchedulerError::NotScheduled(workflow_id))?;
+            .map(|handle| handle.outcome.clone());
+        let Some(mut outcome) = outcome else {
+            return self.persisted_outcome(workflow_id).await;
+        };
         loop {
             if let Some(result) = outcome.borrow().clone() {
                 return Ok(result);
             }
-            outcome
-                .changed()
-                .await
-                .map_err(|_| WorkflowSchedulerError::OutcomeChannelClosed(workflow_id))?;
+            if outcome.changed().await.is_err() {
+                return self.persisted_outcome(workflow_id).await;
+            }
         }
+    }
+
+    async fn persisted_outcome(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<WorkflowOutcome, WorkflowSchedulerError> {
+        let workflow = self
+            .inner
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
+        if !workflow.status.is_terminal() {
+            return Err(WorkflowSchedulerError::NotScheduled(workflow_id));
+        }
+        Ok(match workflow.status {
+            WorkflowStatus::Completed => workflow.output.ok_or_else(|| {
+                workflow
+                    .error
+                    .unwrap_or_else(|| "Workflow completed without output".to_string())
+            }),
+            WorkflowStatus::Failed | WorkflowStatus::Cancelled => Err(workflow
+                .error
+                .unwrap_or_else(|| format!("Workflow ended as {:?}", workflow.status))),
+            _ => unreachable!("terminal status checked above"),
+        })
     }
 }
 
@@ -214,10 +270,14 @@ async fn run_scheduled(
     let outcome = run_scheduled_inner(Arc::clone(&inner), workflow_id, cancellation).await;
     if inner
         .store
-        .get_workflow(workflow_id)
+        .call(move |store| store.get_workflow(workflow_id))
+        .await
         .is_ok_and(|workflow| workflow.status.is_terminal())
     {
-        let _ = inner.store.cleanup_terminal_workflow_state(workflow_id);
+        let _ = inner
+            .store
+            .call(move |store| store.cleanup_terminal_workflow_state(workflow_id))
+            .await;
     }
     outcome
 }
@@ -231,7 +291,8 @@ async fn run_scheduled_inner(
     loop {
         let current = inner
             .store
-            .get_workflow(workflow_id)
+            .call(move |store| store.get_workflow(workflow_id))
+            .await
             .map_err(|error| error.to_string())?;
         if current.status.is_terminal() {
             return current.output.ok_or_else(|| {
@@ -260,12 +321,14 @@ async fn run_scheduled_inner(
         };
         let mut run = inner
             .store
-            .get_workflow(workflow_id)
+            .call(move |store| store.get_workflow(workflow_id))
+            .await
             .map_err(|error| error.to_string())?;
         if run.status == WorkflowStatus::Created {
             run = inner
                 .store
-                .start_workflow(workflow_id)
+                .call(move |store| store.start_workflow(workflow_id))
+                .await
                 .map_err(|error| error.to_string())?;
         }
         if run.status != WorkflowStatus::Running {
@@ -282,25 +345,30 @@ async fn run_scheduled_inner(
             .max(u64::from(!started.elapsed().is_zero()));
         inner
             .store
-            .add_workflow_usage(
-                workflow_id,
-                WorkflowUsage {
-                    wall_time_seconds: elapsed,
-                    ..WorkflowUsage::default()
-                },
-            )
+            .call(move |store| {
+                store.add_workflow_usage(
+                    workflow_id,
+                    WorkflowUsage {
+                        wall_time_seconds: elapsed,
+                        ..WorkflowUsage::default()
+                    },
+                )
+            })
+            .await
             .map_err(|error| error.to_string())?;
         drop(permit);
 
         let current = inner
             .store
-            .get_workflow(workflow_id)
+            .call(move |store| store.get_workflow(workflow_id))
+            .await
             .map_err(|error| error.to_string())?;
         if cancellation.is_cancelled() {
             if !current.status.is_terminal() {
                 inner
                     .store
-                    .cancel_workflow(workflow_id, "cancelled by user")
+                    .call(move |store| store.cancel_workflow(workflow_id, "cancelled by user"))
+                    .await
                     .map_err(|error| error.to_string())?;
             }
             return Err("cancelled by user".to_string());
@@ -312,7 +380,11 @@ async fn run_scheduled_inner(
             Ok(WorkflowExecution::Completed(output)) => {
                 inner
                     .store
-                    .complete_workflow(workflow_id, output.clone())
+                    .call({
+                        let output = output.clone();
+                        move |store| store.complete_workflow(workflow_id, output)
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 return Ok(output);
             }
@@ -320,13 +392,22 @@ async fn run_scheduled_inner(
                 if current.status != suspension.status {
                     match suspension.status {
                         WorkflowStatus::WaitingForUser => {
-                            inner.store.wait_workflow_for_user(workflow_id)
+                            inner
+                                .store
+                                .call(move |store| store.wait_workflow_for_user(workflow_id))
+                                .await
                         }
                         WorkflowStatus::WaitingForTimer => {
-                            inner.store.wait_workflow_for_timer(workflow_id)
+                            inner
+                                .store
+                                .call(move |store| store.wait_workflow_for_timer(workflow_id))
+                                .await
                         }
                         WorkflowStatus::WaitingForSignal => {
-                            inner.store.wait_workflow_for_signal(workflow_id)
+                            inner
+                                .store
+                                .call(move |store| store.wait_workflow_for_signal(workflow_id))
+                                .await
                         }
                         status => Err(StoreError::Invariant(format!(
                             "Workflow runtime returned invalid suspension status {status:?}"
@@ -339,7 +420,11 @@ async fn run_scheduled_inner(
             Err(error) => {
                 inner
                     .store
-                    .fail_workflow(workflow_id, error.clone())
+                    .call({
+                        let error = error.clone();
+                        move |store| store.fail_workflow(workflow_id, error)
+                    })
+                    .await
                     .map_err(|store_error| store_error.to_string())?;
                 return Err(error);
             }
@@ -348,18 +433,22 @@ async fn run_scheduled_inner(
 }
 
 async fn wait_until_runnable(
-    store: &Store,
+    store: &StoreHandle,
     workflow_id: WorkflowId,
     cancellation: &CancellationToken,
     wake_at_hint: Option<DateTime<Utc>>,
 ) -> Result<(), String> {
-    let mut events = store.subscribe();
+    let mut events = store
+        .call::<_, StoreError, _>(|store| Ok(store.subscribe()))
+        .await
+        .map_err(|error| error.to_string())?;
     loop {
         if cancellation.is_cancelled() {
             return Err("cancelled while Workflow was suspended".to_string());
         }
         let run = store
-            .get_workflow(workflow_id)
+            .call::<_, StoreError, _>(move |store| store.get_workflow(workflow_id))
+            .await
             .map_err(|error| error.to_string())?;
         match run.status {
             WorkflowStatus::Created | WorkflowStatus::Running => return Ok(()),
@@ -377,26 +466,37 @@ async fn wait_until_runnable(
             WorkflowStatus::WaitingForUser
             | WorkflowStatus::WaitingForTimer
             | WorkflowStatus::WaitingForSignal => {
-                let open_direct_human_request = store
-                    .list_human_requests(workflow_id)
-                    .map_err(|error| error.to_string())?
+                let (open_direct_human_request, durable_timer, ready_signal) = store
+                    .call(move |store| {
+                        let open_direct_human_request = store
+                            .list_human_requests(workflow_id)?
+                            .into_iter()
+                            .any(|request| request.status == HumanRequestStatus::Open);
+                        let durable_timer = store
+                            .list_timers(workflow_id)?
+                            .into_iter()
+                            .filter(|timer| timer.status == TimerStatus::Active)
+                            .map(|timer| timer.next_fire_at)
+                            .min();
+                        Ok::<_, StoreError>((
+                            open_direct_human_request,
+                            durable_timer,
+                            workflow_has_ready_signal(store, workflow_id)?,
+                        ))
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let next_timer = durable_timer
                     .into_iter()
-                    .any(|request| request.status == HumanRequestStatus::Open);
-                let next_timer = store
-                    .list_timers(workflow_id)
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .filter(|timer| timer.status == TimerStatus::Active)
-                    .map(|timer| timer.next_fire_at)
                     .chain(wake_at_hint.iter().cloned())
                     .min();
-                let ready_signal = workflow_has_ready_signal(store, workflow_id)?;
 
                 if ready_signal
                     || (run.status == WorkflowStatus::WaitingForUser && !open_direct_human_request)
                 {
                     store
-                        .resume_workflow(workflow_id)
+                        .call(move |store| store.resume_workflow(workflow_id))
+                        .await
                         .map_err(|error| error.to_string())?;
                     return Ok(());
                 }
@@ -404,7 +504,8 @@ async fn wait_until_runnable(
                     let wait = (next_fire_at - Utc::now()).to_std().unwrap_or_default();
                     if wait.is_zero() {
                         store
-                            .resume_workflow(workflow_id)
+                            .call(move |store| store.resume_workflow(workflow_id))
+                            .await
                             .map_err(|error| error.to_string())?;
                         return Ok(());
                     }
@@ -412,7 +513,8 @@ async fn wait_until_runnable(
                         _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
                         _ = tokio::time::sleep(wait) => {
                             store
-                                .resume_workflow(workflow_id)
+                                .call(move |store| store.resume_workflow(workflow_id))
+                                .await
                                 .map_err(|error| error.to_string())?;
                             return Ok(());
                         }
@@ -429,10 +531,9 @@ async fn wait_until_runnable(
     }
 }
 
-fn workflow_has_ready_signal(store: &Store, workflow_id: WorkflowId) -> Result<bool, String> {
+fn workflow_has_ready_signal(store: &Store, workflow_id: WorkflowId) -> Result<bool, StoreError> {
     for effect in store
-        .list_workflow_effects(workflow_id)
-        .map_err(|error| error.to_string())?
+        .list_workflow_effects(workflow_id)?
         .into_iter()
         .filter(|effect| {
             effect.kind == "wait_signal" && effect.status == WorkflowEffectStatus::Started
@@ -441,17 +542,14 @@ fn workflow_has_ready_signal(store: &Store, workflow_id: WorkflowId) -> Result<b
         let Some(channel_id) = effect.payload.get("channel_id").and_then(Value::as_str) else {
             continue;
         };
-        let channel_id = ChannelId::from_str(channel_id).map_err(|error| error.to_string())?;
+        let channel_id = ChannelId::from_str(channel_id)
+            .map_err(|error| StoreError::Invariant(error.to_string()))?;
         let after_sequence = effect
             .payload
             .get("after_sequence")
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        if !store
-            .list_signals(channel_id, after_sequence)
-            .map_err(|error| error.to_string())?
-            .is_empty()
-        {
+        if !store.list_signals(channel_id, after_sequence)?.is_empty() {
             return Ok(true);
         }
     }
@@ -469,8 +567,6 @@ pub enum WorkflowSchedulerError {
     },
     #[error("Workflow {0} is not scheduled in this process")]
     NotScheduled(WorkflowId),
-    #[error("outcome channel for Workflow {0} closed unexpectedly")]
-    OutcomeChannelClosed(WorkflowId),
 }
 
 #[cfg(test)]
@@ -635,7 +731,7 @@ mod tests {
             .expect("session should be created");
         let run = create_test_workflow(&store, &session, "Run");
         let scheduler = WorkflowScheduler::new(
-            Arc::clone(&store),
+            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
             }),
@@ -656,6 +752,16 @@ mod tests {
         assert_eq!(completed.status, WorkflowStatus::Completed);
         assert_eq!(completed.output, Some(output));
         assert_eq!(completed.usage.wall_time_seconds, 1);
+        tokio::task::yield_now().await;
+        assert!(!scheduler.inner.handles.lock().await.contains_key(&run.id));
+        assert_eq!(
+            scheduler
+                .wait(run.id)
+                .await
+                .expect("late wait should read the durable terminal outcome")
+                .expect("completed Workflow should retain its output"),
+            json!({"report": "done"})
+        );
     }
 
     #[tokio::test]
@@ -678,7 +784,7 @@ mod tests {
         let created_run = create_test_workflow(&store, &session, "Created");
 
         let scheduler = WorkflowScheduler::new(
-            Arc::clone(&store),
+            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
             }),
@@ -721,7 +827,11 @@ mod tests {
             .create_session(project.id, "Origin", "", "test-model", Vec::new())
             .expect("Session should be created");
         let run = create_test_workflow(&store, &session, "Block until cancelled");
-        let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(BlockingExecutor), 1);
+        let scheduler = WorkflowScheduler::new(
+            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
+            Arc::new(BlockingExecutor),
+            1,
+        );
 
         scheduler
             .start(run.id)
@@ -778,7 +888,7 @@ mod tests {
         let suspended_run = create_test_workflow(&store, &session, "Suspend");
         let other_run = create_test_workflow(&store, &session, "Other");
         let scheduler = WorkflowScheduler::new(
-            Arc::clone(&store),
+            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(SuspendOnceExecutor {
                 suspend_once: HashSet::from([suspended_run.id]),
                 suspended: StdMutex::new(HashSet::new()),
@@ -846,7 +956,7 @@ mod tests {
             executions: StdMutex::new(HashMap::new()),
         });
         let scheduler = WorkflowScheduler::new(
-            Arc::clone(&store),
+            StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::clone(&executor) as Arc<dyn WorkflowRuntime>,
             1,
         );

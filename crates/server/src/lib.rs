@@ -39,6 +39,7 @@ use papermachine_store::NewWorkflow;
 use papermachine_store::ProjectCatalog;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::PatchProjectHomeTool;
@@ -194,48 +195,30 @@ impl AppState {
         &self,
         entity: &'static str,
         id: &str,
-        lookup: impl Fn(&Store) -> Result<T, StoreError>,
-    ) -> Result<(ProjectRuntimeLease, T), StoreError> {
-        if let Some(project_id) = self.entity_projects.read().await.get(id).copied()
-            && let Ok(store) = self.project_store(project_id).await
-        {
-            match lookup(&store) {
-                Ok(value) => return Ok((self.runtime_from_lease(store).await?, value)),
-                Err(StoreError::NotFound { .. }) => {
-                    self.entity_projects.write().await.remove(id);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let projects = self
-            .projects
+        lookup: impl FnOnce(&Store) -> Result<T, StoreError> + Send + 'static,
+    ) -> Result<(ProjectRuntimeLease, T), StoreError>
+    where
+        T: Send + 'static,
+    {
+        let project_id = self
+            .entity_projects
             .read()
             .await
-            .keys()
+            .get(id)
             .copied()
-            .collect::<Vec<_>>();
-        for project_id in projects {
-            let store = match self.project_store(project_id).await {
-                Ok(store) => store,
-                Err(StoreError::NotFound { .. }) => continue,
-                Err(error) => return Err(error),
-            };
-            match lookup(&store) {
-                Ok(value) => {
-                    self.entity_projects
-                        .write()
-                        .await
-                        .insert(id.to_string(), project_id);
-                    return Ok((self.runtime_from_lease(store).await?, value));
-                }
-                Err(StoreError::NotFound { .. }) => {}
-                Err(error) => return Err(error),
+            .ok_or_else(|| StoreError::NotFound {
+                entity,
+                id: id.to_string(),
+            })?;
+        let runtime = self.project_runtime(project_id).await?;
+        match runtime.store.call(lookup).await {
+            Ok(value) => Ok((runtime, value)),
+            Err(error @ StoreError::NotFound { .. }) => {
+                self.entity_projects.write().await.remove(id);
+                Err(error)
             }
+            Err(error) => Err(error),
         }
-        Err(StoreError::NotFound {
-            entity,
-            id: id.to_string(),
-        })
     }
 }
 
@@ -253,28 +236,20 @@ enum ProjectLifecycle {
 }
 
 struct ProjectResources {
-    store: Option<Arc<Store>>,
+    store: Option<StoreHandle>,
     runtime: Option<ProjectRuntime>,
 }
 
 struct ProjectReadLease {
     slot: ProjectSlot,
     project_id: ProjectId,
-    store: Arc<Store>,
+    store: StoreHandle,
     _lifecycle: OwnedRwLockReadGuard<ProjectLifecycle>,
 }
 
-impl std::ops::Deref for ProjectReadLease {
-    type Target = Store;
-
-    fn deref(&self) -> &Self::Target {
-        &self.store
-    }
-}
-
 impl ProjectReadLease {
-    fn store(&self) -> Arc<Store> {
-        Arc::clone(&self.store)
+    fn store(&self) -> StoreHandle {
+        self.store.clone()
     }
 
     async fn runtime(
@@ -285,10 +260,14 @@ impl ProjectReadLease {
         if let Some(runtime) = resources.runtime.as_ref() {
             return Ok(runtime.clone());
         }
-        let project = self.store.get_project(self.project_id)?;
+        let project_id = self.project_id;
+        let project = self
+            .store
+            .call(move |store| store.get_project(project_id))
+            .await?;
         let project_id = project.id;
         let runtime = factory
-            .build(&project, Arc::clone(&self.store))
+            .build(&project, self.store.clone())
             .await
             .map_err(|error| {
                 StoreError::Invariant(format!(
@@ -319,7 +298,7 @@ struct ProjectWriteLease {
 }
 
 impl ProjectWriteLease {
-    async fn store(&self) -> Result<Arc<Store>, StoreError> {
+    async fn store(&self) -> Result<StoreHandle, StoreError> {
         self.slot
             .resources
             .lock()
@@ -369,7 +348,7 @@ impl Drop for ProjectWriteLease {
 }
 
 impl ProjectSlot {
-    fn unloaded(store: Arc<Store>) -> Self {
+    fn unloaded(store: StoreHandle) -> Self {
         Self {
             lifecycle: Arc::new(RwLock::new(ProjectLifecycle::Open)),
             resources: Arc::new(Mutex::new(ProjectResources {
@@ -379,7 +358,7 @@ impl ProjectSlot {
         }
     }
 
-    fn loaded(store: Arc<Store>, runtime: ProjectRuntime) -> Self {
+    fn loaded(store: StoreHandle, runtime: ProjectRuntime) -> Self {
         Self {
             lifecycle: Arc::new(RwLock::new(ProjectLifecycle::Open)),
             resources: Arc::new(Mutex::new(ProjectResources {
@@ -429,7 +408,7 @@ impl ProjectSlot {
 
 #[derive(Clone)]
 struct ProjectRuntime {
-    store: Arc<Store>,
+    store: StoreHandle,
     catalog: Arc<RwLock<WorkflowProgramCatalog>>,
     scheduler: WorkflowScheduler,
     sessions: SessionRuntime,
@@ -446,20 +425,27 @@ struct ProjectRuntimeFactory {
 }
 
 impl ProjectRuntimeFactory {
-    async fn build(&self, project: &Project, store: Arc<Store>) -> anyhow::Result<ProjectRuntime> {
-        store
-            .reconcile_artifacts()
-            .context("failed to reconcile Artifact storage")?;
+    async fn build(&self, project: &Project, store: StoreHandle) -> anyhow::Result<ProjectRuntime> {
         let workflow_runtime_root = store.managed_root().join("workflow-runtime");
-        reset_ephemeral_directory(&workflow_runtime_root)
-            .context("failed to reset Python Workflow runtime")?;
-        reset_ephemeral_directory(&store.managed_root().join("runtime/sandboxes"))
-            .context("failed to reset Agent sandboxes")?;
-        for workflow in store.list_project_workflows(project.id)? {
-            if workflow.status.is_terminal() {
-                store.cleanup_terminal_workflow_state(workflow.id)?;
-            }
-        }
+        let sandbox_root = store.managed_root().join("runtime/sandboxes");
+        let project_id = project.id;
+        let runtime_root = workflow_runtime_root.clone();
+        store
+            .call::<_, anyhow::Error, _>(move |core| {
+                core.reconcile_artifacts()
+                    .context("failed to reconcile Artifact storage")?;
+                reset_ephemeral_directory(&runtime_root)
+                    .context("failed to reset Python Workflow runtime")?;
+                reset_ephemeral_directory(&sandbox_root)
+                    .context("failed to reset Agent sandboxes")?;
+                for workflow in core.list_project_workflows(project_id)? {
+                    if workflow.status.is_terminal() {
+                        core.cleanup_terminal_workflow_state(workflow.id)?;
+                    }
+                }
+                Ok(())
+            })
+            .await?;
         let tools = ToolCatalog::builder()
             .register_workspace(ReadFileTool)
             .context("failed to register read_file")?
@@ -469,21 +455,32 @@ impl ProjectRuntimeFactory {
             .context("failed to register fetch_url")?
             .register_workspace(ExecCommandTool)
             .context("failed to register exec_command")?
-            .register_project(ReadProjectHomeTool::new(Arc::clone(&store)))
+            .register_project(ReadProjectHomeTool::new(store.clone()))
             .context("failed to register read_project_home")?
-            .register_project(PatchProjectHomeTool::new(Arc::clone(&store)))
+            .register_project(PatchProjectHomeTool::new(store.clone()))
             .context("failed to register patch_project_home")?
-            .register_project(PreviewProjectHomeTool::new(Arc::clone(&store)))
+            .register_project(PreviewProjectHomeTool::new(store.clone()))
             .context("failed to register preview_project_home")?
             .build();
         let mut catalog = self.base_catalog.clone();
-        catalog
-            .load_project(project, &store)
-            .with_context(|| format!("failed to load Workflows for Project {}", project.id))?;
-        let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
-        skills.ensure_project(project.id)?;
+        let catalog_project = project.clone();
+        catalog = store
+            .call::<_, anyhow::Error, _>(move |core| {
+                catalog
+                    .load_project(&catalog_project, core)
+                    .with_context(|| {
+                        format!(
+                            "failed to load Workflows for Project {}",
+                            catalog_project.id
+                        )
+                    })?;
+                Ok(catalog)
+            })
+            .await?;
+        let skills = Arc::new(ProjectSkillCatalog::new(store.clone()));
+        skills.ensure_project(project.id).await?;
         let sessions = SessionRuntime::new_with_permits(
-            Arc::clone(&store),
+            store.clone(),
             Arc::clone(&self.model),
             tools.clone(),
             Arc::clone(&skills),
@@ -495,14 +492,14 @@ impl ProjectRuntimeFactory {
             Arc::clone(&self.turn_permits),
         );
         let executor: Arc<dyn WorkflowRuntime> = Arc::new(PythonWorkflowRuntime::new(
-            Arc::clone(&store),
+            store.clone(),
             sessions.clone(),
             catalog.python(),
             catalog.python_runtime_root(),
             workflow_runtime_root,
         ));
         let scheduler = WorkflowScheduler::new_with_permits(
-            Arc::clone(&store),
+            store.clone(),
             executor,
             Arc::clone(&self.workflow_permits),
         );
@@ -613,10 +610,15 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         );
     }
     let mut projects = HashMap::new();
+    let mut entity_projects = HashMap::new();
+    let mut ownership_handles = Vec::new();
     let mut recoverable_projects = Vec::new();
     for entry in catalog_projects {
         let project = entry.project;
-        let store = Arc::new(entry.store);
+        let store = entry.store;
+        for entity_id in store.list_owned_entity_ids(project.id)? {
+            entity_projects.insert(entity_id, project.id);
+        }
         match store.list_recoverable_workflows() {
             Ok(workflows) if !workflows.is_empty() => recoverable_projects.push(project.id),
             Ok(_) => {}
@@ -628,6 +630,8 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
                 );
             }
         }
+        let store = StoreHandle::spawn(store)?;
+        ownership_handles.push(store.clone());
         projects.insert(project.id, ProjectSlot::unloaded(store));
     }
     schedule_trash_cleanup(Arc::clone(&catalog), catalog.trash_entries()?);
@@ -636,7 +640,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         catalog,
         default_workspace_root: config.default_workspace_root.clone(),
         projects: Arc::new(RwLock::new(projects)),
-        entity_projects: Arc::new(RwLock::new(HashMap::new())),
+        entity_projects: Arc::new(RwLock::new(entity_projects)),
         runtime_factory,
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
         default_model,
@@ -645,6 +649,9 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         model_providers,
         mode,
     };
+    for store in ownership_handles {
+        subscribe_project_ownership(store, Arc::clone(&state.entity_projects));
+    }
     for project_id in recoverable_projects {
         if let Err(error) = state.project_runtime(project_id).await {
             tracing::error!(%project_id, %error, "failed to recover active Project runtime");
@@ -791,7 +798,9 @@ async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Vec<Proj
         let project = state
             .project_store(project_id)
             .await?
-            .get_project(project_id)?;
+            .store()
+            .call(move |store| store.get_project(project_id))
+            .await?;
         entries.push(ProjectCatalogEntry {
             workspace_available: workspace_attachment_available(&project.workspace),
             project,
@@ -835,19 +844,24 @@ async fn create_project(
     let name = request.name.trim();
     let workspace = match request.workspace.as_ref() {
         Some(selection) => canonical_workspace_selection(selection, true)?,
-        None => next_default_workspace(&state, name)?,
+        None => next_default_workspace(&state, name).await?,
     };
-    let entry = state.catalog.create_project(name, &workspace)?;
+    let catalog = Arc::clone(&state.catalog);
+    let project_name = name.to_string();
+    let catalog_workspace = workspace.clone();
+    let entry = tokio::task::spawn_blocking(move || {
+        catalog.create_project(&project_name, &catalog_workspace)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Project creation task failed: {error}")))??;
     let project = entry.project;
-    let store = Arc::new(entry.store);
-    let runtime = match state
-        .runtime_factory
-        .build(&project, Arc::clone(&store))
-        .await
-    {
+    let store = StoreHandle::spawn(entry.store)?;
+    subscribe_project_ownership(store.clone(), Arc::clone(&state.entity_projects));
+    let runtime = match state.runtime_factory.build(&project, store.clone()).await {
         Ok(runtime) => runtime,
         Err(error) => {
-            let trash = state.catalog.retire_project(project.id)?;
+            store.shutdown().await?;
+            let trash = retire_catalog_project(Arc::clone(&state.catalog), project.id).await?;
             schedule_trash_cleanup(Arc::clone(&state.catalog), vec![trash]);
             return Err(ApiError::internal(error.to_string()));
         }
@@ -856,7 +870,7 @@ async fn create_project(
         .projects
         .write()
         .await
-        .insert(project.id, ProjectSlot::loaded(Arc::clone(&store), runtime));
+        .insert(project.id, ProjectSlot::loaded(store, runtime));
     Ok((
         StatusCode::CREATED,
         Json(ProjectCatalogEntry {
@@ -887,27 +901,40 @@ async fn pick_workspace_directory(
     }))
 }
 
-fn next_default_workspace(state: &AppState, project_name: &str) -> ApiResult<PathBuf> {
-    let attached = state
-        .catalog
-        .scan()?
-        .into_iter()
-        .map(|entry| PathBuf::from(entry.project.workspace.path))
-        .collect::<Vec<_>>();
+async fn next_default_workspace(state: &AppState, project_name: &str) -> ApiResult<PathBuf> {
+    let catalog = Arc::clone(&state.catalog);
+    let workspace_root = state.default_workspace_root.clone();
     let directory_name = default_workspace_directory_name(project_name);
-    for index in 1_u64.. {
-        let candidate = if index == 1 {
-            state.default_workspace_root.join(&directory_name)
-        } else {
-            state
-                .default_workspace_root
-                .join(format!("{directory_name} {index}"))
-        };
-        if !candidate.exists() && !attached.iter().any(|path| path == &candidate) {
-            return canonical_workspace(candidate.to_string_lossy().as_ref(), true);
+    tokio::task::spawn_blocking(move || {
+        let attached = catalog
+            .scan()?
+            .into_iter()
+            .map(|entry| PathBuf::from(entry.project.workspace.path))
+            .collect::<Vec<_>>();
+        for index in 1_u64.. {
+            let candidate = if index == 1 {
+                workspace_root.join(&directory_name)
+            } else {
+                workspace_root.join(format!("{directory_name} {index}"))
+            };
+            if !candidate.exists() && !attached.iter().any(|path| path == &candidate) {
+                return canonical_workspace(candidate.to_string_lossy().as_ref(), true);
+            }
         }
-    }
-    unreachable!("the default Workspace suffix space is unbounded")
+        unreachable!("the default Workspace suffix space is unbounded")
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Workspace selection task failed: {error}")))?
+}
+
+async fn retire_catalog_project(
+    catalog: Arc<ProjectCatalog>,
+    project_id: ProjectId,
+) -> ApiResult<PathBuf> {
+    tokio::task::spawn_blocking(move || catalog.retire_project(project_id))
+        .await
+        .map_err(|error| ApiError::internal(format!("Project retirement task failed: {error}")))?
+        .map_err(Into::into)
 }
 
 fn default_workspace_directory_name(project_name: &str) -> String {
@@ -953,11 +980,14 @@ async fn relocate_project(
     let workspace = canonical_workspace_selection(&request.workspace, false)?;
     let lease = state.project_write(project_id).await?;
     let store = lease.store().await?;
-    ensure_project_can_detach(&store)?;
-    let project = state
-        .catalog
-        .relocate_project(&store, project_id, &workspace)?;
     lease.reset_runtime().await;
+    let catalog = Arc::clone(&state.catalog);
+    let project = store
+        .call::<_, StoreError, _>(move |core| {
+            ensure_project_can_detach(core)?;
+            catalog.relocate_project(core, project_id, &workspace)
+        })
+        .await?;
     lease.reopen();
     Ok(Json(ProjectCatalogEntry {
         project,
@@ -972,30 +1002,22 @@ async fn remove_project(
     let project_id = parse_id(&project_id, "Project")?;
     let lease = state.project_write(project_id).await?;
     let store = lease.store().await?;
-    ensure_project_can_detach(&store)?;
-    drop(store);
+    store.call(ensure_project_can_detach).await?;
     let mut resources = lease.detach().await?;
     resources.runtime.take();
     let store = resources.store.take().ok_or_else(|| {
         StoreError::Invariant("Project Store disappeared while retiring".to_string())
     })?;
     let managed_root = store.managed_root().to_path_buf();
-    if Arc::strong_count(&store) != 1 {
-        resources.store = Some(store);
-        lease.restore(resources).await;
-        return Err(StoreError::Invariant(
-            "Project runtime still owns Store references after shutdown".to_string(),
-        )
-        .into());
-    }
-    drop(store);
-    let trash = match state.catalog.retire_project(project_id) {
+    store.shutdown().await?;
+    let trash = match retire_catalog_project(Arc::clone(&state.catalog), project_id).await {
         Ok(trash) => trash,
         Err(error) => {
-            let reopened = Arc::new(Store::open(&managed_root)?);
+            let reopened = StoreHandle::spawn(Store::open(&managed_root)?)?;
+            subscribe_project_ownership(reopened.clone(), Arc::clone(&state.entity_projects));
             resources.store = Some(reopened);
             lease.restore(resources).await;
-            return Err(error.into());
+            return Err(error);
         }
     };
     lease.retire();
@@ -1020,6 +1042,26 @@ fn schedule_trash_cleanup(catalog: Arc<ProjectCatalog>, paths: Vec<PathBuf>) {
     }
 }
 
+fn subscribe_project_ownership(store: StoreHandle, index: Arc<RwLock<HashMap<String, ProjectId>>>) {
+    let mut events = store.subscribe_ownership();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    index
+                        .write()
+                        .await
+                        .insert(event.entity_id, event.project_id);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::error!(skipped, "Project ownership index subscriber lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 fn canonical_workspace(value: &str, create: bool) -> ApiResult<PathBuf> {
     let workspace = PathBuf::from(value.trim());
     if !workspace.is_absolute() {
@@ -1042,13 +1084,12 @@ fn canonical_workspace_selection(
     canonical_workspace(&selection.path, create)
 }
 
-fn ensure_project_can_detach(store: &Store) -> ApiResult<()> {
+fn ensure_project_can_detach(store: &Store) -> Result<(), StoreError> {
     if !store.list_recoverable_workflows()?.is_empty() {
         return Err(StoreError::Invariant(
             "Project has active work; finish or cancel it before changing its Workspace attachment"
                 .to_string(),
-        )
-        .into());
+        ));
     }
     Ok(())
 }
@@ -1066,19 +1107,25 @@ async fn get_project_overview(
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<ProjectOverview>> {
     let project_id = parse_id(&project_id, "Project")?;
-    let store = state.project_store(project_id).await?;
-    let project_home = store.get_project_home(project_id)?;
-    let project_home_artifact = project_home
-        .as_ref()
-        .map(|home| store.get_artifact(home.artifact_id))
-        .transpose()?;
-    Ok(Json(ProjectOverview {
-        project: store.get_project(project_id)?,
-        project_home,
-        project_home_artifact,
-        summary_workflow: store
-            .latest_project_workflow_for_program(project_id, "project-summary")?,
-    }))
+    let store = state.project_store(project_id).await?.store();
+    Ok(Json(
+        store
+            .call(move |core| {
+                let project_home = core.get_project_home(project_id)?;
+                let project_home_artifact = project_home
+                    .as_ref()
+                    .map(|home| core.get_artifact(home.artifact_id))
+                    .transpose()?;
+                Ok::<_, StoreError>(ProjectOverview {
+                    project: core.get_project(project_id)?,
+                    project_home,
+                    project_home_artifact,
+                    summary_workflow: core
+                        .latest_project_workflow_for_program(project_id, "project-summary")?,
+                })
+            })
+            .await?,
+    ))
 }
 
 #[derive(Serialize)]
@@ -1103,54 +1150,71 @@ async fn stream_project_events(
     Path(project_id): Path<String>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let project_id = parse_id(&project_id, "Project")?;
-    let store = state.project_store(project_id).await?;
-    store.get_project(project_id)?;
-    let store_handle = store.store();
-    let session_store = Arc::downgrade(&store_handle);
-    let sessions =
-        BroadcastStream::new(store_handle.subscribe_sessions()).filter_map(move |result| {
-            let event = match result {
-                Ok(event) => event,
-                Err(_) => return Some(stream_resync_sse_event("project_resync")),
-            };
-            if !matches!(
-                event.payload,
-                SessionEventPayload::SessionCreated
-                    | SessionEventPayload::SessionStatusChanged { .. }
-            ) {
-                return None;
+    let store_handle = state.project_store(project_id).await?.store();
+    let (session_events, workflow_events) = store_handle
+        .call(move |core| {
+            core.get_project(project_id)?;
+            Ok::<_, StoreError>((core.subscribe_sessions(), core.subscribe()))
+        })
+        .await?;
+    let session_store = store_handle.clone();
+    let sessions = BroadcastStream::new(session_events)
+        .then(move |result| {
+            let session_store = session_store.clone();
+            async move {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(_) => return Some(stream_resync_sse_event("project_resync")),
+                };
+                if !matches!(
+                    event.payload,
+                    SessionEventPayload::SessionCreated
+                        | SessionEventPayload::SessionStatusChanged { .. }
+                ) {
+                    return None;
+                }
+                let session = session_store
+                    .call(move |core| core.get_session(event.session_id))
+                    .await
+                    .ok()?;
+                (session.project_id == project_id).then(|| {
+                    project_update_sse_event(
+                        "session_changed",
+                        &ProjectSessionUpdate {
+                            r#type: "session_changed",
+                            session,
+                        },
+                    )
+                })
             }
-            let session_store = session_store.upgrade()?;
-            let session = session_store.get_session(event.session_id).ok()?;
-            (session.project_id == project_id).then(|| {
-                project_update_sse_event(
-                    "session_changed",
-                    &ProjectSessionUpdate {
-                        r#type: "session_changed",
-                        session,
+        })
+        .filter_map(|event| event);
+    let workflow_store = store_handle.clone();
+    let workflows = BroadcastStream::new(workflow_events)
+        .then(move |result| {
+            let workflow_store = workflow_store.clone();
+            async move {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(_) => return Some(stream_resync_sse_event("project_resync")),
+                };
+                if event.project_id != project_id {
+                    return None;
+                }
+                let workflow = workflow_store
+                    .call(move |core| core.get_workflow(event.workflow_id))
+                    .await
+                    .ok()?;
+                Some(project_update_sse_event(
+                    "workflow_changed",
+                    &ProjectWorkflowUpdate {
+                        r#type: "workflow_changed",
+                        workflow,
                     },
-                )
-            })
-        });
-    let workflow_store = Arc::downgrade(&store_handle);
-    let workflows = BroadcastStream::new(store_handle.subscribe()).filter_map(move |result| {
-        let event = match result {
-            Ok(event) => event,
-            Err(_) => return Some(stream_resync_sse_event("project_resync")),
-        };
-        if event.project_id != project_id {
-            return None;
-        }
-        let workflow_store = workflow_store.upgrade()?;
-        let workflow = workflow_store.get_workflow(event.workflow_id).ok()?;
-        Some(project_update_sse_event(
-            "workflow_changed",
-            &ProjectWorkflowUpdate {
-                r#type: "workflow_changed",
-                workflow,
-            },
-        ))
-    });
+                ))
+            }
+        })
+        .filter_map(|event| event);
     Ok(Sse::new(stream::select(sessions, workflows)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
@@ -1176,8 +1240,12 @@ async fn get_project_system_prompt(
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<ProjectSystemPrompt>> {
     let project_id = parse_id(&project_id, "Project")?;
-    let store = state.project_store(project_id).await?;
-    Ok(Json(store.get_project_system_prompt(project_id)?))
+    let store = state.project_store(project_id).await?.store();
+    Ok(Json(
+        store
+            .call(move |core| core.get_project_system_prompt(project_id))
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1193,11 +1261,12 @@ async fn update_project_system_prompt(
     Json(request): Json<SystemPromptRequest>,
 ) -> ApiResult<Json<ProjectSystemPrompt>> {
     let project_id = parse_id(&project_id, "Project")?;
-    let store = state.project_store(project_id).await?;
-    Ok(Json(store.set_project_system_prompt(
-        project_id,
-        request.system_prompt,
-    )?))
+    let store = state.project_store(project_id).await?.store();
+    Ok(Json(
+        store
+            .call(move |core| core.set_project_system_prompt(project_id, request.system_prompt))
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1219,8 +1288,12 @@ async fn list_sessions(
     if !(1..=200).contains(&query.limit) {
         return Err(ApiError::bad_request("Session list limit must be 1..=200"));
     }
-    let store = state.project_store(id).await?;
-    Ok(Json(store.list_recent_sessions(id, query.limit)?))
+    let store = state.project_store(id).await?.store();
+    Ok(Json(
+        store
+            .call(move |core| core.list_recent_sessions(id, query.limit))
+            .await?,
+    ))
 }
 
 async fn list_project_skills(
@@ -1229,7 +1302,7 @@ async fn list_project_skills(
 ) -> ApiResult<Json<Vec<ProjectSkill>>> {
     let id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(id).await?;
-    Ok(Json(runtime.skills.list(id)?))
+    Ok(Json(runtime.skills.list(id).await?))
 }
 
 async fn get_project_skill(
@@ -1238,7 +1311,7 @@ async fn get_project_skill(
 ) -> ApiResult<Json<ProjectSkill>> {
     let id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(id).await?;
-    Ok(Json(runtime.skills.load(id, &slug)?))
+    Ok(Json(runtime.skills.load(id, &slug).await?))
 }
 
 #[derive(Deserialize)]
@@ -1257,13 +1330,16 @@ async fn create_project_skill(
 ) -> ApiResult<(StatusCode, Json<ProjectSkill>)> {
     let id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(id).await?;
-    let skill = runtime.skills.create(
-        id,
-        request.slug.trim(),
-        request.name.trim(),
-        request.description.trim(),
-        request.instructions.trim(),
-    )?;
+    let skill = runtime
+        .skills
+        .create(
+            id,
+            request.slug.trim(),
+            request.name.trim(),
+            request.description.trim(),
+            request.instructions.trim(),
+        )
+        .await?;
     Ok((StatusCode::CREATED, Json(skill)))
 }
 
@@ -1308,16 +1384,23 @@ async fn get_session_view(
 ) -> ApiResult<Json<SessionView>> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, session) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
-    let turns = runtime.store.list_turns(session_id)?;
-    let steps = runtime.store.list_session_steps(session_id)?;
-    let rollout = runtime.store.session_rollout_status(session_id)?;
-    let workflows = runtime.store.list_session_workflows(session_id)?;
-    let memberships = runtime.store.list_session_participants(session_id)?;
-    let requests = runtime.store.list_session_human_requests(session_id)?;
+    let (turns, steps, rollout, workflows, memberships, requests) = runtime
+        .store
+        .call(move |store| {
+            Ok::<_, StoreError>((
+                store.list_turns(session_id)?,
+                store.list_session_steps(session_id)?,
+                store.session_rollout_status(session_id)?,
+                store.list_session_workflows(session_id)?,
+                store.list_session_participants(session_id)?,
+                store.list_session_human_requests(session_id)?,
+            ))
+        })
+        .await?;
     Ok(Json(SessionView {
         session,
         turns,
@@ -1335,7 +1418,7 @@ async fn close_session(
 ) -> ApiResult<StatusCode> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, session) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
@@ -1343,18 +1426,22 @@ async fn close_session(
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    let mut owning_workflows = Vec::new();
-    for workflow in runtime.store.list_session_workflows(session_id)? {
-        let owns_session = runtime
-            .store
-            .list_participants(workflow.id)?
-            .into_iter()
-            .any(|participant| participant.session_id == session_id);
-        if !owns_session || workflow.status.is_terminal() {
-            continue;
-        }
-        owning_workflows.push(workflow.id);
-    }
+    let (owning_workflows, turns) = runtime
+        .store
+        .call(move |store| {
+            let mut owning = Vec::new();
+            for workflow in store.list_session_workflows(session_id)? {
+                let owns_session = store
+                    .list_participants(workflow.id)?
+                    .into_iter()
+                    .any(|participant| participant.session_id == session_id);
+                if owns_session && !workflow.status.is_terminal() {
+                    owning.push(workflow.id);
+                }
+            }
+            Ok::<_, StoreError>((owning, store.list_turns(session_id)?))
+        })
+        .await?;
 
     for workflow_id in owning_workflows {
         match runtime.scheduler.cancel(workflow_id).await {
@@ -1362,7 +1449,7 @@ async fn close_session(
             Err(error) => return Err(error.into()),
         }
     }
-    for turn in runtime.store.list_turns(session_id)? {
+    for turn in turns {
         if turn.status.is_terminal() {
             continue;
         }
@@ -1371,11 +1458,16 @@ async fn close_session(
             Err(error) => return Err(error.into()),
         }
     }
-    runtime.store.set_session_status(
-        session_id,
-        SessionStatus::Archived,
-        Some("closed by user".to_string()),
-    )?;
+    runtime
+        .store
+        .call(move |store| {
+            store.set_session_status(
+                session_id,
+                SessionStatus::Archived,
+                Some("closed by user".to_string()),
+            )
+        })
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1392,15 +1484,19 @@ async fn update_session_skills(
 ) -> ApiResult<Json<Session>> {
     let id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, session) = state
-        .locate("session", &id.to_string(), |store| store.get_session(id))
+        .locate("session", &id.to_string(), move |store| {
+            store.get_session(id)
+        })
         .await?;
     runtime
         .skills
-        .validate_enabled(session.project_id, &request.enabled_skills)?;
+        .validate_enabled(session.project_id, &request.enabled_skills)
+        .await?;
     Ok(Json(
         runtime
             .store
-            .set_session_enabled_skills(id, request.enabled_skills)?,
+            .call(move |store| store.set_session_enabled_skills(id, request.enabled_skills))
+            .await?,
     ))
 }
 
@@ -1411,14 +1507,16 @@ async fn update_session_system_prompt(
 ) -> ApiResult<Json<Session>> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, _) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
-    Ok(Json(runtime.store.set_session_system_prompt(
-        session_id,
-        request.system_prompt,
-    )?))
+    Ok(Json(
+        runtime
+            .store
+            .call(move |store| store.set_session_system_prompt(session_id, request.system_prompt))
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1434,14 +1532,15 @@ async fn update_session_access(
 ) -> ApiResult<Json<Session>> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, _) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
     Ok(Json(
         runtime
             .store
-            .set_session_access(session_id, request.access)?,
+            .call(move |store| store.set_session_access(session_id, request.access))
+            .await?,
     ))
 }
 
@@ -1451,7 +1550,7 @@ async fn cancel_turn(
 ) -> ApiResult<StatusCode> {
     let turn_id: TurnId = parse_id(&turn_id, "Turn")?;
     let (runtime, _) = state
-        .locate("turn", &turn_id.to_string(), |store| {
+        .locate("turn", &turn_id.to_string(), move |store| {
             store.get_turn(turn_id)
         })
         .await?;
@@ -1554,13 +1653,18 @@ async fn save_workflow_program(
 ) -> ApiResult<(StatusCode, Json<WorkflowProgram>)> {
     let project_id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(project_id).await?;
-    let project = runtime.store.get_project(project_id)?;
-    let loaded =
-        runtime
-            .catalog
-            .write()
-            .await
-            .save_user(&project, &request.source, &runtime.store)?;
+    let mut guard = Arc::clone(&runtime.catalog).write_owned().await;
+    let mut catalog = guard.clone();
+    let source = request.source;
+    let (updated, loaded) = runtime
+        .store
+        .call(move |store| {
+            let project = store.get_project(project_id)?;
+            let loaded = catalog.save_user(&project, &source, store)?;
+            Ok::<_, WorkflowProgramCatalogError>((catalog, loaded))
+        })
+        .await?;
+    *guard = updated;
     Ok((StatusCode::CREATED, Json(loaded.registration)))
 }
 
@@ -1570,9 +1674,16 @@ async fn list_session_workflows(
 ) -> ApiResult<Json<Vec<Workflow>>> {
     let id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, _) = state
-        .locate("session", &id.to_string(), |store| store.get_session(id))
+        .locate("session", &id.to_string(), move |store| {
+            store.get_session(id)
+        })
         .await?;
-    Ok(Json(runtime.store.list_session_workflows(id)?))
+    Ok(Json(
+        runtime
+            .store
+            .call(move |store| store.list_session_workflows(id))
+            .await?,
+    ))
 }
 
 async fn list_project_workflows(
@@ -1581,7 +1692,12 @@ async fn list_project_workflows(
 ) -> ApiResult<Json<Vec<Workflow>>> {
     let project_id = parse_id(&project_id, "Project")?;
     let runtime = state.project_runtime(project_id).await?;
-    Ok(Json(runtime.store.list_project_workflows(project_id)?))
+    Ok(Json(
+        runtime
+            .store
+            .call(move |store| store.list_project_workflows(project_id))
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1675,14 +1791,15 @@ async fn create_workflow(
     let runtime = state.project_runtime(project_id).await?;
     runtime
         .skills
-        .validate_enabled(project_id, &request.enabled_skills)?;
-    let model = request.model.trim();
+        .validate_enabled(project_id, &request.enabled_skills)
+        .await?;
+    let model = request.model.trim().to_string();
     if model.is_empty() {
         return Err(ApiError::bad_request(
             "Workflow model must name an explicit model profile",
         ));
     }
-    validate_model_profile(&state, model)?;
+    validate_model_profile(&state, &model)?;
     let (snapshot, declared_agent_classes) = {
         let catalog = runtime.catalog.read().await;
         let program = catalog
@@ -1700,7 +1817,12 @@ async fn create_workflow(
                 .collect::<std::collections::HashSet<_>>(),
         )
     };
-    let user_task = request.request.as_deref().unwrap_or_default().trim();
+    let user_task = request
+        .request
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     match snapshot.manifest.request_mode {
         WorkflowRequestMode::Required if user_task.is_empty() => {
             return Err(ApiError::bad_request(format!(
@@ -1732,45 +1854,57 @@ async fn create_workflow(
         WorkflowContextMode::Fresh => WorkflowLaunchContext::default(),
         WorkflowContextMode::ProjectSnapshot => WorkflowLaunchContext {
             mode: WorkflowContextMode::ProjectSnapshot,
-            snapshot: Some(build_project_snapshot(
-                &runtime.store,
-                project_id,
-                ProjectSnapshotOptions {
-                    focus_session_id: request.started_from_session_id,
-                    max_sessions: 20,
-                    max_turns_per_session: 8,
-                    max_workflows: 100,
-                    max_artifacts: 30,
-                    include_artifact_content: true,
-                    max_text_chars: 300_000,
-                    ..ProjectSnapshotOptions::default()
-                },
-            )?),
+            snapshot: Some(
+                runtime
+                    .store
+                    .call(move |store| {
+                        build_project_snapshot(
+                            store,
+                            project_id,
+                            ProjectSnapshotOptions {
+                                focus_session_id: request.started_from_session_id,
+                                max_sessions: 20,
+                                max_turns_per_session: 8,
+                                max_workflows: 100,
+                                max_artifacts: 30,
+                                include_artifact_content: true,
+                                max_text_chars: 300_000,
+                                ..ProjectSnapshotOptions::default()
+                            },
+                        )
+                    })
+                    .await?,
+            ),
         },
     };
-    let workflow = runtime.store.create_workflow(NewWorkflow {
-        project_id,
-        started_from_session_id: request.started_from_session_id,
-        program: snapshot,
-        request: user_task.to_string(),
-        instructions: request.instructions.trim().to_string(),
-        trigger: WorkflowTrigger {
-            kind: if request.started_from_session_id.is_some() {
-                WorkflowTriggerKind::User
-            } else {
-                WorkflowTriggerKind::Manual
-            },
-            source_workflow_id: None,
-            source_session_id: request.started_from_session_id,
-            source_timer_id: None,
-        },
-        params: request.params,
-        default_model: model.to_string(),
-        access: request.access,
-        enabled_skills: request.enabled_skills,
-        launch_context,
-        agent_access_overrides: request.agent_access_overrides,
-    })?;
+    let workflow = runtime
+        .store
+        .call(move |store| {
+            store.create_workflow(NewWorkflow {
+                project_id,
+                started_from_session_id: request.started_from_session_id,
+                program: snapshot,
+                request: user_task,
+                instructions: request.instructions.trim().to_string(),
+                trigger: WorkflowTrigger {
+                    kind: if request.started_from_session_id.is_some() {
+                        WorkflowTriggerKind::User
+                    } else {
+                        WorkflowTriggerKind::Manual
+                    },
+                    source_workflow_id: None,
+                    source_session_id: request.started_from_session_id,
+                    source_timer_id: None,
+                },
+                params: request.params,
+                default_model: model,
+                access: request.access,
+                enabled_skills: request.enabled_skills,
+                launch_context,
+                agent_access_overrides: request.agent_access_overrides,
+            })
+        })
+        .await?;
     runtime.scheduler.start(workflow.id).await?;
     Ok((StatusCode::CREATED, Json(workflow)))
 }
@@ -1800,29 +1934,62 @@ async fn get_workflow_view(
 ) -> ApiResult<Json<WorkflowView>> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, run) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
-    let participants = runtime.store.list_participants(workflow_id)?;
-    let actions = runtime.store.list_action_invocations(workflow_id)?;
-    let channels = runtime.store.list_channels(workflow_id)?;
+    let (
+        effects,
+        participants,
+        sessions,
+        actions,
+        attempts,
+        teams,
+        relations,
+        task_scopes,
+        timers,
+        channels,
+        signals,
+        human_requests,
+        control_messages,
+        artifacts,
+    ) = runtime
+        .store
+        .call(move |store| {
+            Ok::<_, StoreError>((
+                store.list_workflow_effects(workflow_id)?,
+                store.list_participants(workflow_id)?,
+                store.list_workflow_sessions(workflow_id)?,
+                store.list_action_invocations(workflow_id)?,
+                store.list_workflow_action_attempts(workflow_id)?,
+                store.list_teams(workflow_id)?,
+                store.list_relations(workflow_id)?,
+                store.list_task_scopes(workflow_id)?,
+                store.list_timers(workflow_id)?,
+                store.list_channels(workflow_id)?,
+                store.list_workflow_signals(workflow_id)?,
+                store.list_human_requests(workflow_id)?,
+                store.list_control_messages(workflow_id)?,
+                store.list_artifacts(workflow_id)?,
+            ))
+        })
+        .await?;
     Ok(Json(WorkflowView {
         workflow: run,
-        effects: runtime.store.list_workflow_effects(workflow_id)?,
+        effects,
         participants,
-        sessions: runtime.store.list_workflow_sessions(workflow_id)?,
+        sessions,
         actions,
-        attempts: runtime.store.list_workflow_action_attempts(workflow_id)?,
-        teams: runtime.store.list_teams(workflow_id)?,
-        relations: runtime.store.list_relations(workflow_id)?,
-        task_scopes: runtime.store.list_task_scopes(workflow_id)?,
-        timers: runtime.store.list_timers(workflow_id)?,
+        attempts,
+        teams,
+        relations,
+        task_scopes,
+        timers,
         channels,
-        signals: runtime.store.list_workflow_signals(workflow_id)?,
-        human_requests: runtime.store.list_human_requests(workflow_id)?,
-        control_messages: runtime.store.list_control_messages(workflow_id)?,
-        artifacts: runtime.store.list_artifacts(workflow_id)?,
+        signals,
+        human_requests,
+        control_messages,
+        artifacts,
     }))
 }
 
@@ -1832,7 +1999,7 @@ async fn get_workflow_state(
 ) -> ApiResult<Json<Workflow>> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (_, workflow) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
@@ -1845,7 +2012,7 @@ async fn pause_workflow(
 ) -> ApiResult<StatusCode> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
@@ -1859,7 +2026,7 @@ async fn resume_workflow(
 ) -> ApiResult<StatusCode> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
@@ -1873,7 +2040,7 @@ async fn cancel_workflow(
 ) -> ApiResult<StatusCode> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
@@ -1900,27 +2067,31 @@ async fn create_control_message(
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, run) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
-    let is_member = runtime
+    let content = request.content.trim().to_string();
+    let message = runtime
         .store
-        .list_participants(workflow_id)?
-        .iter()
-        .any(|item| item.session_id == session_id);
-    if !is_member && run.started_from_session_id != Some(session_id) {
-        return Err(ApiError::bad_request(
-            "Session does not participate in this Workflow",
-        ));
-    }
-    let message = runtime.store.create_control_message(
-        workflow_id,
-        session_id,
-        request.action_invocation_id,
-        request.kind,
-        request.content.trim(),
-    )?;
+        .call(move |store| {
+            let is_member = store
+                .list_participants(workflow_id)?
+                .iter()
+                .any(|item| item.session_id == session_id);
+            if !is_member && run.started_from_session_id != Some(session_id) {
+                return Ok(None);
+            }
+            Ok::<_, StoreError>(Some(store.create_control_message(
+                workflow_id,
+                session_id,
+                request.action_invocation_id,
+                request.kind,
+                &content,
+            )?))
+        })
+        .await?
+        .ok_or_else(|| ApiError::bad_request("Session does not participate in this Workflow"))?;
     Ok((StatusCode::CREATED, Json(message)))
 }
 
@@ -1937,14 +2108,17 @@ async fn answer_human_request(
 ) -> ApiResult<Json<HumanRequest>> {
     let id: HumanRequestId = parse_id(&request_id, "HumanRequest")?;
     let (runtime, current) = state
-        .locate("human request", &id.to_string(), |store| {
+        .locate("human request", &id.to_string(), move |store| {
             store.get_human_request(id)
         })
         .await?;
     validate_schema_value(&current.response_schema, &request.answer, "answer")
         .map_err(ApiError::bad_request)?;
     Ok(Json(
-        runtime.store.answer_human_request(id, request.answer)?,
+        runtime
+            .store
+            .call(move |store| store.answer_human_request(id, request.answer))
+            .await?,
     ))
 }
 
@@ -1961,14 +2135,15 @@ async fn list_workflow_events(
 ) -> ApiResult<Json<Vec<WorkflowEvent>>> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
     Ok(Json(
         runtime
             .store
-            .list_workflow_events(workflow_id, query.after)?,
+            .call(move |store| store.list_workflow_events(workflow_id, query.after))
+            .await?,
     ))
 }
 
@@ -1979,14 +2154,19 @@ async fn stream_workflow_events(
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let workflow_id: WorkflowId = parse_id(&workflow_id, "Workflow")?;
     let (runtime, _) = state
-        .locate("workflow", &workflow_id.to_string(), |store| {
+        .locate("workflow", &workflow_id.to_string(), move |store| {
             store.get_workflow(workflow_id)
         })
         .await?;
-    let receiver = runtime.store.subscribe();
-    let replay = runtime
+    let (receiver, replay) = runtime
         .store
-        .list_workflow_events(workflow_id, query.after)?;
+        .call(move |store| {
+            Ok::<_, StoreError>((
+                store.subscribe(),
+                store.list_workflow_events(workflow_id, query.after)?,
+            ))
+        })
+        .await?;
     let high_watermark = replay.last().map_or(query.after, |event| event.sequence);
     let replay = tokio_stream::iter(replay.into_iter().map(run_sse_event));
     let live = BroadcastStream::new(receiver).filter_map(move |result| match result {
@@ -2009,12 +2189,15 @@ async fn list_session_events(
 ) -> ApiResult<Json<Vec<SessionEvent>>> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, _) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
     Ok(Json(
-        runtime.store.list_session_events(session_id, query.after)?,
+        runtime
+            .store
+            .call(move |store| store.list_session_events(session_id, query.after))
+            .await?,
     ))
 }
 
@@ -2025,48 +2208,69 @@ async fn stream_session_events(
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let session_id: SessionId = parse_id(&session_id, "Session")?;
     let (runtime, _) = state
-        .locate("session", &session_id.to_string(), |store| {
+        .locate("session", &session_id.to_string(), move |store| {
             store.get_session(session_id)
         })
         .await?;
-    let receiver = runtime.store.subscribe_sessions();
-    let workflow_receiver = runtime.store.subscribe();
-    let replay = runtime.store.list_session_events(session_id, query.after)?;
+    let (receiver, workflow_receiver, replay) = runtime
+        .store
+        .call(move |store| {
+            Ok::<_, StoreError>((
+                store.subscribe_sessions(),
+                store.subscribe(),
+                store.list_session_events(session_id, query.after)?,
+            ))
+        })
+        .await?;
     let high_watermark = replay.last().map_or(query.after, |event| event.sequence);
     let replay_store = runtime.store.clone();
-    let replay = tokio_stream::iter(
-        replay
-            .into_iter()
-            .map(move |event| session_sse_event(&replay_store, event)),
-    );
+    let replay = tokio_stream::iter(replay).then(move |event| {
+        let replay_store = replay_store.clone();
+        async move { session_sse_event(&replay_store, event).await }
+    });
     let live_store = runtime.store.clone();
-    let live = BroadcastStream::new(receiver).filter_map(move |result| match result {
-        Ok(event)
-            if event.session_id == session_id
-                && (event.sequence == 0 || event.sequence > high_watermark) =>
-        {
-            Some(session_sse_event(&live_store, event))
-        }
-        Ok(_) => None,
-        Err(_) => Some(stream_resync_sse_event("session_resync")),
-    });
+    let live = BroadcastStream::new(receiver)
+        .then(move |result| {
+            let live_store = live_store.clone();
+            async move {
+                match result {
+                    Ok(event)
+                        if event.session_id == session_id
+                            && (event.sequence == 0 || event.sequence > high_watermark) =>
+                    {
+                        Some(session_sse_event(&live_store, event).await)
+                    }
+                    Ok(_) => None,
+                    Err(_) => Some(stream_resync_sse_event("session_resync")),
+                }
+            }
+        })
+        .filter_map(|event| event);
     let workflow_store = runtime.store.clone();
-    let workflows = BroadcastStream::new(workflow_receiver).filter_map(move |result| {
-        let event = match result {
-            Ok(event) => event,
-            Err(_) => return Some(stream_resync_sse_event("session_resync")),
-        };
-        if !workflow_store
-            .workflow_involves_session(event.workflow_id, session_id)
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        workflow_store
-            .get_workflow(event.workflow_id)
-            .ok()
-            .map(workflow_session_sse_event)
-    });
+    let workflows = BroadcastStream::new(workflow_receiver)
+        .then(move |result| {
+            let workflow_store = workflow_store.clone();
+            async move {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(_) => return Some(stream_resync_sse_event("session_resync")),
+                };
+                workflow_store
+                    .call(move |store| {
+                        if store.workflow_involves_session(event.workflow_id, session_id)? {
+                            Ok(Some(workflow_session_sse_event(
+                                store.get_workflow(event.workflow_id)?,
+                            )))
+                        } else {
+                            Ok::<_, StoreError>(None)
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        })
+        .filter_map(|event| event);
     Ok(
         Sse::new(stream::select(replay.chain(live), workflows)).keep_alive(
             KeepAlive::new()
@@ -2080,7 +2284,7 @@ fn run_sse_event(event: WorkflowEvent) -> Result<Event, Infallible> {
     sse_event(event.sequence, &event.payload, &event)
 }
 
-fn session_sse_event(store: &Store, event: SessionEvent) -> Result<Event, Infallible> {
+async fn session_sse_event(store: &StoreHandle, event: SessionEvent) -> Result<Event, Infallible> {
     let event_type = event_type(&event.payload);
     let include_session = matches!(
         &event.payload,
@@ -2121,20 +2325,28 @@ fn session_sse_event(store: &Store, event: SessionEvent) -> Result<Event, Infall
         } => Some(*agent_instance_id),
         _ => None,
     };
-    let update = SessionStreamUpdate {
-        session: include_session
-            .then(|| store.get_session(event.session_id).ok())
-            .flatten(),
-        turn: include_turn
-            .then(|| event.turn_id.and_then(|id| store.get_turn(id).ok()))
-            .flatten(),
-        step: include_step
-            .then(|| event.step_id.and_then(|id| store.get_step(id).ok()))
-            .flatten(),
-        workflow: workflow_id.and_then(|id| store.get_workflow(id).ok()),
-        participant: participant_id.and_then(|id| store.get_participant(id).ok()),
-        human_request: human_request_id.and_then(|id| store.get_human_request(id).ok()),
-        event,
+    let update = match store
+        .call(move |store| {
+            Ok::<_, StoreError>(SessionStreamUpdate {
+                session: include_session
+                    .then(|| store.get_session(event.session_id).ok())
+                    .flatten(),
+                turn: include_turn
+                    .then(|| event.turn_id.and_then(|id| store.get_turn(id).ok()))
+                    .flatten(),
+                step: include_step
+                    .then(|| event.step_id.and_then(|id| store.get_step(id).ok()))
+                    .flatten(),
+                workflow: workflow_id.and_then(|id| store.get_workflow(id).ok()),
+                participant: participant_id.and_then(|id| store.get_participant(id).ok()),
+                human_request: human_request_id.and_then(|id| store.get_human_request(id).ok()),
+                event,
+            })
+        })
+        .await
+    {
+        Ok(update) => update,
+        Err(_) => return stream_resync_sse_event("session_resync"),
     };
     let data = serialize_sse_data(&update);
     let mut result = Event::default().event(event_type).data(data);
@@ -2183,11 +2395,15 @@ async fn artifact_content(
 ) -> ApiResult<Response> {
     let artifact_id: ArtifactId = parse_id(&artifact_id, "Artifact")?;
     let (runtime, artifact) = state
-        .locate("artifact", &artifact_id.to_string(), |store| {
+        .locate("artifact", &artifact_id.to_string(), move |store| {
             store.get_artifact(artifact_id)
         })
         .await?;
-    let bytes = runtime.store.read_artifact(&artifact)?;
+    let stored_artifact = artifact.clone();
+    let bytes = runtime
+        .store
+        .call(move |store| store.read_artifact(&stored_artifact))
+        .await?;
     let media_type = HeaderValue::from_str(&artifact.media_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     let mut response = Response::new(Body::from(bytes));
@@ -2401,11 +2617,12 @@ mod lifecycle_tests {
         let managed = fixture.path().join("managed");
         let workspace = fixture.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace should be created");
-        let store = Arc::new(Store::create(&managed).expect("Store should be created"));
+        let store = Store::create(&managed).expect("Store should be created");
         let project = store
             .create_project("Lease test", &workspace)
             .expect("Project should be created");
-        let slot = ProjectSlot::unloaded(store);
+        let slot =
+            ProjectSlot::unloaded(StoreHandle::spawn(store).expect("Store thread should start"));
         let reader = slot.read(project.id).await.expect("Project should be open");
         let waiting_slot = slot.clone();
         let mut writer = tokio::spawn(async move { waiting_slot.write().await });

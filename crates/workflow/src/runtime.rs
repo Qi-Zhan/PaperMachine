@@ -12,6 +12,8 @@ use papermachine_session::WorkflowTurnContext;
 use papermachine_store::PROJECT_HOME_ROLE;
 use papermachine_store::PROJECT_HOME_SOURCE_ROLE;
 use papermachine_store::Store;
+use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -24,12 +26,14 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncBufRead;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -42,10 +46,13 @@ use crate::build_project_snapshot;
 use crate::python_runtime_sha256;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
+const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IN_FLIGHT_EFFECTS: usize = 64;
+const RESPONSE_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub struct PythonWorkflowRuntime {
-    store: Arc<Store>,
+    store: StoreHandle,
     sessions: SessionRuntime,
     python: PathBuf,
     python_runtime_root: PathBuf,
@@ -54,7 +61,7 @@ pub struct PythonWorkflowRuntime {
 
 impl PythonWorkflowRuntime {
     pub fn new(
-        store: Arc<Store>,
+        store: StoreHandle,
         sessions: SessionRuntime,
         python: impl Into<PathBuf>,
         python_runtime_root: impl Into<PathBuf>,
@@ -74,7 +81,10 @@ impl PythonWorkflowRuntime {
         workflow_id: WorkflowId,
         cancellation: CancellationToken,
     ) -> Result<Value, WorkflowRuntimeError> {
-        let run = self.store.get_workflow(workflow_id)?;
+        let run = self
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         let source_sha256 = hex::encode(Sha256::digest(run.program.source_code.as_bytes()));
         if source_sha256 != run.program.sha256 {
             return Err(WorkflowRuntimeError::Snapshot(
@@ -144,14 +154,13 @@ impl PythonWorkflowRuntime {
             "context": run.launch_context.snapshot.clone().unwrap_or_else(|| json!({})),
         });
         stdin
-            .write_all(serde_json::to_string(&initialization)?.as_bytes())
+            .write_all(&encode_protocol_frame(&initialization)?)
             .await?;
-        stdin.write_all(b"\n").await?;
         stdin.flush().await?;
 
         let effect_cancellation = cancellation.child_token();
         let context = Arc::new(RunEffectContext {
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             sessions: self.sessions.clone(),
             workflow_id,
             cancellation: effect_cancellation.clone(),
@@ -160,16 +169,13 @@ impl PythonWorkflowRuntime {
             suspensions: Mutex::new(HashMap::new()),
             completion: Mutex::new(None),
         });
-        let (responses_tx, mut responses_rx) = mpsc::unbounded_channel::<EffectResponse>();
-        let writer = tokio::spawn(async move {
+        let (responses_tx, mut responses_rx) =
+            mpsc::channel::<EffectResponse>(RESPONSE_CHANNEL_CAPACITY);
+        let mut writer = tokio::spawn(async move {
             while let Some(response) = responses_rx.recv().await {
-                let line = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+                let line = encode_protocol_frame(&response).map_err(|error| error.to_string())?;
                 stdin
                     .write_all(&line)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                stdin
-                    .write_all(b"\n")
                     .await
                     .map_err(|error| error.to_string())?;
                 stdin.flush().await.map_err(|error| error.to_string())?;
@@ -177,24 +183,55 @@ impl PythonWorkflowRuntime {
             Ok::<(), String>(())
         });
         let stderr_task = tokio::spawn(drain_limited(stderr, MAX_RUNTIME_STDERR_BYTES));
-        let mut lines = BufReader::new(stdout).lines();
+        let mut reader = BufReader::new(stdout);
         let mut handlers = JoinSet::new();
+        let effect_permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_EFFECTS));
         let mut protocol_error = None;
+        let mut writer_result = None;
         loop {
             let next = tokio::select! {
-                line = lines.next_line() => line,
+                frame = read_protocol_frame(&mut reader) => frame,
+                joined = handlers.join_next(), if !handlers.is_empty() => {
+                    match joined {
+                        Some(Ok(Ok(()))) => continue,
+                        Some(Ok(Err(error))) => {
+                            protocol_error = Some(WorkflowRuntimeError::Protocol(error));
+                        }
+                        Some(Err(error)) => {
+                            protocol_error = Some(WorkflowRuntimeError::Protocol(error.to_string()));
+                        }
+                        None => continue,
+                    }
+                    terminate_process_tree(&mut child).await;
+                    break;
+                }
+                result = &mut writer => {
+                    let result = result
+                        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
+                        .map_err(WorkflowRuntimeError::Protocol);
+                    protocol_error = Some(match &result {
+                        Ok(()) => WorkflowRuntimeError::Protocol(
+                            "workflow protocol writer ended before stdout closed".to_string(),
+                        ),
+                        Err(error) => WorkflowRuntimeError::Protocol(error.to_string()),
+                    });
+                    writer_result = Some(result);
+                    terminate_process_tree(&mut child).await;
+                    break;
+                }
                 _ = cancellation.cancelled() => {
                     terminate_process_tree(&mut child).await;
                     protocol_error = Some(WorkflowRuntimeError::Cancelled);
                     break;
                 }
             };
-            let Some(line) = next? else { break };
-            let request: EffectRequest = match serde_json::from_str(&line) {
+            let Some(frame) = next? else { break };
+            let request: EffectRequest = match serde_json::from_slice(&frame) {
                 Ok(request) => request,
                 Err(error) => {
                     protocol_error = Some(WorkflowRuntimeError::Protocol(format!(
-                        "invalid effect request: {error}; line={line}"
+                        "invalid effect request: {error}; frame={}",
+                        protocol_frame_preview(&frame)
                     )));
                     terminate_process_tree(&mut child).await;
                     break;
@@ -213,6 +250,32 @@ impl PythonWorkflowRuntime {
                 }
                 break;
             }
+            let permit = tokio::select! {
+                permit = Arc::clone(&effect_permits).acquire_owned() => {
+                    permit.map_err(|_| WorkflowRuntimeError::Protocol(
+                        "workflow effect semaphore closed".to_string(),
+                    ))?
+                }
+                result = &mut writer => {
+                    let result = result
+                        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
+                        .map_err(WorkflowRuntimeError::Protocol);
+                    protocol_error = Some(match &result {
+                        Ok(()) => WorkflowRuntimeError::Protocol(
+                            "workflow protocol writer ended while applying backpressure".to_string(),
+                        ),
+                        Err(error) => WorkflowRuntimeError::Protocol(error.to_string()),
+                    });
+                    writer_result = Some(result);
+                    terminate_process_tree(&mut child).await;
+                    break;
+                }
+                _ = cancellation.cancelled() => {
+                    terminate_process_tree(&mut child).await;
+                    protocol_error = Some(WorkflowRuntimeError::Cancelled);
+                    break;
+                }
+            };
             let effect_context = Arc::clone(&context);
             let sender = responses_tx.clone();
             handlers.spawn(async move {
@@ -240,16 +303,35 @@ impl PythonWorkflowRuntime {
                         suspended: None,
                     },
                 };
-                let _ = sender.send(response);
+                sender
+                    .send(response)
+                    .await
+                    .map_err(|_| "workflow protocol response channel closed".to_string())?;
+                drop(permit);
+                Ok::<(), String>(())
             });
         }
         effect_cancellation.cancel();
-        while handlers.join_next().await.is_some() {}
+        while let Some(joined) = handlers.join_next().await {
+            let error = match joined {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(error) => Some(error.to_string()),
+            };
+            if protocol_error.is_none()
+                && let Some(error) = error
+            {
+                protocol_error = Some(WorkflowRuntimeError::Protocol(error));
+            }
+        }
         drop(responses_tx);
-        let writer_result = writer
-            .await
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-            .map_err(WorkflowRuntimeError::Protocol);
+        let writer_result = match writer_result {
+            Some(result) => result,
+            None => writer
+                .await
+                .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
+                .map_err(WorkflowRuntimeError::Protocol),
+        };
         let status_result = child.wait().await.map_err(WorkflowRuntimeError::Io);
         let stderr_result = stderr_task
             .await
@@ -299,7 +381,7 @@ impl WorkflowRuntime for PythonWorkflowRuntime {
 }
 
 struct RunEffectContext {
-    store: Arc<Store>,
+    store: StoreHandle,
     sessions: SessionRuntime,
     workflow_id: WorkflowId,
     cancellation: CancellationToken,
@@ -321,12 +403,16 @@ impl RunEffectContext {
             )
         };
         let _guard = gate.lock().await;
-        let effect = self.store.begin_workflow_effect(
-            self.workflow_id,
-            &request.id,
-            &request.kind,
-            request.payload.clone(),
-        )?;
+        let workflow_id = self.workflow_id;
+        let effect_id = request.id.clone();
+        let effect_kind = request.kind.clone();
+        let effect_payload = request.payload.clone();
+        let effect = self
+            .store
+            .call::<_, StoreError, _>(move |store| {
+                store.begin_workflow_effect(workflow_id, &effect_id, &effect_kind, effect_payload)
+            })
+            .await?;
         match effect.status {
             WorkflowEffectStatus::Completed => {
                 self.suspensions.lock().await.remove(&request.id);
@@ -364,14 +450,17 @@ impl RunEffectContext {
                 | WorkflowRuntimeError::Cancelled
                 | WorkflowRuntimeError::WorkflowTerminal(_))
         ) {
-            self.store.finish_workflow_effect(
-                self.workflow_id,
-                &key,
-                result
-                    .as_ref()
-                    .map(Clone::clone)
-                    .map_err(ToString::to_string),
-            )?;
+            let workflow_id = self.workflow_id;
+            let effect_key = key.clone();
+            let effect_result = result
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(ToString::to_string);
+            self.store
+                .call(move |store| {
+                    store.finish_workflow_effect(workflow_id, &effect_key, effect_result)
+                })
+                .await?;
         }
         result
     }
@@ -383,7 +472,11 @@ impl RunEffectContext {
                 "Python runtime requested suspension without a pending durable wait".to_string(),
             ));
         }
-        let run = self.store.get_workflow(self.workflow_id)?;
+        let workflow_id = self.workflow_id;
+        let run = self
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         let status = if run.status == WorkflowStatus::Paused {
             WorkflowStatus::Paused
         } else if suspensions
@@ -415,22 +508,22 @@ impl RunEffectContext {
         match kind {
             "create_agent" => self.create_agent(effect_key, payload).await,
             "set_agent_access" => self.set_agent_access(effect_key, payload).await,
-            "retire_agent" => self.retire_agent(payload),
+            "retire_agent" => self.retire_agent(payload).await,
             "invoke_action" => self.invoke_action(effect_key, payload).await,
-            "create_team" => self.create_team(effect_key, payload),
-            "set_team_members" => self.set_team_members(payload),
-            "set_relation" => self.set_relation(effect_key, payload),
-            "open_scope" => self.open_scope(effect_key, payload),
-            "close_scope" => self.close_scope(payload),
-            "register_timer" => self.register_timer(effect_key, payload),
+            "create_team" => self.create_team(effect_key, payload).await,
+            "set_team_members" => self.set_team_members(payload).await,
+            "set_relation" => self.set_relation(effect_key, payload).await,
+            "open_scope" => self.open_scope(effect_key, payload).await,
+            "close_scope" => self.close_scope(payload).await,
+            "register_timer" => self.register_timer(effect_key, payload).await,
             "wait_timer" => self.wait_timer(effect_key, payload).await,
-            "create_channel" => self.create_channel(effect_key, payload),
-            "publish_signal" => self.publish_signal(effect_key, payload),
+            "create_channel" => self.create_channel(effect_key, payload).await,
+            "publish_signal" => self.publish_signal(effect_key, payload).await,
             "wait_signal" => self.wait_signal(payload).await,
             "ask_human" => self.ask_human(effect_key, payload).await,
-            "project_snapshot" => self.project_snapshot(payload),
-            "publish_artifact" => self.publish_artifact(effect_key, payload),
-            "publish_project_home" => self.publish_project_home(effect_key, payload),
+            "project_snapshot" => self.project_snapshot(payload).await,
+            "publish_artifact" => self.publish_artifact(effect_key, payload).await,
+            "publish_project_home" => self.publish_project_home(effect_key, payload).await,
             "complete" => self.complete(payload).await,
             other => Err(WorkflowRuntimeError::Protocol(format!(
                 "unknown effect kind: {other}"
@@ -442,7 +535,11 @@ impl RunEffectContext {
         if self.cancellation.is_cancelled() {
             return Err(WorkflowRuntimeError::Cancelled);
         }
-        let run = self.store.get_workflow(self.workflow_id)?;
+        let workflow_id = self.workflow_id;
+        let run = self
+            .store
+            .call(move |store| store.get_workflow(workflow_id))
+            .await?;
         match run.status {
             WorkflowStatus::Created | WorkflowStatus::Running => Ok(()),
             WorkflowStatus::Paused
@@ -463,13 +560,6 @@ impl RunEffectContext {
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: CreateAgentEffect = serde_json::from_value(payload)?;
-        let workflow = self.store.get_workflow(self.workflow_id)?;
-        let requested_access = workflow
-            .agent_access_overrides
-            .get(&payload.class_name)
-            .copied()
-            .unwrap_or(payload.access);
-        let effective_access = std::cmp::min(requested_access, workflow.access);
         let participant_id = AgentInstanceId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
@@ -480,30 +570,42 @@ impl RunEffectContext {
             effect_key,
             "session",
         ));
-        let participant = match self.store.get_participant(participant_id) {
-            Ok(participant) => participant,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_participant_with_ids(
-                    self.workflow_id,
-                    participant_id,
-                    session_id,
-                    payload.class_name,
-                    payload.name,
-                    payload.role,
-                    payload.system_prompt,
-                    payload.model,
-                    payload.skills,
-                    effective_access,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let workflow_id = self.workflow_id;
+        let (participant, current_access, effective_access) = self
+            .store
+            .call(move |store| {
+                let workflow = store.get_workflow(workflow_id)?;
+                let requested_access = workflow
+                    .agent_access_overrides
+                    .get(&payload.class_name)
+                    .copied()
+                    .unwrap_or(payload.access);
+                let effective_access = std::cmp::min(requested_access, workflow.access);
+                let participant = match store.get_participant(participant_id) {
+                    Ok(participant) => participant,
+                    Err(StoreError::NotFound { .. }) => store.create_participant_with_ids(
+                        workflow_id,
+                        participant_id,
+                        session_id,
+                        payload.class_name,
+                        payload.name,
+                        payload.role,
+                        payload.system_prompt,
+                        payload.model,
+                        payload.skills,
+                        effective_access,
+                    )?,
+                    Err(error) => return Err(error.into()),
+                };
+                let current_access = store.get_session(participant.session_id)?.access;
+                Ok::<_, WorkflowRuntimeError>((participant, current_access, effective_access))
+            })
+            .await?;
         if participant.workflow_id != self.workflow_id {
             return Err(WorkflowRuntimeError::Protocol(
                 "replayed Agent belongs to another Workflow".to_string(),
             ));
         }
-        let current_access = self.store.get_session(participant.session_id)?.access;
         if current_access < effective_access {
             match self
                 .request_access_grant(effect_key, &participant, current_access, effective_access)
@@ -512,12 +614,24 @@ impl RunEffectContext {
                 Ok(()) => {}
                 Err(error @ WorkflowRuntimeError::Suspended(_)) => return Err(error),
                 Err(error) => {
-                    let _ = self.store.retire_participant(participant.id);
+                    let participant_id = participant.id;
+                    let _ = self
+                        .store
+                        .call::<_, StoreError, _>(move |store| {
+                            store.retire_participant(participant_id)
+                        })
+                        .await;
                     return Err(error);
                 }
             }
         }
-        let access = self.store.get_session(participant.session_id)?.access;
+        let participant_session_id = participant.session_id;
+        let access = self
+            .store
+            .call(move |store| {
+                Ok::<_, StoreError>(store.get_session(participant_session_id)?.access)
+            })
+            .await?;
         Ok(json!({
             "agent_instance_id": participant.id,
             "session_id": participant.session_id,
@@ -533,26 +647,36 @@ impl RunEffectContext {
         let payload: SetAgentAccessEffect = serde_json::from_value(payload)?;
         let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let participant = self.store.get_participant(agent_id)?;
+        let workflow_id = self.workflow_id;
+        let (participant, workflow, current) = self
+            .store
+            .call(move |store| {
+                let participant = store.get_participant(agent_id)?;
+                let workflow = store.get_workflow(workflow_id)?;
+                let current = store.get_session(participant.session_id)?.access;
+                Ok::<_, StoreError>((participant, workflow, current))
+            })
+            .await?;
         if participant.workflow_id != self.workflow_id {
             return Err(WorkflowRuntimeError::Protocol(
                 "cannot change access for an Agent in another Workflow".to_string(),
             ));
         }
-        let workflow = self.store.get_workflow(self.workflow_id)?;
         if payload.access > workflow.access {
             return Err(WorkflowRuntimeError::Protocol(format!(
                 "Agent access {} exceeds Workflow ceiling {}",
                 payload.access, workflow.access
             )));
         }
-        let current = self.store.get_session(participant.session_id)?.access;
         if payload.access > current {
             self.request_access_grant(effect_key, &participant, current, payload.access)
                 .await?;
         } else if payload.access < current {
+            let session_id = participant.session_id;
+            let access = payload.access;
             self.store
-                .set_session_access(participant.session_id, payload.access)?;
+                .call(move |store| store.set_session_access(session_id, access))
+                .await?;
         }
         Ok(json!({"access": payload.access}))
     }
@@ -564,39 +688,44 @@ impl RunEffectContext {
         current: AccessPreset,
         requested: AccessPreset,
     ) -> Result<(), WorkflowRuntimeError> {
-        let workflow = self.store.get_workflow(self.workflow_id)?;
-        if requested > workflow.access {
-            return Err(WorkflowRuntimeError::Protocol(format!(
-                "Agent access {requested} exceeds Workflow ceiling {}",
-                workflow.access
-            )));
-        }
         let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "access-grant",
         ));
-        let request = match self.store.get_human_request(request_id) {
-            Ok(request) => request,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_human_request_with_id(
-                    request_id,
-                    self.workflow_id,
-                    participant.session_id,
-                    format!(
-                        "Workflow Agent {} requests an access change from {current} to {requested}. Grant this access?",
-                        participant.name
-                    ),
-                    json!({
-                        "type": "boolean",
-                        "title": "Grant Agent access",
-                        "requested_access": requested,
-                    }),
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let answer = human_answer_or_suspend(&self.store, request.id)?;
+        let workflow_id = self.workflow_id;
+        let participant_session_id = participant.session_id;
+        let participant_name = participant.name.clone();
+        let answer = self
+            .store
+            .call(move |store| {
+                let workflow = store.get_workflow(workflow_id)?;
+                if requested > workflow.access {
+                    return Err(WorkflowRuntimeError::Protocol(format!(
+                        "Agent access {requested} exceeds Workflow ceiling {}",
+                        workflow.access
+                    )));
+                }
+                let request = match store.get_human_request(request_id) {
+                    Ok(request) => request,
+                    Err(StoreError::NotFound { .. }) => store.create_human_request_with_id(
+                        request_id,
+                        workflow_id,
+                        participant_session_id,
+                        format!(
+                            "Workflow Agent {participant_name} requests an access change from {current} to {requested}. Grant this access?"
+                        ),
+                        json!({
+                            "type": "boolean",
+                            "title": "Grant Agent access",
+                            "requested_access": requested,
+                        }),
+                    )?,
+                    Err(error) => return Err(error.into()),
+                };
+                human_answer_or_suspend(store, request.id)
+            })
+            .await?;
         if answer.as_bool() != Some(true) {
             return Err(WorkflowRuntimeError::Protocol(format!(
                 "human denied {requested} access for Agent {}",
@@ -604,13 +733,16 @@ impl RunEffectContext {
             )));
         }
         self.store
-            .set_session_access(participant.session_id, requested)?;
+            .call(move |store| store.set_session_access(participant_session_id, requested))
+            .await?;
         Ok(())
     }
 
-    fn retire_agent(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn retire_agent(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let agent_id = id_field::<AgentInstanceId>(&payload, "agent_instance_id")?;
-        self.store.retire_participant(agent_id)?;
+        self.store
+            .call(move |store| store.retire_participant(agent_id))
+            .await?;
         Ok(Value::Null)
     }
 
@@ -628,13 +760,42 @@ impl RunEffectContext {
             .map(TaskScopeId::from_str)
             .transpose()
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let participant = self.store.get_participant(agent_id)?;
-        let human_source = resolve_human_turn_source(
-            &self.store,
+        let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
             self.workflow_id,
-            participant.session_id,
-            &payload,
-        )?;
+            effect_key,
+            "action-invocation",
+        ));
+        let workflow_id = self.workflow_id;
+        let stored_payload = payload.clone();
+        let (participant, human_source, invocation) = self
+            .store
+            .call(move |store| {
+                let participant = store.get_participant(agent_id)?;
+                let human_source = resolve_human_turn_source(
+                    store,
+                    workflow_id,
+                    participant.session_id,
+                    &stored_payload,
+                )?;
+                let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
+                let invocation = match store.get_action_invocation(invocation_id) {
+                    Ok(invocation) => invocation,
+                    Err(StoreError::NotFound { .. }) => store.create_action_invocation_with_id(
+                        invocation_id,
+                        workflow_id,
+                        scope_id,
+                        agent_id,
+                        stored_payload.action_name.clone(),
+                        stored_payload.prompt.clone(),
+                        stored_payload.arguments.clone(),
+                        stored_payload.requested_tools.clone(),
+                        source_human_request_id,
+                    )?,
+                    Err(error) => return Err(error.into()),
+                };
+                Ok::<_, WorkflowRuntimeError>((participant, human_source, invocation))
+            })
+            .await?;
         let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
         let turn_origin = if human_source.is_some() {
             TurnOrigin::User
@@ -655,28 +816,6 @@ impl RunEffectContext {
                 )
             },
         );
-        let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "action-invocation",
-        ));
-        let invocation = match self.store.get_action_invocation(invocation_id) {
-            Ok(invocation) => invocation,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_action_invocation_with_id(
-                    invocation_id,
-                    self.workflow_id,
-                    scope_id,
-                    agent_id,
-                    payload.action_name.clone(),
-                    payload.prompt.clone(),
-                    payload.arguments.clone(),
-                    payload.requested_tools.clone(),
-                    source_human_request_id,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
         if invocation.workflow_id != self.workflow_id
             || invocation.agent_instance_id != agent_id
             || invocation.source_human_request_id != source_human_request_id
@@ -707,21 +846,31 @@ impl RunEffectContext {
             )
         };
         let _agent_guard = gate.lock().await;
-        let run = self.store.get_workflow(self.workflow_id)?;
-        let relationship_context =
-            relationship_instructions(&self.store, self.workflow_id, agent_id)?;
-        let mut interruption_guidance = None;
-        let mut recovered_attempt = self
+        let invocation_id = invocation.id;
+        let workflow_id = self.workflow_id;
+        let (run, relationship_context, mut recovered_attempt) = self
             .store
-            .list_action_attempts(invocation.id)?
-            .into_iter()
-            .rev()
-            .find(|attempt| !attempt.status.is_terminal());
+            .call(move |store| {
+                let run = store.get_workflow(workflow_id)?;
+                let relationship_context = relationship_instructions(store, workflow_id, agent_id)?;
+                let recovered_attempt = store
+                    .list_action_attempts(invocation_id)?
+                    .into_iter()
+                    .rev()
+                    .find(|attempt| !attempt.status.is_terminal());
+                Ok::<_, WorkflowRuntimeError>((run, relationship_context, recovered_attempt))
+            })
+            .await?;
+        let mut interruption_guidance = None;
         loop {
             self.checkpoint().await?;
             let attempt = match recovered_attempt.take() {
                 Some(attempt) => attempt,
-                None => self.store.start_action_attempt(invocation.id)?,
+                None => {
+                    self.store
+                        .call(move |store| store.start_action_attempt(invocation_id))
+                        .await?
+                }
             };
             let guidance = interruption_guidance.take();
             let context = WorkflowTurnContext {
@@ -730,7 +879,10 @@ impl RunEffectContext {
                 action_attempt_id: attempt.id,
             };
             let result = if let Some(turn_id) = attempt.turn_id {
-                let turn = self.store.get_turn(turn_id)?;
+                let turn = self
+                    .store
+                    .call(move |store| store.get_turn(turn_id))
+                    .await?;
                 match turn.status {
                     TurnStatus::Completed => Ok(turn),
                     TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {
@@ -751,13 +903,19 @@ impl RunEffectContext {
                         let error = turn
                             .error
                             .unwrap_or_else(|| "Action Turn failed before restart".to_string());
-                        self.store.finish_action(
-                            invocation.id,
-                            attempt.id,
-                            ActionStatus::Failed,
-                            None,
-                            Some(error.clone()),
-                        )?;
+                        let attempt_id = attempt.id;
+                        let stored_error = error.clone();
+                        self.store
+                            .call(move |store| {
+                                store.finish_action(
+                                    invocation_id,
+                                    attempt_id,
+                                    ActionStatus::Failed,
+                                    None,
+                                    Some(stored_error),
+                                )
+                            })
+                            .await?;
                         return Err(WorkflowRuntimeError::Action(error));
                     }
                 }
@@ -826,13 +984,18 @@ impl RunEffectContext {
                         "turn_id": turn.id,
                         "hosted_search_calls_used": turn.hosted_search_calls_used,
                     });
-                    self.store.finish_action(
-                        invocation.id,
-                        attempt.id,
-                        ActionStatus::Completed,
-                        Some(action_output),
-                        None,
-                    )?;
+                    let attempt_id = attempt.id;
+                    self.store
+                        .call(move |store| {
+                            store.finish_action(
+                                invocation_id,
+                                attempt_id,
+                                ActionStatus::Completed,
+                                Some(action_output),
+                                None,
+                            )
+                        })
+                        .await?;
                     return Ok(json!({
                         "action_invocation_id": invocation.id,
                         "output": turn.output.unwrap_or_default(),
@@ -841,63 +1004,91 @@ impl RunEffectContext {
                     }));
                 }
                 Err(SessionRuntimeError::Interrupted(reason)) => {
-                    self.store.finish_action(
-                        invocation.id,
-                        attempt.id,
-                        ActionStatus::Interrupted,
-                        None,
-                        Some(reason.clone()),
-                    )?;
+                    let attempt_id = attempt.id;
+                    let stored_reason = reason.clone();
+                    self.store
+                        .call(move |store| {
+                            store.finish_action(
+                                invocation_id,
+                                attempt_id,
+                                ActionStatus::Interrupted,
+                                None,
+                                Some(stored_reason),
+                            )
+                        })
+                        .await?;
                     interruption_guidance = Some(reason);
                 }
                 Err(SessionRuntimeError::Cancelled) if self.cancellation.is_cancelled() => {
-                    self.store.finish_action(
-                        invocation.id,
-                        attempt.id,
-                        ActionStatus::Cancelled,
-                        None,
-                        Some("Workflow cancelled".to_string()),
-                    )?;
+                    let attempt_id = attempt.id;
+                    self.store
+                        .call(move |store| {
+                            store.finish_action(
+                                invocation_id,
+                                attempt_id,
+                                ActionStatus::Cancelled,
+                                None,
+                                Some("Workflow cancelled".to_string()),
+                            )
+                        })
+                        .await?;
                     return Err(WorkflowRuntimeError::Cancelled);
                 }
                 Err(error) => {
-                    self.store.finish_action(
-                        invocation.id,
-                        attempt.id,
-                        ActionStatus::Failed,
-                        None,
-                        Some(error.to_string()),
-                    )?;
-                    return Err(WorkflowRuntimeError::Action(error.to_string()));
+                    let message = error.to_string();
+                    let stored_message = message.clone();
+                    let attempt_id = attempt.id;
+                    self.store
+                        .call(move |store| {
+                            store.finish_action(
+                                invocation_id,
+                                attempt_id,
+                                ActionStatus::Failed,
+                                None,
+                                Some(stored_message),
+                            )
+                        })
+                        .await?;
+                    return Err(WorkflowRuntimeError::Action(message));
                 }
             }
         }
     }
 
-    fn create_team(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn create_team(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: TeamEffect = serde_json::from_value(payload)?;
         let members = parse_ids(&payload.member_ids)?;
         let team_id = TeamId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "team"));
-        let team = match self.store.get_team(team_id) {
-            Ok(team) => team,
-            Err(papermachine_store::StoreError::NotFound { .. }) => self
-                .store
-                .create_team_with_id(team_id, self.workflow_id, payload.name, members)?,
-            Err(error) => return Err(error.into()),
-        };
+        let workflow_id = self.workflow_id;
+        let team = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_team(team_id) {
+                Ok(team) => Ok(team),
+                Err(StoreError::NotFound { .. }) => {
+                    Ok(store.create_team_with_id(team_id, workflow_id, payload.name, members)?)
+                }
+                Err(error) => Err(error.into()),
+            })
+            .await?;
         Ok(json!({"team_id": team.id}))
     }
 
-    fn set_team_members(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn set_team_members(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: SetTeamEffect = serde_json::from_value(payload)?;
         let team_id = TeamId::from_str(&payload.team_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+        let members = parse_ids(&payload.member_ids)?;
         self.store
-            .set_team_members(team_id, parse_ids(&payload.member_ids)?)?;
+            .call(move |store| store.set_team_members(team_id, members))
+            .await?;
         Ok(Value::Null)
     }
 
-    fn set_relation(
+    async fn set_relation(
         &self,
         effect_key: &str,
         payload: Value,
@@ -912,24 +1103,32 @@ impl RunEffectContext {
             effect_key,
             "relation",
         ));
-        let relation = match self.store.get_relation(relation_id) {
-            Ok(relation) => relation,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.set_relation_with_id(
-                    relation_id,
-                    self.workflow_id,
-                    source,
-                    target,
-                    payload.kind,
-                    payload.instructions,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let workflow_id = self.workflow_id;
+        let relation = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| {
+                match store.get_relation(relation_id) {
+                    Ok(relation) => Ok(relation),
+                    Err(StoreError::NotFound { .. }) => Ok(store.set_relation_with_id(
+                        relation_id,
+                        workflow_id,
+                        source,
+                        target,
+                        payload.kind,
+                        payload.instructions,
+                    )?),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .await?;
         Ok(json!({"relation_id": relation.id}))
     }
 
-    fn open_scope(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn open_scope(
+        &self,
+        effect_key: &str,
+        payload: Value,
+    ) -> Result<Value, WorkflowRuntimeError> {
         let payload: OpenScopeEffect = serde_json::from_value(payload)?;
         let parent = payload
             .parent_id
@@ -942,23 +1141,25 @@ impl RunEffectContext {
             effect_key,
             "task-scope",
         ));
-        let scope = match self.store.get_task_scope(scope_id) {
-            Ok(scope) => scope,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_task_scope_with_id(
+        let workflow_id = self.workflow_id;
+        let scope = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_task_scope(scope_id) {
+                Ok(scope) => Ok(scope),
+                Err(StoreError::NotFound { .. }) => Ok(store.create_task_scope_with_id(
                     scope_id,
-                    self.workflow_id,
+                    workflow_id,
                     parent,
                     payload.name,
                     payload.objective,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+                )?),
+                Err(error) => Err(error.into()),
+            })
+            .await?;
         Ok(json!({"task_scope_id": scope.id}))
     }
 
-    fn close_scope(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn close_scope(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: CloseScopeEffect = serde_json::from_value(payload)?;
         let id = TaskScopeId::from_str(&payload.task_scope_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
@@ -971,41 +1172,42 @@ impl RunEffectContext {
                 )));
             }
         };
-        self.store.set_task_scope_status(id, status)?;
+        self.store
+            .call(move |store| store.set_task_scope_status(id, status))
+            .await?;
         Ok(Value::Null)
     }
 
-    fn register_timer(
+    async fn register_timer(
         &self,
         effect_key: &str,
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: TimerEffect = serde_json::from_value(payload)?;
-        if let Some(timer) = self
-            .store
-            .list_timers(self.workflow_id)?
-            .into_iter()
-            .find(|timer| {
-                timer.name == payload.name
-                    && matches!(timer.status, TimerStatus::Active | TimerStatus::Paused)
-            })
-        {
-            return Ok(json!({"timer_id": timer.id}));
-        }
         let timer_id =
             TimerId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "timer"));
-        let timer = match self.store.get_timer(timer_id) {
-            Ok(timer) => timer,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_timer_with_id(
-                    timer_id,
-                    self.workflow_id,
-                    payload.name,
-                    payload.interval_ms,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let workflow_id = self.workflow_id;
+        let timer = self
+            .store
+            .call::<_, StoreError, _>(move |store| {
+                if let Some(timer) = store.list_timers(workflow_id)?.into_iter().find(|timer| {
+                    timer.name == payload.name
+                        && matches!(timer.status, TimerStatus::Active | TimerStatus::Paused)
+                }) {
+                    return Ok(timer);
+                }
+                match store.get_timer(timer_id) {
+                    Ok(timer) => Ok(timer),
+                    Err(StoreError::NotFound { .. }) => Ok(store.create_timer_with_id(
+                        timer_id,
+                        workflow_id,
+                        payload.name,
+                        payload.interval_ms,
+                    )?),
+                    Err(error) => Err(error),
+                }
+            })
+            .await?;
         Ok(json!({"timer_id": timer.id}))
     }
 
@@ -1016,17 +1218,28 @@ impl RunEffectContext {
     ) -> Result<Value, WorkflowRuntimeError> {
         let timer_id = id_field::<TimerId>(&payload, "timer_id")?;
         self.checkpoint().await?;
-        let timer = self.store.get_timer(timer_id)?;
-        if timer.status != TimerStatus::Active {
-            return Err(WorkflowRuntimeError::Protocol(
-                "timer is no longer active".to_string(),
-            ));
-        }
-        let wait = (timer.next_fire_at - Utc::now())
-            .to_std()
-            .unwrap_or_default();
-        if wait.is_zero() {
-            let fired = self.store.fire_timer_for_effect(timer_id, effect_key)?;
+        let effect_key = effect_key.to_string();
+        let (timer, fired) = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| {
+                let timer = store.get_timer(timer_id)?;
+                if timer.status != TimerStatus::Active {
+                    return Err(WorkflowRuntimeError::Protocol(
+                        "timer is no longer active".to_string(),
+                    ));
+                }
+                let wait = (timer.next_fire_at - Utc::now())
+                    .to_std()
+                    .unwrap_or_default();
+                let fired = if wait.is_zero() {
+                    Some(store.fire_timer_for_effect(timer_id, &effect_key)?)
+                } else {
+                    None
+                };
+                Ok::<_, WorkflowRuntimeError>((timer, fired))
+            })
+            .await?;
+        if let Some(fired) = fired {
             return Ok(json!({"fire_count": fired.fire_count, "fired_at": fired.last_fired_at}));
         }
         Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
@@ -1035,41 +1248,44 @@ impl RunEffectContext {
         )))
     }
 
-    fn create_channel(
+    async fn create_channel(
         &self,
         effect_key: &str,
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: ChannelEffect = serde_json::from_value(payload)?;
-        if let Some(channel) = self
-            .store
-            .list_channels(self.workflow_id)?
-            .into_iter()
-            .find(|item| item.name == payload.name)
-        {
-            return Ok(json!({"channel_id": channel.id}));
-        }
         let channel_id = ChannelId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "channel",
         ));
-        let channel = match self.store.get_channel(channel_id) {
-            Ok(channel) => channel,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_channel_with_id(
-                    channel_id,
-                    self.workflow_id,
-                    payload.name,
-                    payload.schema,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let workflow_id = self.workflow_id;
+        let channel = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| {
+                if let Some(channel) = store
+                    .list_channels(workflow_id)?
+                    .into_iter()
+                    .find(|item| item.name == payload.name)
+                {
+                    return Ok(channel);
+                }
+                match store.get_channel(channel_id) {
+                    Ok(channel) => Ok(channel),
+                    Err(StoreError::NotFound { .. }) => Ok(store.create_channel_with_id(
+                        channel_id,
+                        workflow_id,
+                        payload.name,
+                        payload.schema,
+                    )?),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .await?;
         Ok(json!({"channel_id": channel.id}))
     }
 
-    fn publish_signal(
+    async fn publish_signal(
         &self,
         effect_key: &str,
         payload: Value,
@@ -1085,13 +1301,19 @@ impl RunEffectContext {
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let signal_id =
             SignalId::from_uuid(effect_resource_uuid(self.workflow_id, effect_key, "signal"));
-        let signal = match self.store.get_signal(signal_id) {
-            Ok(signal) => signal,
-            Err(papermachine_store::StoreError::NotFound { .. }) => self
-                .store
-                .publish_signal_with_id(signal_id, channel_id, sender, payload.value)?,
-            Err(error) => return Err(error.into()),
-        };
+        let signal = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| match store.get_signal(signal_id) {
+                Ok(signal) => Ok(signal),
+                Err(StoreError::NotFound { .. }) => Ok(store.publish_signal_with_id(
+                    signal_id,
+                    channel_id,
+                    sender,
+                    payload.value,
+                )?),
+                Err(error) => Err(error.into()),
+            })
+            .await?;
         Ok(json!({"signal_id": signal.id, "sequence": signal.sequence}))
     }
 
@@ -1100,12 +1322,18 @@ impl RunEffectContext {
         let channel_id = ChannelId::from_str(&payload.channel_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         self.checkpoint().await?;
-        if let Some(signal) = self
+        let signal = self
             .store
-            .list_signals(channel_id, payload.after_sequence)?
-            .into_iter()
-            .next()
-        {
+            .call::<_, StoreError, _>(move |store| {
+                Ok::<_, StoreError>(
+                    store
+                        .list_signals(channel_id, payload.after_sequence)?
+                        .into_iter()
+                        .next(),
+                )
+            })
+            .await?;
+        if let Some(signal) = signal {
             return Ok(
                 json!({"signal_id": signal.id, "sequence": signal.sequence, "value": signal.value}),
             );
@@ -1122,70 +1350,80 @@ impl RunEffectContext {
         payload: Value,
     ) -> Result<Value, WorkflowRuntimeError> {
         let payload: AskHumanEffect = serde_json::from_value(payload)?;
-        let run = self.store.get_workflow(self.workflow_id)?;
-        let session_id = if let Some(agent_id) = payload.agent_instance_id {
-            self.store
-                .get_participant(
-                    AgentInstanceId::from_str(&agent_id)
-                        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?,
-                )?
-                .session_id
-        } else if let Some(session_id) = run.started_from_session_id {
-            session_id
-        } else {
-            self.store
-                .list_participants(self.workflow_id)?
-                .first()
-                .map(|participant| participant.session_id)
-                .ok_or_else(|| {
-                    WorkflowRuntimeError::Protocol(
-                        "workflow-level ask_human requires a participant Session".to_string(),
-                    )
-                })?
-        };
         let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "human-request",
         ));
-        let request = match self.store.get_human_request(request_id) {
-            Ok(request) => request,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_human_request_with_id(
-                    request_id,
-                    self.workflow_id,
-                    session_id,
-                    payload.question,
-                    payload.response_schema,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let answer = human_answer_or_suspend(&self.store, request.id)?;
+        let workflow_id = self.workflow_id;
+        let (request, answer) =
+            self.store
+                .call(move |store| {
+                    let run = store.get_workflow(workflow_id)?;
+                    let session_id = if let Some(agent_id) = payload.agent_instance_id {
+                        store
+                            .get_participant(AgentInstanceId::from_str(&agent_id).map_err(
+                                |error| WorkflowRuntimeError::Protocol(error.to_string()),
+                            )?)?
+                            .session_id
+                    } else if let Some(session_id) = run.started_from_session_id {
+                        session_id
+                    } else {
+                        store
+                            .list_participants(workflow_id)?
+                            .first()
+                            .map(|participant| participant.session_id)
+                            .ok_or_else(|| {
+                                WorkflowRuntimeError::Protocol(
+                                    "workflow-level ask_human requires a participant Session"
+                                        .to_string(),
+                                )
+                            })?
+                    };
+                    let request = match store.get_human_request(request_id) {
+                        Ok(request) => request,
+                        Err(StoreError::NotFound { .. }) => store.create_human_request_with_id(
+                            request_id,
+                            workflow_id,
+                            session_id,
+                            payload.question,
+                            payload.response_schema,
+                        )?,
+                        Err(error) => return Err(error.into()),
+                    };
+                    let answer = human_answer_or_suspend(store, request.id)?;
+                    Ok::<_, WorkflowRuntimeError>((request, answer))
+                })
+                .await?;
         Ok(json!({"human_request_id": request.id, "answer": answer}))
     }
 
-    fn project_snapshot(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn project_snapshot(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
         let payload: ProjectSnapshotEffect = serde_json::from_value(payload)?;
-        let run = self.store.get_workflow(self.workflow_id)?;
-        Ok(build_project_snapshot(
-            &self.store,
-            run.project_id,
-            ProjectSnapshotOptions {
-                exclude_workflow_id: Some(self.workflow_id),
-                after_cursor: payload.after_cursor,
-                max_sessions: payload.max_sessions,
-                max_turns_per_session: payload.max_turns_per_session,
-                max_workflows: payload.max_workflows,
-                max_artifacts: payload.max_artifacts,
-                include_artifact_content: payload.include_artifact_content,
-                max_text_chars: payload.max_text_chars,
-                ..ProjectSnapshotOptions::default()
-            },
-        )?)
+        let workflow_id = self.workflow_id;
+        self.store
+            .call(move |store| {
+                let run = store.get_workflow(workflow_id)?;
+                Ok(build_project_snapshot(
+                    store,
+                    run.project_id,
+                    ProjectSnapshotOptions {
+                        exclude_workflow_id: Some(workflow_id),
+                        after_cursor: payload.after_cursor,
+                        max_sessions: payload.max_sessions,
+                        max_turns_per_session: payload.max_turns_per_session,
+                        max_workflows: payload.max_workflows,
+                        max_artifacts: payload.max_artifacts,
+                        include_artifact_content: payload.include_artifact_content,
+                        max_text_chars: payload.max_text_chars,
+                        ..ProjectSnapshotOptions::default()
+                    },
+                )?)
+            })
+            .await
     }
 
-    fn publish_artifact(
+    async fn publish_artifact(
         &self,
         effect_key: &str,
         payload: Value,
@@ -1201,7 +1439,7 @@ impl RunEffectContext {
                 "Project-home Artifact roles are reserved for publish_project_home".to_string(),
             ));
         }
-        let name = payload.name.trim();
+        let name = payload.name.trim().to_string();
         if name.is_empty() {
             return Err(WorkflowRuntimeError::Protocol(
                 "Artifact name must not be empty".to_string(),
@@ -1218,49 +1456,55 @@ impl RunEffectContext {
             ));
         }
         let kind = parse_artifact_kind(&payload.kind)?;
-        let workflow = self.store.get_workflow(self.workflow_id)?;
-        let session_id = payload
+        let agent_id = payload
             .agent_instance_id
             .as_deref()
             .map(AgentInstanceId::from_str)
             .transpose()
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-            .map(|agent_id| self.store.get_participant(agent_id))
-            .transpose()?
-            .map(|participant| {
-                if participant.workflow_id != self.workflow_id {
-                    Err(WorkflowRuntimeError::Protocol(
-                        "Artifact Agent belongs to another Workflow".to_string(),
-                    ))
-                } else {
-                    Ok(participant.session_id)
-                }
-            })
-            .transpose()?;
+            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
         let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
             "artifact",
         ));
-        let artifact = match self.store.get_artifact(artifact_id) {
-            Ok(artifact) => artifact,
-            Err(papermachine_store::StoreError::NotFound { .. }) => {
-                self.store.create_artifact_with_id(
-                    artifact_id,
-                    workflow.project_id,
-                    self.workflow_id,
-                    session_id,
-                    None,
-                    kind,
-                    name,
-                    payload.media_type,
-                    payload.metadata,
-                    payload.content.as_bytes(),
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if artifact.workflow_id != self.workflow_id || artifact.name != name {
+        let workflow_id = self.workflow_id;
+        let expected_name = name.clone();
+        let artifact = self
+            .store
+            .call::<_, WorkflowRuntimeError, _>(move |store| {
+                let workflow = store.get_workflow(workflow_id)?;
+                let session_id = agent_id
+                    .map(|agent_id| store.get_participant(agent_id))
+                    .transpose()?
+                    .map(|participant| {
+                        if participant.workflow_id != workflow_id {
+                            Err(WorkflowRuntimeError::Protocol(
+                                "Artifact Agent belongs to another Workflow".to_string(),
+                            ))
+                        } else {
+                            Ok(participant.session_id)
+                        }
+                    })
+                    .transpose()?;
+                match store.get_artifact(artifact_id) {
+                    Ok(artifact) => Ok(artifact),
+                    Err(StoreError::NotFound { .. }) => Ok(store.create_artifact_with_id(
+                        artifact_id,
+                        workflow.project_id,
+                        workflow_id,
+                        session_id,
+                        None,
+                        kind,
+                        name,
+                        payload.media_type,
+                        payload.metadata,
+                        payload.content.as_bytes(),
+                    )?),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .await?;
+        if artifact.workflow_id != self.workflow_id || artifact.name != expected_name {
             return Err(WorkflowRuntimeError::Protocol(
                 "replayed Artifact has different Workflow or name".to_string(),
             ));
@@ -1274,7 +1518,7 @@ impl RunEffectContext {
         }))
     }
 
-    fn publish_project_home(
+    async fn publish_project_home(
         &self,
         effect_key: &str,
         payload: Value,
@@ -1282,49 +1526,6 @@ impl RunEffectContext {
         let payload: PublishProjectHomeEffect = serde_json::from_value(payload)?;
         let invocation_id = ActionInvocationId::from_str(&payload.action_invocation_id)
             .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let invocation = self.store.get_action_invocation(invocation_id)?;
-        if invocation.workflow_id != self.workflow_id {
-            return Err(WorkflowRuntimeError::Protocol(
-                "Project-home Action belongs to another Workflow".to_string(),
-            ));
-        }
-        if invocation.status != ActionStatus::Completed {
-            return Err(WorkflowRuntimeError::Protocol(
-                "Project home can be published only after the exact Action completes".to_string(),
-            ));
-        }
-        let participant = self.store.get_participant(invocation.agent_instance_id)?;
-        let completed_turn = self
-            .store
-            .list_action_attempts(invocation.id)?
-            .into_iter()
-            .rev()
-            .find(|attempt| attempt.status == ActionStatus::Completed)
-            .and_then(|attempt| attempt.turn_id)
-            .map(|turn_id| self.store.get_turn(turn_id))
-            .transpose()?
-            .ok_or_else(|| {
-                WorkflowRuntimeError::Protocol(
-                    "completed Project-home Action has no durable Turn".to_string(),
-                )
-            })?;
-        if completed_turn.status != TurnStatus::Completed {
-            return Err(WorkflowRuntimeError::Protocol(
-                "Project-home ActionAttempt does not reference a completed Turn".to_string(),
-            ));
-        }
-        let materialized_tools = completed_turn.tool_set.names().collect::<Vec<_>>();
-        for required in [
-            "read_project_home",
-            "patch_project_home",
-            "preview_project_home",
-        ] {
-            if !materialized_tools.contains(&required) {
-                return Err(WorkflowRuntimeError::Protocol(format!(
-                    "Project-home Action Turn did not materialize required tool {required}"
-                )));
-            }
-        }
         let source_artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
             self.workflow_id,
             effect_key,
@@ -1335,14 +1536,64 @@ impl RunEffectContext {
             effect_key,
             "project-home",
         ));
-        let publication = self.store.publish_project_home_draft(
-            self.workflow_id,
-            invocation.id,
-            participant.session_id,
-            source_artifact_id,
-            artifact_id,
-            payload.metadata,
-        )?;
+        let workflow_id = self.workflow_id;
+        let publication = self
+            .store
+            .call(move |store| {
+                let invocation = store.get_action_invocation(invocation_id)?;
+                if invocation.workflow_id != workflow_id {
+                    return Err(WorkflowRuntimeError::Protocol(
+                        "Project-home Action belongs to another Workflow".to_string(),
+                    ));
+                }
+                if invocation.status != ActionStatus::Completed {
+                    return Err(WorkflowRuntimeError::Protocol(
+                        "Project home can be published only after the exact Action completes"
+                            .to_string(),
+                    ));
+                }
+                let participant = store.get_participant(invocation.agent_instance_id)?;
+                let completed_turn = store
+                    .list_action_attempts(invocation.id)?
+                    .into_iter()
+                    .rev()
+                    .find(|attempt| attempt.status == ActionStatus::Completed)
+                    .and_then(|attempt| attempt.turn_id)
+                    .map(|turn_id| store.get_turn(turn_id))
+                    .transpose()?
+                    .ok_or_else(|| {
+                        WorkflowRuntimeError::Protocol(
+                            "completed Project-home Action has no durable Turn".to_string(),
+                        )
+                    })?;
+                if completed_turn.status != TurnStatus::Completed {
+                    return Err(WorkflowRuntimeError::Protocol(
+                        "Project-home ActionAttempt does not reference a completed Turn"
+                            .to_string(),
+                    ));
+                }
+                let materialized_tools = completed_turn.tool_set.names().collect::<Vec<_>>();
+                for required in [
+                    "read_project_home",
+                    "patch_project_home",
+                    "preview_project_home",
+                ] {
+                    if !materialized_tools.contains(&required) {
+                        return Err(WorkflowRuntimeError::Protocol(format!(
+                            "Project-home Action Turn did not materialize required tool {required}"
+                        )));
+                    }
+                }
+                Ok(store.publish_project_home_draft(
+                    workflow_id,
+                    invocation.id,
+                    participant.session_id,
+                    source_artifact_id,
+                    artifact_id,
+                    payload.metadata,
+                )?)
+            })
+            .await?;
         let artifact = publication.artifact;
         Ok(json!({
             "artifact_id": artifact.id,
@@ -1455,6 +1706,69 @@ async fn drain_limited<R: AsyncRead + Unpin>(
         text: String::from_utf8_lossy(&kept).into_owned(),
         truncated,
     })
+}
+
+fn encode_protocol_frame(value: &impl Serialize) -> Result<Vec<u8>, WorkflowRuntimeError> {
+    let mut frame = serde_json::to_vec(value)?;
+    if frame.len().saturating_add(1) > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(WorkflowRuntimeError::Protocol(format!(
+            "workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"
+        )));
+    }
+    frame.push(b'\n');
+    Ok(frame)
+}
+
+async fn read_protocol_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
+    let mut frame = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if frame.is_empty() {
+                return Ok(None);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "workflow protocol frame is missing its newline",
+            ));
+        }
+        if let Some(index) = available.iter().position(|byte| *byte == b'\n') {
+            let consumed = index + 1;
+            if frame.len().saturating_add(consumed) > MAX_PROTOCOL_FRAME_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"),
+                ));
+            }
+            frame.extend_from_slice(&available[..index]);
+            reader.consume(consumed);
+            if frame.last() == Some(&b'\r') {
+                frame.pop();
+            }
+            return Ok(Some(frame));
+        }
+        if frame.len().saturating_add(available.len()) >= MAX_PROTOCOL_FRAME_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"),
+            ));
+        }
+        frame.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+}
+
+fn protocol_frame_preview(frame: &[u8]) -> String {
+    const PREVIEW_BYTES: usize = 512;
+    let prefix = &frame[..frame.len().min(PREVIEW_BYTES)];
+    let mut preview = String::from_utf8_lossy(prefix).into_owned();
+    if frame.len() > PREVIEW_BYTES {
+        preview.push('…');
+    }
+    preview
 }
 
 fn relationship_instructions(
@@ -1672,7 +1986,7 @@ struct SetAgentAccessEffect {
     access: AccessPreset,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct InvokeActionEffect {
     agent_instance_id: String,
     action_name: String,
@@ -1884,4 +2198,36 @@ pub enum WorkflowRuntimeError {
     WorkflowTerminal(WorkflowStatus),
     #[error("Agent action failed: {0}")]
     Action(String),
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn protocol_frame_decoder_accepts_the_limit_and_rejects_the_next_byte() {
+        let mut exact = vec![b'x'; MAX_PROTOCOL_FRAME_BYTES - 1];
+        exact.push(b'\n');
+        let mut reader = BufReader::new(exact.as_slice());
+        assert_eq!(
+            read_protocol_frame(&mut reader)
+                .await
+                .expect("exact frame should decode")
+                .expect("frame should exist")
+                .len(),
+            MAX_PROTOCOL_FRAME_BYTES - 1
+        );
+
+        let mut oversized = vec![b'x'; MAX_PROTOCOL_FRAME_BYTES];
+        oversized.push(b'\n');
+        let mut reader = BufReader::new(oversized.as_slice());
+        assert!(read_protocol_frame(&mut reader).await.is_err());
+    }
+
+    #[test]
+    fn protocol_frame_encoder_appends_one_newline() {
+        let frame = encode_protocol_frame(&json!({"ok": true})).expect("frame should encode");
+        assert_eq!(frame.last(), Some(&b'\n'));
+        assert_eq!(frame.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
 }

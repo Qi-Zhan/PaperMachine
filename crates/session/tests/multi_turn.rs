@@ -28,6 +28,7 @@ use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
+use papermachine_store::StoreHandle;
 use papermachine_tools::ToolCatalog;
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,9 +219,10 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
     let attempt = store
         .start_action_attempt(invocation.id)
         .expect("attempt should start");
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(store_handle.clone()));
     let runtime = SessionRuntime::new(
-        Arc::clone(&store),
+        store_handle,
         Arc::new(BlockingModelClient),
         ToolCatalog::default(),
         skills,
@@ -313,9 +315,11 @@ async fn later_turns_reuse_the_completed_session_history() {
     let research = store
         .create_project("Persistent conversation", directory.path().join("project"))
         .expect("research should be created");
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(store_handle.clone()));
     skills
         .ensure_project(research.id)
+        .await
         .expect("research directories should exist");
     let (run, participant) = workflow_agent(&store, research.id, "");
     let model = ScriptedModelClient::new([
@@ -323,7 +327,7 @@ async fn later_turns_reuse_the_completed_session_history() {
         response("Second answer using context."),
     ]);
     let runtime = SessionRuntime::new(
-        Arc::clone(&store),
+        store_handle,
         Arc::new(model.clone()),
         ToolCatalog::default(),
         skills,
@@ -404,11 +408,12 @@ async fn claimed_guidance_is_checkpointed_before_sampling_and_not_lost() {
         )
         .expect("guidance should queue");
     let model = ScriptedModelClient::new([response("Verified answer.")]);
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
     let runtime = SessionRuntime::new(
-        Arc::clone(&store),
+        store_handle.clone(),
         Arc::new(model.clone()),
         ToolCatalog::default(),
-        Arc::new(ProjectSkillCatalog::new(Arc::clone(&store))),
+        Arc::new(ProjectSkillCatalog::new(store_handle)),
         SessionRuntimeConfig {
             default_model: "test-model".to_string(),
             model_context_window: 128_000,
@@ -468,10 +473,11 @@ async fn turn_prompt_snapshots_preserve_layer_provenance_across_prompt_edits() {
         .set_project_system_prompt(project.id, "Project prompt one.")
         .expect("Project prompt should update");
     let (run, participant) = workflow_agent(&store, project.id, "Agent prompt one.");
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(store_handle.clone()));
     let model = ScriptedModelClient::new([response("First."), response("Second.")]);
     let runtime = SessionRuntime::new(
-        Arc::clone(&store),
+        store_handle,
         Arc::new(model.clone()),
         ToolCatalog::default(),
         skills,
@@ -597,12 +603,14 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
         .expect("attempt should start");
 
     let model = ScriptedModelClient::new([response("Usage was recorded.")]);
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(store_handle.clone()));
     skills
         .ensure_project(research.id)
+        .await
         .expect("research directories should exist");
     let runtime = SessionRuntime::new(
-        Arc::clone(&store),
+        store_handle,
         Arc::new(model),
         ToolCatalog::default(),
         skills,

@@ -8,7 +8,7 @@ use papermachine_protocol::{
 };
 use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
-use papermachine_store::{NewWorkflow, Store};
+use papermachine_store::{NewWorkflow, Store, StoreHandle};
 use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
     PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, WorkflowScheduler,
@@ -188,9 +188,19 @@ fn runtime_with(
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
 ) -> PythonWorkflowRuntime {
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
+    let store = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    runtime_on_handle(store, work_root, model, tools)
+}
+
+fn runtime_on_handle(
+    store: StoreHandle,
+    work_root: &Path,
+    model: Arc<dyn ModelClient>,
+    tools: ToolCatalog,
+) -> PythonWorkflowRuntime {
+    let skills = Arc::new(ProjectSkillCatalog::new(store.clone()));
     let sessions = SessionRuntime::new(
-        Arc::clone(&store),
+        store.clone(),
         model,
         tools,
         skills,
@@ -612,8 +622,14 @@ async fn concurrent_channel_branches_replay_a_signal_published_before_suspension
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
-    let executor = runtime(Arc::clone(&store), &directory.path().join("runtime"));
-    let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(executor), 1);
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let executor = runtime_on_handle(
+        store_handle.clone(),
+        &directory.path().join("runtime"),
+        Arc::new(ScriptedModelClient::default()),
+        ToolCatalog::default(),
+    );
+    let scheduler = WorkflowScheduler::new(store_handle, Arc::new(executor), 1);
 
     scheduler
         .start(workflow.id)
@@ -667,8 +683,14 @@ async fn background_timer_keeps_firing_while_main_flow_waits_for_human() {
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
-    let executor = runtime(Arc::clone(&store), &directory.path().join("runtime"));
-    let scheduler = WorkflowScheduler::new(Arc::clone(&store), Arc::new(executor), 1);
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let executor = runtime_on_handle(
+        store_handle.clone(),
+        &directory.path().join("runtime"),
+        Arc::new(ScriptedModelClient::default()),
+        ToolCatalog::default(),
+    );
+    let scheduler = WorkflowScheduler::new(store_handle, Arc::new(executor), 1);
     scheduler
         .start(workflow.id)
         .await

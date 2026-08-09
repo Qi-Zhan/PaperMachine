@@ -13,6 +13,7 @@ from papermachine import WorkflowContext, _Runtime, _effect, _set_runtime
 _protocol_stdout = sys.stdout
 sys.stdout = sys.stderr
 MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024
+MAX_PENDING_EFFECTS = 64
 
 
 class EffectClient:
@@ -26,10 +27,13 @@ class EffectClient:
         self.failure: Exception | None = None
 
     async def write(self, message: dict[str, Any]) -> None:
-        async with self.write_lock:
-            _protocol_stdout.write(
-                json.dumps(message, separators=(",", ":")) + "\n"
+        line = json.dumps(message, separators=(",", ":")) + "\n"
+        if len(line.encode("utf-8")) > MAX_PROTOCOL_LINE_BYTES:
+            raise RuntimeError(
+                f"workflow protocol frame exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
             )
+        async with self.write_lock:
+            _protocol_stdout.write(line)
             _protocol_stdout.flush()
 
     async def send(self, effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
@@ -40,10 +44,21 @@ class EffectClient:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         if effect_id in self.pending:
             raise RuntimeError(f"effect is already pending: {effect_id}")
+        if len(self.pending) >= MAX_PENDING_EFFECTS:
+            raise RuntimeError(
+                f"workflow has more than {MAX_PENDING_EFFECTS} in-flight effects"
+            )
         self.pending[effect_id] = future
         self.pending_kinds[effect_id] = kind
         self.suspended.discard(effect_id)
-        await self.write({"id": effect_id, "kind": kind, "payload": payload})
+        try:
+            await self.write({"id": effect_id, "kind": kind, "payload": payload})
+        except BaseException:
+            self.pending.pop(effect_id, None)
+            self.pending_kinds.pop(effect_id, None)
+            self.suspended.discard(effect_id)
+            future.cancel()
+            raise
         return await future
 
     async def request_suspension_if_quiescent(self) -> None:
@@ -72,6 +87,12 @@ class EffectClient:
                 line = await self.reader.readline()
                 if not line:
                     raise RuntimeError("Rust workflow runtime closed the protocol stream")
+                if len(line) > MAX_PROTOCOL_LINE_BYTES:
+                    raise RuntimeError(
+                        f"workflow protocol frame exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
+                    )
+                if not line.endswith(b"\n"):
+                    raise RuntimeError("workflow protocol frame is missing its newline")
                 response = json.loads(line)
                 effect_id = str(response["id"])
                 future = self.pending.get(effect_id)
@@ -125,7 +146,7 @@ def load_workflow(source_path: Path, entrypoint: str):
 async def run() -> None:
     if len(sys.argv) != 3:
         raise RuntimeError("runner requires workflow.py and entrypoint arguments")
-    protocol_reader = asyncio.StreamReader(limit=MAX_PROTOCOL_LINE_BYTES)
+    protocol_reader = asyncio.StreamReader(limit=MAX_PROTOCOL_LINE_BYTES + 1)
     protocol = asyncio.StreamReaderProtocol(protocol_reader)
     transport, _ = await asyncio.get_running_loop().connect_read_pipe(
         lambda: protocol,
@@ -134,6 +155,12 @@ async def run() -> None:
     initialization_line = await protocol_reader.readline()
     if not initialization_line:
         raise RuntimeError("Rust workflow runtime closed before initialization")
+    if len(initialization_line) > MAX_PROTOCOL_LINE_BYTES:
+        raise RuntimeError(
+            f"workflow protocol frame exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
+        )
+    if not initialization_line.endswith(b"\n"):
+        raise RuntimeError("workflow initialization frame is missing its newline")
     initialization = json.loads(initialization_line)
     client = EffectClient(protocol_reader)
     runtime = _Runtime(client.send)

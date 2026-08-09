@@ -22,6 +22,7 @@ use papermachine_session::WorkflowTurnContext;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::NewWorkflow;
 use papermachine_store::Store;
+use papermachine_store::StoreHandle;
 use papermachine_store::TurnContextCheckpoint;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolContext;
@@ -151,6 +152,7 @@ async fn workflow_restart_fails_closed_when_the_model_route_changes() {
 struct WorkflowRecoveryFixture {
     _directory: TempDir,
     store: Arc<Store>,
+    store_handle: StoreHandle,
     skills: Arc<ProjectSkillCatalog>,
     catalog: ToolCatalog,
     model: ScriptedModelClient,
@@ -167,7 +169,7 @@ impl WorkflowRecoveryFixture {
 
     fn runtime_with_context_window(&self, model_context_window: usize) -> SessionRuntime {
         SessionRuntime::new(
-            Arc::clone(&self.store),
+            self.store_handle.clone(),
             Arc::new(self.model.clone()),
             self.catalog.clone(),
             Arc::clone(&self.skills),
@@ -303,13 +305,18 @@ fn workflow_recovery_fixture(
             .id
     });
 
-    let skills = Arc::new(ProjectSkillCatalog::new(Arc::clone(&store)));
-    skills
-        .ensure_project(project.id)
-        .expect("skill directories should exist");
+    store
+        .ensure_managed_directory("skills")
+        .expect("skill directory should exist");
+    store
+        .ensure_managed_directory("sources")
+        .expect("source directory should exist");
+    let store_handle = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
+    let skills = Arc::new(ProjectSkillCatalog::new(store_handle.clone()));
     WorkflowRecoveryFixture {
         _directory: directory,
         store,
+        store_handle,
         skills,
         catalog,
         model,

@@ -5,17 +5,17 @@ use papermachine_protocol::ProjectSkill;
 use papermachine_protocol::SkillSnapshot;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use serde::Deserialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone)]
 pub struct ProjectSkillCatalog {
-    store: Arc<Store>,
+    store: StoreHandle,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,46 +32,41 @@ struct SkillFrontmatter {
 }
 
 impl ProjectSkillCatalog {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self { store }
     }
 
-    pub fn ensure_project(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
-        self.store.get_project(project_id)?;
-        self.store.ensure_managed_directory("skills")?;
-        self.store.ensure_managed_directory("sources")?;
-        Ok(self.store.managed_root().to_path_buf())
+    pub async fn ensure_project(&self, project_id: ProjectId) -> Result<PathBuf, SkillError> {
+        self.store
+            .call(move |store| ensure_project(store, project_id))
+            .await
     }
 
-    pub fn list(&self, project_id: ProjectId) -> Result<Vec<ProjectSkill>, SkillError> {
-        self.ensure_project(project_id)?;
-        let mut skills = Vec::new();
-        for slug in self.store.list_managed_directories("skills")? {
-            skills.push(self.load(project_id, &slug)?);
-        }
-        Ok(skills)
+    pub async fn list(&self, project_id: ProjectId) -> Result<Vec<ProjectSkill>, SkillError> {
+        self.store
+            .call(move |store| {
+                ensure_project(store, project_id)?;
+                store
+                    .list_managed_directories("skills")?
+                    .into_iter()
+                    .map(|slug| load_skill(store, project_id, &slug))
+                    .collect()
+            })
+            .await
     }
 
-    pub fn load(&self, project_id: ProjectId, slug: &str) -> Result<ProjectSkill, SkillError> {
-        validate_slug(slug)?;
-        self.store.get_project(project_id)?;
-        let relative_path = PathBuf::from("skills").join(slug).join("SKILL.md");
-        if !self.store.managed_file_exists(&relative_path)? {
-            return Err(SkillError::NotFound(slug.to_string()));
-        }
-        let source = self.store.read_managed_text(&relative_path, 1024 * 1024)?;
-        let (frontmatter, instructions) = parse_skill_markdown(&source)?;
-        Ok(ProjectSkill {
-            slug: slug.to_string(),
-            name: frontmatter.name,
-            description: frontmatter.description,
-            relative_path: format!("skills/{slug}/SKILL.md"),
-            sha256: hex::encode(Sha256::digest(source.as_bytes())),
-            instructions: instructions.to_string(),
-        })
+    pub async fn load(
+        &self,
+        project_id: ProjectId,
+        slug: &str,
+    ) -> Result<ProjectSkill, SkillError> {
+        let slug = slug.to_string();
+        self.store
+            .call(move |store| load_skill(store, project_id, &slug))
+            .await
     }
 
-    pub fn create(
+    pub async fn create(
         &self,
         project_id: ProjectId,
         slug: &str,
@@ -79,81 +74,142 @@ impl ProjectSkillCatalog {
         description: &str,
         instructions: &str,
     ) -> Result<ProjectSkill, SkillError> {
-        validate_slug(slug)?;
-        if name.trim().is_empty() || description.trim().is_empty() || instructions.trim().is_empty()
-        {
-            return Err(SkillError::Invalid(
-                "skill name, description, and instructions must not be empty".to_string(),
-            ));
-        }
-        self.ensure_project(project_id)?;
-        if self
-            .store
-            .list_managed_directories("skills")?
-            .iter()
-            .any(|existing| existing == slug)
-        {
-            return Err(SkillError::AlreadyExists(slug.to_string()));
-        }
-        let document = format!(
-            "---\nname: {}\ndescription: {}\n---\n\n{}\n",
-            yaml_scalar(name.trim())?,
-            yaml_scalar(description.trim())?,
-            instructions.trim()
-        );
-        if let Err(error) = self.store.write_managed_file(
-            PathBuf::from("skills").join(slug).join("SKILL.md"),
-            document.as_bytes(),
-        ) {
-            let _ = self
-                .store
-                .remove_managed_entry(PathBuf::from("skills").join(slug));
-            return Err(error.into());
-        }
-        self.load(project_id, slug)
+        let slug = slug.to_string();
+        let name = name.to_string();
+        let description = description.to_string();
+        let instructions = instructions.to_string();
+        self.store
+            .call(move |store| {
+                create_skill(store, project_id, &slug, &name, &description, &instructions)
+            })
+            .await
     }
 
-    pub fn validate_enabled(
+    pub async fn validate_enabled(
         &self,
         project_id: ProjectId,
         slugs: &[String],
     ) -> Result<(), SkillError> {
-        for slug in unique_slugs(slugs)? {
-            self.load(project_id, slug)?;
-        }
-        Ok(())
+        let slugs = slugs.to_vec();
+        self.store
+            .call(move |store| {
+                for slug in unique_slugs(&slugs)? {
+                    load_skill(store, project_id, slug)?;
+                }
+                Ok(())
+            })
+            .await
     }
 
-    pub fn resolve(
+    pub async fn resolve(
         &self,
         project_id: ProjectId,
         slugs: &[String],
     ) -> Result<ResolvedSkills, SkillError> {
-        let mut snapshots = Vec::new();
-        let mut sections = Vec::new();
-        for slug in unique_slugs(slugs)? {
-            let skill = self.load(project_id, slug)?;
-            snapshots.push(SkillSnapshot {
-                slug: slug.to_string(),
-                sha256: skill.sha256.clone(),
-            });
-            sections.push(format!(
-                "## Skill: {} (`{}`)\n{}\n\n{}",
-                skill.name, slug, skill.description, skill.instructions
-            ));
-        }
-        Ok(ResolvedSkills {
-            snapshots,
-            instructions: if sections.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "Project-local skills enabled for this turn:\n\n{}",
-                    sections.join("\n\n")
-                )
-            },
-        })
+        let slugs = slugs.to_vec();
+        self.store
+            .call(move |store| resolve_skills(store, project_id, &slugs))
+            .await
     }
+}
+
+fn ensure_project(store: &Store, project_id: ProjectId) -> Result<PathBuf, SkillError> {
+    store.get_project(project_id)?;
+    store.ensure_managed_directory("skills")?;
+    store.ensure_managed_directory("sources")?;
+    Ok(store.managed_root().to_path_buf())
+}
+
+fn load_skill(
+    store: &Store,
+    project_id: ProjectId,
+    slug: &str,
+) -> Result<ProjectSkill, SkillError> {
+    validate_slug(slug)?;
+    store.get_project(project_id)?;
+    let relative_path = PathBuf::from("skills").join(slug).join("SKILL.md");
+    if !store.managed_file_exists(&relative_path)? {
+        return Err(SkillError::NotFound(slug.to_string()));
+    }
+    let source = store.read_managed_text(&relative_path, 1024 * 1024)?;
+    let (frontmatter, instructions) = parse_skill_markdown(&source)?;
+    Ok(ProjectSkill {
+        slug: slug.to_string(),
+        name: frontmatter.name,
+        description: frontmatter.description,
+        relative_path: format!("skills/{slug}/SKILL.md"),
+        sha256: hex::encode(Sha256::digest(source.as_bytes())),
+        instructions: instructions.to_string(),
+    })
+}
+
+fn create_skill(
+    store: &Store,
+    project_id: ProjectId,
+    slug: &str,
+    name: &str,
+    description: &str,
+    instructions: &str,
+) -> Result<ProjectSkill, SkillError> {
+    validate_slug(slug)?;
+    if name.trim().is_empty() || description.trim().is_empty() || instructions.trim().is_empty() {
+        return Err(SkillError::Invalid(
+            "skill name, description, and instructions must not be empty".to_string(),
+        ));
+    }
+    ensure_project(store, project_id)?;
+    if store
+        .list_managed_directories("skills")?
+        .iter()
+        .any(|existing| existing == slug)
+    {
+        return Err(SkillError::AlreadyExists(slug.to_string()));
+    }
+    let document = format!(
+        "---\nname: {}\ndescription: {}\n---\n\n{}\n",
+        yaml_scalar(name.trim())?,
+        yaml_scalar(description.trim())?,
+        instructions.trim()
+    );
+    if let Err(error) = store.write_managed_file(
+        PathBuf::from("skills").join(slug).join("SKILL.md"),
+        document.as_bytes(),
+    ) {
+        let _ = store.remove_managed_entry(PathBuf::from("skills").join(slug));
+        return Err(error.into());
+    }
+    load_skill(store, project_id, slug)
+}
+
+fn resolve_skills(
+    store: &Store,
+    project_id: ProjectId,
+    slugs: &[String],
+) -> Result<ResolvedSkills, SkillError> {
+    let mut snapshots = Vec::new();
+    let mut sections = Vec::new();
+    for slug in unique_slugs(slugs)? {
+        let skill = load_skill(store, project_id, slug)?;
+        snapshots.push(SkillSnapshot {
+            slug: slug.to_string(),
+            sha256: skill.sha256.clone(),
+        });
+        sections.push(format!(
+            "## Skill: {} (`{}`)\n{}\n\n{}",
+            skill.name, slug, skill.description, skill.instructions
+        ));
+    }
+    Ok(ResolvedSkills {
+        snapshots,
+        instructions: if sections.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "Project-local skills enabled for this turn:\n\n{}",
+                sections.join("\n\n")
+            )
+        },
+    })
 }
 
 fn parse_skill_markdown(source: &str) -> Result<(SkillFrontmatter, &str), SkillError> {

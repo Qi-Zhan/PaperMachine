@@ -8,41 +8,41 @@ use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::WorkflowId;
 use papermachine_store::ProjectHomeDraft;
 use papermachine_store::ProjectHomePatchOperation;
-use papermachine_store::Store;
+use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ReadProjectHomeTool {
-    store: Arc<Store>,
+    store: StoreHandle,
 }
 
 impl ReadProjectHomeTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self { store }
     }
 }
 
 #[derive(Clone)]
 pub struct PatchProjectHomeTool {
-    store: Arc<Store>,
+    store: StoreHandle,
 }
 
 impl PatchProjectHomeTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self { store }
     }
 }
 
 #[derive(Clone)]
 pub struct PreviewProjectHomeTool {
-    store: Arc<Store>,
+    store: StoreHandle,
 }
 
 impl PreviewProjectHomeTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self { store }
     }
 }
@@ -78,7 +78,10 @@ impl ToolExecutor for ReadProjectHomeTool {
         let (workflow_id, action_invocation_id) = action_context(&context)?;
         let draft = self
             .store
-            .read_project_home_draft(workflow_id, action_invocation_id)
+            .call::<_, StoreError, _>(move |store| {
+                store.read_project_home_draft(workflow_id, action_invocation_id)
+            })
+            .await
             .map_err(store_error)?;
         Ok(ToolOutput {
             value: draft_value(&draft),
@@ -134,12 +137,15 @@ impl ToolExecutor for PatchProjectHomeTool {
         let (workflow_id, action_invocation_id) = action_context(&context)?;
         let draft = self
             .store
-            .patch_project_home_draft(
-                workflow_id,
-                action_invocation_id,
-                &args.base_revision,
-                args.operations,
-            )
+            .call::<_, StoreError, _>(move |store| {
+                store.patch_project_home_draft(
+                    workflow_id,
+                    action_invocation_id,
+                    &args.base_revision,
+                    args.operations,
+                )
+            })
+            .await
             .map_err(store_error)?;
         Ok(ToolOutput {
             value: json!({
@@ -176,7 +182,10 @@ impl ToolExecutor for PreviewProjectHomeTool {
         let (workflow_id, action_invocation_id) = action_context(&context)?;
         let draft = self
             .store
-            .read_project_home_draft(workflow_id, action_invocation_id)
+            .call::<_, StoreError, _>(move |store| {
+                store.read_project_home_draft(workflow_id, action_invocation_id)
+            })
+            .await
             .map_err(store_error)?;
         let html = draft.html();
         let rendered_text = html2text::from_read(html.as_bytes(), 100).map_err(|error| {

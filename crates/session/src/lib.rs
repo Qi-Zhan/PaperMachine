@@ -42,6 +42,7 @@ use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
+use papermachine_store::StoreHandle;
 use papermachine_store::TurnContextCheckpoint;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolError;
@@ -64,7 +65,7 @@ pub struct SessionRuntime {
 }
 
 struct SessionRuntimeInner {
-    store: Arc<Store>,
+    store: StoreHandle,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
     skills: Arc<ProjectSkillCatalog>,
@@ -114,7 +115,7 @@ impl PromptLayerInput {
 
 impl SessionRuntime {
     pub fn new(
-        store: Arc<Store>,
+        store: StoreHandle,
         model: Arc<dyn ModelClient>,
         tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
@@ -125,7 +126,7 @@ impl SessionRuntime {
     }
 
     pub fn new_with_permits(
-        store: Arc<Store>,
+        store: StoreHandle,
         model: Arc<dyn ModelClient>,
         tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
@@ -179,7 +180,11 @@ impl SessionRuntime {
             .await?;
         self.run_tracked_turn(turn.id, context, cancellation)
             .await?;
-        Ok(self.inner.store.get_turn(turn.id)?)
+        Ok(self
+            .inner
+            .store
+            .call(move |store| store.get_turn(turn.id))
+            .await?)
     }
 
     pub async fn resume_workflow_action(
@@ -190,7 +195,11 @@ impl SessionRuntime {
     ) -> Result<Turn, SessionRuntimeError> {
         self.run_tracked_turn(turn_id, context, cancellation)
             .await?;
-        Ok(self.inner.store.get_turn(turn_id)?)
+        Ok(self
+            .inner
+            .store
+            .call(move |store| store.get_turn(turn_id))
+            .await?)
     }
 
     async fn run_tracked_turn(
@@ -235,7 +244,11 @@ impl SessionRuntime {
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: ActionAttemptId,
     ) -> Result<Turn, SessionRuntimeError> {
-        let session = self.inner.store.get_session(session_id)?;
+        let session = self
+            .inner
+            .store
+            .call(move |store| store.get_session(session_id))
+            .await?;
         let model = if model_override.is_some_and(|model| !model.trim().is_empty()) {
             model_override.unwrap_or_default().trim().to_string()
         } else if session.model.trim().is_empty() {
@@ -246,11 +259,14 @@ impl SessionRuntime {
         let resolved = self
             .inner
             .skills
-            .resolve(session.project_id, &session.enabled_skills)?;
+            .resolve(session.project_id, &session.enabled_skills)
+            .await?;
+        let project_id = session.project_id;
         let project_prompt = self
             .inner
             .store
-            .get_project_system_prompt(session.project_id)?;
+            .call(move |store| store.get_project_system_prompt(project_id))
+            .await?;
         let prompt = build_prompt_snapshot(&session, project_prompt, prompt_layers, &resolved);
         let tool_set = self.inner.tools.materialize_action_tools(
             &requested_tools,
@@ -262,20 +278,29 @@ impl SessionRuntime {
             reasoning_effort,
             self.inner.model_context_window,
         )?;
-        Ok(self.inner.store.create_turn_for_attempt(
-            action_attempt_id,
-            session_id,
-            origin,
-            input,
-            model_route,
-            prompt,
-            tools_enabled,
-            session.access,
-            tool_set,
-            web_search_context_size,
-            response_format,
-            resolved.snapshots,
-        )?)
+        let access = session.access;
+        let snapshots = resolved.snapshots;
+        let input = input.into();
+        Ok(self
+            .inner
+            .store
+            .call(move |store| {
+                store.create_turn_for_attempt(
+                    action_attempt_id,
+                    session_id,
+                    origin,
+                    input,
+                    model_route,
+                    prompt,
+                    tools_enabled,
+                    access,
+                    tool_set,
+                    web_search_context_size,
+                    response_format,
+                    snapshots,
+                )
+            })
+            .await?)
     }
 
     pub async fn cancel(&self, turn_id: TurnId) -> Result<(), SessionRuntimeError> {
@@ -283,12 +308,19 @@ impl SessionRuntime {
             cancellation.cancel();
             return Ok(());
         }
-        let turn = self.inner.store.get_turn(turn_id)?;
+        let turn = self
+            .inner
+            .store
+            .call(move |store| store.get_turn(turn_id))
+            .await?;
         if matches!(
             turn.status,
             TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused
         ) {
-            self.inner.store.cancel_turn(turn_id)?;
+            self.inner
+                .store
+                .call(move |store| store.cancel_turn(turn_id))
+                .await?;
             return Ok(());
         }
         Err(SessionRuntimeError::TerminalTurn(turn_id))
@@ -301,14 +333,19 @@ async fn run_scheduled_turn(
     workflow_context: WorkflowTurnContext,
     cancellation: CancellationToken,
 ) -> Result<(), SessionRuntimeError> {
-    let sandbox = inner.store.get_turn(turn_id).ok().map(|turn| {
-        inner
-            .store
-            .managed_root()
-            .join("runtime/sandboxes")
-            .join(turn.session_id.to_string())
-            .join(turn.id.to_string())
-    });
+    let sandbox = inner
+        .store
+        .call(move |store| store.get_turn(turn_id))
+        .await
+        .ok()
+        .map(|turn| {
+            inner
+                .store
+                .managed_root()
+                .join("runtime/sandboxes")
+                .join(turn.session_id.to_string())
+                .join(turn.id.to_string())
+        });
     let result =
         run_scheduled_turn_inner(Arc::clone(&inner), turn_id, workflow_context, cancellation).await;
     if let Some(sandbox) = sandbox
@@ -337,14 +374,20 @@ async fn run_scheduled_turn_inner(
         }
         _ = cancellation.cancelled() => return Err(SessionRuntimeError::Cancelled),
     };
-    let turn = inner.store.start_turn(turn_id)?;
+    let (turn, session, rollout) = inner
+        .store
+        .call(move |store| {
+            let turn = store.start_turn(turn_id)?;
+            let session = store.get_session(turn.session_id)?;
+            let rollout = store.reconstruct_session_rollout(session.id)?;
+            Ok::<_, StoreError>((turn, session, rollout))
+        })
+        .await?;
     verify_prompt_snapshot(&turn.prompt)?;
     inner
         .model
         .validate_route_snapshot(&turn.model_route, inner.model_context_window)?;
     let tools = inner.tools.registry_for_snapshot(&turn.tool_set)?;
-    let session = inner.store.get_session(turn.session_id)?;
-    let rollout = inner.store.reconstruct_session_rollout(session.id)?;
     let active_rollout = rollout.active_turn.ok_or_else(|| {
         StoreError::Invariant(format!(
             "Session rollout has no active state for running Turn {}",
@@ -361,36 +404,47 @@ async fn run_scheduled_turn_inner(
     let resume_current_turn = active_rollout.has_checkpoint;
     let mut rollout_context = active_rollout.context;
     if resume_current_turn {
-        let recovered = reconcile_step_projections(&inner.store, &turn, &rollout_context)?;
-        if recovered > 0 {
-            inner.store.publish_transient_session_event(
-                turn.session_id,
-                Some(turn.id),
-                None,
-                SessionEventPayload::AssistantMessageReset,
-            )?;
-        }
+        let projected_turn = turn.clone();
+        let projected_context = rollout_context.clone();
+        inner
+            .store
+            .call(move |store| {
+                let recovered =
+                    reconcile_step_projections(store, &projected_turn, &projected_context)?;
+                if recovered > 0 {
+                    store.publish_transient_session_event(
+                        projected_turn.session_id,
+                        Some(projected_turn.id),
+                        None,
+                        SessionEventPayload::AssistantMessageReset,
+                    )?;
+                }
+                Ok::<_, StoreError>(())
+            })
+            .await?;
         let repaired = repair_interrupted_tool_calls(rollout_context.clone());
         if repaired.len() != rollout_context.len() {
-            inner.store.checkpoint_turn_context(
-                turn.id,
-                TurnContextCheckpoint {
-                    mutation: ModelContextMutation::Append {
-                        items: repaired[rollout_context.len()..].to_vec(),
-                    },
-                    usage: active_rollout.usage,
-                    completed_model_steps: active_rollout.completed_model_steps,
-                    hosted_search_calls_used: active_rollout.hosted_search_calls_used,
-                    checkpoint_message: active_rollout.checkpoint_message.clone(),
-                    acknowledged_control_ids: Vec::new(),
+            let checkpoint = TurnContextCheckpoint {
+                mutation: ModelContextMutation::Append {
+                    items: repaired[rollout_context.len()..].to_vec(),
                 },
-            )?;
+                usage: active_rollout.usage,
+                completed_model_steps: active_rollout.completed_model_steps,
+                hosted_search_calls_used: active_rollout.hosted_search_calls_used,
+                checkpoint_message: active_rollout.checkpoint_message.clone(),
+                acknowledged_control_ids: Vec::new(),
+            };
+            let checkpoint_turn_id = turn.id;
+            inner
+                .store
+                .call(move |store| store.checkpoint_turn_context(checkpoint_turn_id, checkpoint))
+                .await?;
             rollout_context = repaired;
         }
     }
     let history = rollout_context.clone();
     let event_sink = Arc::new(SessionAgentEventSink::new(
-        Arc::clone(&inner.store),
+        inner.store.clone(),
         session.id,
         turn.id,
         Some(workflow_context.workflow_id),
@@ -399,7 +453,7 @@ async fn run_scheduled_turn_inner(
     ));
     let events: Arc<dyn AgentEventSink> = event_sink.clone();
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
-        store: Arc::clone(&inner.store),
+        store: inner.store.clone(),
     });
     let runtime = AgentRuntime::new(Arc::clone(&inner.model), tools, events).with_control(control);
     let mut request = AgentTurnRequest::new(
@@ -439,14 +493,19 @@ async fn run_scheduled_turn_inner(
             );
             inner
                 .store
-                .complete_turn(turn.id, result.final_message, result.usage)?;
+                .call(move |store| store.complete_turn(turn.id, result.final_message, result.usage))
+                .await?;
             Ok(())
         }
         Err(AgentError::Cancelled) => {
             event_sink
                 .finish_pending(StepStatus::Cancelled, "cancelled by user")
                 .await?;
-            inner.store.cancel_turn(turn.id)?;
+            let turn_id = turn.id;
+            inner
+                .store
+                .call(move |store| store.cancel_turn(turn_id))
+                .await?;
             Err(SessionRuntimeError::Cancelled)
         }
         Err(AgentError::Interrupted {
@@ -456,25 +515,33 @@ async fn run_scheduled_turn_inner(
             event_sink
                 .finish_pending(StepStatus::Cancelled, &reason)
                 .await?;
-            inner.store.interrupt_turn_with_controls(
-                turn.id,
-                reason.clone(),
-                &control_message_ids,
-            )?;
+            let turn_id = turn.id;
+            let stored_reason = reason.clone();
+            inner
+                .store
+                .call(move |store| {
+                    store.interrupt_turn_with_controls(turn_id, stored_reason, &control_message_ids)
+                })
+                .await?;
             Err(SessionRuntimeError::Interrupted(reason))
         }
         Err(error) => {
             event_sink
                 .finish_pending(StepStatus::Failed, &error.to_string())
                 .await?;
-            inner.store.fail_turn(turn.id, error.to_string())?;
+            let turn_id = turn.id;
+            let message = error.to_string();
+            inner
+                .store
+                .call(move |store| store.fail_turn(turn_id, message))
+                .await?;
             Err(SessionRuntimeError::Agent(error))
         }
     }
 }
 
 struct StoreAgentControlPlane {
-    store: Arc<Store>,
+    store: StoreHandle,
 }
 
 #[async_trait]
@@ -490,23 +557,26 @@ impl AgentControlPlane for StoreAgentControlPlane {
         loop {
             let run = self
                 .store
-                .get_workflow(workflow_id)
+                .call::<_, StoreError, _>(move |store| store.get_workflow(workflow_id))
+                .await
                 .map_err(|error| error.to_string())?;
             match run.status {
                 WorkflowStatus::Paused
                 | WorkflowStatus::WaitingForUser
                 | WorkflowStatus::WaitingForTimer
                 | WorkflowStatus::WaitingForSignal => {
-                    let turn = self
+                    let turn_id = context.turn_id;
+                    let mut events = self
                         .store
-                        .get_turn(context.turn_id)
+                        .call(move |store| {
+                            let turn = store.get_turn(turn_id)?;
+                            if turn.status != TurnStatus::Paused {
+                                store.pause_turn(turn_id)?;
+                            }
+                            Ok::<_, StoreError>(store.subscribe())
+                        })
+                        .await
                         .map_err(|error| error.to_string())?;
-                    if turn.status != TurnStatus::Paused {
-                        self.store
-                            .pause_turn(context.turn_id)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    let mut events = self.store.subscribe();
                     tokio::select! {
                         _ = cancellation.cancelled() => return Err("cancelled".to_string()),
                         event = events.recv() => {
@@ -527,23 +597,19 @@ impl AgentControlPlane for StoreAgentControlPlane {
                 }
             }
         }
-        let turn = self
-            .store
-            .get_turn(context.turn_id)
-            .map_err(|error| error.to_string())?;
-        if turn.status == TurnStatus::Paused {
-            self.store
-                .resume_turn(context.turn_id)
-                .map_err(|error| error.to_string())?;
-        }
+        let turn_id = context.turn_id;
+        let session_id = context.session_id;
+        let action_invocation_id = context.action_invocation_id;
         let messages = self
             .store
-            .claim_control_messages(
-                workflow_id,
-                context.session_id,
-                context.action_invocation_id,
-                context.turn_id,
-            )
+            .call(move |store| {
+                let turn = store.get_turn(turn_id)?;
+                if turn.status == TurnStatus::Paused {
+                    store.resume_turn(turn_id)?;
+                }
+                store.claim_control_messages(workflow_id, session_id, action_invocation_id, turn_id)
+            })
+            .await
             .map_err(|error| error.to_string())?;
         let mut checkpoint = AgentCheckpoint::default();
         for message in messages {
@@ -842,7 +908,7 @@ fn hash_text(content: &str) -> String {
 }
 
 struct SessionAgentEventSink {
-    store: Arc<Store>,
+    store: StoreHandle,
     session_id: SessionId,
     turn_id: TurnId,
     workflow_id: Option<WorkflowId>,
@@ -860,7 +926,7 @@ struct RolloutCheckpointState {
 
 impl SessionAgentEventSink {
     fn new(
-        store: Arc<Store>,
+        store: StoreHandle,
         session_id: SessionId,
         turn_id: TurnId,
         workflow_id: Option<WorkflowId>,
@@ -891,16 +957,20 @@ impl AgentEventSink for SessionAgentEventSink {
             AgentEvent::Started { .. } => Ok(()),
             AgentEvent::MessageDelta { delta } => {
                 self.transient(None, SessionEventPayload::AssistantMessageDelta { delta })
+                    .await
             }
             AgentEvent::MessageReset => {
                 self.transient(None, SessionEventPayload::AssistantMessageReset)
+                    .await
             }
             AgentEvent::MessageCompleted { .. } => {
                 self.append(None, SessionEventPayload::AssistantMessageCompleted)
+                    .await
             }
             AgentEvent::ModelStepStarted { step, input } => {
                 self.model_steps.lock().await.insert(step, input);
                 self.transient(None, SessionEventPayload::ModelStepStarted)
+                    .await
             }
             AgentEvent::ModelStepCompleted {
                 step,
@@ -911,21 +981,26 @@ impl AgentEventSink for SessionAgentEventSink {
                 let input = self.model_steps.lock().await.remove(&step).ok_or_else(|| {
                     format!("model Step {step} completed without a matching start")
                 })?;
+                let turn_id = self.turn_id;
                 let stored = self
                     .store
-                    .create_terminal_step(
-                        self.turn_id,
-                        StepKind::Model,
-                        format!("model sample {step}"),
-                        input,
-                        StepStatus::Completed,
-                        Some(output),
-                        usage,
-                        Some(duration_ms),
-                    )
+                    .call(move |store| {
+                        store.create_terminal_step(
+                            turn_id,
+                            StepKind::Model,
+                            format!("model sample {step}"),
+                            input,
+                            StepStatus::Completed,
+                            Some(output),
+                            usage,
+                            Some(duration_ms),
+                        )
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 self.charge_action_step().await?;
                 self.append(Some(stored.id), SessionEventPayload::ModelStepCompleted)
+                    .await
             }
             AgentEvent::ModelStepFailed {
                 step,
@@ -939,46 +1014,61 @@ impl AgentEventSink for SessionAgentEventSink {
                     .await
                     .remove(&step)
                     .unwrap_or_else(|| json!({"model_step": step}));
+                let turn_id = self.turn_id;
                 let stored = self
                     .store
-                    .create_terminal_step(
-                        self.turn_id,
-                        StepKind::Model,
-                        format!("model sample {step}"),
-                        input,
-                        StepStatus::Failed,
-                        Some(json!({"error": &error})),
-                        usage,
-                        Some(duration_ms),
-                    )
+                    .call(move |store| {
+                        store.create_terminal_step(
+                            turn_id,
+                            StepKind::Model,
+                            format!("model sample {step}"),
+                            input,
+                            StepStatus::Failed,
+                            Some(json!({"error": &error})),
+                            usage,
+                            Some(duration_ms),
+                        )
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 self.charge_action_step().await?;
                 if let Some(workflow_id) = self.workflow_id {
                     self.store
-                        .add_workflow_usage(
-                            workflow_id,
-                            WorkflowUsage {
-                                tokens: usage,
-                                ..WorkflowUsage::default()
-                            },
-                        )
+                        .call(move |store| {
+                            store.add_workflow_usage(
+                                workflow_id,
+                                WorkflowUsage {
+                                    tokens: usage,
+                                    ..WorkflowUsage::default()
+                                },
+                            )
+                        })
+                        .await
                         .map_err(|error| error.to_string())?;
                 }
                 self.append(Some(stored.id), SessionEventPayload::ModelStepFailed)
+                    .await
             }
             AgentEvent::ToolCallStarted { call } => {
                 let input = serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+                let turn_id = self.turn_id;
                 let step = self
                     .store
-                    .create_tool_step(self.turn_id, call.call_id.clone(), call.name.clone(), input)
+                    .call({
+                        let call_id = call.call_id.clone();
+                        let name = call.name.clone();
+                        move |store| store.create_tool_step(turn_id, call_id, name, input)
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 self.tool_steps
                     .lock()
                     .await
                     .insert(call.call_id.clone(), step.id);
                 self.charge_action_step().await?;
-                self.append(Some(step.id), SessionEventPayload::ToolCallStarted)?;
+                self.append(Some(step.id), SessionEventPayload::ToolCallStarted)
+                    .await?;
                 papermachine_store::process_fault::reach_process_fault_boundary(
                     papermachine_store::process_fault::FUNCTION_CALL_COMMITTED_BEFORE_DISPATCH,
                 );
@@ -994,41 +1084,53 @@ impl AgentEventSink for SessionAgentEventSink {
                 let step_id = self.tool_steps.lock().await.remove(&call_id);
                 if let Some(step_id) = step_id {
                     self.store
-                        .finish_step(
-                            step_id,
-                            if success {
-                                StepStatus::Completed
-                            } else {
-                                StepStatus::Failed
-                            },
-                            Some(output.clone()),
-                            TokenUsage::default(),
-                            Some(duration_ms),
-                        )
+                        .call({
+                            let output = output.clone();
+                            move |store| {
+                                store.finish_step(
+                                    step_id,
+                                    if success {
+                                        StepStatus::Completed
+                                    } else {
+                                        StepStatus::Failed
+                                    },
+                                    Some(output),
+                                    TokenUsage::default(),
+                                    Some(duration_ms),
+                                )
+                            }
+                        })
+                        .await
                         .map_err(|error| error.to_string())?;
                 }
                 self.append(step_id, SessionEventPayload::ToolCallCompleted)
+                    .await
             }
             AgentEvent::HostedToolCompleted {
                 tool_name,
                 input,
                 output,
             } => {
+                let turn_id = self.turn_id;
                 let step = self
                     .store
-                    .create_terminal_step(
-                        self.turn_id,
-                        StepKind::Tool,
-                        tool_name.clone(),
-                        input.clone(),
-                        StepStatus::Completed,
-                        Some(output),
-                        TokenUsage::default(),
-                        None,
-                    )
+                    .call(move |store| {
+                        store.create_terminal_step(
+                            turn_id,
+                            StepKind::Tool,
+                            tool_name,
+                            input,
+                            StepStatus::Completed,
+                            Some(output),
+                            TokenUsage::default(),
+                            None,
+                        )
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 self.charge_action_step().await?;
                 self.append(Some(step.id), SessionEventPayload::HostedToolCompleted)
+                    .await
             }
             AgentEvent::ContextTrimmed { removed_items } => {
                 let mut checkpoint = self.checkpoint.lock().await;
@@ -1037,16 +1139,21 @@ impl AgentEventSink for SessionAgentEventSink {
                 }
                 drop(checkpoint);
                 self.append(None, SessionEventPayload::ContextTrimmed { removed_items })
+                    .await
             }
             AgentEvent::ContextCompactionStarted { before_tokens } => {
+                let turn_id = self.turn_id;
                 let step = self
                     .store
-                    .create_step(
-                        self.turn_id,
-                        StepKind::Model,
-                        "context compaction",
-                        json!({"before_tokens": before_tokens}),
-                    )
+                    .call(move |store| {
+                        store.create_step(
+                            turn_id,
+                            StepKind::Model,
+                            "context compaction",
+                            json!({"before_tokens": before_tokens}),
+                        )
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 self.compaction_steps.lock().await.push(step.id);
                 self.charge_action_step().await?;
@@ -1063,18 +1170,24 @@ impl AgentEventSink for SessionAgentEventSink {
                 let step_id = self.compaction_steps.lock().await.pop();
                 if let Some(step_id) = step_id {
                     self.store
-                        .finish_step(
-                            step_id,
-                            StepStatus::Completed,
-                            Some(json!({
-                                "summary": summary,
-                                "before_tokens": before_tokens,
-                                "after_tokens": after_tokens,
-                                "removed_items": removed_items,
-                            })),
-                            usage,
-                            Some(duration_ms),
-                        )
+                        .call({
+                            let summary = summary.clone();
+                            move |store| {
+                                store.finish_step(
+                                    step_id,
+                                    StepStatus::Completed,
+                                    Some(json!({
+                                        "summary": summary,
+                                        "before_tokens": before_tokens,
+                                        "after_tokens": after_tokens,
+                                        "removed_items": removed_items,
+                                    })),
+                                    usage,
+                                    Some(duration_ms),
+                                )
+                            }
+                        })
+                        .await
                         .map_err(|error| error.to_string())?;
                 }
                 self.checkpoint.lock().await.replacement_reason =
@@ -1087,9 +1200,11 @@ impl AgentEventSink for SessionAgentEventSink {
                         removed_items,
                     },
                 )
+                .await
             }
             AgentEvent::SamplingRetry { attempt, error } => {
                 self.append(None, SessionEventPayload::SamplingRetry { attempt, error })
+                    .await
             }
             AgentEvent::HistoryCheckpoint {
                 history,
@@ -1117,18 +1232,22 @@ impl AgentEventSink for SessionAgentEventSink {
                     }
                 };
                 let model_advanced = completed_model_steps > checkpoint.completed_model_steps;
+                let turn_id = self.turn_id;
                 self.store
-                    .checkpoint_turn_context(
-                        self.turn_id,
-                        TurnContextCheckpoint {
-                            mutation,
-                            usage,
-                            completed_model_steps,
-                            hosted_search_calls_used,
-                            checkpoint_message: message,
-                            acknowledged_control_ids,
-                        },
-                    )
+                    .call(move |store| {
+                        store.checkpoint_turn_context(
+                            turn_id,
+                            TurnContextCheckpoint {
+                                mutation,
+                                usage,
+                                completed_model_steps,
+                                hosted_search_calls_used,
+                                checkpoint_message: message,
+                                acknowledged_control_ids,
+                            },
+                        )
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
                 checkpoint.context = history;
                 checkpoint.replacement_reason = None;
@@ -1151,31 +1270,22 @@ impl SessionAgentEventSink {
             return Ok(());
         };
         self.store
-            .add_workflow_usage(
-                workflow_id,
-                WorkflowUsage {
-                    action_steps: 1,
-                    ..WorkflowUsage::default()
-                },
-            )
+            .call(move |store| {
+                store.add_workflow_usage(
+                    workflow_id,
+                    WorkflowUsage {
+                        action_steps: 1,
+                        ..WorkflowUsage::default()
+                    },
+                )
+            })
+            .await
             .map_err(|error| error.to_string())?;
         Ok(())
     }
 
     async fn finish_pending(&self, status: StepStatus, error: &str) -> Result<(), StoreError> {
         let model_steps = self.model_steps.lock().await.drain().collect::<Vec<_>>();
-        for (step, input) in model_steps {
-            self.store.create_terminal_step(
-                self.turn_id,
-                StepKind::Model,
-                format!("model sample {step}"),
-                input,
-                status,
-                Some(json!({"error": error})),
-                TokenUsage::default(),
-                None,
-            )?;
-        }
         let tool_steps = self
             .tool_steps
             .lock()
@@ -1189,32 +1299,64 @@ impl SessionAgentEventSink {
             .await
             .drain(..)
             .collect::<Vec<_>>();
-        for step_id in tool_steps.into_iter().chain(compaction_steps) {
-            self.store.finish_step(
-                step_id,
-                status,
-                Some(json!({"error": error})),
-                TokenUsage::default(),
-                None,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn append(&self, step_id: Option<StepId>, payload: SessionEventPayload) -> Result<(), String> {
+        let turn_id = self.turn_id;
+        let error = error.to_string();
         self.store
-            .append_session_event(self.session_id, Some(self.turn_id), step_id, payload)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            .call(move |store| {
+                for (step, input) in model_steps {
+                    store.create_terminal_step(
+                        turn_id,
+                        StepKind::Model,
+                        format!("model sample {step}"),
+                        input,
+                        status,
+                        Some(json!({"error": &error})),
+                        TokenUsage::default(),
+                        None,
+                    )?;
+                }
+                for step_id in tool_steps.into_iter().chain(compaction_steps) {
+                    store.finish_step(
+                        step_id,
+                        status,
+                        Some(json!({"error": &error})),
+                        TokenUsage::default(),
+                        None,
+                    )?;
+                }
+                Ok::<_, StoreError>(())
+            })
+            .await
     }
 
-    fn transient(
+    async fn append(
         &self,
         step_id: Option<StepId>,
         payload: SessionEventPayload,
     ) -> Result<(), String> {
+        let session_id = self.session_id;
+        let turn_id = self.turn_id;
         self.store
-            .publish_transient_session_event(self.session_id, Some(self.turn_id), step_id, payload)
+            .call(move |store| {
+                store.append_session_event(session_id, Some(turn_id), step_id, payload)
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn transient(
+        &self,
+        step_id: Option<StepId>,
+        payload: SessionEventPayload,
+    ) -> Result<(), String> {
+        let session_id = self.session_id;
+        let turn_id = self.turn_id;
+        self.store
+            .call(move |store| {
+                store.publish_transient_session_event(session_id, Some(turn_id), step_id, payload)
+            })
+            .await
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
