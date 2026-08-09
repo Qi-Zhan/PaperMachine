@@ -1,16 +1,16 @@
 {
   "schema": "papermachine.project-summary-toolset-dogfood.v1",
-  "started_at": "2026-08-09T05:01:10.769353+00:00",
-  "git_commit": "c24474ff4c45e4e1384e783982bd11c82ca112ba",
-  "run_root": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-summary-toolset-dogfood-17tdlbwg",
-  "finished_at": "2026-08-09T05:01:39.858100+00:00",
-  "project_id": "019fe4e5-750a-7301-b85e-e72042e1a094",
+  "started_at": "2026-08-09T10:10:43.064393+00:00",
+  "git_commit": "bc31c933647f7400129bb9694e55f4c1cc2b04ea",
+  "run_root": "/private/tmp/papermachine-summary-dogfood.b3CK4F",
+  "finished_at": "2026-08-09T10:11:10.263113+00:00",
+  "project_id": "019fe600-de60-7a90-a218-335ec69ed195",
   "first_write_glm": {
-    "workflow_id": "019fe4e5-763a-7670-afcb-b9b44fd19fb9",
-    "session_id": "e1e1ffa1-1742-5e69-acdb-c13d9758d291",
-    "action_invocation_id": "692c3cd0-f078-54b9-b66e-d4abe3c9a279",
-    "action_attempt_id": "019fe4e5-767d-7231-bdcf-961fcf027c65",
-    "turn_id": "019fe4e5-767f-73b2-b360-9705a4107ff9",
+    "workflow_id": "019fe600-df67-7e31-a867-a7aa9c9aa989",
+    "session_id": "234a4534-ee54-53a9-88af-50e16ac74644",
+    "action_invocation_id": "522efb50-d378-5aee-a213-e4b6f0c9cb03",
+    "action_attempt_id": "019fe600-dfb3-7392-9695-a06797f78736",
+    "turn_id": "019fe600-dfb4-7182-a6fe-cecd3f3108a1",
     "tool_set": {
       "definitions": [
         {
@@ -92,33 +92,33 @@
       {
         "name": "read_project_home",
         "status": "completed",
-        "tool_call_id": "call_5d96b261e9fd4f0ea3756d00",
+        "tool_call_id": "call_064a962cbe0f4870871a4e5b",
         "execution_state": "completed"
       },
       {
         "name": "patch_project_home",
         "status": "completed",
-        "tool_call_id": "call_231d0abaa93b43299331843d",
+        "tool_call_id": "call_3531b1668fba4b44843917b8",
         "execution_state": "completed"
       },
       {
         "name": "preview_project_home",
         "status": "completed",
-        "tool_call_id": "call_42b5102bf5e444218a94724e",
+        "tool_call_id": "call_77f6ada588c5407182b673c5",
         "execution_state": "completed"
       }
     ],
     "tool_trial_failures": 0,
     "base_artifact_id": null,
-    "page_artifact_id": "90c30dba-f73a-5871-abb2-763617070351",
-    "source_artifact_id": "9593a5cb-dba2-5444-b973-4e0b96c898c4",
-    "page_sha256": "12375debfa982473690e1192783e8e3c0c6303e834ed4e4d1db8dbbbfdf17ce6",
+    "page_artifact_id": "e440948c-cb86-59ff-8a1b-3b798ac5079b",
+    "source_artifact_id": "0fdd94f4-9872-58a7-9120-fc7cf04605bf",
+    "page_sha256": "cb7904b49b9b229eaa5e5e4d9ae8397bdf52a2ccc03c114f463602dc2a1b9e23",
     "provider_requests": [
       {
         "continuation_miss_reason": "http_transport",
         "model_profile": "glm-5-2",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_key": "e864150d1de8b744a6358b4178ced2c9-session",
         "prompt_cache_mode": "implicit",
         "provider": "aeroides",
         "transport": "http_sse",
@@ -130,7 +130,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "glm-5-2",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_key": "e864150d1de8b744a6358b4178ced2c9-session",
         "prompt_cache_mode": "implicit",
         "provider": "aeroides",
         "transport": "http_sse",
@@ -142,7 +142,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "glm-5-2",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_key": "e864150d1de8b744a6358b4178ced2c9-session",
         "prompt_cache_mode": "implicit",
         "provider": "aeroides",
         "transport": "http_sse",
@@ -154,7 +154,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "glm-5-2",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "2a7df2eacd397010cb2bbfc06088542c-session",
+        "prompt_cache_key": "e864150d1de8b744a6358b4178ced2c9-session",
         "prompt_cache_mode": "implicit",
         "provider": "aeroides",
         "transport": "http_sse",
@@ -171,9 +171,9 @@
       "timer_fires": 0,
       "hosted_search_calls": 0,
       "tokens": {
-        "input_tokens": 7071,
-        "output_tokens": 1068,
-        "cached_input_tokens": 5952,
+        "input_tokens": 6994,
+        "output_tokens": 994,
+        "cached_input_tokens": 5056,
         "cache_write_input_tokens": 0
       },
       "wall_time_seconds": 5,
@@ -181,11 +181,11 @@
     }
   },
   "existing_page_refresh_deepseek": {
-    "workflow_id": "019fe4e5-8d71-7f20-ae15-4cf45d03336f",
-    "session_id": "83ba3373-a41e-5e59-9867-b710b415939a",
-    "action_invocation_id": "f495c8b0-ece2-5ee3-9581-f67bdb2483c5",
-    "action_attempt_id": "019fe4e5-8dcf-7f62-b9b4-8cc36dcecdac",
-    "turn_id": "019fe4e5-8dd0-73d1-8636-5e54c63659e7",
+    "workflow_id": "019fe600-f62d-78f2-bd97-21409a6cc9d0",
+    "session_id": "5718d3c1-c755-5ac6-aa87-90499821f2f0",
+    "action_invocation_id": "30f2cb74-b4cb-5fa5-8948-7f6e9c5865a8",
+    "action_attempt_id": "019fe600-f68f-7fd3-a9d1-b02ee594dec9",
+    "turn_id": "019fe600-f690-7043-a9b9-3e2190586d66",
     "tool_set": {
       "definitions": [
         {
@@ -267,39 +267,33 @@
       {
         "name": "read_project_home",
         "status": "completed",
-        "tool_call_id": "call_00_QNudbKQ8fqBF2ebrLPSw7674",
-        "execution_state": "completed"
-      },
-      {
-        "name": "preview_project_home",
-        "status": "completed",
-        "tool_call_id": "call_01_b8hgK9I5GApP0nojnkeu0534",
+        "tool_call_id": "call_00_hsu1PjVpZqO8JEWkreyn8847",
         "execution_state": "completed"
       },
       {
         "name": "patch_project_home",
         "status": "completed",
-        "tool_call_id": "call_00_fiZVU5agnV1EoZBHJcU17287",
+        "tool_call_id": "call_00_yzcjB4okQIH8yoXDaEnx7511",
         "execution_state": "completed"
       },
       {
         "name": "preview_project_home",
         "status": "completed",
-        "tool_call_id": "call_00_ET_QE3gnpdFlzvn1sl4bi1d9752",
+        "tool_call_id": "call_00_yJujZZSHVxwtNS7Eiw7y2496",
         "execution_state": "completed"
       }
     ],
     "tool_trial_failures": 0,
-    "base_artifact_id": "90c30dba-f73a-5871-abb2-763617070351",
-    "page_artifact_id": "70af2163-8686-50d3-9e51-e9cd16c8a6b5",
-    "source_artifact_id": "adfdfebc-b803-5c8f-81ca-f7433e3e79a3",
-    "page_sha256": "7061805a84adfd955fca84d58271981b6ebfdea096224f7853b654d1bfeef638",
+    "base_artifact_id": "e440948c-cb86-59ff-8a1b-3b798ac5079b",
+    "page_artifact_id": "158ce7fc-7ee1-5306-9e3f-4356fe4a1450",
+    "source_artifact_id": "476555c4-9a4d-5899-8fda-0b65245c893b",
+    "page_sha256": "bfa96ccb35ed0a68b20a31e2f24b3fe00610457f1925fcbe520ce6a1d442ed44",
     "provider_requests": [
       {
         "continuation_miss_reason": "http_transport",
         "model_profile": "deepseek-flash",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_key": "e7246d40ea1a1e98580641b7e3a07d42-session",
         "prompt_cache_mode": "implicit",
         "provider": "deepseek",
         "transport": "http_sse",
@@ -311,7 +305,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "deepseek-flash",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_key": "e7246d40ea1a1e98580641b7e3a07d42-session",
         "prompt_cache_mode": "implicit",
         "provider": "deepseek",
         "transport": "http_sse",
@@ -323,7 +317,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "deepseek-flash",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_key": "e7246d40ea1a1e98580641b7e3a07d42-session",
         "prompt_cache_mode": "implicit",
         "provider": "deepseek",
         "transport": "http_sse",
@@ -335,7 +329,7 @@
         "continuation_miss_reason": "http_transport",
         "model_profile": "deepseek-flash",
         "prompt_cache_breakpoint": false,
-        "prompt_cache_key": "f539da2a83dd86792829642e617e799d-session",
+        "prompt_cache_key": "e7246d40ea1a1e98580641b7e3a07d42-session",
         "prompt_cache_mode": "implicit",
         "provider": "deepseek",
         "transport": "http_sse",
@@ -348,20 +342,20 @@
       "agents_created": 1,
       "actions_started": 1,
       "actions_completed": 1,
-      "action_steps": 8,
+      "action_steps": 7,
       "timer_fires": 0,
       "hosted_search_calls": 0,
       "tokens": {
-        "input_tokens": 16033,
-        "output_tokens": 2535,
-        "cached_input_tokens": 11776,
+        "input_tokens": 16833,
+        "output_tokens": 2135,
+        "cached_input_tokens": 12416,
         "cache_write_input_tokens": 0
       },
-      "wall_time_seconds": 22,
+      "wall_time_seconds": 19,
       "estimated_cost_usd": null
     }
   },
-  "project_artifact_count": 5,
+  "canonical_page_artifact_id": "158ce7fc-7ee1-5306-9e3f-4356fe4a1450",
   "assertions": {
     "fresh_data_dir": true,
     "one_attempt_per_summary": true,

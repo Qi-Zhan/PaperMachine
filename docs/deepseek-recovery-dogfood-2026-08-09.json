@@ -1,60 +1,57 @@
 {
   "schema": "papermachine.deepseek-recovery-dogfood.v2",
-  "started_at": "2026-08-09T05:01:57.660507+00:00",
-  "git_commit": "c24474ff4c45e4e1384e783982bd11c82ca112ba",
-  "run_root": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm",
+  "started_at": "2026-08-09T10:11:41.304386+00:00",
+  "git_commit": "bc31c933647f7400129bb9694e55f4c1cc2b04ea",
+  "run_root": "/private/tmp/papermachine-deepseek-dogfood.VgcljV",
   "model_profile": "deepseek-flash",
   "fault_boundary": "tool_execution_started",
-  "finished_at": "2026-08-09T05:02:14.057836+00:00",
+  "finished_at": "2026-08-09T10:12:03.240838+00:00",
   "server": {
-    "first_pid": 74958,
-    "killed_pid": 74958,
+    "first_pid": 22194,
+    "killed_pid": 22194,
     "signal": "SIGKILL",
-    "restarted_pid": 74992,
+    "restarted_pid": 22222,
     "health_mode": "providers"
   },
   "project": {
-    "id": "019fe4e6-2c36-7ec2-ba34-f7073934753a",
-    "managed_database": "/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/managed/projects/019fe4e6-2c36-7ec2-ba34-f7073934753a/state/project.db",
+    "id": "019fe601-bc94-72a0-afcd-776a2617fed8",
+    "managed_database": "/private/tmp/papermachine-deepseek-dogfood.VgcljV/managed/projects/019fe601-bc94-72a0-afcd-776a2617fed8/state/project.db",
     "managed_database_preserved": true
   },
   "workflow": {
-    "id": "019fe4e6-2d8a-7680-9d58-52d931c791b4",
+    "id": "019fe601-bdba-7120-9b80-b61a852f7307",
     "status": "completed",
     "action_invocation_count": 4,
     "action_attempt_count": 4,
     "attempts_per_invocation": {
-      "cb2a2af3-969c-5a5b-a36f-f27c71f6982a": 1,
-      "a394c360-b1ad-5cec-b6bc-8300086eabdc": 1,
-      "6237893d-48cd-50fe-bae7-d2981a7e95ac": 1,
-      "ac524a46-82db-51e6-82eb-903a8c8a1c92": 1
+      "8b7d1b7b-2e77-5657-bbdc-5d6aa7be54aa": 1,
+      "63be3818-85ec-5517-b420-05dea1cc9e74": 1,
+      "ca164a06-d231-57d5-92ea-5f9f024a4f0b": 1,
+      "7a482c4a-0925-51d2-800c-ead74922626e": 1
     }
   },
   "session": {
-    "id": "4cdd9051-cc3b-5e4e-85a5-94ad672f1cb4",
+    "id": "376dd6fd-1f4b-5e94-872d-5c2f2d051594",
     "turn_ids": [
-      "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
-      "019fe4e6-4502-77b0-9807-2760a9809289",
-      "019fe4e6-519b-7681-88ad-4c7690525d89",
-      "019fe4e6-5d7b-7e30-a278-b8f1738ef119"
+      "019fe601-be03-7e10-b5c4-aad51c6c697e",
+      "019fe601-db5d-72a1-a2d3-f50223489cc2",
+      "019fe601-ed64-76e3-a58f-620472a73e21",
+      "019fe601-fdf1-7d83-a689-5e2872bb7af9"
     ],
     "rollout": {
       "version": 1,
-      "last_sequence": 106,
-      "projected_sequence": 106
+      "last_sequence": 105,
+      "projected_sequence": 105
     },
-    "authorization_sha256": "1ce3b799cf0b467fd1f76ce53952547c8e72df4db971e0778aa508cd927709c2",
+    "authorization_sha256": "b9063df8243407293763b5217452e3f9da85ae27b7c6cf5250bb8ac4c6ff4da0",
     "turn_workspace_snapshot": {
-      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "id": "019fe601-bca6-7972-ba5a-ba4727c48cc2",
       "revision": 1,
-      "roots": [
-        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-original"
-      ],
-      "primary_root": 0
+      "path": "/private/tmp/papermachine-deepseek-dogfood.VgcljV/workspace-original"
     },
     "turn_tool_sets": [
       {
-        "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+        "turn_id": "019fe601-be03-7e10-b5c4-aad51c6c697e",
         "names": [
           "read_file",
           "write_file"
@@ -62,21 +59,21 @@
         "sha256": "90085d06c4ebbe5293146181ce381aa09bfef74722fa320b5f42eab6d5d1ca71"
       },
       {
-        "turn_id": "019fe4e6-4502-77b0-9807-2760a9809289",
+        "turn_id": "019fe601-db5d-72a1-a2d3-f50223489cc2",
         "names": [
           "read_file"
         ],
         "sha256": "0392ceb315a757a87cdf8436f9effea004d2eb277bfd760c58cbde483ddfe69f"
       },
       {
-        "turn_id": "019fe4e6-519b-7681-88ad-4c7690525d89",
+        "turn_id": "019fe601-ed64-76e3-a58f-620472a73e21",
         "names": [
           "read_file"
         ],
         "sha256": "0392ceb315a757a87cdf8436f9effea004d2eb277bfd760c58cbde483ddfe69f"
       },
       {
-        "turn_id": "019fe4e6-5d7b-7e30-a278-b8f1738ef119",
+        "turn_id": "019fe601-fdf1-7d83-a689-5e2872bb7af9",
         "names": [
           "read_file"
         ],
@@ -85,11 +82,11 @@
     ]
   },
   "faulted_tool_before_sigkill": {
-    "id": "019fe4e6-34d5-70e3-ab58-4b2468cfe9be",
-    "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+    "id": "019fe601-c623-7630-9928-5361802d369a",
+    "turn_id": "019fe601-be03-7e10-b5c4-aad51c6c697e",
     "sequence": 2,
     "name": "write_file",
-    "tool_call_id": "call_00_Db21IOzRHvl2UXGiypRJ5750",
+    "tool_call_id": "call_00_ax8gYKWAL7FA22NLR1UG5505",
     "effect_disposition": "idempotent",
     "execution_state": "executing",
     "status": "running",
@@ -100,11 +97,11 @@
     "output": null
   },
   "faulted_tool_after_restart": {
-    "id": "019fe4e6-34d5-70e3-ab58-4b2468cfe9be",
-    "turn_id": "019fe4e6-2dcc-7320-9fc4-1059a71d1071",
+    "id": "019fe601-c623-7630-9928-5361802d369a",
+    "turn_id": "019fe601-be03-7e10-b5c4-aad51c6c697e",
     "sequence": 2,
     "name": "write_file",
-    "tool_call_id": "call_00_Db21IOzRHvl2UXGiypRJ5750",
+    "tool_call_id": "call_00_ax8gYKWAL7FA22NLR1UG5505",
     "effect_disposition": "idempotent",
     "execution_state": "completed",
     "status": "completed",
@@ -126,7 +123,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -138,7 +135,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -150,7 +147,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -162,7 +159,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -174,7 +171,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -186,7 +183,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -198,7 +195,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -210,7 +207,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -222,7 +219,7 @@
       "continuation_miss_reason": "http_transport",
       "model_profile": "deepseek-flash",
       "prompt_cache_breakpoint": false,
-      "prompt_cache_key": "26ac475e7e73ddb38ffdf7cdc149b9b8-session",
+      "prompt_cache_key": "a90d043327789fea37170a2ebb829898-session",
       "prompt_cache_mode": "implicit",
       "provider": "deepseek",
       "transport": "http_sse",
@@ -233,25 +230,25 @@
   ],
   "security_denials": {
     "sensitive_workspace_file": {
-      "step_id": "019fe4e6-4b44-7d40-98bf-0aef41ee3131",
-      "tool_call_id": "call_00_JHHQvw6EgQpqWtcToLEV1196",
+      "step_id": "019fe601-e475-7212-849a-de1625652b96",
+      "tool_call_id": "call_00_98cSQGbjbJFdqiYobP9V5328",
       "status": "failed",
       "execution_state": "completed",
       "error": "path may contain Workspace credentials and is denied: .env"
     },
     "outside_workspace": {
-      "step_id": "019fe4e6-570e-7601-83e9-b10554075fb3",
-      "tool_call_id": "call_00_3KeENjHPPMdNRF0hoIfB9850",
+      "step_id": "019fe601-f554-7180-8b7c-4a9be2352ab8",
+      "tool_call_id": "call_00_QKyYLwb2khixze3ZyuKg8832",
       "status": "failed",
       "execution_state": "completed",
-      "error": "path must stay inside the Session workspace: /var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/outside-secret.txt"
+      "error": "path must stay inside the Session workspace: /private/tmp/papermachine-deepseek-dogfood.VgcljV/outside-secret.txt"
     },
     "managed_project_state": {
-      "step_id": "019fe4e6-64a7-78d1-a56b-894d72292967",
-      "tool_call_id": "call_00_B03m1o77lcTLgV5kMIkx5194",
+      "step_id": "019fe602-0670-7371-a439-46b96393f41a",
+      "tool_call_id": "call_00_VGMPhB0Q1Vcd5j4zRyYt5736",
       "status": "failed",
       "execution_state": "completed",
-      "error": "path is reserved for PaperMachine managed state: /var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/managed/projects/019fe4e6-2c36-7ec2-ba34-f7073934753a/state/project.db"
+      "error": "path is reserved for PaperMachine managed state: /private/tmp/papermachine-deepseek-dogfood.VgcljV/managed/projects/019fe601-bc94-72a0-afcd-776a2617fed8/state/project.db"
     }
   },
   "proof": {
@@ -261,27 +258,21 @@
   },
   "workspace_reattachment": {
     "before": {
-      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "id": "019fe601-bca6-7972-ba5a-ba4727c48cc2",
       "revision": 1,
-      "roots": [
-        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-original"
-      ],
-      "primary_root": 0
+      "path": "/private/tmp/papermachine-deepseek-dogfood.VgcljV/workspace-original"
     },
     "after": {
-      "id": "019fe4e6-2c3f-7791-aebd-dc7d565a8e4b",
+      "id": "019fe601-bca6-7972-ba5a-ba4727c48cc2",
       "revision": 2,
-      "roots": [
-        "/private/var/folders/4z/4fjzr0516z9gfpnt3ksdrh_40000gn/T/papermachine-deepseek-dogfood-lbwzfwlm/workspace-relocated"
-      ],
-      "primary_root": 0
+      "path": "/private/tmp/papermachine-deepseek-dogfood.VgcljV/workspace-relocated"
     },
     "old_root_exists": false,
     "new_root_exists": true,
     "managed_state_unchanged": true
   },
   "project_deletion": {
-    "project_id": "019fe4e6-6aec-7690-9c35-23732cabb196",
+    "project_id": "019fe602-1132-7082-9e7b-6c6ed454339a",
     "managed_state_removed": true,
     "workspace_preserved": true,
     "file_preserved": true,

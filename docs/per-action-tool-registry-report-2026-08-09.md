@@ -11,8 +11,8 @@ PaperMachine 已删除 Agent 级工具旁路，改为由 host 在每个 Turn 创
   等价于 `tools=[]`；
 - Workspace 工具按 Turn 的 materialized access 上限过滤；
 - Project 工具只能经 Workflow Action 声明进入，普通用户 Session 永远不会自动获得；
-- hosted web search 不属于该列表，仍由 access、`search_context_size` 与 provider
-  capability 独立决定；
+- hosted web search 不属于该列表，仍由 access、`search_context_size` 与所选 model
+  profile 的 capability 独立决定；
 - `ActionInvocation.requested_tools` 保存声明请求，Turn 原子保存排序后的 definitions
   与 SHA-256 `ToolSetSnapshot`；
 - model exposure、dispatch、pause/resume 与 crash recovery 都从该快照重建；executor
@@ -20,8 +20,7 @@ PaperMachine 已删除 Agent 级工具旁路，改为由 host 在每个 Turn 创
 - ToolRegistry 只处理 membership、dispatch、parallel policy 与 reconciliation，文件、
   网络、managed-state deny 和 sandbox 检查仍留在工具内部形成 defense in depth。
 
-该发布点的数据库 schema 为 5；这是带日期的历史验证记录，不表示当前 schema 编号。
-本轮没有迁移或兼容读取；旧 data dir 未改动，全部真实验证使用新建的临时 data dir。
+Store 只接受当前精确 schema，全部真实验证使用新建的临时 data dir。
 
 ## Clean break
 
@@ -39,22 +38,22 @@ async def maintain_project_home(...):
     ...
 ```
 
-代码、测试、Web wire types 与文档中均不再存在被删除的两个旧标识。Action
-declaration、Rust catalog validation 与 Turn materialization 都会拒绝未知、非法或重复
-名称；finalize 与 JSON repair Turn 强制使用空 Registry。
+Action declaration、Rust catalog validation 与 Turn materialization 使用同一个
+Action-level contract，并拒绝未知、非法或重复名称；finalize 与 JSON repair Turn
+强制使用空 Registry。
 
 ## 自动验证
 
 在 macOS 当前 checkout 上完成：
 
 - `cargo fmt --all -- --check`；
-- `cargo test --workspace`：133 个 Rust tests 全部通过，包括真实子进程 SIGKILL
+- `cargo test --workspace`：138 个 Rust tests 全部通过，包括真实子进程 SIGKILL
   recovery matrix；
 - `cargo clippy --workspace --all-targets -- -D warnings`；
-- Python DSL/built-in tests：55 个通过；
-- benchmark runtime、BrowseComp、Deep Research、LiveDR 四组 runner tests：共 43 个通过；
+- Python DSL/built-in tests：35 个通过；
+- benchmark runtime、BrowseComp、Deep Research、LiveDR 四组 runner tests：共 39 个通过；
 - development launcher tests：2 个通过；
-- Web tests：7 个通过；
+- Web tests：9 个通过；
 - Web production build；
 - `git diff --check`。
 
@@ -72,7 +71,7 @@ Workflow Action、普通 Session 排除 Project 工具、同一持久 Agent 的�
 
 1. Aeroides GLM 5.2 从空白页完成首次写入；
 2. 一个无 Agent 的确定性 Workflow 发布新的 verified-note Artifact；
-3. DeepSeek V4 Flash 读取 GLM 页面作为 base，先 preview，再 patch，并再次 preview 后发布。
+3. DeepSeek V4 Flash 读取 GLM 页面作为 base，更新并 preview 后发布。
 
 两次 Summary 均为 1 个 ActionInvocation、1 个 ActionAttempt、1 个 completed Turn，
 没有 model retry、Action retry 或 terminal failure；最终 preview diagnostics 均为 0，
@@ -89,13 +88,22 @@ read_project_home
 Workspace 工具。DeepSeek 首次 `read_project_home` 返回的 `base_artifact_id` 精确等于
 GLM 发布的 page Artifact ID。
 
-GLM Turn 使用 7,071 input / 1,068 output tokens，其中 5,952 input tokens 命中缓存；
-DeepSeek Turn 使用 16,033 input / 2,535 output tokens，其中 11,776 input tokens 命中
+GLM Turn 使用 6,994 input / 994 output tokens，其中 5,056 input tokens 命中缓存；
+DeepSeek Turn 使用 16,833 input / 2,135 output tokens，其中 12,416 input tokens 命中
 缓存。Summary access 为 `model_only`，两次 hosted search 调用均为 0。
 
-最初两次混合 runner 在 DeepSeek 采样前收到 401，因为宿主进程与 ignored `.env` 都
-仍指向旧 key；换成用户提供的有效 key 后从第三个全新 data dir 完整重跑通过。该认证
-准备失败没有进入成功 run 的 Workflow retry 或 ActionAttempt 统计。
+## DeepSeek 联网研究 dogfood
+
+使用 benchmark-owned `single-agent-research` 与独立无工具 grader 对 A2A/MCP 任务 69
+运行一个 exploratory 样本。Research Agent 实际完成 39 次 hosted search，随后用同一
+Session 的空 Registry `research_finalize` Action 收敛最终稿；两个 ActionInvocation
+各只有一个 completed ActionAttempt，没有 Workflow retry、Action retry 或 terminal
+failure。
+
+该 run 共 58 Steps、1,124,541 input / 25,007 output tokens，其中 990,464 input tokens
+命中缓存，wall time 363 秒；最终报告 26,243 字符、包含 23 个 direct URLs。独立 grader
+使用 9,303 input / 9,811 output tokens，给出 93.82 的 absolute point-wise 分数。它是
+单任务、单次重复的非官方 exploratory 结果，不是官方 RACE 分数。
 
 ## DeepSeek SIGKILL 与权限 dogfood
 
@@ -112,7 +120,7 @@ DeepSeek Turn 使用 16,033 input / 2,535 output tokens，其中 11,776 input to
 Server 在首个 `write_file` 已持久进入 `executing` 后收到 SIGKILL。重启后同一个
 Step ID、Turn ID、provider call ID 与 effect identity 被保留，幂等工具完成为
 `completed`，proof 文件内容和 SHA-256 正确。四个 ActionInvocation 各只有一个
-ActionAttempt；Workflow completed，rollout sequence 与 SQLite projection 都为 106。
+ActionAttempt；Workflow completed，rollout sequence 与 SQLite projection 都为 105。
 
 真实模型随后逐一触发并观察到三类拒绝：Workspace `.env`、Workspace 外文件、
 PaperMachine managed database。Project Workspace relocation 只增加 attachment revision，
