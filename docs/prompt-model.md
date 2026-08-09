@@ -35,7 +35,7 @@ effort 与相关非秘密配置的 SHA-256。prompt 无法改变这条路由，A
 |---:|---|---|---|
 | 1 | `runtime` | no | PaperMachine built-in runtime contract |
 | 2 | `project` | yes | `<data-dir>/projects/<project-id>/prompts/system.md` |
-| 3 | `workflow` | yes | Optional run `instructions`, Action contract, and relevant relations |
+| 3 | `workflow` | yes | Optional run `instructions` and Action contract |
 | 4 | `agent` or `session` | yes | Agent class/constructor `system_prompt`, or an interactive Session system prompt |
 | 5 | `skills` | yes | complete resolved instructions from enabled Project Skills |
 | 6 | `control` | yes | explicit runtime or human attempt guidance |
@@ -161,7 +161,7 @@ across Turns in one Agent Session. The concrete request and Action arguments
 remain message input rather than being rebuilt into system instructions. A
 captured Project snapshot costs no model tokens until Workflow code explicitly
 passes some or all of it. Run instructions and Agent system prompts stay stable;
-changing Action type, relations, skills, control guidance, or an editable prompt
+changing Action type, skills, control guidance, or an editable prompt
 intentionally changes the instruction prefix. The routing cache key remains
 Session-scoped, while the provider decides actual reuse by matching request
 prefixes. Session history still grows and may be compacted; this separation
@@ -170,7 +170,7 @@ makes misses attributable instead of silently re-sending unrelated Project data.
 同一 Turn 的 instruction snapshot 完全固定，同一 Agent Session 的多个 Turns 通常
 共享稳定前缀。具体 request 与 Action 参数保留在 message input，不会反复拼进 system
 instructions；捕获的 Project 快照在 Workflow 显式传入前也不消耗模型 token。run
-instructions 与 Agent system prompt 保持稳定；切换 Action、修改 relation、skills、
+instructions 与 Agent system prompt 保持稳定；切换 Action、修改 skills、
 control guidance 或可编辑 prompt 会有意改变 instruction prefix。cache routing key
 仍以 Session 为作用域，真正复用由 provider 的请求前缀匹配决定。Session 历史仍会
 增长并可能触发 compaction，但缓存 miss 不再来自无关 Project 数据的隐式重发。

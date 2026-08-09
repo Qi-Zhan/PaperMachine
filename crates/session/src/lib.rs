@@ -563,7 +563,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
             match run.status {
                 WorkflowStatus::Paused
                 | WorkflowStatus::WaitingForUser
-                | WorkflowStatus::WaitingForTimer => {
+                | WorkflowStatus::WaitingForDeadline => {
                     let turn_id = context.turn_id;
                     let mut events = self
                         .store

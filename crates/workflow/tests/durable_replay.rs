@@ -48,13 +48,13 @@ async def main(ctx):
     return {"decision": decision}
 "#;
 
-const TIMER_SOURCE: &str = r#"from papermachine import wait, workflow
+const WAIT_SOURCE: &str = r#"from papermachine import wait, workflow
 
 
 @workflow(
-    slug="durable-timer-replay",
-    name="Durable timer replay",
-    description="Suspend a Python process until its durable timer is due.",
+    slug="durable-wait-replay",
+    name="Durable wait replay",
+    description="Suspend a Python process until its durable deadline is due.",
     params_schema={"type": "object", "additionalProperties": False},
 )
 async def main(ctx):
@@ -205,7 +205,7 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
     let project = store
         .create_project("ABI mismatch", directory.path().join("project"))
         .expect("Project should be created");
-    let mut program = program_with_source("abi-mismatch", TIMER_SOURCE);
+    let mut program = program_with_source("abi-mismatch", WAIT_SOURCE);
     program.runtime_sha256 = "0".repeat(64);
     let workflow = store
         .create_workflow(NewWorkflow {
@@ -472,20 +472,20 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
 }
 
 #[tokio::test]
-async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
+async fn durable_wait_suspends_the_python_process_and_replays_when_due() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
         Store::open_in_memory(directory.path().join("artifacts"))
             .expect("store should open in memory"),
     );
     let project = store
-        .create_project("Durable timer", directory.path().join("project"))
+        .create_project("Durable wait", directory.path().join("project"))
         .expect("project should be created");
     let workflow = store
         .create_workflow(NewWorkflow {
             project_id: project.id,
             started_from_session_id: None,
-            program: program_with_source("durable-timer-replay", TIMER_SOURCE),
+            program: program_with_source("durable-wait-replay", WAIT_SOURCE),
             request: "Wait without retaining a Python process.".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
@@ -504,16 +504,16 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
     let first = runtime(Arc::clone(&store), &directory.path().join("runtime"))
         .execute(workflow.id, CancellationToken::new())
         .await
-        .expect("timer wait should suspend cleanly");
+        .expect("durable wait should suspend cleanly");
     let wake_at = match first {
         WorkflowExecution::Suspended(suspension) => {
-            assert_eq!(suspension.status, WorkflowStatus::WaitingForTimer);
+            assert_eq!(suspension.status, WorkflowStatus::WaitingForDeadline);
             suspension
                 .wake_at
-                .expect("timer suspension should have a wake time")
+                .expect("deadline suspension should have a wake time")
         }
         WorkflowExecution::Completed(output) => {
-            panic!("timer completed before suspension: {output}")
+            panic!("wait completed before suspension: {output}")
         }
     };
     assert!(
@@ -528,11 +528,11 @@ async fn durable_timer_suspends_the_python_process_and_replays_when_due() {
     tokio::time::sleep(delay + Duration::from_millis(10)).await;
     store
         .start_workflow(workflow.id)
-        .expect("timer Workflow should be runnable");
+        .expect("waiting Workflow should be runnable");
     let output = runtime(Arc::clone(&store), &directory.path().join("runtime"))
         .execute(workflow.id, CancellationToken::new())
         .await
-        .expect("due timer should replay");
+        .expect("due wait should replay");
     assert_eq!(
         output,
         WorkflowExecution::Completed(json!({"completed": true}))

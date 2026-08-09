@@ -263,10 +263,10 @@ research 内核”。用户表达的是长期协作结构；runtime 负责解释
 最值得做成稳定 primitive 的是：
 
 - 持久 `Agent`/Session 和同一 Session 内的多轮 action；
-- `together(...)` 并行、结构化关系与作用域；
+- `together(...)` 显式并行，其他结构使用普通 Python 控制流；
 - typed action input/output 与 completion contract；
 - evaluator 产生窄 follow-up，再路由回指定 Session；
-- durable timer、signal、channel、`ask_human` 和每轮 `wait_for_human`；
+- durable `ask_human` 与单一 journaled `wait`；
 - Project/Workflow/Agent 三层权限上限，以及每 Turn 不可变快照；
 - Agent/action 级重试、停止策略和可观察的 usage；
 - Project snapshot、artifact 和后续 Workflow 对已有结果的显式消费。
@@ -274,8 +274,8 @@ research 内核”。用户表达的是长期协作结构；runtime 负责解释
 `interactive-agent` 和 `project-summary` 都继续作为 built-in Workflow，而不是特殊旁路。
 Project 管理多个正在运行或已完成的 Workflow；Workflow 管理参与的 Session。Project
 是 PaperMachine 持久管理的研究世界；Agent 操作的是单独挂载、用户自有的 Workspace。
-summary Workflow 读取 Project snapshot，在手动、
-定时或 stale-on-open 条件触发时生成 HTML artifact；它的 prompt 使用正常的 Project、
+summary Workflow 读取 Project snapshot，手动运行或在普通 loop 的 durable wait 之后刷新
+HTML artifact；它的 prompt 使用正常的 Project、
 Workflow、Agent 分层机制。这样普通交互、定时总结和复杂研究共享同一个 runtime，用户
 又不需要理解额外的 “instance” 概念。
 

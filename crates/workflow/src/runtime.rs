@@ -484,13 +484,8 @@ impl RunEffectContext {
             .any(|suspension| suspension.status == WorkflowStatus::WaitingForUser)
         {
             WorkflowStatus::WaitingForUser
-        } else if suspensions
-            .values()
-            .any(|suspension| suspension.status == WorkflowStatus::WaitingForTimer)
-        {
-            WorkflowStatus::WaitingForTimer
         } else {
-            WorkflowStatus::WaitingForTimer
+            WorkflowStatus::WaitingForDeadline
         };
         let wake_at = suspensions
             .values()
@@ -534,7 +529,7 @@ impl RunEffectContext {
             WorkflowStatus::Created | WorkflowStatus::Running => Ok(()),
             WorkflowStatus::Paused
             | WorkflowStatus::WaitingForUser
-            | WorkflowStatus::WaitingForTimer => Err(WorkflowRuntimeError::Suspended(
+            | WorkflowStatus::WaitingForDeadline => Err(WorkflowRuntimeError::Suspended(
                 WorkflowSuspension::new(run.status, None),
             )),
             WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
@@ -1033,7 +1028,7 @@ impl RunEffectContext {
             return Ok(json!({"fired_at": wake_at}));
         }
         Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
-            WorkflowStatus::WaitingForTimer,
+            WorkflowStatus::WaitingForDeadline,
             Some(wake_at),
         )))
     }

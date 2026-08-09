@@ -1053,7 +1053,7 @@ async function waitForProjectSummary(projectId: string, workflowId: string) {
     if (workflow.status === 'failed' || workflow.status === 'cancelled') {
       throw new Error(workflow.error ?? workflow.status)
     }
-    if (['completed', 'waiting_for_timer'].includes(workflow.status)) {
+    if (['completed', 'waiting_for_deadline'].includes(workflow.status)) {
       const overview = await refreshProjectIndex(projectId)
       if (overview.project_home) return
     }

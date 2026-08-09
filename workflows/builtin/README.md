@@ -19,6 +19,6 @@ set: research Actions request the four Workspace tools, model-only Actions use
   powers the normal New Session action.
 - `project-summary`: one persistent Agent reads, incrementally edits, and
   previews the Project home page within its normal tool loop, then publishes
-  the validated semantic page once or on a durable refresh timer.
+  the validated semantic page once or in a loop separated by durable waits.
 - `evidence-loop`: parallel evidence collection, evaluator-directed follow-ups
   in the same route Sessions, and iterative review of the final draft.

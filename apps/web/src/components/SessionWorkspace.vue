@@ -744,7 +744,7 @@ const composerPlaceholder = computed(() => {
   return activeTurn.value ? t('session.running') : t('session.preparingNextTurn')
 })
 const workflowIsActive = computed(() =>
-  ['created', 'running', 'waiting_for_user', 'waiting_for_timer', 'waiting_for_signal', 'paused'].includes(
+  ['created', 'running', 'waiting_for_user', 'waiting_for_deadline', 'paused'].includes(
     props.workflowView?.workflow.status ?? '',
   ),
 )

@@ -394,10 +394,10 @@ async fn run_scheduled_inner(
                                 .call(move |store| store.wait_workflow_for_user(workflow_id))
                                 .await
                         }
-                        WorkflowStatus::WaitingForTimer => {
+                        WorkflowStatus::WaitingForDeadline => {
                             inner
                                 .store
-                                .call(move |store| store.wait_workflow_for_timer(workflow_id))
+                                .call(move |store| store.wait_workflow_for_deadline(workflow_id))
                                 .await
                         }
                         status => Err(StoreError::Invariant(format!(
@@ -478,9 +478,9 @@ async fn wait_until_runnable(
                     _ = events.recv() => {}
                 }
             }
-            WorkflowStatus::WaitingForTimer => {
+            WorkflowStatus::WaitingForDeadline => {
                 let wake_at = wake_at_hint.ok_or_else(|| {
-                    "Workflow timer suspension is missing its wake time".to_string()
+                    "Workflow deadline suspension is missing its wake time".to_string()
                 })?;
                 let wait = (wake_at - Utc::now()).to_std().unwrap_or_default();
                 if wait.is_zero() {
@@ -573,7 +573,7 @@ mod tests {
                     .insert(workflow_id);
             if should_suspend {
                 Ok(WorkflowExecution::Suspended(WorkflowSuspension::new(
-                    WorkflowStatus::WaitingForTimer,
+                    WorkflowStatus::WaitingForDeadline,
                     Some(Utc::now() + chrono::Duration::hours(1)),
                 )))
             } else {
@@ -824,7 +824,7 @@ mod tests {
                     .get_workflow(suspended_run.id)
                     .expect("Workflow should load")
                     .status
-                    == WorkflowStatus::WaitingForTimer
+                    == WorkflowStatus::WaitingForDeadline
                 {
                     break;
                 }

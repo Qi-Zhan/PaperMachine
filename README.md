@@ -41,8 +41,8 @@ Agent prompt, Project context, and user guidance all use the ordinary Workflow
 and Session mechanisms; pause, cancellation, provider failure, and completion
 all stop the loop without a separate evaluator Agent.
 
-The **Project Page** can run the reviewed `project-summary` Workflow once or on
-a configurable durable timer. Its summary Agent reads a bounded snapshot of
+The **Project Page** can run the reviewed `project-summary` Workflow once or in
+a normal loop separated by durable waits. Its summary Agent reads a bounded snapshot of
 existing Project Sessions, Workflow results, and Artifact metadata. In one
 ordinary tool-capable Action it reads the existing page, applies semantic block
 patches, previews the complete materialized result, and can keep correcting it
@@ -61,7 +61,7 @@ Project
     optional starting Session
     Agent instance <-> Session
       Action -> Attempt -> Turn -> Steps
-    Teams, relations, scopes, timers, channels, human requests
+    Human requests, controls, effects, and artifacts
 ```
 
 PaperMachine separates shipped resources, PaperMachine-managed Project worlds,
@@ -177,11 +177,11 @@ each Turn's PromptSnapshot; scripts and assets are not a runtime capability.
   action contract remains an inspectable prompt layer.
 - Compose explicit concurrency with `together(...)` and serialize each Agent's
   own Session Turns.
-- Add Agents dynamically; define Teams, directed relations, task scopes,
-  channels/signals, background tasks, and durable timer records.
-- Suspend quiescent human/timer/signal waits without retaining an idle Python
-  process or global execution permit; replay wakes on an answer, due timer, or
-  durable Signal, including concurrent background-timer plus human-wait flows.
+- Add Agents dynamically and express orchestration with ordinary Python control
+  flow plus explicit `together(...)` concurrency.
+- Suspend quiescent human/deadline waits without retaining an idle Python
+  process or global execution permit; `wait(...)` is one journaled effect whose
+  persisted start time defines its deadline.
 - Read bounded Project state from Workflow code with `ctx.project.snapshot()`;
   long-lived Workflows can pass `cursor` back as `after_cursor` to receive only
   later committed changes. Publish deterministic text/HTML Artifacts with
@@ -353,4 +353,4 @@ See the accepted [runtime kernel target](docs/runtime-kernel.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
 [security boundaries](docs/security.md). The crash matrix, complete release
 checks, and current real-provider evidence are summarized in
-[the 2026-08-09 kernel validation report](docs/kernel-validation-2026-08-09.md).
+[the 2026-08-10 simplified-kernel validation report](docs/kernel-validation-2026-08-10.md).

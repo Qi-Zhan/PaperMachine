@@ -69,7 +69,7 @@ pub enum WorkflowStatus {
     Created,
     Running,
     WaitingForUser,
-    WaitingForTimer,
+    WaitingForDeadline,
     Paused,
     Completed,
     Failed,
@@ -131,7 +131,7 @@ pub struct Workflow {
     pub id: WorkflowId,
     pub project_id: ProjectId,
     /// Optional Session from which the user started this Workflow. Project-level
-    /// and built-in background Workflows do not need one.
+    /// and long-lived built-in Workflows do not need one.
     pub started_from_session_id: Option<SessionId>,
     pub program: WorkflowProgramSnapshot,
     /// Immutable per-Run request. The Workflow program decides which Agents

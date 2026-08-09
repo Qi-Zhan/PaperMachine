@@ -1529,7 +1529,7 @@ impl Store {
             &[
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForDeadline,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Paused,
@@ -1543,7 +1543,7 @@ impl Store {
             &[
                 WorkflowStatus::Paused,
                 WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForDeadline,
                 WorkflowStatus::Running,
             ],
             WorkflowStatus::Running,
@@ -1560,11 +1560,11 @@ impl Store {
         )
     }
 
-    pub fn wait_workflow_for_timer(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
+    pub fn wait_workflow_for_deadline(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
         self.transition_workflow(
             id,
-            &[WorkflowStatus::Running, WorkflowStatus::WaitingForTimer],
-            WorkflowStatus::WaitingForTimer,
+            &[WorkflowStatus::Running, WorkflowStatus::WaitingForDeadline],
+            WorkflowStatus::WaitingForDeadline,
             None,
         )
     }
@@ -1580,7 +1580,7 @@ impl Store {
                 WorkflowStatus::Created,
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForDeadline,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Failed,
@@ -1599,7 +1599,7 @@ impl Store {
                 WorkflowStatus::Created,
                 WorkflowStatus::Running,
                 WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForTimer,
+                WorkflowStatus::WaitingForDeadline,
                 WorkflowStatus::Paused,
             ],
             WorkflowStatus::Cancelled,
