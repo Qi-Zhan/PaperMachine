@@ -3088,7 +3088,6 @@ impl Store {
         let name = name.into();
         let stored = store_artifact_file(
             &self.shared.artifact_root,
-            project_id,
             workflow_id,
             session_id,
             id,

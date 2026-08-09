@@ -28,9 +28,11 @@ only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, permissions, and Session serialization before applying them.
 
 `ctx.project.snapshot()` is a Rust-owned read effect, not database access from
-Python. It is fixed to the current Workflow's Project, excludes summary runs to
-avoid recursive ingestion, caps collection counts and per-Turn text, and omits
-provider reasoning and credentials. `publish_artifact(...)` accepts bounded
+Python. It is fixed to the current Workflow's Project and excludes only the
+calling Workflow's own Sessions and outputs, so published Project state remains
+available to other Agents without recursive self-ingestion. It caps collection
+counts and per-Turn text and omits provider reasoning and credentials.
+`publish_artifact(...)` accepts bounded
 text only, derives a deterministic Artifact ID from the Workflow/effect path,
 and verifies optional Agent ownership.
 

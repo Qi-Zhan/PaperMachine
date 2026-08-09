@@ -767,6 +767,7 @@ fn database_reopens_and_artifacts_are_content_addressed() {
             .expect("artifact should be created");
         assert_eq!(artifact.size_bytes, 8);
         assert_eq!(artifact.sha256.len(), 64);
+        assert!(artifact.relative_path.starts_with(&run.id.to_string()));
         assert!(artifacts.join(&artifact.relative_path).is_file());
         (research.id, run.id)
     };

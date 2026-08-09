@@ -119,8 +119,9 @@ launch. Neither `ctx.request` nor `ctx.context` is automatically promoted into
 model instructions; the Workflow must pass them to the relevant Actions. In contrast,
 `await ctx.project.snapshot(...)` performs an explicit durable effect and
 returns a bounded view of current Project Sessions, Turns, Workflow results,
-and Artifact metadata; it excludes summary runs themselves to avoid recursive
-summaries.
+and Artifact metadata. It excludes the calling Workflow's own participant
+Sessions and outputs; state published by other Workflows, including the current
+Project summary, remains readable as ordinary Project context.
 
 ## DSL surface
 

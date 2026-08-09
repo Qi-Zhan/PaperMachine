@@ -53,23 +53,20 @@ pub fn build_project_snapshot(
     let max_text_chars = options.max_text_chars.clamp(1_000, 2_000_000);
     let project = store.get_project(project_id)?;
     let workflows = store.list_project_workflows(project.id)?;
-    let summary_workflow_ids = workflows
-        .iter()
-        .filter(|workflow| workflow.program.manifest.slug == "project-summary")
-        .map(|workflow| workflow.id)
-        .collect::<HashSet<_>>();
-    let mut summary_session_ids = HashSet::new();
-    for workflow_id in &summary_workflow_ids {
-        for participant in store.list_participants(*workflow_id)? {
-            summary_session_ids.insert(participant.session_id);
-        }
-    }
+    let excluded_session_ids = match options.exclude_workflow_id {
+        Some(workflow_id) => store
+            .list_participants(workflow_id)?
+            .into_iter()
+            .map(|participant| participant.session_id)
+            .collect::<HashSet<_>>(),
+        None => HashSet::new(),
+    };
 
     let mut text = SnapshotTextBudget::new(max_text_chars);
     let mut project_sessions = store
         .list_sessions(project.id)?
         .into_iter()
-        .filter(|session| !summary_session_ids.contains(&session.id))
+        .filter(|session| !excluded_session_ids.contains(&session.id))
         .filter(|session| {
             options
                 .updated_after
@@ -130,7 +127,6 @@ pub fn build_project_snapshot(
         .into_iter()
         .filter(|workflow| {
             options.exclude_workflow_id != Some(workflow.id)
-                && workflow.program.manifest.slug != "project-summary"
                 && options
                     .updated_after
                     .is_none_or(|updated_after| workflow.updated_at > updated_after)
@@ -168,12 +164,10 @@ pub fn build_project_snapshot(
         .list_project_artifacts(project.id)?
         .into_iter()
         .filter(|artifact| {
-            !matches!(
-                artifact.metadata.get("role").and_then(Value::as_str),
-                Some("project_summary" | "project_summary_source")
-            ) && options
-                .updated_after
-                .is_none_or(|updated_after| artifact.created_at > updated_after)
+            options.exclude_workflow_id != Some(artifact.workflow_id)
+                && options
+                    .updated_after
+                    .is_none_or(|updated_after| artifact.created_at > updated_after)
         })
         .take(max_artifacts)
         .map(|artifact| {
@@ -358,10 +352,10 @@ mod tests {
                 Some(older.id),
                 None,
                 ArtifactKind::Report,
-                "evidence.md",
-                "text/markdown",
-                json!({"source": "primary"}),
-                "原始证据内容".as_bytes(),
+                "project-home.html",
+                "text/html",
+                json!({"role": "project_summary"}),
+                "<h1>原始证据内容</h1>".as_bytes(),
             )
             .expect("Artifact should be created");
 
@@ -380,9 +374,21 @@ mod tests {
         assert_eq!(snapshot["focus_session_id"], focus.id.to_string());
         assert_eq!(snapshot["sessions"][0]["id"], focus.id.to_string());
         assert_eq!(snapshot["project"]["name"], "Context Project");
-        assert_eq!(snapshot["artifacts"][0]["content"], "原始证据内容");
+        assert_eq!(snapshot["artifacts"][0]["content"], "<h1>原始证据内容</h1>");
         assert_eq!(snapshot["artifacts"][0]["content_truncated"], false);
         assert_eq!(snapshot["limits"]["include_artifact_content"], true);
+
+        let without_current = build_project_snapshot(
+            &store,
+            project.id,
+            ProjectSnapshotOptions {
+                exclude_workflow_id: Some(workflow.id),
+                ..ProjectSnapshotOptions::default()
+            },
+        )
+        .expect("calling Workflow state should be excluded");
+        assert_eq!(without_current["workflows"], json!([]));
+        assert_eq!(without_current["artifacts"], json!([]));
     }
 
     #[test]

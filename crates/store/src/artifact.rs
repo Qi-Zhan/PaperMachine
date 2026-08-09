@@ -1,7 +1,6 @@
 use crate::StoreError;
 use hex::encode;
 use papermachine_protocol::ArtifactId;
-use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::WorkflowId;
 use sha2::Digest;
@@ -17,7 +16,6 @@ pub(crate) struct StoredArtifactFile {
 
 pub(crate) fn store_artifact_file(
     artifact_root: &Path,
-    project_id: ProjectId,
     workflow_id: WorkflowId,
     session_id: Option<SessionId>,
     artifact_id: ArtifactId,
@@ -28,7 +26,6 @@ pub(crate) fn store_artifact_file(
         .map(|id| id.to_string())
         .unwrap_or_else(|| "workflow".to_string());
     let directory = artifact_root
-        .join(project_id.to_string())
         .join(workflow_id.to_string())
         .join(session_segment);
     std::fs::create_dir_all(&directory).map_err(|error| StoreError::Io(error.to_string()))?;
