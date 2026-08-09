@@ -6,11 +6,7 @@ from pathlib import Path
 
 
 WORKFLOW = runpy.run_path(
-    Path(__file__).resolve().parents[2]
-    / "workflows"
-    / "builtin"
-    / "live-dr-grader"
-    / "workflow.py"
+    Path(__file__).resolve().parent / "grader" / "workflow.py"
 )
 
 

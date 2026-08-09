@@ -4,12 +4,13 @@ Built-ins use the same Python Agent DSL as user workflows. They are reviewed
 source examples, not privileged Rust handlers.
 
 Built-ins declare access explicitly: evidence-gathering Agents use `research`,
-while evaluators, synthesizers, writers, and graders that consume supplied
+while evaluators, synthesizers, and writers that consume supplied
 evidence use `model_only`. Each Action also declares its complete local tool
 set: research Actions request the four Workspace tools, model-only Actions use
 `tools=[]`, and Project Summary requests only its three Project-home tools.
 
 - `parallel-discovery`: independent routes followed by one synthesis Session.
+- `single-agent-research`: one persistent research Session produces a report.
 - `goal`: one persistent Agent performs each tool-capable Turn, stops when that
   Turn marks the objective complete or genuinely blocked, and otherwise starts
   another Turn without waiting for a human.

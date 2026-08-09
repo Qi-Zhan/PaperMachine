@@ -35,6 +35,7 @@ if str(BENCHMARKS_ROOT) not in sys.path:
 
 from benchmark_runtime import (
     default_server_binary,
+    install_project_workflow,
     isolated_server,
     runtime_artifact_fingerprints,
 )
@@ -97,7 +98,7 @@ RUNTIME_FILES = (
     "python/papermachine/_runner.py",
     "python/papermachine/_validate.py",
     "workflows/builtin/evidence-loop/workflow.py",
-    "workflows/builtin/live-dr-grader/workflow.py",
+    "benchmarks/live-dr-mini/grader/workflow.py",
     "workflows/builtin/single-agent-research/workflow.py",
 )
 UPSTREAM_EVALUATOR = {
@@ -1584,6 +1585,11 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
         f"LiveDRBench research - {args.run_name}",
         "Structured claim-discovery runs with isolated upstream-rubric post-write grading.",
         run_dir / "project",
+    )
+    install_project_workflow(
+        api,
+        project_id,
+        Path(__file__).resolve().parent / "grader" / "workflow.py",
     )
     validate_workflows(
         api,

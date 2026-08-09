@@ -27,6 +27,7 @@ if str(BENCHMARKS_ROOT) not in sys.path:
 
 from benchmark_runtime import (
     default_server_binary,
+    install_project_workflow,
     isolated_server,
     runtime_artifact_fingerprints,
 )
@@ -88,7 +89,7 @@ RUNTIME_FILES = (
     "python/papermachine/_runner.py",
     "python/papermachine/_validate.py",
     "workflows/builtin/evidence-loop/workflow.py",
-    "workflows/builtin/short-answer-grader/workflow.py",
+    "benchmarks/browsecomp-mini/grader/workflow.py",
     "workflows/builtin/single-agent-research/workflow.py",
 )
 
@@ -1088,6 +1089,11 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
             "Independent no-tool answer-equivalence grading Sessions.",
             run_dir / "projects" / "grader",
         )
+    install_project_workflow(
+        api,
+        state["projects"]["grader"],
+        Path(__file__).resolve().parent / "grader" / "workflow.py",
+    )
     validate_workflows(
         api,
         state["projects"]["research"],

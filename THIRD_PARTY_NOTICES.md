@@ -41,7 +41,7 @@ No codex-mobile source has been copied at this stage.
 
 ## Microsoft LiveDRBench
 
-The benchmark adapter and `live-dr-grader` workflow adapt claim-matching
+The LiveDR benchmark adapter and benchmark-owned grader Workflow adapt claim-matching
 semantics and evaluation rubrics from LiveDRBench at commit
 `6ff85b67b35fa303907f6f275417622338acd1f6`.
 

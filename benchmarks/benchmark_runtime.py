@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 
 def server_data_dir(run_dir: Path) -> Path:
@@ -40,6 +41,14 @@ def runtime_artifact_fingerprints(
         name: hashlib.sha256(path.read_bytes()).hexdigest()
         for name, path in paths.items()
     }
+
+
+def install_project_workflow(api: Any, project_id: str, source_path: Path) -> Any:
+    """Install one benchmark-owned Workflow through the public Project API."""
+    return api.post(
+        f"/projects/{project_id}/workflow-programs",
+        {"source": source_path.read_text(encoding="utf-8")},
+    )
 
 
 def server_command(

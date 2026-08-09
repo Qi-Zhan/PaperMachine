@@ -27,6 +27,7 @@ if str(BENCHMARKS_ROOT) not in sys.path:
 
 from benchmark_runtime import (
     default_server_binary,
+    install_project_workflow,
     isolated_server,
     runtime_artifact_fingerprints,
 )
@@ -98,7 +99,7 @@ RUNTIME_FILES = (
     "python/papermachine/_validate.py",
     "workflows/builtin/evidence-loop/workflow.py",
     "workflows/builtin/single-agent-research/workflow.py",
-    "workflows/builtin/report-grader/workflow.py",
+    "benchmarks/deep-research-mini/grader/workflow.py",
 )
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 URL_RE = re.compile(r"https?://[^\s)\]>]+")
@@ -1804,6 +1805,11 @@ def run_matrix(args: argparse.Namespace, api_base: str | None) -> int:
             "Independent post-write grading Sessions using the full upstream rubric.",
             run_dir / "projects" / "grader",
         )
+    install_project_workflow(
+        api,
+        state["projects"]["grader"],
+        Path(__file__).resolve().parent / "grader" / "workflow.py",
+    )
     validate_workflows(
         api,
         state["projects"]["research"],
