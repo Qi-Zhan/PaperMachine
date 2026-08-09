@@ -200,9 +200,11 @@ PaperMachine server ------------+
        | Responses WebSocket                  | JSONL effect requests
        | (HTTP SSE fallback)
        | sample/tool loop                     v
-       +-> ToolRegistry <-------------- RunEffectContext
-                 |                         |
-                 +-> execution sandbox     +-> SessionRuntime actions
+       +-> exact ToolRegistry <--------- RunEffectContext
+                 ^                         |
+                 |                         +-> SessionRuntime actions
+            host ToolCatalog               |
+                 +-> execution sandbox ----+
                                |
                  in-memory catalog + per-Project Store/artifacts
 ```
@@ -219,9 +221,12 @@ A user Turn or workflow action follows the same core path:
 
 1. Verify that every attached Workspace root is still a real directory at its
    recorded canonical path. If not, fail before creating a Turn.
-2. Append the Turn to its Session rollout, then project it with its immutable
-   Workspace/authorization environment,
-   Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
+2. Resolve the local tools before the Turn exists. A standalone user Turn gets
+   all Workspace tools allowed by access; a Workflow Action starts from its
+   static `tools=[...]` declaration, filters Workspace tools by access, and may
+   receive declared Project tools. Atomically append the Turn with the sorted
+   definitions and SHA-256 ToolSetSnapshot, immutable Workspace/authorization
+   environment, Project-skill snapshot, and ordered prompt snapshot. `Turn.origin` records
    whether input is a direct/verified human message or program-generated
    Workflow work.
 3. Reconstruct canonical model context by replaying that append-only rollout.
@@ -421,14 +426,26 @@ journal is returned in Workflow views and is visible in the Session inspector.
 
 The Project Page is itself backed by ordinary Workflow data. A built-in
 `project-summary` run reads a bounded Rust-produced Project snapshot and
-publishes an immutable HTML report Artifact. The UI embeds only the newest
-Artifact in a sandboxed iframe; manual refreshes are one-shot runs, while an
-active refresh policy is simply a non-terminal scheduled Workflow. Its first
-refresh is full; later timer firings request only changes since the prior
-`captured_at` cursor and skip model work when that delta is empty. The same
-summary Agent Session retains the prior report and can reuse its provider
-prefix. There is no separate summary-instance table or privileged summary
-daemon.
+starts one ordinary tool-capable Action on a persistent summary Agent. Project
+page access is a structured host API, not filesystem access: the Action
+declares read, semantic block patch, and materialized preview tools. Its Turn
+stores exactly those definitions and no Workspace tools, without granting
+access to PaperMachine managed files or expanding its Workspace preset. The Agent can edit and inspect the
+draft for as many model/tool steps as it needs and ends naturally when it is
+satisfied; no Workflow-level review state machine or evaluator Action decides
+for it.
+
+After that Action completes, one replay-safe publication effect stores the
+block source and exposes an immutable semantic HTML Artifact. The UI fetches
+the newest page Artifact, removes active content, inline styles, forms, and
+external media, and renders the remaining semantic markup directly as the
+Project home page. There is no fixed Project dashboard and no iframe boundary.
+Manual refreshes are one-shot runs, while an active refresh policy is simply a
+non-terminal scheduled Workflow. Its first refresh is full; later timer firings
+request only changes since the prior `captured_at` cursor and skip model work
+when that delta is empty. The same summary Agent Session retains prior Turns and
+the next draft starts from the last published block source. There is no separate
+summary-instance table or privileged summary daemon.
 
 ## Skills and workflow roots
 

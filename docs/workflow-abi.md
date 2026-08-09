@@ -24,6 +24,7 @@ class Researcher(Agent):
     @action(
         search_context_size="low",
         reasoning_effort="high",
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def investigate(self, question: str, perspective: str):
         """Find evidence, counterevidence, provenance, and uncertainty."""
@@ -32,7 +33,7 @@ class Researcher(Agent):
 class Synthesizer(Agent):
     access = "model_only"
 
-    @action(reasoning_effort="medium")
+    @action(reasoning_effort="medium", tools=[])
     async def synthesize(self, question: str, findings: list[str]):
         """Compare findings and return the strongest bounded conclusion."""
 
@@ -130,7 +131,7 @@ summaries.
 | `Agent(model=...)` | Binds this persistent Agent Session to a configured model profile; an empty value inherits the Run default. Different roles use different models by ordinary Python construction. |
 | `Agent(access=...)` | Overrides the class access profile for this instance. |
 | `await agent.set_access(...)` | Downgrades immediately between Turns; an upgrade suspends for explicit human approval. |
-| `@action` | Declares a model-backed action. Optional `search_context_size`, `reasoning_effort`, and `finalize` configure retrieval context, model compute, and post-search finalization. The model/tool loop ends naturally on a terminal assistant message. |
+| `@action(tools=[...])` | Declares a model-backed action and its complete static local-tool request. The default is `[]`; names must be non-empty and unique. Rust rejects unknown names and filters Workspace tools against access before creating the Turn. Optional `search_context_size`, `reasoning_effort`, and `finalize` configure hosted retrieval context, model compute, and post-search finalization. The model/tool loop ends naturally on a terminal assistant message. |
 | `await together(...)` | Runs awaitables concurrently; duplicate same-Agent actions fail before starting. |
 | `Team(name, *agents)` | Creates a named, dynamically mutable membership set. |
 | `await team.add/remove(...)` | Changes Team membership. |
@@ -145,6 +146,7 @@ summaries.
 | `await wait(seconds=... / minutes=...)` | Suspends one branch until a named durable timer fires. |
 | `await ctx.project.snapshot(...)` | Reads bounded Project-owned research state through Rust; Python never opens the database directly. |
 | `await publish_artifact(...)` | Publishes a deterministic text Artifact, optionally associated with an Agent Session. |
+| `await publish_project_home(agent=...)` | Atomically publishes the semantic Project-home draft produced through that Agent's current Action tool loop. |
 
 Ordinary Python `if`, `for`, `while`, functions, collections, and exceptions
 remain the workflow control language. Arbitrary imports, filesystem/network
@@ -206,12 +208,16 @@ remain available asynchronously; provider errors fail the Workflow. These are
 stop conditions around the loop, not user waits inside it.
 
 The built-in `project-summary` is the reference background program. It reads
-`ctx.project.snapshot()`, asks one persistent summary Agent to render a
-self-contained HTML report, publishes it as an Artifact, and optionally calls
+`ctx.project.snapshot()` and starts one normal Action on a persistent summary
+Agent. Inside the existing Agent loop, that Agent can repeatedly call
+`read_project_home`, `patch_project_home`, and `preview_project_home`; there is
+no one-shot HTML return contract and no separate evaluator Action. When the
+Action naturally ends, `publish_project_home(...)` atomically materializes its
+validated block draft as an immutable HTML Artifact. The Workflow may then call
 `wait(minutes=...)` before repeating. Its reviewed Agent prompt lives in source;
 the Project Page exposes the run's user-controlled `instructions` and timer
-interval. A scheduled summary is therefore an ordinary durable Workflow,
-not a second "instance" entity or a hidden Project daemon.
+interval. A scheduled summary is therefore an ordinary durable Workflow, not a
+second "instance" entity or a hidden Project daemon.
 
 ## Effect protocol
 
@@ -236,7 +242,7 @@ create_team       set_team_members    set_relation
 open_scope        close_scope         register_timer
 wait_timer        create_channel      publish_signal
 wait_signal       ask_human           project_snapshot
-publish_artifact  complete
+publish_artifact  publish_project_home complete
 ```
 
 Rust rejects unknown effects and malformed or cross-run IDs. On process

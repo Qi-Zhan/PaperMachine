@@ -39,18 +39,28 @@ TurnEnvironmentSnapshot
   canonical roots and cwd
   materialized filesystem policy
   local-process network policy
-  model-visible and server-hosted tool capabilities
+  Workspace tool and hosted-search capability ceilings
   immutable protected roots
   environment-variable policy
 ```
 
-Every enforcement boundary consumes that same materialized context:
+Local-tool selection is a separate host-owned surface. At Turn creation a
+trusted ToolCatalog constructs an exact immutable ToolRegistry. Workflow
+Actions supply a static `tools=[...]` candidate list; access filters Workspace
+tools, while Project tools can enter only through this Action path. Standalone
+user Turns receive every Workspace tool allowed by access and no Project tools.
+The Turn stores the sorted definitions and SHA-256 as a ToolSetSnapshot.
 
-1. model-visible tool schema filtering;
-2. ToolRegistry dispatch authorization;
-3. each direct file and network tool;
-4. local command sandbox construction; and
-5. sandboxed Workflow Python execution.
+Every enforcement boundary consumes one or both immutable snapshots:
+
+1. model-visible definitions and dispatch use exact ToolRegistry membership;
+2. each direct file and network tool rechecks Turn authorization;
+3. local command sandbox construction uses Turn authorization; and
+4. sandboxed Workflow Python execution uses its separate run policy.
+
+Recovery rebuilds from the saved ToolSetSnapshot. A missing executor, changed
+definition, non-canonical ordering, or invalid hash fails closed before another
+sample or tool execution.
 
 For every preset, PaperMachine-managed Project state is unreadable and
 unwritable by Agent tools. Below `full_access`, writes to `.git`, `.agents`, and

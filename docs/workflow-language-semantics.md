@@ -323,6 +323,23 @@ from the effect path, and is idempotent under replay. These effects let ordinary
 user Workflows build Project-level views without direct SQLite or host-file
 access.
 
+Every Action declares its complete local-tool request with
+`@action(tools=[...])`; bare `@action` means no local tools. The declaration is
+static Workflow metadata and the requested names are stored on the durable
+ActionInvocation. Before creating its Turn, Rust rejects unknown names, filters
+Workspace tools against the materialized access ceiling, and admits Project
+tools only on this Workflow Action path. It then stores the final sorted
+definitions and SHA-256 as the Turn's ToolSetSnapshot. Standalone user Turns
+have no Action declaration and receive all Workspace tools allowed by their
+access; they never receive Project tools. Hosted web search remains a separate
+provider capability controlled by access and `search_context_size`.
+
+Sampling, dispatch, pause/resume, and recovery rebuild the same exact Registry
+from that snapshot. Missing executors or changed definitions fail closed.
+`project-summary` declares only `read_project_home`, `patch_project_home`, and
+`preview_project_home`, then publishes with one replay-safe
+`publish_project_home(...)` effect after the Agent Action ends.
+
 Control messages are asynchronous:
 
 | Control | Exact semantics |

@@ -62,18 +62,23 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 - 任意源 prompt 的修改都不会追溯改变已有 Turn，只影响之后创建的 Turn。
 
 `project-summary` makes this split concrete. Its reviewed Agent base prompt and
-Action contract stay in the built-in Workflow source. The Project Page edits
-the summary run's `instructions`: what to emphasize, preserve, or omit.
+Action contract stay in the built-in Workflow source. The contract gives the
+Agent page read, patch, and preview tools and trusts its normal tool loop to
+inspect and correct the result before finishing; it does not impose a second
+review prompt. The Project Page edits the summary run's `instructions`: what to
+emphasize, preserve, or omit.
 The Project system prompt still applies underneath it. Updating a scheduled
 summary starts a new snapshotted Workflow run and terminates the old schedule;
 previous summary Turns and HTML Artifacts remain attributable to their original
 prompt snapshots.
 
 `project-summary` 把这个分层直接呈现在 UI 中：内置 Workflow 源码保存经审查的
-Agent 基础 prompt 与 Action contract；Project Page 编辑的是该 summary run 的
-run `instructions`，用来说明应优先展示、保留或省略什么；Project system
-prompt 仍然位于更前面的共享层。修改定时摘要会启动一个使用新 prompt 快照的
-Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到原 prompt。
+Agent 基础 prompt 与 Action contract；同一 Action 通过页面读取、增量修改和预览
+工具自行检查并修正结果，不再由第二个 review prompt 判断；Project Page 编辑的是
+该 summary run 的 run `instructions`，用来说明应优先展示、保留或省略什么；
+Project system prompt 仍然位于更前面的共享层。修改定时摘要会启动一个使用新
+prompt 快照的 Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到
+原 prompt。
 
 ## Launch context / 启动上下文
 

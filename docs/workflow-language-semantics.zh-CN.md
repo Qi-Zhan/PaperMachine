@@ -280,6 +280,20 @@ Signal 也会在 replay 后恰好消费一次。
 幂等。用户 Workflow 可以用这两个 effect 构建 Project 级视图，而不需要直接访问
 SQLite 或 host 文件。
 
+每个 Action 都用 `@action(tools=[...])` 声明它请求的全部本地工具；裸
+`@action` 表示不使用本地工具。这份静态声明属于 Workflow 元数据，请求名称持久记录
+在 ActionInvocation 上。Rust 在创建 Turn 前拒绝未知名称，按已实体化的 access 上限
+过滤 Workspace 工具，并且只在 Workflow Action 路径接纳 Project 工具；最终排序后的
+definitions 及其 SHA-256 作为 Turn 的 ToolSetSnapshot 持久保存。普通用户 Turn 没有
+Action 声明，因此获得 access 允许的全部 Workspace 工具，但永远不会自动获得 Project
+工具。Hosted web search 仍由 access、`search_context_size` 和 provider capability
+独立控制。
+
+model sampling、dispatch、pause/resume 与 crash recovery 都从该快照重建同一个精确
+Registry；executor 缺失或 definition 改变时 fail closed。内置 `project-summary` 只
+声明 `read_project_home`、`patch_project_home` 和 `preview_project_home`，Agent 自然
+结束后再由 `publish_project_home(...)` 一次性发布。
+
 Control message 是异步的：
 
 | Control | 精确语义 |

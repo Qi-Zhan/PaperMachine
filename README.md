@@ -42,10 +42,14 @@ all stop the loop without a separate evaluator Agent.
 
 The **Project Page** can run the reviewed `project-summary` Workflow once or on
 a configurable durable timer. Its summary Agent reads a bounded snapshot of
-existing Project Sessions, Workflow results, and Artifact metadata, then
-publishes an immutable HTML progress report that the UI embeds in a sandboxed
-frame. The visible summary policy is the run's ordinary `instructions` field;
-there is no hidden summary daemon or extra instance model.
+existing Project Sessions, Workflow results, and Artifact metadata. In one
+ordinary tool-capable Action it reads the existing page, applies semantic block
+patches, previews the complete materialized result, and can keep correcting it
+before the runtime publishes an immutable HTML Artifact. That sanitized
+fragment is the Project home page itself; there is no fixed dashboard around it
+and no embedded frame. The summary policy is the run's ordinary `instructions`
+field; there is no review Action, hidden summary daemon, or extra instance
+model.
 
 ```text
 Project
@@ -126,7 +130,7 @@ small packages owned by one Project.
 - `crates/protocol`: canonical IDs, entities, events, and API data types.
 - `crates/model`: provider profiles, model routing, Responses API streaming,
   and deterministic model clients.
-- `crates/tools`: model-visible file, shell, and fetch tools.
+- `crates/tools`: host ToolCatalog, exact per-Turn ToolRegistry, and local tools.
 - `crates/execution`: process lifecycle and OS sandbox enforcement.
 - `crates/agent`: sampling, tool execution, retry, control checkpoints, context.
 - `crates/session`: durable multi-turn Session and workflow-action runtime.
@@ -154,8 +158,8 @@ small packages owned by one Project.
 - Assign each Session/Workflow Agent one of five access presets. A Workflow
   launch establishes a hard run ceiling, a Session-origin launch cannot exceed
   the source Session, and per-Agent class overrides cannot exceed the run.
-  Profiles are snapshotted per Turn and enforced in model tool exposure,
-  registry dispatch, built-in tools, path resolution, and command sandboxing;
+  Profiles are snapshotted per Turn and enforced while the host constructs its
+  exact ToolRegistry, inside built-in tools, path resolution, and command sandboxing;
   later in-run upgrades within the established ceiling require a typed human
   grant.
 - Define Agents and actions in Python; use ordinary `if`, `for`, and `while`.
@@ -173,6 +177,12 @@ small packages owned by one Project.
   long-lived Workflows can pass `captured_at` back as `updated_after` to receive
   only later changes. Publish deterministic text/HTML Artifacts with
   `publish_artifact(...)`.
+- Declare every Action's local tools with `@action(tools=[...])`. Rust validates
+  names, filters Workspace tools against the Turn access ceiling, and atomically
+  stores the resulting sorted definitions and SHA-256 with the Turn. Project
+  tools are admitted only through a Workflow Action declaration and never enter
+  an ordinary user Session. `project-summary` declares only page read, patch,
+  and preview, then calls `publish_project_home(...)`.
 - Launch with either a fresh context or one immutable, bounded Project snapshot.
   The latter is exposed as `ctx.context`; the Workflow explicitly routes raw or
   summarized portions to the Agents that need them. A Session-origin snapshot

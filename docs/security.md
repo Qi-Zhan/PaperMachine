@@ -52,11 +52,26 @@ Saving the same Project-local slug replaces the editable program source. Every
 Workflow stores an immutable snapshot of the exact source and SHA-256 it started
 with, so later edits cannot change execution history.
 
-Generated project-summary HTML is untrusted model output. It is served with
-`nosniff` and a restrictive CSP (`sandbox`, no default network/source access,
-inline style and data images only), and the Project Page embeds it in an iframe
-with an empty sandbox permission set. It is never injected into the parent Vue
-DOM.
+The `project-summary` Agent does not receive PaperMachine's managed directory as
+a Workspace. Its Action declares exactly `read_project_home`,
+`patch_project_home`, and `preview_project_home`; the host materializes those
+Project tools into that Action Turn's immutable ToolSet. They operate on a
+bounded managed draft keyed to that exact Workflow Action. Semantic patches use revision checks and stable block IDs;
+unsafe active tags, inline event/style attributes, script URLs, oversized
+blocks, stale revisions, and no-op edits fail as tool results that the same
+Agent can inspect and correct. The publication effect accepts only the latest
+completed Action belonging to that Workflow and Agent, then creates an
+immutable block-source Artifact before making the corresponding page Artifact
+visible.
+
+Generated project-summary HTML remains untrusted model output. It is served
+with `nosniff` and a restrictive CSP (`sandbox`, no default network/source
+access, inline style and data images only) for safe raw access. Before the
+newest Artifact becomes the Project home page, the Web client parses its body
+and sanitizes it with DOMPurify. Scripts, inline styles, forms, controls,
+frames, embedded objects, external media, SVG/MathML, unsafe attributes, and
+non-Web links are removed. Only that sanitized semantic fragment is rendered
+into the parent Vue DOM.
 
 ## Agent tools
 
@@ -80,10 +95,21 @@ security boundary.
 
 Turn creation materializes the Session preset with the exact Workspace
 attachment and revision, cwd, managed-state deny, filesystem scopes, tool
-capabilities, and network capabilities. The Turn persists that policy and its
-SHA-256. Tool schemas are filtered before model sampling, and registry dispatch
-plus each built-in implementation rechecks the same materialized context.
-Omitting a schema is therefore not the enforcement boundary.
+capabilities, and network capabilities. Independently, the host ToolCatalog
+constructs one exact ToolRegistry. A Workflow Action starts from its static
+`@action(tools=[...])` declaration and filters Workspace tools through that
+materialized access policy; a standalone user Turn starts from every Workspace
+tool allowed by the policy. Project tools are available only on the Workflow
+Action path. The Turn atomically persists the sorted tool definitions and their
+SHA-256 beside the authorization snapshot.
+
+Model exposure, dispatch, pause/resume, and crash recovery all rebuild from
+that ToolSet. An absent executor, changed definition, invalid hash, or forged
+call fails closed. The registry has no permission bypass and cannot execute a
+tool outside its membership. File, network, managed-state, and sandbox checks
+remain inside each implementation as defense in depth. Thus declaring a
+Workspace tool never expands the Session's filesystem or network policy, while
+declaring a Project tool never grants access to its managed files.
 
 Before creating that Turn, the Store verifies that every attached root still
 exists as a real directory at the canonical path recorded by the attachment.
