@@ -37,7 +37,6 @@ export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
 export interface Project {
   id: Id
   name: string
-  description: string
   workspace: WorkspaceAttachment
   created_at: string
   updated_at: string
@@ -78,6 +77,13 @@ export interface PromptLayer {
 }
 export interface PromptSnapshot { layers: PromptLayer[]; rendered: string; sha256: string }
 export interface ProjectSystemPrompt { relative_path: string; content: string; sha256: string }
+export interface ToolDefinition {
+  name: string
+  description: string
+  parameters: unknown
+  supports_parallel: boolean
+}
+export interface ToolSetSnapshot { definitions: ToolDefinition[]; sha256: string }
 export interface TokenUsage {
   input_tokens: number
   output_tokens: number
@@ -97,6 +103,7 @@ export interface Turn {
   reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   prompt: PromptSnapshot
   environment: TurnEnvironmentSnapshot
+  tool_set: ToolSetSnapshot
   tools_enabled: boolean
   web_search_context_size: 'low' | 'medium' | 'high' | null
   response_format: unknown | null
@@ -264,6 +271,7 @@ export interface ActionInvocation {
   action_name: string
   contract: string
   arguments: unknown
+  requested_tools: string[]
   source_human_request_id: Id | null
   status: ActionStatus
   output: unknown | null
@@ -460,7 +468,12 @@ export interface WorkflowProgramSource {
   source: string
   validation: WorkflowValidation
 }
-export interface WorkflowAgentDeclaration { class_name: string; actions: string[]; access: AccessPreset }
+export interface WorkflowAgentDeclaration {
+  class_name: string
+  actions: WorkflowActionDeclaration[]
+  access: AccessPreset
+}
+export interface WorkflowActionDeclaration { name: string; tools: string[] }
 export interface WorkflowTimerDeclaration { callback: string; seconds: number | null; policy: string | null }
 export interface WorkflowFeatureSummary {
   parallel_blocks: number

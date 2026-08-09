@@ -45,16 +45,10 @@
           class="text-area text-area--small"
           :placeholder="t('dialog.workflowInstructionsPlaceholder')"
         />
-        <p class="field-note workflow-prompt-note">
-          {{ t(requestMode === 'none' ? 'dialog.workflowPromptStackInteractive' : session ? 'dialog.workflowPromptStackFromSession' : 'dialog.workflowPromptStack') }}
-        </p>
 
         <section v-if="schemaFields.length" class="workflow-launch-section">
           <header class="workflow-launch-section-heading">
-            <div>
-              <h3>{{ t('workflow.params') }}</h3>
-              <p>{{ t('dialog.workflowParamsDescription') }}</p>
-            </div>
+            <h3>{{ t('workflow.params') }}</h3>
           </header>
           <div class="schema-fields">
             <template v-for="field in visibleFields" :key="field.key">
@@ -148,10 +142,7 @@
 
         <section class="workflow-launch-section workflow-run-configuration">
           <header class="workflow-launch-section-heading">
-            <div>
-              <h3>{{ t('dialog.runConfiguration') }}</h3>
-              <p>{{ t('dialog.runConfigurationDescription') }}</p>
-            </div>
+            <h3>{{ t('dialog.runConfiguration') }}</h3>
             <LoaderCircle v-if="programLoading" class="spin" :size="15" />
           </header>
 
@@ -171,10 +162,6 @@
               </span>
             </label>
           </div>
-          <p class="workflow-context-note">
-            {{ contextMode === 'project_snapshot' ? t('dialog.contextSnapshotNote') : t('dialog.freshContextNote') }}
-          </p>
-
           <div class="workflow-launch-grid">
             <label>
               <span class="field-label">{{ t('common.model') }}</span>
@@ -218,17 +205,14 @@
 
           <div v-if="validation?.agents.length" class="workflow-agent-access">
             <div class="workflow-agent-access-heading">
-              <div>
-                <strong>{{ t('dialog.agentPermissions') }}</strong>
-                <small>{{ t('dialog.agentPermissionsDescription') }}</small>
-              </div>
+              <strong>{{ t('dialog.agentPermissions') }}</strong>
               <span>{{ validation.agents.length }}</span>
             </div>
             <div v-for="agent in validation.agents" :key="agent.class_name" class="workflow-agent-access-row">
               <div>
                 <strong>{{ agent.class_name }}</strong>
                 <small>
-                  {{ agent.actions.length ? agent.actions.join(' · ') : t('workflow.noActions') }}
+                  {{ agent.actions.length ? agent.actions.map((action) => action.name).join(' · ') : t('workflow.noActions') }}
                 </small>
               </div>
               <select
@@ -249,7 +233,6 @@
 
           <fieldset v-if="skills.length" class="skill-picker workflow-run-skills">
             <legend>{{ t('dialog.workflowSkills') }}</legend>
-            <p>{{ t('dialog.workflowSkillsDescription') }}</p>
             <label v-for="skill in skills" :key="skill.slug" class="check-row">
               <input v-model="enabledSkills" type="checkbox" :value="skill.slug" />
               <span>

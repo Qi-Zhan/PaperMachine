@@ -44,8 +44,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>('/health'),
   listProjects: () => request<ProjectCatalogEntry[]>('/projects'),
-  createProject: (name: string, description: string, workspacePath: string) =>
-    request<ProjectCatalogEntry>('/projects', { method: 'POST', body: JSON.stringify({ name, description, workspace: { roots: [workspacePath], primary_root: 0 } }) }),
+  createProject: (name: string, workspacePath?: string) => {
+    const workspace = workspacePath?.trim()
+    return request<ProjectCatalogEntry>('/projects', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        ...(workspace ? { workspace: { roots: [workspace], primary_root: 0 } } : {}),
+      }),
+    })
+  },
+  pickWorkspaceDirectory: () =>
+    request<{ path: string | null }>('/workspaces/pick-directory', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
   relocateProject: (projectId: string, workspacePath: string) =>
     request<ProjectCatalogEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace: { roots: [workspacePath], primary_root: 0 } }) }),
   removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),

@@ -1,5 +1,10 @@
 <template>
-  <div class="app-layout">
+  <div
+    class="app-layout"
+    :data-sidebar-open="desktopSidebarOpen"
+    :data-sidebar-resizing="sidebarResizing"
+    :style="{ '--sidebar-width': `${sidebarWidth}px` }"
+  >
     <div v-if="mobileSidebarOpen" class="mobile-sidebar-backdrop" @click="mobileSidebarOpen = false" />
     <div class="sidebar-region" :data-mobile-open="mobileSidebarOpen">
       <AppSidebar
@@ -22,6 +27,20 @@
         @select-session="selectSession"
       />
     </div>
+    <div
+      class="sidebar-resizer"
+      :data-resizing="sidebarResizing"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-label="t('common.resizeSidebar')"
+      :aria-valuemin="SIDEBAR_MIN_WIDTH"
+      :aria-valuemax="SIDEBAR_MAX_WIDTH"
+      :aria-valuenow="sidebarWidth"
+      tabindex="0"
+      @dblclick="resetSidebarWidth"
+      @keydown="resizeSidebarWithKeyboard"
+      @pointerdown="startSidebarResize"
+    />
 
     <section class="main-region">
       <div v-if="initialLoading" class="full-loading">
@@ -33,18 +52,18 @@
         v-else-if="workflowLibraryOpen && selectedProjectId"
         :project-id="selectedProjectId"
         :workflows="workflowPrograms"
-        @open-sidebar="mobileSidebarOpen = true"
+        @toggle-sidebar="toggleSidebar"
         @saved="workflowSaved"
       />
 
       <div v-else-if="projects.length === 0" class="zero-state">
         <header class="zero-state-header">
           <button
-            class="icon-button mobile-only"
+            class="icon-button sidebar-toggle"
             type="button"
-            :title="t('common.openSidebar')"
-            :aria-label="t('common.openSidebar')"
-            @click="mobileSidebarOpen = true"
+            :title="t('common.toggleSidebar')"
+            :aria-label="t('common.toggleSidebar')"
+            @click="toggleSidebar"
           >
             <PanelLeft :size="18" />
           </button>
@@ -76,7 +95,7 @@
         :access-busy="accessBusy"
         :prompt-busy="promptBusy"
         :hosted-web-search="sessionHostedWebSearch"
-        @open-sidebar="mobileSidebarOpen = true"
+        @toggle-sidebar="toggleSidebar"
         @select-project="selectProject"
         @select-session="selectSession"
         @close-session="closeSession"
@@ -101,19 +120,11 @@
         v-else-if="projectOverview"
         :overview="projectOverview"
         :workspace-available="selectedProject?.workspace_available ?? false"
-        :skills="projectSkills"
-        :prompt-busy="promptBusy"
         :summary-busy="summaryBusy"
-        @open-sidebar="mobileSidebarOpen = true"
+        @toggle-sidebar="toggleSidebar"
         @new-session="openSessionDialog(projectOverview.project.id)"
-        @new-skill="skillDialogOpen = true"
-        @select-session="selectSession"
-        @open-artifact="selectedArtifact = $event"
-        @update-system-prompt="updateProjectSystemPrompt"
         @run-workflow="openProjectWorkflowDialog"
         @run-summary="runProjectSummary"
-        @stop-summary="stopProjectSummary"
-        @relocate-workspace="openRelocateProjectDialog(projectOverview.project.id)"
       />
 
       <div v-else class="full-loading"><LoaderCircle class="spin" :size="18" /></div>
@@ -154,14 +165,6 @@
       @close="closeDialogs"
       @submit="createSession"
     />
-    <NewSkillDialog
-      :open="skillDialogOpen"
-      :busy="dialogBusy"
-      :error="dialogError"
-      :project-name="selectedProject?.name ?? ''"
-      @close="closeDialogs"
-      @submit="createSkill"
-    />
     <StartWorkflowDialog
       :open="workflowDialogOpen"
       :busy="dialogBusy"
@@ -198,7 +201,6 @@ import ArtifactDialog from './components/ArtifactDialog.vue'
 import NewProjectDialog from './components/NewProjectDialog.vue'
 import ProjectPathDialog from './components/ProjectPathDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
-import NewSkillDialog from './components/NewSkillDialog.vue'
 import ProjectOverview from './components/ProjectOverview.vue'
 import SessionWorkspace from './components/SessionWorkspace.vue'
 import WorkflowLibrary from './components/WorkflowLibrary.vue'
@@ -248,12 +250,19 @@ const projectDialogOpen = ref(false)
 const projectPathDialogOpen = ref(false)
 const projectPathDialogProjectId = ref<string | null>(null)
 const sessionDialogOpen = ref(false)
-const skillDialogOpen = ref(false)
 const workflowDialogOpen = ref(false)
 const workflowDialogProjectId = ref<string | null>(null)
 const workflowDialogOriginSession = ref<Session | null>(null)
 const dialogProjectId = ref<string | null>(null)
 const mobileSidebarOpen = ref(false)
+const SIDEBAR_DEFAULT_WIDTH = 280
+const SIDEBAR_MIN_WIDTH = 220
+const SIDEBAR_MAX_WIDTH = 480
+const SIDEBAR_WIDTH_STORAGE_KEY = 'papermachine.sidebar.width'
+const SIDEBAR_OPEN_STORAGE_KEY = 'papermachine.sidebar.open'
+const sidebarWidth = ref(readSidebarWidth())
+const desktopSidebarOpen = ref(readSidebarOpen())
+const sidebarResizing = ref(false)
 const selectedArtifact = ref<Artifact | null>(null)
 const selectedWorkflowOutput = ref<Workflow | null>(null)
 const workflowLibraryOpen = ref(false)
@@ -327,9 +336,95 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  stopSidebarResize()
   closeSessionStream()
   clearTimers()
 })
+
+function readSidebarWidth(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY))
+    if (Number.isFinite(stored) && stored > 0) return clampSidebarWidth(stored)
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+  return SIDEBAR_DEFAULT_WIDTH
+}
+
+function readSidebarOpen(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))
+}
+
+function persistSidebarWidth() {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.value))
+  } catch {
+    // Resizing still works when storage is unavailable.
+  }
+}
+
+function toggleSidebar() {
+  if (window.matchMedia('(max-width: 900px)').matches) {
+    mobileSidebarOpen.value = !mobileSidebarOpen.value
+    return
+  }
+  desktopSidebarOpen.value = !desktopSidebarOpen.value
+  try {
+    window.localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(desktopSidebarOpen.value))
+  } catch {
+    // Toggling still works when storage is unavailable.
+  }
+}
+
+function startSidebarResize(event: PointerEvent) {
+  if (event.button !== 0 || !desktopSidebarOpen.value) return
+  event.preventDefault()
+  sidebarResizing.value = true
+  document.body.classList.add('sidebar-resizing')
+  window.addEventListener('pointermove', resizeSidebar)
+  window.addEventListener('pointerup', stopSidebarResize)
+  window.addEventListener('pointercancel', stopSidebarResize)
+}
+
+function resizeSidebar(event: PointerEvent) {
+  sidebarWidth.value = clampSidebarWidth(event.clientX)
+}
+
+function stopSidebarResize() {
+  if (!sidebarResizing.value) return
+  sidebarResizing.value = false
+  document.body.classList.remove('sidebar-resizing')
+  window.removeEventListener('pointermove', resizeSidebar)
+  window.removeEventListener('pointerup', stopSidebarResize)
+  window.removeEventListener('pointercancel', stopSidebarResize)
+  persistSidebarWidth()
+}
+
+function resizeSidebarWithKeyboard(event: KeyboardEvent) {
+  const step = event.shiftKey ? 40 : 16
+  let nextWidth = sidebarWidth.value
+  if (event.key === 'ArrowLeft') nextWidth -= step
+  else if (event.key === 'ArrowRight') nextWidth += step
+  else if (event.key === 'Home') nextWidth = SIDEBAR_MIN_WIDTH
+  else if (event.key === 'End') nextWidth = SIDEBAR_MAX_WIDTH
+  else return
+  event.preventDefault()
+  sidebarWidth.value = clampSidebarWidth(nextWidth)
+  persistSidebarWidth()
+}
+
+function resetSidebarWidth() {
+  sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH
+  persistSidebarWidth()
+}
 
 async function refreshProjectIndex(projectId: string) {
   const overview = await api.getProject(projectId)
@@ -653,18 +748,17 @@ function closeDialogs() {
   if (dialogBusy.value) return
   projectDialogOpen.value = false
   sessionDialogOpen.value = false
-  skillDialogOpen.value = false
   workflowDialogOpen.value = false
   workflowDialogProjectId.value = null
   workflowDialogOriginSession.value = null
   dialogError.value = ''
 }
 
-async function createProject(input: { name: string; description: string; workspacePath: string }) {
+async function createProject(input: { name: string; workspacePath: string }) {
   dialogBusy.value = true
   dialogError.value = ''
   try {
-    const project = await api.createProject(input.name, input.description, input.workspacePath)
+    const project = await api.createProject(input.name, input.workspacePath)
     projects.value = [project, ...projects.value]
     sessionsByProject[project.id] = []
     skillsByProject[project.id] = []
@@ -905,22 +999,6 @@ async function updateSessionSystemPrompt(systemPrompt: string) {
   }
 }
 
-async function updateProjectSystemPrompt(systemPrompt: string) {
-  const overview = projectOverview.value
-  if (!overview || promptBusy.value) return
-  promptBusy.value = true
-  try {
-    const prompt = await api.updateProjectSystemPrompt(overview.project.id, systemPrompt)
-    if (projectOverview.value?.project.id === overview.project.id) {
-      projectOverview.value = { ...projectOverview.value, system_prompt: prompt }
-    }
-  } catch (error) {
-    globalError.value = messageOf(error)
-  } finally {
-    promptBusy.value = false
-  }
-}
-
 async function runProjectSummary(input: {
   instructions: string
   intervalMinutes: number
@@ -936,8 +1014,8 @@ async function runProjectSummary(input: {
       program_slug: 'project-summary',
       request:
         input.intervalMinutes > 0
-          ? `Refresh the Project progress page every ${input.intervalMinutes} minutes.`
-          : 'Refresh the Project progress page now.',
+          ? `Refresh the Project home page every ${input.intervalMinutes} minutes.`
+          : 'Refresh the Project home page now.',
       instructions: input.instructions.trim(),
       params: {
         interval_minutes: input.intervalMinutes,
@@ -953,21 +1031,6 @@ async function runProjectSummary(input: {
       await api.cancelWorkflow(input.replaceWorkflowId)
     }
     await waitForProjectSummary(overview.project.id, workflow.id)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  } finally {
-    summaryBusy.value = false
-  }
-}
-
-async function stopProjectSummary(workflowId: string) {
-  const overview = projectOverview.value
-  if (!overview || summaryBusy.value) return
-  summaryBusy.value = true
-  try {
-    await api.cancelWorkflow(workflowId)
-    await refreshProjectIndex(overview.project.id)
-    syncProjectPoll()
   } catch (error) {
     globalError.value = messageOf(error)
   } finally {
@@ -992,24 +1055,6 @@ async function waitForProjectSummary(projectId: string, workflowId: string) {
     await new Promise((resolve) => window.setTimeout(resolve, 500))
   }
   throw new Error(t('project.summaryTimeout'))
-}
-
-async function createSkill(input: { slug: string; name: string; description: string; instructions: string }) {
-  const projectId = selectedProjectId.value
-  if (!projectId) return
-  dialogBusy.value = true
-  dialogError.value = ''
-  try {
-    const skill = await api.createProjectSkill(projectId, input)
-    skillsByProject[projectId] = [...(skillsByProject[projectId] ?? []), skill].sort((left, right) =>
-      left.name.localeCompare(right.name),
-    )
-    skillDialogOpen.value = false
-  } catch (error) {
-    dialogError.value = messageOf(error)
-  } finally {
-    dialogBusy.value = false
-  }
 }
 
 async function createWorkflow(input: {

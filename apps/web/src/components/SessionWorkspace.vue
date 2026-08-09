@@ -3,11 +3,11 @@
     <header class="page-header session-page-header">
       <div class="page-leading session-heading">
         <button
-          class="icon-button mobile-only"
+          class="icon-button sidebar-toggle"
           type="button"
-          :title="t('common.openSidebar')"
-          :aria-label="t('common.openSidebar')"
-          @click="$emit('open-sidebar')"
+          :title="t('common.toggleSidebar')"
+          :aria-label="t('common.toggleSidebar')"
+          @click="$emit('toggle-sidebar')"
         >
           <PanelLeft :size="18" />
         </button>
@@ -710,7 +710,7 @@ const props = defineProps<{
   hostedWebSearch: boolean
 }>()
 const emit = defineEmits<{
-  'open-sidebar': []
+  'toggle-sidebar': []
   'select-project': [projectId: string]
   'select-session': [sessionId: string]
   'close-session': []

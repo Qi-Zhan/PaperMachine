@@ -13,20 +13,26 @@
         </header>
         <p class="field-note project-path-intro">{{ t('dialog.relocateProjectDescription', { name: projectName ?? 'Project' }) }}</p>
         <label class="field-label" for="existing-project-root">{{ t('dialog.projectWorkspace') }}</label>
-        <input
-          id="existing-project-root"
-          ref="pathInput"
-          v-model="rootPath"
-          class="text-input code-input"
-          autocomplete="off"
-          :placeholder="t('dialog.projectWorkspacePlaceholder')"
-          required
-        />
-        <p class="field-note">{{ t('dialog.relocateWorkspaceHelp') }}</p>
-        <p v-if="error" class="form-error">{{ error }}</p>
+        <div class="workspace-path-picker">
+          <input
+            id="existing-project-root"
+            ref="pathInput"
+            v-model="rootPath"
+            class="text-input code-input"
+            autocomplete="off"
+            :placeholder="t('dialog.projectWorkspacePlaceholder')"
+            required
+          />
+          <button class="secondary-button" type="button" :disabled="busy || pickerBusy" @click="pickDirectory">
+            <LoaderCircle v-if="pickerBusy" class="spin" :size="15" />
+            <FolderOpen v-else :size="15" />
+            {{ t('dialog.chooseWorkspace') }}
+          </button>
+        </div>
+        <p v-if="pickerError || error" class="form-error">{{ pickerError || error }}</p>
         <footer class="dialog-actions">
           <button class="text-button" type="button" @click="$emit('close')">{{ t('common.cancel') }}</button>
-          <button class="primary-button" type="submit" :disabled="busy || !rootPath.trim()">
+          <button class="primary-button" type="submit" :disabled="busy || pickerBusy || !rootPath.trim()">
             <LoaderCircle v-if="busy" class="spin" :size="16" />
             <FolderOpen v-else :size="16" />
             {{ t('dialog.relocateProjectAction') }}
@@ -40,6 +46,7 @@
 <script setup lang="ts">
 import { FolderOpen, LoaderCircle, X } from '@lucide/vue'
 import { nextTick, ref, watch } from 'vue'
+import { api } from '../api'
 import { useAppI18n } from '../i18n'
 
 const props = defineProps<{
@@ -56,6 +63,8 @@ const emit = defineEmits<{
 
 const { t } = useAppI18n()
 const rootPath = ref('')
+const pickerBusy = ref(false)
+const pickerError = ref('')
 const pathInput = ref<HTMLInputElement | null>(null)
 
 watch(
@@ -63,6 +72,7 @@ watch(
   async (open) => {
     if (!open) return
     rootPath.value = props.initialPath ?? ''
+    pickerError.value = ''
     await nextTick()
     pathInput.value?.focus()
     pathInput.value?.select()
@@ -70,7 +80,21 @@ watch(
 )
 
 function submit() {
-  if (!rootPath.value.trim() || props.busy) return
+  if (!rootPath.value.trim() || props.busy || pickerBusy.value) return
   emit('submit', rootPath.value.trim())
+}
+
+async function pickDirectory() {
+  if (props.busy || pickerBusy.value) return
+  pickerBusy.value = true
+  pickerError.value = ''
+  try {
+    const selection = await api.pickWorkspaceDirectory()
+    if (selection.path) rootPath.value = selection.path
+  } catch (error) {
+    pickerError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    pickerBusy.value = false
+  }
 }
 </script>

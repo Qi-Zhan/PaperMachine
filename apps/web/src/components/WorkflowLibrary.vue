@@ -2,11 +2,10 @@
   <div class="workflow-library">
     <header class="page-header workflow-page-header">
       <div class="page-leading">
-        <button class="icon-button mobile-only" type="button" :title="t('common.openSidebar')" :aria-label="t('common.openSidebar')" @click="$emit('open-sidebar')">
+        <button class="icon-button sidebar-toggle" type="button" :title="t('common.toggleSidebar')" :aria-label="t('common.toggleSidebar')" @click="$emit('toggle-sidebar')">
           <PanelLeft :size="18" />
         </button>
         <div>
-          <p class="eyebrow">{{ t('workflow.runtime') }}</p>
           <h1>{{ t('workflow.title') }}</h1>
         </div>
       </div>
@@ -109,7 +108,7 @@
                     <div v-for="agent in validation.agents" :key="agent.class_name" class="workflow-agent-declaration">
                       <strong>{{ agent.class_name }}</strong>
                       <small>{{ accessLabel(agent.access) }}</small>
-                      <span v-if="agent.actions.length">{{ agent.actions.join(' · ') }}</span>
+                      <span v-if="agent.actions.length">{{ agent.actions.map((action) => action.name).join(' · ') }}</span>
                       <span v-else>{{ t('workflow.noActions') }}</span>
                     </div>
                   </div>
@@ -215,7 +214,7 @@ import type {
 } from '../types'
 
 const props = defineProps<{ projectId: string; workflows: WorkflowProgram[] }>()
-const emit = defineEmits<{ 'open-sidebar': []; saved: [workflow: WorkflowProgram] }>()
+const emit = defineEmits<{ 'toggle-sidebar': []; saved: [workflow: WorkflowProgram] }>()
 
 const selectedKey = ref<string | null>(null)
 const sourceText = ref('')
