@@ -235,6 +235,57 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
 }
 
 #[test]
+fn assistant_deltas_are_broadcast_without_entering_durable_history() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("Store should open");
+    let project = store
+        .create_project("Streaming", directory.path().join("workspace"))
+        .expect("Project should be created");
+    let session = store
+        .create_session(project.id, "Session", "", "test-model", Vec::new())
+        .expect("Session should be created");
+    let durable_before = store
+        .list_session_events(session.id, 0)
+        .expect("events should load");
+    let mut subscriber = store.subscribe_sessions();
+
+    let delta = store
+        .publish_transient_session_event(
+            session.id,
+            None,
+            None,
+            SessionEventPayload::AssistantMessageDelta {
+                delta: "partial".to_string(),
+            },
+        )
+        .expect("delta should publish");
+
+    assert_eq!(delta.sequence, 0);
+    assert_eq!(
+        subscriber
+            .try_recv()
+            .expect("subscriber should receive the delta"),
+        delta
+    );
+    assert_eq!(
+        store
+            .list_session_events(session.id, 0)
+            .expect("events should load"),
+        durable_before
+    );
+    assert!(
+        store
+            .append_session_event(
+                session.id,
+                None,
+                None,
+                SessionEventPayload::AssistantMessageReset,
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("Store should open");

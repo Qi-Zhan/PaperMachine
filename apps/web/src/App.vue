@@ -87,6 +87,7 @@
         :workspace-available="selectedProject.workspace_available"
         :view="sessionView"
         :events="sessionEvents"
+        :live-outputs="liveAssistantOutputs"
         :skills="projectSkills"
         :workflow-view="workflowView"
         :workflow-loading="workflowLoading"
@@ -195,6 +196,13 @@ import {
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api, sessionEventTypes } from './api'
 import { useAppI18n } from './i18n'
+import {
+  applyLiveAssistantUpdate,
+  applySessionStreamUpdate,
+  isDurableSessionUpdate,
+  type LiveAssistantOutputs,
+  type SessionStreamUpdate,
+} from './sessionEvents'
 import AppSidebar from './components/AppSidebar.vue'
 import ArtifactDialog from './components/ArtifactDialog.vue'
 import NewProjectDialog from './components/NewProjectDialog.vue'
@@ -232,6 +240,7 @@ const selectedSessionId = ref<string | null>(null)
 const projectOverview = ref<ProjectOverviewType | null>(null)
 const sessionView = ref<SessionView | null>(null)
 const sessionEvents = ref<SessionEvent[]>([])
+const liveAssistantOutputs = ref<LiveAssistantOutputs>({})
 const workflowView = ref<WorkflowView | null>(null)
 const workflowLoading = ref(false)
 const health = ref<Health | null>(null)
@@ -267,7 +276,7 @@ const selectedWorkflowOutput = ref<Workflow | null>(null)
 const workflowLibraryOpen = ref(false)
 
 let sessionEventSource: EventSource | null = null
-let refreshTimer: number | null = null
+let workflowRefreshTimer: number | null = null
 let pollTimer: number | null = null
 
 const selectedProject = computed(
@@ -455,6 +464,7 @@ async function selectProject(projectId: string): Promise<boolean> {
   selectedSessionId.value = null
   sessionView.value = null
   sessionEvents.value = []
+  liveAssistantOutputs.value = {}
   workflowView.value = null
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
@@ -481,6 +491,7 @@ async function selectSession(sessionId: string): Promise<boolean> {
   selectedSessionId.value = sessionId
   sessionView.value = null
   sessionEvents.value = []
+  liveAssistantOutputs.value = {}
   workflowView.value = null
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
@@ -501,7 +512,6 @@ async function selectSession(sessionId: string): Promise<boolean> {
     const latestWorkflow = view.workflows[0]
     if (latestWorkflow) void inspectWorkflow(latestWorkflow.id)
     writeRoute('session', sessionId)
-    syncPoll()
     return true
   } catch (error) {
     if (selectedSessionId.value === sessionId) selectedSessionId.value = null
@@ -523,12 +533,23 @@ function connectSessionStream(sessionId: string, after: number) {
   }
   const receive = (message: MessageEvent<string>) => {
     try {
-      const event = JSON.parse(message.data) as SessionEvent
-      if (!sessionEvents.value.some((candidate) => candidate.id === event.id)) {
-        sessionEvents.value.push(event)
+      const update = JSON.parse(message.data) as SessionStreamUpdate
+      liveAssistantOutputs.value = applyLiveAssistantUpdate(liveAssistantOutputs.value, update)
+      if (sessionView.value?.session.id === sessionId) {
+        sessionView.value = applySessionStreamUpdate(sessionView.value, update)
+      }
+      if (
+        isDurableSessionUpdate(update) &&
+        !sessionEvents.value.some((candidate) => candidate.id === update.id)
+      ) {
+        sessionEvents.value.push(update)
         sessionEvents.value.sort((left, right) => left.sequence - right.sequence)
       }
-      if (event.type !== 'assistant_message_delta') scheduleSessionRefresh(sessionId)
+      if ('session' in update && update.session) updateSidebarSession(update.session)
+      const updatedWorkflow = update.workflow
+      if (updatedWorkflow && workflowView.value?.workflow.id === updatedWorkflow.id) {
+        scheduleWorkflowInspection(updatedWorkflow.id)
+      }
     } catch {
       globalError.value = t('app.invalidSessionEvent')
     }
@@ -542,44 +563,20 @@ function closeSessionStream() {
   streamConnected.value = false
 }
 
-function scheduleSessionRefresh(sessionId: string) {
-  if (refreshTimer !== null) window.clearTimeout(refreshTimer)
-  refreshTimer = window.setTimeout(async () => {
-    refreshTimer = null
-    if (selectedSessionId.value !== sessionId) return
-    await refreshSession(sessionId)
+function updateSidebarSession(session: Session) {
+  const sessions = sessionsByProject[session.project_id] ?? []
+  sessionsByProject[session.project_id] = [
+    session,
+    ...sessions.filter((candidate) => candidate.id !== session.id),
+  ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+}
+
+function scheduleWorkflowInspection(workflowId: string) {
+  if (workflowRefreshTimer !== null) window.clearTimeout(workflowRefreshTimer)
+  workflowRefreshTimer = window.setTimeout(() => {
+    workflowRefreshTimer = null
+    if (workflowView.value?.workflow.id === workflowId) void inspectWorkflow(workflowId, true)
   }, 120)
-}
-
-async function refreshSession(sessionId: string) {
-  try {
-    const view = await api.getSession(sessionId)
-    if (selectedSessionId.value !== sessionId) return
-    sessionView.value = view
-    const sessions = sessionsByProject[view.session.project_id] ?? []
-    sessionsByProject[view.session.project_id] = [
-      view.session,
-      ...sessions.filter((session) => session.id !== view.session.id),
-    ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
-    await refreshProjectIndex(view.session.project_id)
-    if (workflowView.value) {
-      const current = view.workflows.find((workflow) => workflow.id === workflowView.value?.workflow.id)
-      if (current) void inspectWorkflow(current.id, true)
-    }
-    syncPoll()
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-function syncPoll() {
-  clearPoll()
-  if (!sessionView.value || !hasActiveWork(sessionView.value)) return
-  const sessionId = sessionView.value.session.id
-  pollTimer = window.setTimeout(async () => {
-    pollTimer = null
-    if (selectedSessionId.value === sessionId) await refreshSession(sessionId)
-  }, 900)
 }
 
 function syncProjectPoll() {
@@ -622,25 +619,14 @@ function projectPollDelay(overview: ProjectOverviewType): number | null {
   return 5_000
 }
 
-function hasActiveWork(view: SessionView): boolean {
-  return (
-    view.turns.some((turn) => turn.status === 'queued' || turn.status === 'running') ||
-    view.workflows.some((workflow) =>
-      workflow.status === 'created' ||
-      (workflow.status === 'running' && !workflow.attention_required) ||
-      ['waiting_for_timer', 'waiting_for_signal'].includes(workflow.status),
-    )
-  )
-}
-
 function clearPoll() {
   if (pollTimer !== null) window.clearTimeout(pollTimer)
   pollTimer = null
 }
 
 function clearTimers() {
-  if (refreshTimer !== null) window.clearTimeout(refreshTimer)
-  refreshTimer = null
+  if (workflowRefreshTimer !== null) window.clearTimeout(workflowRefreshTimer)
+  workflowRefreshTimer = null
   clearPoll()
 }
 
@@ -893,8 +879,6 @@ async function sendSessionMessage(input: string) {
       }
     }
     await inspectWorkflow(humanRequest.workflow_id, true)
-    scheduleSessionRefresh(view.session.id)
-    syncPoll()
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -918,7 +902,6 @@ async function closeSession() {
 async function cancelTurn(turnId: string) {
   try {
     await api.cancelTurn(turnId)
-    if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -953,7 +936,6 @@ async function updateSessionAccess(access: AccessPreset) {
     ].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
   } catch (error) {
     globalError.value = messageOf(error)
-    if (selectedSessionId.value === view.session.id) await refreshSession(view.session.id)
   } finally {
     accessBusy.value = false
   }
@@ -1067,7 +1049,6 @@ async function createWorkflow(input: {
         workflows: [workflow, ...sessionView.value.workflows.filter((candidate) => candidate.id !== workflow.id)],
       }
       await inspectWorkflow(workflow.id)
-      syncPoll()
     } else {
       const session = await waitForWorkflowSessionOrTerminal(workflow.id)
       await refreshProjectIndex(project.id)
@@ -1100,7 +1081,6 @@ async function waitForWorkflowSessionOrTerminal(workflowId: string): Promise<Ses
 async function cancelWorkflow(workflowId: string) {
   try {
     await api.cancelWorkflow(workflowId)
-    if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -1109,7 +1089,6 @@ async function cancelWorkflow(workflowId: string) {
 async function pauseWorkflow(workflowId: string) {
   try {
     await api.pauseWorkflow(workflowId)
-    if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -1118,7 +1097,6 @@ async function pauseWorkflow(workflowId: string) {
 async function resumeWorkflow(workflowId: string) {
   try {
     await api.resumeWorkflow(workflowId)
-    if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }
@@ -1149,7 +1127,6 @@ async function answerHumanRequest(input: { requestId: string; answer: unknown; w
   try {
     await api.answerHumanRequest(input.requestId, input.answer)
     await inspectWorkflow(input.workflowId, true)
-    if (selectedSessionId.value) scheduleSessionRefresh(selectedSessionId.value)
   } catch (error) {
     globalError.value = messageOf(error)
   }

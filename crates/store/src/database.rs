@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -307,9 +307,7 @@ impl Store {
             session.id,
             None,
             None,
-            SessionEventPayload::SessionCreated {
-                title: session.title.clone(),
-            },
+            SessionEventPayload::SessionCreated,
         )?;
         transaction.commit()?;
         drop(connection);
@@ -720,11 +718,7 @@ impl Store {
             session_id,
             Some(turn.id),
             None,
-            SessionEventPayload::TurnCreated {
-                origin: turn.origin,
-                input: turn.input.clone(),
-                model: turn.model.clone(),
-            },
+            SessionEventPayload::TurnCreated,
         );
         self.commit_session_rollout_item_locked(
             session_id,
@@ -1062,6 +1056,16 @@ impl Store {
         )
     }
 
+    pub fn list_session_steps(&self, session_id: SessionId) -> Result<Vec<AgentStep>, StoreError> {
+        self.query_documents(
+            "SELECT steps.document_json FROM steps
+             INNER JOIN turns ON turns.id = steps.turn_id
+             WHERE turns.session_id = ?1
+             ORDER BY turns.created_at ASC, turns.id ASC, steps.sequence ASC",
+            [session_id.to_string()],
+        )
+    }
+
     pub fn append_session_event(
         &self,
         session_id: SessionId,
@@ -1070,18 +1074,10 @@ impl Store {
         payload: SessionEventPayload,
     ) -> Result<SessionEvent, StoreError> {
         self.get_session(session_id)?;
-        if !is_stable_rollout_event(&payload) {
-            let session_lock = self.shared.session_rollout_lock(session_id)?;
-            let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-            self.replay_session_rollout_locked(session_id)?;
-            let mut connection = self.connection()?;
-            let transaction = connection.transaction()?;
-            let event =
-                append_session_event_tx(&transaction, session_id, turn_id, step_id, payload)?;
-            transaction.commit()?;
-            drop(connection);
-            self.shared.publish_session(event.clone());
-            return Ok(event);
+        if is_transient_session_event(&payload) {
+            return Err(StoreError::Invariant(
+                "transient Session events must be published without persistence".to_string(),
+            ));
         }
         let pending = pending_session_event(session_id, turn_id, step_id, payload);
         let record = self.commit_session_rollout_item(
@@ -1094,6 +1090,24 @@ impl Store {
                 "Session rollout returned the wrong item".to_string(),
             )),
         }
+    }
+
+    pub fn publish_transient_session_event(
+        &self,
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        step_id: Option<StepId>,
+        payload: SessionEventPayload,
+    ) -> Result<SessionEvent, StoreError> {
+        self.get_session(session_id)?;
+        if !is_transient_session_event(&payload) {
+            return Err(StoreError::Invariant(
+                "durable Session events must be appended to the rollout".to_string(),
+            ));
+        }
+        let event = pending_session_event(session_id, turn_id, step_id, payload);
+        self.shared.publish_session(event.clone());
+        Ok(event)
     }
 
     pub fn list_session_events(
@@ -1311,6 +1325,24 @@ impl Store {
              ORDER BY wr.updated_at DESC, wr.id ASC",
             [session_id.to_string()],
         )
+    }
+
+    pub fn workflow_involves_session(
+        &self,
+        workflow_id: WorkflowId,
+        session_id: SessionId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection()?.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM workflows
+               WHERE id = ?1 AND started_from_session_id = ?2
+               UNION ALL
+               SELECT 1 FROM workflow_participants
+               WHERE workflow_id = ?1 AND session_id = ?2
+             )",
+            params![workflow_id.to_string(), session_id.to_string()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn list_project_workflows(
@@ -1708,9 +1740,7 @@ impl Store {
             session.id,
             None,
             None,
-            SessionEventPayload::SessionCreated {
-                title: session.title.clone(),
-            },
+            SessionEventPayload::SessionCreated,
         )?;
         let attached = append_session_event_tx(
             &transaction,
@@ -1720,7 +1750,6 @@ impl Store {
             SessionEventPayload::WorkflowAgentAttached {
                 workflow_id: run.id,
                 agent_instance_id: participant.id,
-                role: participant.role.clone(),
             },
         )?;
         let run_event = append_workflow_event_tx(
@@ -1758,6 +1787,17 @@ impl Store {
             "SELECT document_json FROM workflow_participants WHERE workflow_id = ?1
              ORDER BY created_at ASC, id ASC",
             [workflow_id.to_string()],
+        )
+    }
+
+    pub fn list_session_participants(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<WorkflowParticipant>, StoreError> {
+        self.query_documents(
+            "SELECT document_json FROM workflow_participants WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+            [session_id.to_string()],
         )
     }
 
@@ -2777,7 +2817,6 @@ impl Store {
             SessionEventPayload::HumanRequestOpened {
                 workflow_id,
                 human_request_id: request.id,
-                question: request.question.clone(),
             },
         )?;
         transaction.commit()?;
@@ -2801,6 +2840,17 @@ impl Store {
         self.query_documents(
             "SELECT document_json FROM human_requests WHERE workflow_id = ?1 ORDER BY created_at ASC",
             [workflow_id.to_string()],
+        )
+    }
+
+    pub fn list_session_human_requests(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<HumanRequest>, StoreError> {
+        self.query_documents(
+            "SELECT document_json FROM human_requests WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+            [session_id.to_string()],
         )
     }
 
@@ -2979,7 +3029,6 @@ impl Store {
                     workflow_id,
                     control_message_id: message.id,
                     kind: message.kind,
-                    content: message.content.clone(),
                 },
             )?;
         }
@@ -3892,6 +3941,7 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL, UNIQUE(workflow_id, session_id)
          );
+         CREATE INDEX IF NOT EXISTS workflow_participants_session ON workflow_participants(session_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS action_invocations (
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
            session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
@@ -3940,6 +3990,7 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            created_at TEXT NOT NULL, updated_at TEXT GENERATED ALWAYS AS (COALESCE(json_extract(document_json, '$.resolved_at'), created_at)) VIRTUAL,
            document_json TEXT NOT NULL
          );
+         CREATE INDEX IF NOT EXISTS human_requests_session ON human_requests(session_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS control_messages (
            id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
            session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
@@ -4401,8 +4452,8 @@ fn pending_session_event(
     }
 }
 
-fn is_stable_rollout_event(payload: &SessionEventPayload) -> bool {
-    !matches!(
+fn is_transient_session_event(payload: &SessionEventPayload) -> bool {
+    matches!(
         payload,
         SessionEventPayload::AssistantMessageDelta { .. }
             | SessionEventPayload::AssistantMessageReset

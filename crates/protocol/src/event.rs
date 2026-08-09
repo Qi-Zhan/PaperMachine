@@ -7,7 +7,6 @@ use crate::ControlMessageId;
 use crate::ControlMessageKind;
 use crate::EventId;
 use crate::HumanRequestId;
-use crate::ModelToolCall;
 use crate::ProjectId;
 use crate::SessionId;
 use crate::SessionStatus;
@@ -16,9 +15,7 @@ use crate::StepId;
 use crate::TaskScopeId;
 use crate::TeamId;
 use crate::TimerId;
-use crate::TokenUsage;
 use crate::TurnId;
-use crate::TurnOrigin;
 use crate::TurnStatus;
 use crate::WorkflowId;
 use crate::WorkflowStatus;
@@ -139,59 +136,27 @@ pub struct SessionEvent {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEventPayload {
-    SessionCreated {
-        title: String,
-    },
+    SessionCreated,
     SessionStatusChanged {
         status: SessionStatus,
         reason: Option<String>,
     },
-    TurnCreated {
-        origin: TurnOrigin,
-        input: String,
-        model: String,
-    },
+    TurnCreated,
     TurnStatusChanged {
         status: TurnStatus,
         error: Option<String>,
-    },
-    AgentStarted {
-        objective: String,
-        model: String,
     },
     AssistantMessageDelta {
         delta: String,
     },
     AssistantMessageReset,
-    AssistantMessageCompleted {
-        message: String,
-    },
-    ModelStepStarted {
-        step: u32,
-    },
-    ModelStepCompleted {
-        step: u32,
-        usage: TokenUsage,
-    },
-    ModelStepFailed {
-        step: u32,
-        error: String,
-        usage: TokenUsage,
-    },
-    ToolCallStarted {
-        call: ModelToolCall,
-    },
-    ToolCallCompleted {
-        call_id: String,
-        tool_name: String,
-        output: Value,
-        duration_ms: u64,
-        success: bool,
-    },
-    HostedToolCompleted {
-        tool_name: String,
-        input: Value,
-    },
+    AssistantMessageCompleted,
+    ModelStepStarted,
+    ModelStepCompleted,
+    ModelStepFailed,
+    ToolCallStarted,
+    ToolCallCompleted,
+    HostedToolCompleted,
     ContextTrimmed {
         removed_items: usize,
     },
@@ -207,12 +172,10 @@ pub enum SessionEventPayload {
     WorkflowAgentAttached {
         workflow_id: WorkflowId,
         agent_instance_id: AgentInstanceId,
-        role: String,
     },
     HumanRequestOpened {
         workflow_id: WorkflowId,
         human_request_id: HumanRequestId,
-        question: String,
     },
     HumanRequestResolved {
         workflow_id: WorkflowId,
@@ -222,7 +185,6 @@ pub enum SessionEventPayload {
         workflow_id: WorkflowId,
         control_message_id: ControlMessageId,
         kind: ControlMessageKind,
-        content: String,
     },
     Warning {
         message: String,

@@ -23,6 +23,7 @@ use axum::response::sse::Sse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::routing::put;
+use futures::stream;
 use papermachine_model::ConfiguredModels;
 use papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW;
 use papermachine_model::ModelClient;
@@ -826,6 +827,30 @@ struct SessionView {
     human_requests: Vec<HumanRequest>,
 }
 
+#[derive(Serialize)]
+struct SessionStreamUpdate {
+    #[serde(flatten)]
+    event: SessionEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<Session>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn: Option<Turn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<AgentStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<Workflow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participant: Option<WorkflowParticipant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    human_request: Option<HumanRequest>,
+}
+
+#[derive(Serialize)]
+struct SessionWorkflowUpdate {
+    r#type: &'static str,
+    workflow: Workflow,
+}
+
 async fn get_session_view(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -837,30 +862,11 @@ async fn get_session_view(
         })
         .await?;
     let turns = runtime.store.list_turns(session_id)?;
-    let mut steps = Vec::new();
-    for turn in &turns {
-        steps.extend(runtime.store.list_steps(turn.id)?);
-    }
+    let steps = runtime.store.list_session_steps(session_id)?;
     let rollout = runtime.store.session_rollout_status(session_id)?;
     let workflows = runtime.store.list_session_workflows(session_id)?;
-    let mut memberships = Vec::new();
-    let mut requests = Vec::new();
-    for workflow in &workflows {
-        memberships.extend(
-            runtime
-                .store
-                .list_participants(workflow.id)?
-                .into_iter()
-                .filter(|item| item.session_id == session_id),
-        );
-        requests.extend(
-            runtime
-                .store
-                .list_human_requests(workflow.id)?
-                .into_iter()
-                .filter(|item| item.session_id == session_id),
-        );
-    }
+    let memberships = runtime.store.list_session_participants(session_id)?;
+    let requests = runtime.store.list_session_human_requests(session_id)?;
     Ok(Json(SessionView {
         session,
         turns,
@@ -1572,28 +1578,123 @@ async fn stream_session_events(
         })
         .await?;
     let receiver = runtime.store.subscribe_sessions();
+    let workflow_receiver = runtime.store.subscribe();
     let replay = runtime.store.list_session_events(session_id, query.after)?;
     let high_watermark = replay.last().map_or(query.after, |event| event.sequence);
-    let replay = tokio_stream::iter(replay.into_iter().map(session_sse_event));
+    let replay_store = runtime.store.clone();
+    let replay = tokio_stream::iter(
+        replay
+            .into_iter()
+            .map(move |event| session_sse_event(&replay_store, event)),
+    );
+    let live_store = runtime.store.clone();
     let live = BroadcastStream::new(receiver).filter_map(move |result| match result {
-        Ok(event) if event.session_id == session_id && event.sequence > high_watermark => {
-            Some(session_sse_event(event))
+        Ok(event)
+            if event.session_id == session_id
+                && (event.sequence == 0 || event.sequence > high_watermark) =>
+        {
+            Some(session_sse_event(&live_store, event))
         }
         _ => None,
     });
-    Ok(Sse::new(replay.chain(live)).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    ))
+    let workflow_store = runtime.store.clone();
+    let workflows = BroadcastStream::new(workflow_receiver).filter_map(move |result| {
+        let event = result.ok()?;
+        if !workflow_store
+            .workflow_involves_session(event.workflow_id, session_id)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        workflow_store
+            .get_workflow(event.workflow_id)
+            .ok()
+            .map(workflow_session_sse_event)
+    });
+    Ok(
+        Sse::new(stream::select(replay.chain(live), workflows)).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        ),
+    )
 }
 
 fn run_sse_event(event: WorkflowEvent) -> Result<Event, Infallible> {
     sse_event(event.sequence, &event.payload, &event)
 }
 
-fn session_sse_event(event: SessionEvent) -> Result<Event, Infallible> {
-    sse_event(event.sequence, &event.payload, &event)
+fn session_sse_event(store: &Store, event: SessionEvent) -> Result<Event, Infallible> {
+    let event_type = event_type(&event.payload);
+    let include_session = matches!(
+        &event.payload,
+        SessionEventPayload::SessionCreated | SessionEventPayload::SessionStatusChanged { .. }
+    );
+    let include_turn = matches!(
+        &event.payload,
+        SessionEventPayload::TurnCreated | SessionEventPayload::TurnStatusChanged { .. }
+    );
+    let include_step = matches!(
+        &event.payload,
+        SessionEventPayload::ModelStepStarted
+            | SessionEventPayload::ModelStepCompleted
+            | SessionEventPayload::ModelStepFailed
+            | SessionEventPayload::ToolCallStarted
+            | SessionEventPayload::ToolCallCompleted
+            | SessionEventPayload::HostedToolCompleted
+    );
+    let workflow_id = match &event.payload {
+        SessionEventPayload::WorkflowAgentAttached { workflow_id, .. }
+        | SessionEventPayload::HumanRequestOpened { workflow_id, .. }
+        | SessionEventPayload::HumanRequestResolved { workflow_id, .. }
+        | SessionEventPayload::ControlMessageApplied { workflow_id, .. } => Some(*workflow_id),
+        _ => None,
+    };
+    let human_request_id = match &event.payload {
+        SessionEventPayload::HumanRequestOpened {
+            human_request_id, ..
+        }
+        | SessionEventPayload::HumanRequestResolved {
+            human_request_id, ..
+        } => Some(*human_request_id),
+        _ => None,
+    };
+    let participant_id = match &event.payload {
+        SessionEventPayload::WorkflowAgentAttached {
+            agent_instance_id, ..
+        } => Some(*agent_instance_id),
+        _ => None,
+    };
+    let update = SessionStreamUpdate {
+        session: include_session
+            .then(|| store.get_session(event.session_id).ok())
+            .flatten(),
+        turn: include_turn
+            .then(|| event.turn_id.and_then(|id| store.get_turn(id).ok()))
+            .flatten(),
+        step: include_step
+            .then(|| event.step_id.and_then(|id| store.get_step(id).ok()))
+            .flatten(),
+        workflow: workflow_id.and_then(|id| store.get_workflow(id).ok()),
+        participant: participant_id.and_then(|id| store.get_participant(id).ok()),
+        human_request: human_request_id.and_then(|id| store.get_human_request(id).ok()),
+        event,
+    };
+    let data = serialize_sse_data(&update);
+    let mut result = Event::default().event(event_type).data(data);
+    if update.event.sequence > 0 {
+        result = result.id(update.event.sequence.to_string());
+    }
+    Ok(result)
+}
+
+fn workflow_session_sse_event(workflow: Workflow) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("workflow_changed")
+        .data(serialize_sse_data(&SessionWorkflowUpdate {
+            r#type: "workflow_changed",
+            workflow,
+        })))
 }
 
 fn sse_event<P: Serialize, E: Serialize>(
@@ -1601,16 +1702,23 @@ fn sse_event<P: Serialize, E: Serialize>(
     payload: &P,
     event: &E,
 ) -> Result<Event, Infallible> {
-    let event_type = serde_json::to_value(payload)
-        .ok()
-        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
-        .unwrap_or_else(|| "event".to_string());
-    let data =
-        serde_json::to_string(event).unwrap_or_else(|error| format!(r#"{{"error":"{error}"}}"#));
+    let event_type = event_type(payload);
+    let data = serialize_sse_data(event);
     Ok(Event::default()
         .id(sequence.to_string())
         .event(event_type)
         .data(data))
+}
+
+fn event_type(payload: &impl Serialize) -> String {
+    serde_json::to_value(payload)
+        .ok()
+        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "event".to_string())
+}
+
+fn serialize_sse_data(value: &impl Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| format!(r#"{{"error":"{error}"}}"#))
 }
 
 async fn artifact_content(

@@ -197,7 +197,7 @@ impl SessionRuntime {
             .recover_orphaned_steps(&turn, context, cancellation.clone())
             .await?;
         if recovered_steps > 0 {
-            self.inner.store.append_session_event(
+            self.inner.store.publish_transient_session_event(
                 turn.session_id,
                 Some(turn_id),
                 None,
@@ -490,7 +490,7 @@ impl SessionRuntime {
         step: &AgentStep,
         status: StepStatus,
         output: Value,
-        success: bool,
+        _success: bool,
         duration_ms: u64,
     ) -> Result<(), SessionRuntimeError> {
         self.inner.store.finish_step(
@@ -504,13 +504,7 @@ impl SessionRuntime {
             turn.session_id,
             Some(turn.id),
             Some(step.id),
-            SessionEventPayload::ToolCallCompleted {
-                call_id: step.tool_call_id.clone().unwrap_or_default(),
-                tool_name: step.name.clone(),
-                output,
-                duration_ms,
-                success,
-            },
+            SessionEventPayload::ToolCallCompleted,
         )?;
         Ok(())
     }
@@ -972,19 +966,16 @@ impl SessionAgentEventSink {
 impl AgentEventSink for SessionAgentEventSink {
     async fn emit(&self, event: AgentEvent) -> Result<(), String> {
         match event {
-            AgentEvent::Started { objective, model } => {
-                self.append(None, SessionEventPayload::AgentStarted { objective, model })
-            }
+            AgentEvent::Started { .. } => Ok(()),
             AgentEvent::MessageDelta { delta } => {
-                self.append(None, SessionEventPayload::AssistantMessageDelta { delta })
+                self.transient(None, SessionEventPayload::AssistantMessageDelta { delta })
             }
             AgentEvent::MessageReset => {
-                self.append(None, SessionEventPayload::AssistantMessageReset)
+                self.transient(None, SessionEventPayload::AssistantMessageReset)
             }
-            AgentEvent::MessageCompleted { message } => self.append(
-                None,
-                SessionEventPayload::AssistantMessageCompleted { message },
-            ),
+            AgentEvent::MessageCompleted { .. } => {
+                self.append(None, SessionEventPayload::AssistantMessageCompleted)
+            }
             AgentEvent::ModelStepStarted { step, input } => {
                 let stored = self
                     .store
@@ -997,10 +988,7 @@ impl AgentEventSink for SessionAgentEventSink {
                     .map_err(|error| error.to_string())?;
                 self.model_steps.lock().await.insert(step, stored.id);
                 self.charge_action_step().await?;
-                self.append(
-                    Some(stored.id),
-                    SessionEventPayload::ModelStepStarted { step },
-                )
+                self.append(Some(stored.id), SessionEventPayload::ModelStepStarted)
             }
             AgentEvent::ModelStepCompleted {
                 step,
@@ -1031,10 +1019,7 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                self.append(
-                    step_id,
-                    SessionEventPayload::ModelStepCompleted { step, usage },
-                )
+                self.append(step_id, SessionEventPayload::ModelStepCompleted)
             }
             AgentEvent::ModelStepFailed {
                 step,
@@ -1065,10 +1050,7 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                self.append(
-                    step_id,
-                    SessionEventPayload::ModelStepFailed { step, error, usage },
-                )
+                self.append(step_id, SessionEventPayload::ModelStepFailed)
             }
             AgentEvent::ToolCallStarted {
                 call,
@@ -1091,7 +1073,7 @@ impl AgentEventSink for SessionAgentEventSink {
                     .await
                     .insert(call.call_id.clone(), step.id);
                 self.charge_action_step().await?;
-                self.append(Some(step.id), SessionEventPayload::ToolCallStarted { call })?;
+                self.append(Some(step.id), SessionEventPayload::ToolCallStarted)?;
                 papermachine_store::process_fault::reach_process_fault_boundary(
                     papermachine_store::process_fault::TOOL_PREPARED_BEFORE_EXECUTION,
                 );
@@ -1113,10 +1095,10 @@ impl AgentEventSink for SessionAgentEventSink {
             }
             AgentEvent::ToolCallCompleted {
                 call_id,
-                tool_name,
                 output,
                 duration_ms,
                 success,
+                ..
             } => {
                 let step_id = self.tool_steps.lock().await.remove(&call_id);
                 if let Some(step_id) = step_id {
@@ -1134,16 +1116,7 @@ impl AgentEventSink for SessionAgentEventSink {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                self.append(
-                    step_id,
-                    SessionEventPayload::ToolCallCompleted {
-                        call_id,
-                        tool_name,
-                        output,
-                        duration_ms,
-                        success,
-                    },
-                )
+                self.append(step_id, SessionEventPayload::ToolCallCompleted)
             }
             AgentEvent::HostedToolCompleted {
                 tool_name,
@@ -1182,10 +1155,7 @@ impl AgentEventSink for SessionAgentEventSink {
                         .map_err(|error| error.to_string())?;
                 }
                 self.charge_action_step().await?;
-                self.append(
-                    Some(step.id),
-                    SessionEventPayload::HostedToolCompleted { tool_name, input },
-                )
+                self.append(Some(step.id), SessionEventPayload::HostedToolCompleted)
             }
             AgentEvent::ContextTrimmed { removed_items } => {
                 let mut checkpoint = self.checkpoint.lock().await;
@@ -1358,6 +1328,17 @@ impl SessionAgentEventSink {
     fn append(&self, step_id: Option<StepId>, payload: SessionEventPayload) -> Result<(), String> {
         self.store
             .append_session_event(self.session_id, Some(self.turn_id), step_id, payload)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn transient(
+        &self,
+        step_id: Option<StepId>,
+        payload: SessionEventPayload,
+    ) -> Result<(), String> {
+        self.store
+            .publish_transient_session_event(self.session_id, Some(self.turn_id), step_id, payload)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }

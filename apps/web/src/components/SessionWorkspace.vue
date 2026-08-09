@@ -666,7 +666,6 @@ import {
   workflowTitle,
 } from '../format'
 import { useAppI18n } from '../i18n'
-import { liveAssistantOutput } from '../sessionEvents'
 import type {
   AccessPreset,
   AgentStep,
@@ -688,6 +687,7 @@ const props = defineProps<{
   workspaceAvailable: boolean
   view: SessionView
   events: SessionEvent[]
+  liveOutputs: Record<string, string>
   skills: ProjectSkill[]
   workflowView: WorkflowView | null
   workflowLoading: boolean
@@ -857,7 +857,7 @@ function noticesFor(turnId: string) {
   )
 }
 function liveOutput(turnId: string): string {
-  return liveAssistantOutput(props.events, turnId)
+  return props.liveOutputs[turnId] ?? ''
 }
 function noticeText(event: SessionEvent): string {
   if (event.type === 'context_trimmed') return t('session.contextCompacted', { count: String(event.removed_items ?? 0) })

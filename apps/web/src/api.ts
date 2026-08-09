@@ -126,7 +126,6 @@ export const sessionEventTypes = [
   'session_status_changed',
   'turn_created',
   'turn_status_changed',
-  'agent_started',
   'assistant_message_delta',
   'assistant_message_reset',
   'assistant_message_completed',
@@ -143,5 +142,6 @@ export const sessionEventTypes = [
   'human_request_opened',
   'human_request_resolved',
   'control_message_applied',
+  'workflow_changed',
   'warning',
 ] as const

@@ -4,9 +4,7 @@ use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
-use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowEventPayload;
 use papermachine_protocol::WorkflowId;
@@ -47,7 +45,7 @@ fn session_message_reset_has_a_stable_sse_tag() {
 }
 
 #[test]
-fn failed_model_step_exposes_charged_usage() {
+fn model_step_event_is_only_a_durable_reference() {
     let event = SessionEvent {
         id: EventId::new(),
         sequence: 4,
@@ -55,25 +53,17 @@ fn failed_model_step_exposes_charged_usage() {
         turn_id: None,
         step_id: None,
         occurred_at: Utc::now(),
-        payload: SessionEventPayload::ModelStepFailed {
-            step: 1,
-            error: "max_output_tokens".to_string(),
-            usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 100,
-                cached_input_tokens: 4,
-                cache_write_input_tokens: 0,
-            },
-        },
+        payload: SessionEventPayload::ModelStepFailed,
     };
 
     let value = serde_json::to_value(event).expect("event should serialize");
     assert_eq!(value["type"], "model_step_failed");
-    assert_eq!(value["usage"]["output_tokens"], 100);
+    assert!(value.get("usage").is_none());
+    assert!(value.get("error").is_none());
 }
 
 #[test]
-fn turn_created_event_preserves_message_origin() {
+fn turn_created_event_does_not_duplicate_turn_fields() {
     let event = SessionEvent {
         id: EventId::new(),
         sequence: 5,
@@ -81,16 +71,14 @@ fn turn_created_event_preserves_message_origin() {
         turn_id: None,
         step_id: None,
         occurred_at: Utc::now(),
-        payload: SessionEventPayload::TurnCreated {
-            origin: TurnOrigin::Workflow,
-            input: "Investigate route A".to_string(),
-            model: "test-model".to_string(),
-        },
+        payload: SessionEventPayload::TurnCreated,
     };
 
     let value = serde_json::to_value(event).expect("event should serialize");
     assert_eq!(value["type"], "turn_created");
-    assert_eq!(value["origin"], "workflow");
+    assert!(value.get("origin").is_none());
+    assert!(value.get("input").is_none());
+    assert!(value.get("model").is_none());
 }
 
 #[test]

@@ -634,6 +634,16 @@ fn collaboration_state_is_research_owned_and_events_are_ordered() {
             .len(),
         2
     );
+    assert!(
+        store
+            .workflow_involves_session(run.id, origin.id)
+            .expect("origin membership should load")
+    );
+    assert!(
+        store
+            .workflow_involves_session(run.id, researcher.session_id)
+            .expect("participant membership should load")
+    );
     assert_eq!(
         store
             .get_team(team.id)
