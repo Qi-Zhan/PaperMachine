@@ -26,6 +26,7 @@ use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+pub use catalog::CatalogFailure;
 pub use catalog::CatalogProject;
 pub use catalog::ProjectCatalog;
 pub use database::ProjectChange;

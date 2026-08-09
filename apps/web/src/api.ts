@@ -62,6 +62,8 @@ export const api = {
     request<ProjectCatalogEntry>(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ workspace: { roots: [workspacePath], primary_root: 0 } }) }),
   removeProject: (projectId: string) => request<void>(`/projects/${projectId}`, { method: 'DELETE' }),
   getProject: (projectId: string) => request<ProjectOverview>(`/projects/${projectId}`),
+  listSessions: (projectId: string, limit = 100) =>
+    request<Session[]>(`/projects/${projectId}/sessions?limit=${limit}`),
   updateProjectSystemPrompt: (projectId: string, systemPrompt: string) =>
     request<ProjectSystemPrompt>(`/projects/${projectId}/system-prompt`, {
       method: 'PUT',
@@ -89,6 +91,7 @@ export const api = {
   createWorkflow: (projectId: string, input: CreateWorkflowInput) =>
     request<Workflow>(`/projects/${projectId}/workflows`, { method: 'POST', body: JSON.stringify(input) }),
   getWorkflow: (workflowId: string) => request<WorkflowView>(`/workflows/${workflowId}`),
+  getWorkflowState: (workflowId: string) => request<Workflow>(`/workflows/${workflowId}/state`),
   pauseWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/pause`, { method: 'POST' }),
   resumeWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/resume`, { method: 'POST' }),
   cancelWorkflow: (workflowId: string) => request<void>(`/workflows/${workflowId}/cancel`, { method: 'POST' }),
@@ -143,5 +146,6 @@ export const sessionEventTypes = [
   'human_request_resolved',
   'control_message_applied',
   'workflow_changed',
+  'session_resync',
   'warning',
 ] as const

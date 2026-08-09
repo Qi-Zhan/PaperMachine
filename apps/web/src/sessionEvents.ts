@@ -23,7 +23,11 @@ export interface SessionWorkflowUpdate {
   workflow: Workflow
 }
 
-export type SessionStreamUpdate = SessionEntityUpdate | SessionWorkflowUpdate
+export interface SessionResyncUpdate {
+  type: 'session_resync'
+}
+
+export type SessionStreamUpdate = SessionEntityUpdate | SessionWorkflowUpdate | SessionResyncUpdate
 export type LiveAssistantOutputs = Record<string, string>
 
 export function applySessionStreamUpdate(
@@ -31,7 +35,7 @@ export function applySessionStreamUpdate(
   update: SessionStreamUpdate,
 ): SessionView {
   const sessionUpdate = isSessionEntityUpdate(update) ? update : null
-  const workflow = update.workflow
+  const workflow = 'workflow' in update ? update.workflow : undefined
   const turns = sessionUpdate?.turn ? upsert(view.turns, sessionUpdate.turn, byCreatedAt) : view.turns
   const turnOrder = new Map(turns.map((turn, index) => [turn.id, index]))
 

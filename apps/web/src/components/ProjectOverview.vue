@@ -98,19 +98,10 @@ const emit = defineEmits<{
 const { t } = useAppI18n()
 const defaultSummaryInstructions =
   'Keep the Project home page accurate, useful, and current. Prioritize evidence-backed conclusions, consequential decisions, unresolved contradictions, blockers, and concrete next actions.'
-const summaryWorkflows = computed(() =>
-  props.overview.workflows.filter((workflow) => workflow.program.manifest.slug === 'project-summary'),
-)
 const summaryInstructions = computed(
-  () => summaryWorkflows.value[0]?.instructions || defaultSummaryInstructions,
+  () => props.overview.summary_workflow?.instructions || defaultSummaryInstructions,
 )
-const latestSummaryArtifact = computed(() =>
-  props.overview.project_home
-    ? props.overview.artifacts.find(
-        (artifact) => artifact.id === props.overview.project_home?.artifact_id,
-      )
-    : undefined,
-)
+const latestSummaryArtifact = computed(() => props.overview.project_home_artifact ?? undefined)
 const summaryHtml = ref('')
 const summaryLoading = ref(false)
 const summaryLoadFailed = ref(false)

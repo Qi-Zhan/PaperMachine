@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -325,6 +325,19 @@ impl Store {
              AND status != 'archived'
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
+        )
+    }
+
+    pub fn list_recent_sessions(
+        &self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<Session>, StoreError> {
+        self.query_documents(
+            "SELECT document_json FROM sessions WHERE project_id = ?1
+             AND status != 'archived'
+             ORDER BY updated_at DESC, id ASC LIMIT ?2",
+            params![project_id.to_string(), limit],
         )
     }
 
@@ -1255,12 +1268,13 @@ impl Store {
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO workflows
-             (id, project_id, started_from_session_id, status, attention_required, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+             (id, project_id, started_from_session_id, program_slug, status, attention_required, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
             params![
                 workflow.id.to_string(),
                 workflow.project_id.to_string(),
                 workflow.started_from_session_id.map(|id| id.to_string()),
+                &workflow.program.manifest.slug,
                 enum_string(workflow.status)?,
                 workflow.updated_at.to_rfc3339(),
                 serde_json::to_string(&workflow)?,
@@ -1354,6 +1368,24 @@ impl Store {
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
         )
+    }
+
+    pub fn latest_project_workflow_for_program(
+        &self,
+        project_id: ProjectId,
+        program_slug: &str,
+    ) -> Result<Option<Workflow>, StoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT document_json FROM workflows
+                 WHERE project_id = ?1 AND program_slug = ?2
+                 ORDER BY updated_at DESC, id ASC LIMIT 1",
+                params![project_id.to_string(), program_slug],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|document| serde_json::from_str(&document).map_err(StoreError::from))
+            .transpose()
     }
 
     pub fn begin_workflow_effect(
@@ -1801,6 +1833,20 @@ impl Store {
         )
     }
 
+    pub fn list_workflow_sessions(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Vec<Session>, StoreError> {
+        self.query_documents(
+            "SELECT sessions.document_json FROM sessions
+             INNER JOIN workflow_participants
+               ON workflow_participants.session_id = sessions.id
+             WHERE workflow_participants.workflow_id = ?1
+             ORDER BY workflow_participants.created_at ASC, sessions.id ASC",
+            [workflow_id.to_string()],
+        )
+    }
+
     pub fn retire_participant(
         &self,
         id: AgentInstanceId,
@@ -2028,6 +2074,22 @@ impl Store {
         self.query_documents(
             "SELECT document_json FROM action_attempts WHERE invocation_id = ?1 ORDER BY number ASC",
             [invocation_id.to_string()],
+        )
+    }
+
+    pub fn list_workflow_action_attempts(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Vec<ActionAttempt>, StoreError> {
+        self.query_documents(
+            "SELECT action_attempts.document_json FROM action_attempts
+             INNER JOIN action_invocations
+               ON action_invocations.id = action_attempts.invocation_id
+             WHERE action_invocations.workflow_id = ?1
+             ORDER BY action_invocations.created_at ASC,
+                      action_invocations.id ASC,
+                      action_attempts.number ASC",
+            [workflow_id.to_string()],
         )
     }
 
@@ -2734,6 +2796,17 @@ impl Store {
             "SELECT document_json FROM workflow_signals WHERE channel_id = ?1 AND sequence > ?2
              ORDER BY sequence ASC",
             params![channel_id.to_string(), after_sequence],
+        )
+    }
+
+    pub fn list_workflow_signals(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Vec<WorkflowSignal>, StoreError> {
+        self.query_documents(
+            "SELECT document_json FROM workflow_signals WHERE workflow_id = ?1
+             ORDER BY created_at ASC, id ASC",
+            [workflow_id.to_string()],
         )
     }
 
@@ -3918,10 +3991,12 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS workflows (
            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-           started_from_session_id TEXT REFERENCES sessions(id), status TEXT NOT NULL,
+           started_from_session_id TEXT REFERENCES sessions(id), program_slug TEXT NOT NULL,
+           status TEXT NOT NULL,
            attention_required INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS workflows_project_updated ON workflows(project_id, updated_at DESC);
+         CREATE INDEX IF NOT EXISTS workflows_project_program_updated ON workflows(project_id, program_slug, updated_at DESC);
          CREATE INDEX IF NOT EXISTS workflows_starting_session_updated ON workflows(started_from_session_id, updated_at DESC);
          CREATE TABLE IF NOT EXISTS workflow_effects (
            workflow_id TEXT NOT NULL REFERENCES workflows(id), effect_key TEXT NOT NULL,

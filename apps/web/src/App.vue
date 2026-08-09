@@ -120,7 +120,7 @@
         v-else-if="projectOverview"
         :overview="projectOverview"
         :workspace-available="selectedProject?.workspace_available ?? false"
-        :summary-busy="summaryBusy"
+        :summary-busy="projectSummaryBusy"
         @toggle-sidebar="toggleSidebar"
         @new-session="openSessionDialog(projectOverview.project.id)"
         @run-workflow="openProjectWorkflowDialog"
@@ -276,8 +276,9 @@ const selectedWorkflowOutput = ref<Workflow | null>(null)
 const workflowLibraryOpen = ref(false)
 
 let sessionEventSource: EventSource | null = null
+let projectEventSource: EventSource | null = null
 let workflowRefreshTimer: number | null = null
-let pollTimer: number | null = null
+let projectRefreshTimer: number | null = null
 
 const selectedProject = computed(
   () => projects.value.find((project) => project.id === selectedProjectId.value) ?? null,
@@ -316,6 +317,11 @@ const sessionHostedWebSearch = computed(() => {
     (provider) => provider.id === profile.provider,
   )?.hosted_web_search ?? false
 })
+const projectSummaryBusy = computed(
+  () =>
+    summaryBusy.value ||
+    ['created', 'running'].includes(projectOverview.value?.summary_workflow?.status ?? ''),
+)
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
@@ -346,6 +352,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   stopSidebarResize()
   closeSessionStream()
+  closeProjectStream()
   clearTimers()
 })
 
@@ -436,7 +443,6 @@ function resetSidebarWidth() {
 
 async function refreshProjectIndex(projectId: string) {
   const overview = await api.getProject(projectId)
-  sessionsByProject[projectId] = overview.sessions
   const index = projects.value.findIndex((project) => project.id === projectId)
   if (index >= 0) {
     projects.value[index] = {
@@ -446,6 +452,12 @@ async function refreshProjectIndex(projectId: string) {
   }
   if (selectedProjectId.value === projectId && !selectedSessionId.value) projectOverview.value = overview
   return overview
+}
+
+async function refreshProjectSessions(projectId: string) {
+  const sessions = await api.listSessions(projectId)
+  sessionsByProject[projectId] = sessions
+  return sessions
 }
 
 async function ensureProjectSkills(projectId: string, refresh = false) {
@@ -459,25 +471,25 @@ async function selectProject(projectId: string): Promise<boolean> {
   const catalogEntry = projects.value.find((project) => project.id === projectId)
   if (!catalogEntry) return false
   closeSessionStream()
-  clearPoll()
+  closeProjectStream()
   selectedProjectId.value = projectId
   selectedSessionId.value = null
   sessionView.value = null
   sessionEvents.value = []
   liveAssistantOutputs.value = {}
   workflowView.value = null
+  workflowPrograms.value = []
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
   try {
     const [overview] = await Promise.all([
       refreshProjectIndex(projectId),
-      ensureProjectSkills(projectId),
-      loadWorkflowPrograms(projectId),
+      refreshProjectSessions(projectId),
     ])
     if (selectedProjectId.value === projectId && !selectedSessionId.value) {
       projectOverview.value = overview
       writeRoute('project', projectId)
-      syncProjectPoll()
+      connectProjectStream(projectId)
     }
     return true
   } catch (error) {
@@ -496,7 +508,7 @@ async function selectSession(sessionId: string): Promise<boolean> {
   workflowLibraryOpen.value = false
   mobileSidebarOpen.value = false
   closeSessionStream()
-  clearPoll()
+  closeProjectStream()
   try {
     const [view, events] = await Promise.all([api.getSession(sessionId), api.listSessionEvents(sessionId)])
     if (selectedSessionId.value !== sessionId) return false
@@ -505,7 +517,7 @@ async function selectSession(sessionId: string): Promise<boolean> {
     sessionEvents.value = events
     await Promise.all([
       ensureProjectSkills(view.session.project_id),
-      refreshProjectIndex(view.session.project_id),
+      refreshProjectSessions(view.session.project_id),
       loadWorkflowPrograms(view.session.project_id),
     ])
     connectSessionStream(sessionId, events.at(-1)?.sequence ?? 0)
@@ -534,6 +546,10 @@ function connectSessionStream(sessionId: string, after: number) {
   const receive = (message: MessageEvent<string>) => {
     try {
       const update = JSON.parse(message.data) as SessionStreamUpdate
+      if (update.type === 'session_resync') {
+        void reconcileSession(sessionId)
+        return
+      }
       liveAssistantOutputs.value = applyLiveAssistantUpdate(liveAssistantOutputs.value, update)
       if (sessionView.value?.session.id === sessionId) {
         sessionView.value = applySessionStreamUpdate(sessionView.value, update)
@@ -546,7 +562,7 @@ function connectSessionStream(sessionId: string, after: number) {
         sessionEvents.value.sort((left, right) => left.sequence - right.sequence)
       }
       if ('session' in update && update.session) updateSidebarSession(update.session)
-      const updatedWorkflow = update.workflow
+      const updatedWorkflow = 'workflow' in update ? update.workflow : undefined
       if (updatedWorkflow && workflowView.value?.workflow.id === updatedWorkflow.id) {
         scheduleWorkflowInspection(updatedWorkflow.id)
       }
@@ -557,10 +573,87 @@ function connectSessionStream(sessionId: string, after: number) {
   for (const type of sessionEventTypes) source.addEventListener(type, receive as EventListener)
 }
 
+async function reconcileSession(sessionId: string) {
+  try {
+    const after = sessionEvents.value.at(-1)?.sequence ?? 0
+    const [view, events] = await Promise.all([
+      api.getSession(sessionId),
+      api.listSessionEvents(sessionId, after),
+    ])
+    if (selectedSessionId.value !== sessionId) return
+    sessionView.value = view
+    const known = new Set(sessionEvents.value.map((event) => event.id))
+    sessionEvents.value = [...sessionEvents.value, ...events.filter((event) => !known.has(event.id))]
+      .sort((left, right) => left.sequence - right.sequence)
+    updateSidebarSession(view.session)
+  } catch (error) {
+    globalError.value = messageOf(error)
+  }
+}
+
 function closeSessionStream() {
   sessionEventSource?.close()
   sessionEventSource = null
   streamConnected.value = false
+}
+
+type ProjectStreamUpdate =
+  | { type: 'session_changed'; session: Session }
+  | { type: 'workflow_changed'; workflow: Workflow }
+  | { type: 'project_resync' }
+
+function connectProjectStream(projectId: string) {
+  closeProjectStream()
+  const source = new EventSource(`/api/projects/${projectId}/events/stream`)
+  projectEventSource = source
+  source.onopen = () => {
+    if (selectedProjectId.value === projectId && !selectedSessionId.value) {
+      void refreshProjectIndex(projectId)
+    }
+  }
+  source.onerror = () => {
+    // EventSource reconnects automatically; onopen reconciles missed state.
+  }
+  const receive = (message: MessageEvent<string>) => {
+    try {
+      const update = JSON.parse(message.data) as ProjectStreamUpdate
+      if (update.type === 'project_resync') {
+        scheduleProjectRefresh(projectId)
+      } else if (update.type === 'session_changed') {
+        updateSidebarSession(update.session)
+      } else if (update.workflow.program.manifest.slug === 'project-summary') {
+        if (projectOverview.value?.project.id === projectId) {
+          projectOverview.value = {
+            ...projectOverview.value,
+            summary_workflow: update.workflow,
+          }
+        }
+        scheduleProjectRefresh(projectId)
+      }
+    } catch {
+      globalError.value = t('app.invalidSessionEvent')
+    }
+  }
+  source.addEventListener('session_changed', receive as EventListener)
+  source.addEventListener('workflow_changed', receive as EventListener)
+  source.addEventListener('project_resync', receive as EventListener)
+}
+
+function closeProjectStream() {
+  projectEventSource?.close()
+  projectEventSource = null
+  if (projectRefreshTimer !== null) window.clearTimeout(projectRefreshTimer)
+  projectRefreshTimer = null
+}
+
+function scheduleProjectRefresh(projectId: string) {
+  if (projectRefreshTimer !== null) window.clearTimeout(projectRefreshTimer)
+  projectRefreshTimer = window.setTimeout(() => {
+    projectRefreshTimer = null
+    if (selectedProjectId.value === projectId && !selectedSessionId.value) {
+      void refreshProjectIndex(projectId)
+    }
+  }, 120)
 }
 
 function updateSidebarSession(session: Session) {
@@ -579,55 +672,11 @@ function scheduleWorkflowInspection(workflowId: string) {
   }, 120)
 }
 
-function syncProjectPoll() {
-  clearPoll()
-  const overview = projectOverview.value
-  if (!overview || selectedSessionId.value || workflowLibraryOpen.value) return
-  const delay = projectPollDelay(overview)
-  if (delay === null) return
-  const projectId = overview.project.id
-  pollTimer = window.setTimeout(async () => {
-    pollTimer = null
-    if (
-      selectedProjectId.value !== projectId ||
-      selectedSessionId.value ||
-      workflowLibraryOpen.value
-    ) return
-    try {
-      await refreshProjectIndex(projectId)
-    } catch (error) {
-      globalError.value = messageOf(error)
-    }
-    if (selectedProjectId.value === projectId && !selectedSessionId.value) syncProjectPoll()
-  }, delay)
-}
-
-function projectPollDelay(overview: ProjectOverviewType): number | null {
-  const active = overview.workflows.filter(
-    (workflow) => !['completed', 'failed', 'cancelled'].includes(workflow.status),
-  )
-  if (!active.length) return null
-  if (active.some((workflow) => ['created', 'running'].includes(workflow.status))) return 900
-  const timerIntervals = active
-    .filter((workflow) => workflow.status === 'waiting_for_timer')
-    .map((workflow) => Number(workflow.params.interval_minutes ?? 0))
-    .filter((minutes) => Number.isFinite(minutes) && minutes > 0)
-  if (timerIntervals.length) {
-    const shortestIntervalMs = Math.min(...timerIntervals) * 60_000
-    return Math.min(30_000, Math.max(1_000, shortestIntervalMs / 2))
-  }
-  return 5_000
-}
-
-function clearPoll() {
-  if (pollTimer !== null) window.clearTimeout(pollTimer)
-  pollTimer = null
-}
-
 function clearTimers() {
   if (workflowRefreshTimer !== null) window.clearTimeout(workflowRefreshTimer)
   workflowRefreshTimer = null
-  clearPoll()
+  if (projectRefreshTimer !== null) window.clearTimeout(projectRefreshTimer)
+  projectRefreshTimer = null
 }
 
 function showHome() {
@@ -650,7 +699,7 @@ async function openWorkflowLibrary(projectId = selectedProjectId.value ?? projec
   }
   writeRoute('workflows', projectId)
   closeSessionStream()
-  clearPoll()
+  closeProjectStream()
   selectedSessionId.value = null
   sessionView.value = null
   sessionEvents.value = []
@@ -996,15 +1045,13 @@ async function runProjectSummary(input: {
 
 async function waitForProjectSummary(projectId: string, workflowId: string) {
   for (let attempt = 0; attempt < 240; attempt += 1) {
-    const overview = await refreshProjectIndex(projectId)
-    const workflow = overview.workflows.find((candidate) => candidate.id === workflowId)
-    const artifact = overview.project_home
-    if (workflow?.status === 'failed' || workflow?.status === 'cancelled') {
+    const workflow = await api.getWorkflowState(workflowId)
+    if (workflow.status === 'failed' || workflow.status === 'cancelled') {
       throw new Error(workflow.error ?? workflow.status)
     }
-    if (artifact && workflow && ['completed', 'waiting_for_timer'].includes(workflow.status)) {
-      syncProjectPoll()
-      return
+    if (['completed', 'waiting_for_timer'].includes(workflow.status)) {
+      const overview = await refreshProjectIndex(projectId)
+      if (overview.project_home) return
     }
     await new Promise((resolve) => window.setTimeout(resolve, 500))
   }

@@ -29,6 +29,12 @@ pub struct CatalogProject {
     pub store: Store,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogFailure {
+    pub path: PathBuf,
+    pub error: String,
+}
+
 impl ProjectCatalog {
     pub fn open(data_root: impl AsRef<Path>) -> Result<Self, StoreError> {
         std::fs::create_dir_all(data_root.as_ref())
@@ -63,6 +69,11 @@ impl ProjectCatalog {
     pub fn scan(&self) -> Result<Vec<CatalogProject>, StoreError> {
         let _guard = self.mutation.lock().map_err(|_| StoreError::LockPoisoned)?;
         self.scan_unlocked()
+    }
+
+    pub fn scan_resilient(&self) -> Result<(Vec<CatalogProject>, Vec<CatalogFailure>), StoreError> {
+        let _guard = self.mutation.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.scan_resilient_unlocked()
     }
 
     pub fn create_project(
@@ -195,37 +206,52 @@ impl ProjectCatalog {
     }
 
     fn scan_unlocked(&self) -> Result<Vec<CatalogProject>, StoreError> {
+        let (projects, failures) = self.scan_resilient_unlocked()?;
+        if let Some(failure) = failures.into_iter().next() {
+            return Err(StoreError::Invariant(format!(
+                "invalid Project catalog entry {}: {}",
+                failure.path.display(),
+                failure.error
+            )));
+        }
+        Ok(projects)
+    }
+
+    fn scan_resilient_unlocked(
+        &self,
+    ) -> Result<(Vec<CatalogProject>, Vec<CatalogFailure>), StoreError> {
         let mut projects = Vec::new();
+        let mut failures = Vec::new();
         let mut workspace_owners = BTreeMap::<PathBuf, ProjectId>::new();
         for entry in sorted_entries(&self.projects_root)? {
-            let file_type = entry
-                .file_type()
-                .map_err(|error| StoreError::Io(error.to_string()))?;
-            if !file_type.is_dir() || file_type.is_symlink() {
-                return Err(StoreError::Invariant(format!(
-                    "invalid entry in Project catalog: {}",
-                    entry.path().display()
-                )));
-            }
-            let name = entry.file_name().into_string().map_err(|_| {
-                StoreError::Invariant("Project directory name is not Unicode".to_string())
-            })?;
-            let project_id = ProjectId::from_str(&name).map_err(|error| {
-                StoreError::Invariant(format!("invalid Project directory {name}: {error}"))
-            })?;
-            let store = Store::open(entry.path())?;
-            let project = validate_project_identity(&store, project_id)?;
-            for root in &project.workspace.roots {
-                let root = PathBuf::from(root);
-                if let Some(owner) = workspace_owners.insert(root.clone(), project.id) {
-                    return Err(StoreError::Invariant(format!(
-                        "Workspace {} is attached to Projects {owner} and {}",
-                        root.display(),
-                        project.id
-                    )));
+            let path = entry.path();
+            let candidate = load_catalog_project(entry).and_then(|candidate| {
+                for root in &candidate.project.workspace.roots {
+                    let root = PathBuf::from(root);
+                    if let Some(owner) = workspace_owners.get(&root) {
+                        return Err(StoreError::Invariant(format!(
+                            "Workspace {} is attached to Projects {owner} and {}",
+                            root.display(),
+                            candidate.project.id
+                        )));
+                    }
                 }
+                Ok(candidate)
+            });
+            let candidate = match candidate {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    failures.push(CatalogFailure {
+                        path,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            for root in &candidate.project.workspace.roots {
+                workspace_owners.insert(PathBuf::from(root), candidate.project.id);
             }
-            projects.push(CatalogProject { project, store });
+            projects.push(candidate);
         }
         projects.sort_by(|left, right| {
             right
@@ -234,8 +260,30 @@ impl ProjectCatalog {
                 .cmp(&left.project.updated_at)
                 .then_with(|| left.project.id.cmp(&right.project.id))
         });
-        Ok(projects)
+        Ok((projects, failures))
     }
+}
+
+fn load_catalog_project(entry: std::fs::DirEntry) -> Result<CatalogProject, StoreError> {
+    let file_type = entry
+        .file_type()
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    if !file_type.is_dir() || file_type.is_symlink() {
+        return Err(StoreError::Invariant(format!(
+            "catalog entry is not a real directory: {}",
+            entry.path().display()
+        )));
+    }
+    let name = entry
+        .file_name()
+        .into_string()
+        .map_err(|_| StoreError::Invariant("Project directory name is not Unicode".to_string()))?;
+    let project_id = ProjectId::from_str(&name).map_err(|error| {
+        StoreError::Invariant(format!("invalid Project directory {name}: {error}"))
+    })?;
+    let store = Store::open(entry.path())?;
+    let project = validate_project_identity(&store, project_id)?;
+    Ok(CatalogProject { project, store })
 }
 
 fn validate_project_identity(

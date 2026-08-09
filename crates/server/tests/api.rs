@@ -74,6 +74,57 @@ async fn initialization_validates_resources_before_opening_application_data() {
 }
 
 #[tokio::test]
+async fn inactive_project_runtime_failures_are_lazy_and_isolated() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let project = create_project(&app, directory.path(), "Lazy runtime").await;
+    let broken_workflow = directory
+        .path()
+        .join("app-data/projects")
+        .join(project.id.to_string())
+        .join("workflows/broken/workflow.py");
+    std::fs::create_dir_all(
+        broken_workflow
+            .parent()
+            .expect("Workflow fixture should have a parent"),
+    )
+    .expect("Workflow fixture directory should be created");
+    std::fs::write(&broken_workflow, "this is not valid Python (")
+        .expect("invalid Workflow fixture should be written");
+    drop(app);
+
+    let restarted = test_app(&directory).await;
+    let projects = restarted
+        .clone()
+        .oneshot(empty_request("GET", "/api/projects"))
+        .await
+        .expect("Project list should load");
+    assert_eq!(projects.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(projects).await.as_array().map(Vec::len),
+        Some(1)
+    );
+    let overview = restarted
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}", project.id),
+        ))
+        .await
+        .expect("Project index should not require its runtime");
+    assert_eq!(overview.status(), StatusCode::OK);
+
+    let runtime_endpoint = restarted
+        .oneshot(empty_request(
+            "GET",
+            &format!("/api/projects/{}/workflow-programs", project.id),
+        ))
+        .await
+        .expect("runtime endpoint should report the local failure");
+    assert_eq!(runtime_endpoint.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn managed_project_state_is_separate_from_the_user_workspace() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("research/portable-paper");
@@ -110,6 +161,8 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
             .is_none()
     );
 
+    let broken_catalog_entry = directory.path().join("app-data/projects/not-a-project-id");
+    std::fs::create_dir(&broken_catalog_entry).expect("broken catalog fixture should be created");
     let restarted = test_app(&directory).await;
     let projects = restarted
         .clone()
@@ -119,6 +172,7 @@ async fn managed_project_state_is_separate_from_the_user_workspace() {
     let projects = response_json(projects).await;
     assert_eq!(projects.as_array().map(Vec::len), Some(1));
     assert_eq!(projects[0]["id"], project["id"]);
+    assert!(broken_catalog_entry.is_dir());
 
     let overview = restarted
         .oneshot(empty_request(
@@ -633,19 +687,16 @@ async fn api_layers_project_and_session_system_prompts_into_user_turns() {
         .collect::<Vec<_>>();
     assert_eq!(kinds, vec!["runtime", "project", "workflow", "agent"]);
 
-    let overview = app
+    let project_prompt = app
         .oneshot(empty_request(
             "GET",
-            &format!("/api/projects/{}", project.id),
+            &format!("/api/projects/{}/system-prompt", project.id),
         ))
         .await
-        .expect("Project overview should complete");
-    assert_eq!(overview.status(), StatusCode::OK);
-    let overview = response_json(overview).await;
-    assert_eq!(
-        overview["system_prompt"]["content"],
-        "Use only primary evidence."
-    );
+        .expect("Project prompt should load");
+    assert_eq!(project_prompt.status(), StatusCode::OK);
+    let project_prompt = response_json(project_prompt).await;
+    assert_eq!(project_prompt["content"], "Use only primary evidence.");
 }
 
 async fn get_workflow_view(app: &Router, workflow_id: &str) -> Value {
@@ -827,16 +878,17 @@ async fn closing_a_session_archives_it_and_cancels_its_interactive_workflow() {
         "archived"
     );
 
-    let overview = app
+    let project_sessions = app
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/projects/{}", project.id),
+            &format!("/api/projects/{}/sessions", project.id),
         ))
         .await
-        .expect("Project overview should complete");
+        .expect("Project Sessions should load");
     assert!(
-        response_json(overview).await["sessions"]
+        response_json(project_sessions)
+            .await
             .as_array()
             .is_some_and(Vec::is_empty)
     );
@@ -936,20 +988,16 @@ async fn api_runs_python_workflow_as_project_owned_sessions() {
             .all(|pair| pair[0].sequence < pair[1].sequence)
     );
 
-    let overview = app
+    let project_sessions = app
         .clone()
         .oneshot(empty_request(
             "GET",
-            &format!("/api/projects/{}", project.id),
+            &format!("/api/projects/{}/sessions", project.id),
         ))
         .await
-        .expect("Project overview should load");
-    let overview = response_json(overview).await;
-    assert_eq!(overview["sessions"].as_array().map(Vec::len), Some(4));
-    assert_eq!(
-        overview["workflow_participants"].as_array().map(Vec::len),
-        Some(4)
-    );
+        .expect("Project Sessions should load");
+    let project_sessions = response_json(project_sessions).await;
+    assert_eq!(project_sessions.as_array().map(Vec::len), Some(4));
 
     let research_participant = view["participants"]
         .as_array()
@@ -1470,6 +1518,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
     let overview = response_json(overview).await;
     assert_eq!(overview["project_home"]["artifact_id"], summary["id"]);
     assert_eq!(overview["project_home"]["source_artifact_id"], source["id"]);
+    assert_eq!(overview["project_home_artifact"]["id"], summary["id"]);
 
     let artifact_id = summary["id"]
         .as_str()
@@ -1545,11 +1594,8 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
         .await
         .expect("Project overview should load");
     let overview = response_json(overview).await;
-    assert!(overview["artifacts"].as_array().is_some_and(|artifacts| {
-        artifacts
-            .iter()
-            .any(|artifact| artifact["id"] == artifact_id)
-    }));
+    assert_eq!(overview["project_home_artifact"]["id"], artifact_id);
+    assert!(overview.get("artifacts").is_none());
 }
 
 #[tokio::test]

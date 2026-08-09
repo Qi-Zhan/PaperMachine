@@ -84,3 +84,25 @@ fn startup_quarantines_unpublished_staging_state() {
         .purge_trash_entry(&quarantined[0])
         .expect("quarantine should purge");
 }
+
+#[test]
+fn resilient_scan_keeps_healthy_projects_visible_beside_a_broken_entry() {
+    let directory = tempdir().expect("temporary root should be created");
+    let data = directory.path().join("data");
+    let catalog = ProjectCatalog::open(&data).expect("catalog should open");
+    let healthy = catalog
+        .create_project("Healthy", directory.path().join("workspace"))
+        .expect("healthy Project should be created");
+    let broken = data.join("projects/not-a-project-id");
+    std::fs::create_dir(&broken).expect("broken entry should be created");
+
+    let (projects, failures) = catalog
+        .scan_resilient()
+        .expect("resilient scan should complete");
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].project.id, healthy.project.id);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].path.file_name(), broken.file_name());
+    assert!(catalog.scan().is_err());
+}

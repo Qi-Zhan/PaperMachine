@@ -387,12 +387,8 @@ export interface ProjectSkill {
 export interface ProjectOverview {
   project: Project
   project_home: ProjectHome | null
-  system_prompt: ProjectSystemPrompt
-  sessions: Session[]
-  workflows: Workflow[]
-  workflow_participants: WorkflowParticipant[]
-  human_requests: HumanRequest[]
-  artifacts: Artifact[]
+  project_home_artifact: Artifact | null
+  summary_workflow: Workflow | null
 }
 
 export interface SessionView {
