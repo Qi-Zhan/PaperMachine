@@ -208,8 +208,7 @@ body.sidebar-resizing * {
   background: #293733;
 }
 
-.toolbar-actions,
-.header-actions {
+.toolbar-actions {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -513,7 +512,6 @@ body.sidebar-resizing * {
   font-size: 9px;
 }
 
-.status-dot,
 .connection-dot {
   display: inline-block;
   width: 7px;
@@ -541,29 +539,18 @@ body.sidebar-resizing * {
   animation: spin 700ms linear infinite;
 }
 
-.status-dot[data-status="running"],
-.status-dot[data-status="queued"] {
-  background: var(--amber);
-}
-
 .status-pin[data-status="ready"],
-.status-pin[data-status="completed"],
-.status-dot[data-status="ready"],
-.status-dot[data-status="completed"] {
+.status-pin[data-status="completed"] {
   background: var(--green);
 }
 
 .status-pin[data-status="failed"],
 .status-pin[data-status="aborted"],
-.status-pin[data-status="cancelled"],
-.status-dot[data-status="failed"],
-.status-dot[data-status="aborted"],
-.status-dot[data-status="cancelled"] {
+.status-pin[data-status="cancelled"] {
   background: var(--red);
 }
 
-.status-pin[data-status="paused"],
-.status-dot[data-status="paused"] {
+.status-pin[data-status="paused"] {
   background: var(--blue);
 }
 
@@ -706,55 +693,6 @@ body.sidebar-resizing * {
 .text-button:disabled {
   cursor: default;
   opacity: 0.5;
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--muted);
-  background: #fff;
-  font-size: 10px;
-  font-weight: 620;
-  white-space: nowrap;
-}
-
-.status-badge[data-status="running"],
-.status-badge[data-status="queued"] {
-  border-color: #efd4a7;
-  color: #80510f;
-  background: var(--amber-soft);
-}
-
-.status-badge[data-status="completed"],
-.status-badge[data-status="ready"] {
-  border-color: #c8e2d4;
-  color: #1f674c;
-  background: var(--green-soft);
-}
-
-.status-badge[data-status="failed"],
-.status-badge[data-status="aborted"],
-.status-badge[data-status="cancelled"] {
-  border-color: #efc9ce;
-  color: #98323d;
-  background: var(--red-soft);
-}
-
-.status-badge[data-status="paused"] {
-  border-color: #c9ddeb;
-  color: #2c638a;
-  background: var(--blue-soft);
-}
-
-.status-badge .status-dot {
-  width: 6px;
-  height: 6px;
-  flex-basis: 6px;
 }
 
 .project-overview,
@@ -980,19 +918,6 @@ body.sidebar-resizing * {
 
 .session-heading-copy {
   min-width: 0;
-}
-
-.stream-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  color: var(--faint);
-}
-
-.stream-state[data-connected="true"] {
-  color: var(--green);
 }
 
 .session-thread {
@@ -2710,11 +2635,6 @@ body.sidebar-resizing * {
   .project-home-summary table {
     display: block;
     overflow-x: auto;
-  }
-
-  .session-page-header .status-badge,
-  .session-page-header .stream-state {
-    display: none;
   }
 
   .conversation-timeline {

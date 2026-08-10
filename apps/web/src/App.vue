@@ -90,14 +90,11 @@
         :events="sessionEvents"
         :live-outputs="liveAssistantOutputs"
         :workflow-view="workflowView"
-        :stream-connected="streamConnected"
         @toggle-sidebar="toggleSidebar"
         @select-project="selectProject"
         @select-session="selectSession"
-        @close-session="closeSession"
         @send="sendSessionMessage"
         @cancel-turn="cancelTurn"
-        @open-workflow="openSessionWorkflowDialog"
       />
 
       <ProjectOverview
@@ -222,7 +219,6 @@ const liveAssistantOutputs = ref<LiveAssistantOutputs>({})
 const workflowView = ref<WorkflowView | null>(null)
 const health = ref<Health | null>(null)
 const online = ref(false)
-const streamConnected = ref(false)
 const initialLoading = ref(true)
 const globalError = ref('')
 const dialogError = ref('')
@@ -502,11 +498,7 @@ function connectSessionStream(projectId: string, sessionId: string, after: numbe
   const source = new EventSource(`/api/projects/${projectId}/sessions/${sessionId}/events/stream?after=${after}`)
   sessionEventSource = source
   source.onopen = () => {
-    streamConnected.value = true
     online.value = true
-  }
-  source.onerror = () => {
-    streamConnected.value = false
   }
   const receive = (message: MessageEvent<string>) => {
     try {
@@ -559,7 +551,6 @@ async function reconcileSession(projectId: string, sessionId: string) {
 function closeSessionStream() {
   sessionEventSource?.close()
   sessionEventSource = null
-  streamConnected.value = false
 }
 
 type ProjectStreamUpdate =
@@ -713,11 +704,6 @@ function openSessionDialog(projectId: string) {
   void ensureProjectSkills(projectId).catch((error) => {
     dialogError.value = messageOf(error)
   })
-}
-
-function openSessionWorkflowDialog() {
-  const session = sessionView.value?.session
-  if (session) void openWorkflowDialog(session.project_id, session)
 }
 
 function openProjectWorkflowDialog() {
@@ -890,21 +876,6 @@ async function sendSessionMessage(input: string) {
       }
     }
     await inspectWorkflow(view.session.project_id, humanRequest.workflow_id, true)
-  } catch (error) {
-    globalError.value = messageOf(error)
-  }
-}
-
-async function closeSession() {
-  const view = sessionView.value
-  if (!view || !window.confirm(t('session.closeConfirm', { title: view.session.title }))) return
-  try {
-    await api.closeSession(view.session.project_id, view.session.id)
-    const projectId = view.session.project_id
-    sessionsByProject[projectId] = (sessionsByProject[projectId] ?? []).filter(
-      (session) => session.id !== view.session.id,
-    )
-    await selectProject(projectId)
   } catch (error) {
     globalError.value = messageOf(error)
   }

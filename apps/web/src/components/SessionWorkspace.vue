@@ -25,33 +25,6 @@
           <h1 :title="view.session.title">{{ view.session.title }}</h1>
         </div>
       </div>
-      <div class="header-actions">
-        <span class="stream-state" :data-connected="streamConnected" :title="t('session.eventStream')">
-          <Radio :size="13" />
-        </span>
-        <StatusBadge :status="view.session.status" />
-        <button
-          v-if="!sessionIsArchived"
-          class="icon-button"
-          type="button"
-          :title="t('session.startWorkflow')"
-          :aria-label="t('session.startWorkflow')"
-          :disabled="!workspaceAvailable"
-          @click="$emit('open-workflow')"
-        >
-          <GitBranch :size="16" />
-        </button>
-        <button
-          v-if="!sessionIsArchived"
-          class="icon-button"
-          type="button"
-          :title="t('session.close')"
-          :aria-label="t('session.close')"
-          @click="$emit('close-session')"
-        >
-          <Archive :size="16" />
-        </button>
-      </div>
     </header>
 
     <main class="session-thread">
@@ -295,7 +268,6 @@
 <script setup lang="ts">
 import {
   Activity,
-  Archive,
   ArrowLeft,
   ArrowUp,
   BrainCircuit,
@@ -311,7 +283,6 @@ import {
   LoaderCircle,
   PanelLeft,
   Pause,
-  Radio,
   Save,
   ScanSearch,
   Search,
@@ -341,7 +312,6 @@ import type {
   WorkflowView,
 } from '../types'
 import MarkdownView from './MarkdownView.vue'
-import StatusBadge from './StatusBadge.vue'
 
 const props = defineProps<{
   project: Project
@@ -350,16 +320,13 @@ const props = defineProps<{
   events: SessionEvent[]
   liveOutputs: Record<string, string>
   workflowView: WorkflowView | null
-  streamConnected: boolean
 }>()
 const emit = defineEmits<{
   'toggle-sidebar': []
   'select-project': [projectId: string]
   'select-session': [projectId: string, sessionId: string]
-  'close-session': []
   send: [input: string]
   'cancel-turn': [turnId: string]
-  'open-workflow': []
 }>()
 
 const draft = ref('')
