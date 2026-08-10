@@ -52,7 +52,7 @@ returned snapshots as Action data. `publish_artifact` and
 managed files.
 
 Project Home publication accepts one exact awaited, completed Action, verifies
-its Session/Agent/Action provenance, validates the HTML fragment, writes
+its Session/Agent/Action provenance, extracts the complete HTML document, writes
 immutable source and page Artifacts, then atomically
 updates the canonical pointer. Identical content reuses the current revision.
 No Workflow slug or Agent class is privileged.

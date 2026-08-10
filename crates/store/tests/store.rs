@@ -930,7 +930,7 @@ fn project_home_is_owned_by_exact_session_action_and_agent() {
             response_format: None,
         })
         .expect("Action should be created");
-    let html = "<section><h2>Verified result</h2></section>".to_string();
+    let html = "<!DOCTYPE html><html><body><h2>Verified result</h2></body></html>".to_string();
     assert!(
         store
             .publish_project_home(

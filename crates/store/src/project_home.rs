@@ -48,13 +48,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id)?;
-        let html = normalize_html_fragment(&html);
-        if html.is_empty() {
-            return Err(StoreError::Invariant(
-                "Project-home Action returned an empty page".to_string(),
-            ));
-        }
-        validate_html_fragment(html)?;
+        let html = extract_html_document(&html)?;
         let revision = hex::encode(Sha256::digest(html.as_bytes()));
         let current = self.get_project_home(session.project_id)?;
         if let Some(current) = current.as_ref()
@@ -177,29 +171,32 @@ fn remove_artifact_file(store: &Store, artifact: &Artifact) {
     );
 }
 
-fn normalize_html_fragment(html: &str) -> &str {
-    let html = html.trim();
-    let html = html.strip_prefix("```html\n").unwrap_or(html).trim();
-    html.strip_suffix("```").unwrap_or(html).trim()
-}
-
-fn validate_html_fragment(html: &str) -> Result<(), StoreError> {
-    if html.len() > MAX_PAGE_BYTES {
+fn extract_html_document(output: &str) -> Result<&str, StoreError> {
+    let output = output.trim();
+    if output.len() > MAX_PAGE_BYTES {
         return Err(StoreError::Invariant(format!(
             "Project home exceeds {MAX_PAGE_BYTES} bytes"
         )));
     }
-    if html.contains('\0') {
+    if output.contains('\0') {
         return Err(StoreError::Invariant(
             "Project-home HTML must not contain NUL bytes".to_string(),
         ));
     }
-    if !html.starts_with('<') || !html.ends_with('>') {
+
+    let lowercase = output.to_ascii_lowercase();
+    let start = lowercase
+        .find("<!doctype html")
+        .or_else(|| lowercase.find("<html"));
+    let end = lowercase
+        .rfind("</html>")
+        .map(|index| index + "</html>".len());
+    let Some((start, end)) = start.zip(end).filter(|(start, end)| start < end) else {
         return Err(StoreError::Invariant(
-            "Project-home output must be only an HTML fragment".to_string(),
+            "Project-home Action must return a complete standalone HTML document".to_string(),
         ));
-    }
-    Ok(())
+    };
+    Ok(&output[start..end])
 }
 
 #[cfg(test)]
@@ -207,22 +204,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_and_bounds_html_fragments() {
-        assert!(validate_html_fragment("Result without markup").is_err());
-        assert!(validate_html_fragment("<p>Result\0</p>").is_err());
-        assert!(
-            validate_html_fragment(
-                "<style>table { border-collapse: collapse }</style><article><h1>Result</h1><p>Literal ```html text is harmless.</p><table style=\"border-collapse: collapse\"><tr><td>1</td></tr></table></article>"
+    fn extracts_and_bounds_html_documents() {
+        assert!(extract_html_document("Result without markup").is_err());
+        assert!(extract_html_document("<html><body>Result\0</body></html>").is_err());
+        assert_eq!(
+            extract_html_document(
+                "Done.\n\n```html\n<!DOCTYPE html><html><body><h1>Result</h1></body></html>\n```"
             )
-            .is_ok()
+            .expect("fenced document should be extracted"),
+            "<!DOCTYPE html><html><body><h1>Result</h1></body></html>"
         );
         assert_eq!(
-            normalize_html_fragment("```html\n<article>Result</article>\n```"),
-            "<article>Result</article>"
-        );
-        assert_eq!(
-            normalize_html_fragment("```html\n<article>Partial result</article>"),
-            "<article>Partial result</article>"
+            extract_html_document("<HTML><body>Result</body></HTML>")
+                .expect("HTML matching should be case insensitive"),
+            "<HTML><body>Result</body></HTML>"
         );
     }
 }
