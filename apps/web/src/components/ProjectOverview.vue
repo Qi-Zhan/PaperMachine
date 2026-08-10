@@ -78,7 +78,7 @@ import { GitBranch, LoaderCircle, MessageSquarePlus, PanelLeft, RefreshCw } from
 import { computed, ref, watch } from 'vue'
 import { api } from '../api'
 import { useAppI18n } from '../i18n'
-import { PROJECT_HOME_CSP, PROJECT_HOME_SANDBOX } from '../projectHome'
+import { isolateProjectHomeDocument, PROJECT_HOME_CSP, PROJECT_HOME_SANDBOX } from '../projectHome'
 import type { ProjectOverview } from '../types'
 
 const props = defineProps<{
@@ -131,7 +131,9 @@ async function loadLatestSummary() {
     const source = await api.readArtifact(artifact)
     const document = source.trim()
     if (!document) throw new Error('Project summary is empty')
-    if (generation === summaryLoadGeneration) summaryDocument.value = document
+    if (generation === summaryLoadGeneration) {
+      summaryDocument.value = isolateProjectHomeDocument(document)
+    }
   } catch {
     if (generation === summaryLoadGeneration) {
       summaryDocument.value = ''

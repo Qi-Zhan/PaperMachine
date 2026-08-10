@@ -18,3 +18,14 @@ export const PROJECT_HOME_CSP = [
   "form-action 'none'",
   "base-uri 'none'",
 ].join('; ')
+
+const PROJECT_HOME_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PROJECT_HOME_CSP.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}">`
+
+export function isolateProjectHomeDocument(source: string): string {
+  const head = /<head\b[^>]*>/i.exec(source)
+  if (head?.index !== undefined) {
+    const offset = head.index + head[0].length
+    return `${source.slice(0, offset)}${PROJECT_HOME_CSP_META}${source.slice(offset)}`
+  }
+  return source.replace(/<html\b[^>]*>/i, `$&<head>${PROJECT_HOME_CSP_META}</head>`)
+}

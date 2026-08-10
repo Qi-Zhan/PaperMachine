@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { PROJECT_HOME_CSP, PROJECT_HOME_SANDBOX } from './projectHome'
+import {
+  isolateProjectHomeDocument,
+  PROJECT_HOME_CSP,
+  PROJECT_HOME_SANDBOX,
+} from './projectHome'
 
 describe('Project Home document isolation', () => {
   it('allows presentation code without sharing the application origin', () => {
@@ -16,5 +20,17 @@ describe('Project Home document isolation', () => {
     expect(PROJECT_HOME_CSP).toContain("connect-src 'none'")
     expect(PROJECT_HOME_CSP).toContain("form-action 'none'")
     expect(PROJECT_HOME_CSP).toContain("base-uri 'none'")
+
+    const source = '<!DOCTYPE html><html><head><style>body{color:red}</style></head><body><script>draw()</script></body></html>'
+    const isolated = isolateProjectHomeDocument(source)
+    expect(isolated).toContain('<head><meta http-equiv="Content-Security-Policy"')
+    expect(isolated).toContain('<style>body{color:red}</style>')
+    expect(isolated).toContain('<script>draw()</script>')
+  })
+
+  it('creates a head only when the generated document omitted one', () => {
+    expect(isolateProjectHomeDocument('<html><body>Result</body></html>')).toContain(
+      '<html><head><meta http-equiv="Content-Security-Policy"',
+    )
   })
 })
