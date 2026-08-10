@@ -2,10 +2,11 @@ use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::ActionSource;
 use papermachine_protocol::ActionStatus;
+use papermachine_protocol::AgentInputKind;
+use papermachine_protocol::AgentInputSource;
+use papermachine_protocol::AgentInputStatus;
 use papermachine_protocol::ArtifactId;
 use papermachine_protocol::ArtifactKind;
-use papermachine_protocol::ControlMessageKind;
-use papermachine_protocol::ControlMessageStatus;
 use papermachine_protocol::HumanRequestId;
 use papermachine_protocol::HumanRequestStatus;
 use papermachine_protocol::MessageRole;
@@ -128,7 +129,7 @@ fn session_is_the_workflow_instance_and_owns_multiple_agents() {
         },
         params: json!({}),
         default_model: "test-model".to_string(),
-        access: AccessPreset::Workspace,
+        access: AccessPreset::FullAccess,
         enabled_skills: Vec::new(),
         agent_access_overrides: BTreeMap::new(),
     });
@@ -775,10 +776,10 @@ fn project_changes_page_current_entities_and_chunk_text_artifacts() {
 }
 
 #[test]
-fn control_claim_is_agent_scoped_and_applied_by_checkpoint() {
+fn agent_input_claim_is_agent_scoped_and_applied_by_checkpoint() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
-    let project = project(&store, &directory, "controls");
+    let project = project(&store, &directory, "agent-inputs");
     let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Workspace);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let created = harness
@@ -787,33 +788,34 @@ fn control_claim_is_agent_scoped_and_applied_by_checkpoint() {
     store
         .start_turn(created.turn.id)
         .expect("Turn should start");
-    let control = store
-        .create_control_message(
+    let input = store
+        .create_agent_input(
             harness.session.id,
             harness.agent.id,
             Some(created.invocation.id),
-            ControlMessageKind::Guide,
+            AgentInputSource::Human,
+            AgentInputKind::Guide,
             "Check the evidence",
         )
-        .expect("control should queue");
+        .expect("Agent input should queue");
     let first = store
-        .claim_control_messages(
+        .claim_agent_inputs(
             harness.session.id,
             harness.agent.id,
             Some(created.invocation.id),
             created.turn.id,
         )
-        .expect("control should claim");
+        .expect("Agent input should claim");
     let recovered = store
-        .claim_control_messages(
+        .claim_agent_inputs(
             harness.session.id,
             harness.agent.id,
             Some(created.invocation.id),
             created.turn.id,
         )
-        .expect("same Turn should recover its claim");
+        .expect("same Turn should recover its input claim");
     assert_eq!(first, recovered);
-    assert_eq!(first[0].status, ControlMessageStatus::Claimed);
+    assert_eq!(first[0].status, AgentInputStatus::Claimed);
 
     store
         .checkpoint_turn_context(
@@ -829,19 +831,19 @@ fn control_claim_is_agent_scoped_and_applied_by_checkpoint() {
                 completed_model_steps: 0,
                 hosted_search_calls_used: 0,
                 checkpoint_message: None,
-                acknowledged_control_ids: vec![control.id],
+                acknowledged_agent_input_ids: vec![input.id],
             },
         )
-        .expect("checkpoint should acknowledge control");
-    let controls = store
-        .list_control_messages(harness.session.id)
-        .expect("control messages should list");
+        .expect("checkpoint should acknowledge Agent input");
+    let inputs = store
+        .list_agent_inputs(harness.session.id)
+        .expect("Agent inputs should list");
     assert_eq!(
-        controls
+        inputs
             .first()
-            .expect("the acknowledged control should remain visible")
+            .expect("the acknowledged Agent input should remain visible")
             .status,
-        ControlMessageStatus::Applied
+        AgentInputStatus::Applied
     );
 }
 

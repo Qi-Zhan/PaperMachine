@@ -40,10 +40,14 @@ use papermachine_store::StoreError;
 use papermachine_store::StoreHandle;
 use papermachine_tools::ApplyPatchTool;
 use papermachine_tools::ExecCommandTool;
+use papermachine_tools::NATIVE_TOOL_NAMES;
 use papermachine_tools::ProcessTable;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::WriteStdinTool;
+use papermachine_workflow::ActionControl;
 use papermachine_workflow::ActionRunner;
+use papermachine_workflow::COLLABORATION_TOOL_NAMES;
+use papermachine_workflow::CollaborationTools;
 use papermachine_workflow::PythonSessionExecutor;
 use papermachine_workflow::SessionExecutor;
 use papermachine_workflow::SessionScheduler;
@@ -102,8 +106,6 @@ type InitializedModels = (
     Vec<ModelProfile>,
     Vec<ModelProviderInfo>,
 );
-
-const LOCAL_TOOL_NAMES: [&str; 3] = ["exec_command", "write_stdin", "apply_patch"];
 
 #[derive(Clone)]
 pub struct AppState {
@@ -276,6 +278,7 @@ struct ProjectRuntimeFactory {
     turn_permits: Arc<Semaphore>,
     session_permits: Arc<Semaphore>,
     max_processes_per_agent: usize,
+    max_child_agents: usize,
     shutdown: CancellationToken,
 }
 
@@ -297,12 +300,17 @@ impl ProjectRuntimeFactory {
             .await?;
         let processes =
             ProcessTable::new(self.max_processes_per_agent, self.shutdown.child_token());
-        let tools = ToolCatalog::builder()
-            .register_workspace(ExecCommandTool::new(processes.clone()))
+        let action_control = ActionControl::default();
+        let collaboration =
+            CollaborationTools::new(store.clone(), action_control.clone(), self.max_child_agents);
+        let tools = collaboration
+            .register(ToolCatalog::builder())
+            .context("failed to register collaboration tools")?
+            .register_native(ExecCommandTool::new(processes.clone()))
             .context("failed to register exec_command")?
-            .register_workspace(WriteStdinTool::new(processes.clone()))
+            .register_native(WriteStdinTool::new(processes.clone()))
             .context("failed to register write_stdin")?
-            .register_workspace(ApplyPatchTool)
+            .register_native(ApplyPatchTool)
             .context("failed to register apply_patch")?
             .build();
         let mut catalog = self.base_catalog.clone();
@@ -340,7 +348,7 @@ impl ProjectRuntimeFactory {
             catalog.python_runtime_root(),
             workflow_runtime_root,
         ));
-        let action_runner = ActionRunner::new(store.clone(), turns.clone());
+        let action_runner = ActionRunner::new(store.clone(), turns.clone(), action_control);
         let scheduler = SessionScheduler::new_with_permits(
             store.clone(),
             executor,
@@ -397,7 +405,10 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
     let base_catalog = WorkflowProgramCatalog::scan(
         &workflows_root,
         &python_runtime_root,
-        LOCAL_TOOL_NAMES.into_iter().map(str::to_string),
+        NATIVE_TOOL_NAMES
+            .into_iter()
+            .chain(COLLABORATION_TOOL_NAMES)
+            .map(str::to_string),
     )
     .context("failed to load built-in WorkflowProgram catalog")?;
     let catalog = Arc::new(
@@ -447,6 +458,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         )),
         session_permits: Arc::new(Semaphore::new(config.max_concurrent_runs.max(1))),
         max_processes_per_agent: config.max_parallel_actions.max(1),
+        max_child_agents: config.max_parallel_actions.max(1),
         shutdown: shutdown.clone(),
     });
     let (catalog_projects, failures) = catalog.scan_resilient()?;
@@ -547,8 +559,8 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             post(cancel_session),
         )
         .route(
-            "/projects/{project_id}/sessions/{session_id}/agents/{agent_id}/control",
-            post(create_control_message),
+            "/projects/{project_id}/sessions/{session_id}/agents/{agent_id}/input",
+            post(create_agent_input),
         )
         .route(
             "/projects/{project_id}/sessions/{session_id}/events",
@@ -1150,7 +1162,7 @@ struct SessionView {
     actions: Vec<ActionInvocation>,
     attempts: Vec<ActionAttempt>,
     human_requests: Vec<HumanRequest>,
-    control_messages: Vec<ControlMessage>,
+    agent_inputs: Vec<AgentInput>,
     artifacts: Vec<Artifact>,
 }
 
@@ -1194,7 +1206,7 @@ async fn get_session_view(
     if session.project_id != project_id {
         return Err(ApiError::not_found(format!("Session {session_id}")));
     }
-    let (agents, turns, steps, rollouts, effects, actions, attempts, requests, controls, artifacts) =
+    let (agents, turns, steps, rollouts, effects, actions, attempts, requests, inputs, artifacts) =
         runtime
             .store
             .call(move |store| {
@@ -1217,7 +1229,7 @@ async fn get_session_view(
                     store.list_action_invocations(session_id)?,
                     store.list_session_action_attempts(session_id)?,
                     store.list_human_requests(session_id)?,
-                    store.list_control_messages(session_id)?,
+                    store.list_agent_inputs(session_id)?,
                     store.list_artifacts(session_id)?,
                 ))
             })
@@ -1232,7 +1244,7 @@ async fn get_session_view(
         actions,
         attempts,
         human_requests: requests,
-        control_messages: controls,
+        agent_inputs: inputs,
         artifacts,
     }))
 }
@@ -1610,19 +1622,19 @@ async fn cancel_session(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ControlRequest {
-    kind: ControlMessageKind,
+struct AgentInputRequest {
+    kind: AgentInputKind,
     content: String,
     action_invocation_id: Option<ActionInvocationId>,
 }
 
-async fn create_control_message(
+async fn create_agent_input(
     State(state): State<AppState>,
     Path((project_id, session_id, agent_id)): Path<(String, String, String)>,
-    Json(request): Json<ControlRequest>,
-) -> ApiResult<(StatusCode, Json<ControlMessage>)> {
+    Json(request): Json<AgentInputRequest>,
+) -> ApiResult<(StatusCode, Json<AgentInput>)> {
     if request.content.trim().is_empty() {
-        return Err(ApiError::bad_request("control message must not be empty"));
+        return Err(ApiError::bad_request("Agent input must not be empty"));
     }
     let project_id: ProjectId = parse_id(&project_id, "Project")?;
     let session_id: SessionId = parse_id(&session_id, "Session")?;
@@ -1638,10 +1650,11 @@ async fn create_control_message(
                     "Session belongs to another Project".to_string(),
                 ));
             }
-            store.create_control_message(
+            store.create_agent_input(
                 session_id,
                 agent_id,
                 request.action_invocation_id,
+                AgentInputSource::Human,
                 request.kind,
                 &content,
             )

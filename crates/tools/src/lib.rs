@@ -34,12 +34,15 @@ pub use registry::ToolCatalog;
 pub use registry::ToolCatalogBuilder;
 pub use registry::ToolRegistry;
 
+pub const NATIVE_TOOL_NAMES: [&str; 3] = ["exec_command", "write_stdin", "apply_patch"];
+
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub project_id: ProjectId,
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub turn_id: TurnId,
+    pub tool_call_id: String,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub sandbox_root: PathBuf,

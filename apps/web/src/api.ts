@@ -1,7 +1,7 @@
 import type {
   Artifact,
-  ControlMessage,
-  ControlMessageKind,
+  AgentInput,
+  AgentInputKind,
   CreateSessionRequest,
   GeneratedWorkflow,
   Health,
@@ -87,12 +87,12 @@ export const api = {
     request<void>(`/projects/${projectId}/sessions/${sessionId}/resume`, { method: 'POST' }),
   cancelSession: (projectId: string, sessionId: string) =>
     request<void>(`/projects/${projectId}/sessions/${sessionId}/cancel`, { method: 'POST' }),
-  createControlMessage: (
+  createAgentInput: (
     projectId: string,
     sessionId: string,
     agentId: string,
-    input: { kind: ControlMessageKind; content: string; action_invocation_id?: string },
-  ) => request<ControlMessage>(`/projects/${projectId}/sessions/${sessionId}/agents/${agentId}/control`, {
+    input: { kind: AgentInputKind; content: string; action_invocation_id?: string },
+  ) => request<AgentInput>(`/projects/${projectId}/sessions/${sessionId}/agents/${agentId}/input`, {
     method: 'POST',
     body: JSON.stringify(input),
   }),
@@ -136,8 +136,8 @@ export const sessionEventTypes = [
   'sampling_retry',
   'human_request_opened',
   'human_request_resolved',
-  'control_message_queued',
-  'control_message_applied',
+  'agent_input_queued',
+  'agent_input_applied',
   'usage_updated',
   'session_resync',
   'warning',

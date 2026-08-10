@@ -13,6 +13,13 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct CatalogEntry {
     executor: Arc<dyn ToolExecutor>,
+    kind: ToolKind,
+}
+
+#[derive(Clone, Copy)]
+enum ToolKind {
+    Native,
+    Collaboration,
 }
 
 /// Host-owned catalog of every local tool implementation.
@@ -35,6 +42,7 @@ impl ToolCatalog {
         &self,
         tool_policy: Option<&[String]>,
         access: AccessPreset,
+        allow_spawn: bool,
     ) -> Result<ToolSetSnapshot, ToolError> {
         let requested_tools = tool_policy
             .map(|tools| tools.iter().collect::<Vec<_>>())
@@ -51,7 +59,11 @@ impl ToolCatalog {
                 .tools
                 .get(name)
                 .ok_or_else(|| ToolError::UnknownTool(name.clone()))?;
-            if access.allows_local_tool(name) {
+            let allowed = match entry.kind {
+                ToolKind::Native => access.allows_local_tool(name),
+                ToolKind::Collaboration => allow_spawn || name != "spawn_agent",
+            };
+            if allowed {
                 selected.push((name, entry));
             }
         }
@@ -149,14 +161,21 @@ pub struct ToolCatalogBuilder {
 }
 
 impl ToolCatalogBuilder {
-    pub fn register_workspace<T>(self, tool: T) -> Result<Self, ToolError>
+    pub fn register_native<T>(self, tool: T) -> Result<Self, ToolError>
     where
         T: ToolExecutor + 'static,
     {
-        self.register(tool)
+        self.register(tool, ToolKind::Native)
     }
 
-    fn register<T>(mut self, tool: T) -> Result<Self, ToolError>
+    pub fn register_collaboration<T>(self, tool: T) -> Result<Self, ToolError>
+    where
+        T: ToolExecutor + 'static,
+    {
+        self.register(tool, ToolKind::Collaboration)
+    }
+
+    fn register<T>(mut self, tool: T, kind: ToolKind) -> Result<Self, ToolError>
     where
         T: ToolExecutor + 'static,
     {
@@ -170,6 +189,7 @@ impl ToolCatalogBuilder {
             name,
             CatalogEntry {
                 executor: Arc::new(tool),
+                kind,
             },
         );
         Ok(self)

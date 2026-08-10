@@ -14,7 +14,7 @@ mod rollout;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionSource;
 use papermachine_protocol::AgentId;
-use papermachine_protocol::ControlMessageId;
+use papermachine_protocol::AgentInputId;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelResponseFormat;
 use papermachine_protocol::ProjectId;
@@ -83,13 +83,19 @@ pub struct NewActionInvocation {
 }
 
 #[derive(Clone, Debug)]
+pub struct AgentInterrupt {
+    pub cancelled_action_ids: Vec<papermachine_protocol::ActionInvocationId>,
+    pub running_action_ids: Vec<papermachine_protocol::ActionInvocationId>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TurnContextCheckpoint {
     pub mutation: ModelContextMutation,
     pub usage: TokenUsage,
     pub completed_model_steps: u32,
     pub hosted_search_calls_used: u32,
     pub checkpoint_message: Option<String>,
-    pub acknowledged_control_ids: Vec<ControlMessageId>,
+    pub acknowledged_agent_input_ids: Vec<AgentInputId>,
 }
 
 #[derive(Debug, Error)]

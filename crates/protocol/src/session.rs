@@ -2,7 +2,7 @@ use crate::AccessPreset;
 use crate::ActionAttemptId;
 use crate::ActionInvocationId;
 use crate::AgentId;
-use crate::ControlMessageId;
+use crate::AgentInputId;
 use crate::HumanRequestId;
 use crate::ModelResponseFormat;
 use crate::ModelRouteSnapshot;
@@ -42,6 +42,13 @@ pub enum SessionStatus {
 impl SessionStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    pub const fn accepts_actions(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingForInput | Self::WaitingForDeadline
+        )
     }
 }
 
@@ -134,6 +141,7 @@ pub struct SessionUsage {
 pub struct Agent {
     pub id: AgentId,
     pub session_id: SessionId,
+    pub parent_agent_id: Option<AgentId>,
     pub class_name: String,
     pub name: String,
     pub role: String,
@@ -231,7 +239,8 @@ pub struct HumanRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ControlMessageKind {
+pub enum AgentInputKind {
+    Message,
     Guide,
     Interrupt,
     Finish,
@@ -239,21 +248,29 @@ pub enum ControlMessageKind {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ControlMessageStatus {
+pub enum AgentInputStatus {
     Pending,
     Claimed,
     Applied,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ControlMessage {
-    pub id: ControlMessageId,
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AgentInputSource {
+    Human,
+    Agent { sender_agent_id: AgentId },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct AgentInput {
+    pub id: AgentInputId,
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub action_invocation_id: Option<ActionInvocationId>,
-    pub kind: ControlMessageKind,
+    pub source: AgentInputSource,
+    pub kind: AgentInputKind,
     pub content: String,
-    pub status: ControlMessageStatus,
+    pub status: AgentInputStatus,
     pub created_at: DateTime<Utc>,
     pub claimed_turn_id: Option<TurnId>,
     pub claimed_at: Option<DateTime<Utc>>,

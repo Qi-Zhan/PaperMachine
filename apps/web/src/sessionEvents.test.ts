@@ -56,7 +56,7 @@ function view(): SessionView {
     actions: [],
     attempts: [],
     human_requests: [],
-    control_messages: [],
+    agent_inputs: [],
     artifacts: [],
   }
 }

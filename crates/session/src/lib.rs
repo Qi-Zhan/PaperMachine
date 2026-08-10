@@ -15,8 +15,9 @@ use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
 use papermachine_protocol::Agent;
 use papermachine_protocol::AgentId;
+use papermachine_protocol::AgentInputKind;
+use papermachine_protocol::AgentInputSource;
 use papermachine_protocol::ContextReplacementReason;
-use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelResponseFormat;
@@ -266,10 +267,11 @@ impl TurnRuntime {
             .call(move |store| store.get_project_system_prompt(project_id))
             .await?;
         let prompt = build_prompt_snapshot(&agent, project_prompt, prompt_layers, &resolved);
-        let tool_set = self
-            .inner
-            .tools
-            .materialize_action_tools(tool_policy.as_deref(), agent.access)?;
+        let tool_set = self.inner.tools.materialize_action_tools(
+            tool_policy.as_deref(),
+            agent.access,
+            agent.parent_agent_id.is_none(),
+        )?;
         let model_route = self.inner.model.resolve_route_snapshot(
             &model,
             reasoning_effort,
@@ -425,7 +427,7 @@ async fn run_scheduled_turn_inner(
                 completed_model_steps: active_rollout.completed_model_steps,
                 hosted_search_calls_used: active_rollout.hosted_search_calls_used,
                 checkpoint_message: active_rollout.checkpoint_message.clone(),
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             };
             let checkpoint_turn_id = turn.id;
             inner
@@ -504,7 +506,7 @@ async fn run_scheduled_turn_inner(
         }
         Err(AgentError::Interrupted {
             reason,
-            control_message_ids,
+            agent_input_ids,
         }) => {
             event_sink
                 .finish_pending(StepStatus::Cancelled, &reason)
@@ -514,7 +516,7 @@ async fn run_scheduled_turn_inner(
             inner
                 .store
                 .call(move |store| {
-                    store.interrupt_turn_with_controls(turn_id, stored_reason, &control_message_ids)
+                    store.interrupt_turn_with_inputs(turn_id, stored_reason, &agent_input_ids)
                 })
                 .await?;
             Err(TurnRuntimeError::Interrupted(reason))
@@ -553,9 +555,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                 .await
                 .map_err(|error| error.to_string())?;
             match run.status {
-                SessionStatus::Paused
-                | SessionStatus::WaitingForInput
-                | SessionStatus::WaitingForDeadline => {
+                SessionStatus::Paused => {
                     let turn_id = context.turn_id;
                     let mut events = self
                         .store
@@ -577,16 +577,19 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         }
                     }
                 }
-                SessionStatus::Created | SessionStatus::Running => break,
+                SessionStatus::Created
+                | SessionStatus::Running
+                | SessionStatus::WaitingForInput
+                | SessionStatus::WaitingForDeadline => break,
                 SessionStatus::Closing
                 | SessionStatus::Completed
                 | SessionStatus::Failed
                 | SessionStatus::Cancelled => {
                     return Ok(AgentCheckpoint {
-                        guidance: Vec::new(),
+                        messages: Vec::new(),
                         interrupt: Some(format!("Session entered {:?}", run.status)),
                         finish: None,
-                        control_message_ids: Vec::new(),
+                        agent_input_ids: Vec::new(),
                     });
                 }
             }
@@ -601,17 +604,36 @@ impl AgentControlPlane for StoreAgentControlPlane {
                 if turn.status == TurnStatus::Paused {
                     store.resume_turn(turn_id)?;
                 }
-                store.claim_control_messages(session_id, agent_id, action_invocation_id, turn_id)
+                store.claim_agent_inputs(session_id, agent_id, action_invocation_id, turn_id)
             })
             .await
             .map_err(|error| error.to_string())?;
         let mut checkpoint = AgentCheckpoint::default();
         for message in messages {
-            checkpoint.control_message_ids.push(message.id);
+            checkpoint.agent_input_ids.push(message.id);
             match message.kind {
-                ControlMessageKind::Guide => checkpoint.guidance.push(message.content),
-                ControlMessageKind::Interrupt => checkpoint.interrupt = Some(message.content),
-                ControlMessageKind::Finish => checkpoint.finish = Some(message.content),
+                AgentInputKind::Message => {
+                    let sender = match message.source {
+                        AgentInputSource::Agent { sender_agent_id } => {
+                            let sender = self
+                                .store
+                                .call(move |store| store.get_agent(sender_agent_id))
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            format!("Message from {} ({}):", sender.name, sender.id)
+                        }
+                        AgentInputSource::Human => "Message from the user:".to_string(),
+                    };
+                    checkpoint
+                        .messages
+                        .push(format!("{sender}\n{}", message.content));
+                }
+                AgentInputKind::Guide => checkpoint.messages.push(format!(
+                    "Human guidance for this running action:\n{}",
+                    message.content
+                )),
+                AgentInputKind::Interrupt => checkpoint.interrupt = Some(message.content),
+                AgentInputKind::Finish => checkpoint.finish = Some(message.content),
             }
         }
         Ok(checkpoint)
@@ -1208,7 +1230,7 @@ impl AgentEventSink for TurnEventSink {
                 completed_model_steps,
                 hosted_search_calls_used,
                 message,
-                acknowledged_control_ids,
+                acknowledged_agent_input_ids,
             } => {
                 let mut checkpoint = self.checkpoint.lock().await;
                 let mutation = if history == checkpoint.context {
@@ -1264,7 +1286,7 @@ impl AgentEventSink for TurnEventSink {
                                 completed_model_steps,
                                 hosted_search_calls_used,
                                 checkpoint_message: message,
-                                acknowledged_control_ids,
+                                acknowledged_agent_input_ids,
                             },
                         )
                     })

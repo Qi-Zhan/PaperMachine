@@ -62,11 +62,15 @@ fn turn_environment(
 
 fn command_tools() -> ToolRegistry {
     let catalog = ToolCatalog::builder()
-        .register_workspace(ExecCommandTool::default())
+        .register_native(ExecCommandTool::default())
         .expect("command tool should register")
         .build();
     let snapshot = catalog
-        .materialize_action_tools(Some(&["exec_command".to_string()]), AccessPreset::Workspace)
+        .materialize_action_tools(
+            Some(&["exec_command".to_string()]),
+            AccessPreset::Workspace,
+            true,
+        )
         .expect("command tool set should materialize");
     catalog
         .registry_for_snapshot(&snapshot)
@@ -75,15 +79,16 @@ fn command_tools() -> ToolRegistry {
 
 fn workspace_tools() -> ToolRegistry {
     let catalog = ToolCatalog::builder()
-        .register_workspace(ExecCommandTool::default())
+        .register_native(ExecCommandTool::default())
         .expect("command tool should register")
-        .register_workspace(ApplyPatchTool)
+        .register_native(ApplyPatchTool)
         .expect("patch tool should register")
         .build();
     let snapshot = catalog
         .materialize_action_tools(
             Some(&["exec_command".to_string(), "apply_patch".to_string()]),
             AccessPreset::Workspace,
+            true,
         )
         .expect("Workspace tool set should materialize");
     catalog

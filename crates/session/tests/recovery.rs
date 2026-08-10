@@ -227,7 +227,7 @@ fn workflow_recovery_fixture(
         .expect("Agent should be created");
     let calls = Arc::new(AtomicUsize::new(0));
     let catalog = ToolCatalog::builder()
-        .register_workspace(CountingTool {
+        .register_native(CountingTool {
             calls: Arc::clone(&calls),
         })
         .expect("tool should register")
@@ -256,7 +256,7 @@ fn workflow_recovery_fixture(
         .resolve_route_snapshot("test-model", None, 128_000)
         .expect("test model route should resolve");
     let tool_set = catalog
-        .materialize_action_tools(Some(&requested_tools), AccessPreset::Workspace)
+        .materialize_action_tools(Some(&requested_tools), AccessPreset::Workspace, true)
         .expect("Action tool set should materialize");
     let turn = store
         .create_turn_for_attempt(
@@ -296,7 +296,7 @@ fn workflow_recovery_fixture(
                 completed_model_steps: 1,
                 hosted_search_calls_used: 0,
                 checkpoint_message: None,
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("context should checkpoint");

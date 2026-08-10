@@ -122,7 +122,7 @@ export function sessionEventTitle(event: SessionEvent): string {
     agent_created: t('event.agentCreated'),
     human_request_opened: t('event.humanRequested'),
     human_request_resolved: t('event.humanResolved'),
-    control_message_applied: t('event.guidanceApplied'),
+    agent_input_applied: t('event.guidanceApplied'),
     warning: t('event.warning'),
   }
   return explicit[event.type] ?? statusLabel(event.type)

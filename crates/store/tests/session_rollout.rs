@@ -48,7 +48,7 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
                 completed_model_steps: 1,
                 hosted_search_calls_used: 0,
                 checkpoint_message: Some("answer".to_string()),
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("context should checkpoint");
@@ -116,7 +116,7 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
                 completed_model_steps: 2,
                 hosted_search_calls_used: 1,
                 checkpoint_message: None,
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("context should checkpoint");
@@ -280,7 +280,7 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
                 completed_model_steps: 1,
                 hosted_search_calls_used: 0,
                 checkpoint_message: None,
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("initial context should checkpoint");
@@ -297,7 +297,7 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
                 completed_model_steps: 1,
                 hosted_search_calls_used: 0,
                 checkpoint_message: None,
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("compacted context should checkpoint");
@@ -313,7 +313,7 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
                 completed_model_steps: 2,
                 hosted_search_calls_used: 0,
                 checkpoint_message: Some("done".to_string()),
-                acknowledged_control_ids: Vec::new(),
+                acknowledged_agent_input_ids: Vec::new(),
             },
         )
         .expect("terminal context should checkpoint");

@@ -506,6 +506,24 @@ async fn interactive_session_has_one_agent_rollout_and_exact_human_provenance() 
             .iter()
             .all(|turn| turn["agent_id"] == agent_id)
     );
+    assert_eq!(
+        second["turns"][0]["tool_set"]["definitions"]
+            .as_array()
+            .expect("interactive ToolSet should be an array")
+            .iter()
+            .map(|definition| definition["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "apply_patch",
+            "exec_command",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent",
+            "write_stdin",
+        ]
+    );
     let first_turn = &first["turns"][0];
     let action = first["actions"]
         .as_array()

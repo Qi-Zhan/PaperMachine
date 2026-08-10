@@ -2,8 +2,8 @@ use crate::ActionAttemptId;
 use crate::ActionInvocationId;
 use crate::ActionStatus;
 use crate::AgentId;
-use crate::ControlMessageId;
-use crate::ControlMessageKind;
+use crate::AgentInputId;
+use crate::AgentInputKind;
 use crate::EventId;
 use crate::HumanRequestId;
 use crate::ProjectId;
@@ -64,13 +64,13 @@ pub enum SessionEventPayload {
     HumanRequestResolved {
         human_request_id: HumanRequestId,
     },
-    ControlMessageQueued {
-        control_message_id: ControlMessageId,
-        kind: ControlMessageKind,
+    AgentInputQueued {
+        agent_input_id: AgentInputId,
+        kind: AgentInputKind,
     },
-    ControlMessageApplied {
-        control_message_id: ControlMessageId,
-        kind: ControlMessageKind,
+    AgentInputApplied {
+        agent_input_id: AgentInputId,
+        kind: AgentInputKind,
     },
     UsageUpdated {
         usage: SessionUsage,

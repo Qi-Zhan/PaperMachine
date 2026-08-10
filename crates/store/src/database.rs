@@ -1,3 +1,4 @@
+use crate::AgentInterrupt;
 use crate::NewActionInvocation;
 use crate::NewSession;
 use crate::StoreError;
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 23;
+const SCHEMA_VERSION: u32 = 24;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -630,18 +631,18 @@ impl Store {
         )
     }
 
-    pub fn interrupt_turn_with_controls(
+    pub fn interrupt_turn_with_inputs(
         &self,
         id: TurnId,
         reason: impl Into<String>,
-        control_message_ids: &[ControlMessageId],
+        agent_input_ids: &[AgentInputId],
     ) -> Result<Turn, StoreError> {
         self.transition_turn(
             id,
             &[TurnStatus::Running, TurnStatus::Paused],
             TurnStatus::Interrupted,
             Some(reason.into()),
-            control_message_ids.to_vec(),
+            agent_input_ids.to_vec(),
         )
     }
 
@@ -661,7 +662,7 @@ impl Store {
         allowed_from: &[TurnStatus],
         status: TurnStatus,
         error: Option<String>,
-        acknowledged_control_ids: Vec<ControlMessageId>,
+        acknowledged_agent_input_ids: Vec<AgentInputId>,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
         let agent_lock = self.shared.agent_rollout_lock(existing.agent_id)?;
@@ -677,7 +678,7 @@ impl Store {
                 turn.status
             )));
         }
-        self.persist_turn_status_locked(turn, status, error, acknowledged_control_ids)
+        self.persist_turn_status_locked(turn, status, error, acknowledged_agent_input_ids)
     }
 
     pub fn checkpoint_turn_context(
@@ -704,7 +705,7 @@ impl Store {
                 completed_model_steps: checkpoint.completed_model_steps,
                 hosted_search_calls_used: checkpoint.hosted_search_calls_used,
                 checkpoint_message: checkpoint.checkpoint_message,
-                acknowledged_control_ids: checkpoint.acknowledged_control_ids,
+                acknowledged_agent_input_ids: checkpoint.acknowledged_agent_input_ids,
             },
         )?;
         self.get_turn(id)
@@ -715,7 +716,7 @@ impl Store {
         mut turn: Turn,
         status: TurnStatus,
         error: Option<String>,
-        acknowledged_control_ids: Vec<ControlMessageId>,
+        acknowledged_agent_input_ids: Vec<AgentInputId>,
     ) -> Result<Turn, StoreError> {
         if turn.status.is_terminal() {
             return Err(StoreError::Invariant(format!(
@@ -730,7 +731,7 @@ impl Store {
             turn.agent_id,
             AgentRolloutItem::TurnUpdated {
                 turn: turn.clone(),
-                acknowledged_control_ids,
+                acknowledged_agent_input_ids,
             },
         )?;
         Ok(turn)
@@ -1698,6 +1699,7 @@ impl Store {
         let agent = Agent {
             id: agent_id,
             session_id: session.id,
+            parent_agent_id: None,
             class_name,
             name,
             role,
@@ -1715,8 +1717,8 @@ impl Store {
         session.updated_at = now;
         transaction.execute(
             "INSERT INTO agents
-             (id, session_id, document_json)
-             VALUES (?1, ?2, ?3)",
+             (id, session_id, parent_agent_id, document_json)
+             VALUES (?1, ?2, NULL, ?3)",
             params![
                 agent.id.to_string(),
                 session.id.to_string(),
@@ -1751,6 +1753,162 @@ impl Store {
              ORDER BY created_at ASC, id ASC",
             [session_id.to_string()],
         )
+    }
+
+    pub fn interrupt_descendant_agent(
+        &self,
+        caller_agent_id: AgentId,
+        target_agent_id: AgentId,
+        input_id: AgentInputId,
+        reason: String,
+    ) -> Result<AgentInterrupt, StoreError> {
+        if caller_agent_id == target_agent_id {
+            return Err(StoreError::Invariant(
+                "an Agent cannot interrupt itself with the collaboration tool".to_string(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let caller: Agent = load_document_tx(
+            &transaction,
+            "agents",
+            &caller_agent_id.to_string(),
+            "caller Agent",
+        )?;
+        let target: Agent = load_document_tx(
+            &transaction,
+            "agents",
+            &target_agent_id.to_string(),
+            "target Agent",
+        )?;
+        if caller.session_id != target.session_id {
+            return Err(StoreError::Invariant(
+                "only descendants in the caller Session may be interrupted".to_string(),
+            ));
+        }
+        let mut ancestor = target.parent_agent_id;
+        let mut is_descendant = false;
+        while let Some(agent_id) = ancestor {
+            if agent_id == caller.id {
+                is_descendant = true;
+                break;
+            }
+            let agent: Agent = load_document_tx(
+                &transaction,
+                "agents",
+                &agent_id.to_string(),
+                "ancestor Agent",
+            )?;
+            if agent.session_id != caller.session_id {
+                return Err(StoreError::Invariant(
+                    "Agent ancestry crossed a Session boundary".to_string(),
+                ));
+            }
+            ancestor = agent.parent_agent_id;
+        }
+        if !is_descendant {
+            return Err(StoreError::Invariant(
+                "interrupt_agent may only target a caller descendant".to_string(),
+            ));
+        }
+        let session: Session = load_document_tx(
+            &transaction,
+            "sessions",
+            &target.session_id.to_string(),
+            "Session",
+        )?;
+        if session.status.is_terminal() || session.archived_at.is_some() {
+            return Err(StoreError::Invariant(
+                "cannot interrupt an Agent in a terminal or archived Session".to_string(),
+            ));
+        }
+        let documents = {
+            let mut statement = transaction.prepare(
+                "SELECT document_json FROM action_invocations
+                 WHERE agent_id = ?1 AND status IN ('scheduled', 'running', 'interrupted')
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows =
+                statement.query_map([target.id.to_string()], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut actions = documents
+            .into_iter()
+            .map(|document| serde_json::from_str::<ActionInvocation>(&document))
+            .collect::<Result<Vec<_>, _>>()?;
+        if actions
+            .iter()
+            .filter(|action| action.status == ActionStatus::Running)
+            .count()
+            > 1
+        {
+            return Err(StoreError::Invariant(
+                "an Agent has more than one running Action".to_string(),
+            ));
+        }
+        let now = Utc::now();
+        let mut cancelled_action_ids = Vec::new();
+        let mut running_action_ids = Vec::new();
+        let mut events = Vec::new();
+        for action in &mut actions {
+            match action.status {
+                ActionStatus::Scheduled | ActionStatus::Interrupted => {
+                    action.status = ActionStatus::Cancelled;
+                    action.output = None;
+                    action.error = Some(reason.clone());
+                    action.updated_at = now;
+                    update_status_document_tx(
+                        &transaction,
+                        "action_invocations",
+                        &action.id.to_string(),
+                        action.status,
+                        action,
+                    )?;
+                    events.push(append_session_event_tx(
+                        &transaction,
+                        action.session_id,
+                        Some(action.agent_id),
+                        None,
+                        None,
+                        action_event_payload(action, None),
+                    )?);
+                    events.extend(apply_terminal_action_inputs_tx(
+                        &transaction,
+                        action.id,
+                        now,
+                    )?);
+                    cancelled_action_ids.push(action.id);
+                }
+                ActionStatus::Running => {
+                    let (_, event) = insert_agent_input_tx(
+                        &transaction,
+                        input_id,
+                        action.session_id,
+                        action.agent_id,
+                        Some(action.id),
+                        AgentInputSource::Agent {
+                            sender_agent_id: caller.id,
+                        },
+                        AgentInputKind::Interrupt,
+                        reason.clone(),
+                    )?;
+                    if let Some(event) = event {
+                        events.push(event);
+                    }
+                    running_action_ids.push(action.id);
+                }
+                ActionStatus::Completed | ActionStatus::Failed | ActionStatus::Cancelled => {}
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        for event in events {
+            self.shared.publish_session(event);
+        }
+        Ok(AgentInterrupt {
+            cancelled_action_ids,
+            running_action_ids,
+        })
     }
 
     pub fn set_agent_access(
@@ -1803,6 +1961,186 @@ impl Store {
         Ok(agent)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_child_agent_task(
+        &self,
+        parent_agent_id: AgentId,
+        child_agent_id: AgentId,
+        invocation_id: ActionInvocationId,
+        name: Option<String>,
+        task: String,
+        access: Option<AccessPreset>,
+        max_children: usize,
+    ) -> Result<(Agent, ActionInvocation), StoreError> {
+        if task.trim().is_empty() {
+            return Err(StoreError::Invariant(
+                "child Agent task must not be empty".to_string(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let parent: Agent = load_document_tx(
+            &transaction,
+            "agents",
+            &parent_agent_id.to_string(),
+            "parent Agent",
+        )?;
+        let requested_name = name.filter(|name| !name.trim().is_empty());
+        let requested_access = access.unwrap_or(parent.access);
+
+        match load_document_tx::<Agent>(
+            &transaction,
+            "agents",
+            &child_agent_id.to_string(),
+            "child Agent",
+        ) {
+            Ok(existing) => {
+                let action: ActionInvocation = load_document_tx(
+                    &transaction,
+                    "action_invocations",
+                    &invocation_id.to_string(),
+                    "child Action",
+                )?;
+                if existing.session_id == parent.session_id
+                    && existing.parent_agent_id == Some(parent.id)
+                    && requested_name
+                        .as_ref()
+                        .is_none_or(|name| existing.name == *name)
+                    && existing.access == requested_access
+                    && action.session_id == existing.session_id
+                    && action.agent_id == existing.id
+                    && action.action_name == "agent_task"
+                    && action.input == task
+                    && action.source
+                        == (ActionSource::Agent {
+                            sender_agent_id: parent.id,
+                        })
+                {
+                    transaction.commit()?;
+                    return Ok((existing, action));
+                }
+                return Err(StoreError::Invariant(format!(
+                    "child Agent id {child_agent_id} was reused with different provenance"
+                )));
+            }
+            Err(StoreError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        let mut session: Session = load_document_tx(
+            &transaction,
+            "sessions",
+            &parent.session_id.to_string(),
+            "Session",
+        )?;
+        if !session.status.accepts_actions() || session.archived_at.is_some() {
+            return Err(StoreError::Invariant(
+                "cannot spawn an Agent in a terminal, archived, or non-running Session".to_string(),
+            ));
+        }
+        if parent.parent_agent_id.is_some() {
+            return Err(StoreError::Invariant(
+                "child Agents cannot spawn descendants".to_string(),
+            ));
+        }
+        let child_count = transaction.query_row(
+            "SELECT COUNT(*) FROM agents WHERE parent_agent_id = ?1",
+            [parent.id.to_string()],
+            |row| row.get::<_, usize>(0),
+        )?;
+        if child_count >= max_children.max(1) {
+            return Err(StoreError::Invariant(format!(
+                "Agent child limit {} reached",
+                max_children.max(1)
+            )));
+        }
+        let child_access = requested_access;
+        if child_access > parent.access {
+            return Err(StoreError::Invariant(format!(
+                "child access {child_access} exceeds parent access {}",
+                parent.access
+            )));
+        }
+        let child = Agent {
+            id: child_agent_id,
+            session_id: parent.session_id,
+            parent_agent_id: Some(parent.id),
+            class_name: parent.class_name.clone(),
+            name: requested_name
+                .unwrap_or_else(|| format!("{} child {}", parent.name, child_count + 1)),
+            role: parent.role.clone(),
+            system_prompt: parent.system_prompt.clone(),
+            model: parent.model.clone(),
+            access: child_access,
+            skills: parent.skills.clone(),
+            created_at: Utc::now(),
+        };
+        session.usage.agents_created = session.usage.agents_created.saturating_add(1);
+        session.updated_at = child.created_at;
+        transaction.execute(
+            "INSERT INTO agents (id, session_id, parent_agent_id, document_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                child.id.to_string(),
+                child.session_id.to_string(),
+                parent.id.to_string(),
+                serde_json::to_string(&child)?,
+            ],
+        )?;
+        update_session_tx(&transaction, &session)?;
+        let agent_event = append_session_event_tx(
+            &transaction,
+            session.id,
+            Some(child.id),
+            None,
+            None,
+            SessionEventPayload::AgentCreated {
+                name: child.name.clone(),
+                role: child.role.clone(),
+            },
+        )?;
+        let (action, action_event) = insert_action_invocation_tx(
+            &transaction,
+            invocation_id,
+            NewActionInvocation {
+                session_id: session.id,
+                agent_id: child.id,
+                action_name: "agent_task".to_string(),
+                contract: "Complete the delegated task and return a concise, self-contained result to the sending Agent.".to_string(),
+                arguments: json!({
+                    "task": task,
+                    "sender_agent_id": parent.id,
+                }),
+                input: task,
+                source: ActionSource::Agent {
+                    sender_agent_id: parent.id,
+                },
+                tool_policy: None,
+                web_search_context_size: None,
+                reasoning_effort: None,
+                response_format: None,
+            },
+        )?;
+        let usage_event = append_session_event_tx(
+            &transaction,
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::UsageUpdated {
+                usage: session.usage.clone(),
+            },
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(agent_event);
+        if let Some(event) = action_event {
+            self.shared.publish_session(event);
+        }
+        self.shared.publish_session(usage_event);
+        Ok((child, action))
+    }
+
     pub fn create_action_invocation(
         &self,
         action: NewActionInvocation,
@@ -1817,72 +2155,12 @@ impl Store {
     ) -> Result<ActionInvocation, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let agent: Agent = load_document_tx(
-            &transaction,
-            "agents",
-            &action.agent_id.to_string(),
-            "agent",
-        )?;
-        if agent.session_id != action.session_id {
-            return Err(StoreError::Invariant(
-                "action Agent belongs to another Session".to_string(),
-            ));
-        }
-        let session: Session = load_document_tx(
-            &transaction,
-            "sessions",
-            &action.session_id.to_string(),
-            "session",
-        )?;
-        if session.status != SessionStatus::Running {
-            return Err(StoreError::Invariant(
-                "cannot schedule an Action unless its Session is running".to_string(),
-            ));
-        }
-        let now = Utc::now();
-        let invocation = ActionInvocation {
-            id: invocation_id,
-            session_id: action.session_id,
-            agent_id: action.agent_id,
-            action_name: action.action_name,
-            contract: action.contract,
-            arguments: action.arguments,
-            input: action.input,
-            source: action.source,
-            tool_policy: action.tool_policy,
-            web_search_context_size: action.web_search_context_size,
-            reasoning_effort: action.reasoning_effort,
-            response_format: action.response_format,
-            status: ActionStatus::Scheduled,
-            output: None,
-            error: None,
-            created_at: now,
-            updated_at: now,
-        };
-        transaction.execute(
-            "INSERT INTO action_invocations
-             (id, session_id, agent_id, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                invocation.id.to_string(),
-                invocation.session_id.to_string(),
-                invocation.agent_id.to_string(),
-                enum_string(invocation.status)?,
-                now.to_rfc3339(),
-                serde_json::to_string(&invocation)?,
-            ],
-        )?;
-        let event = append_session_event_tx(
-            &transaction,
-            invocation.session_id,
-            Some(invocation.agent_id),
-            None,
-            None,
-            action_event_payload(&invocation, None),
-        )?;
+        let (invocation, event) = insert_action_invocation_tx(&transaction, invocation_id, action)?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_session(event);
+        if let Some(event) = event {
+            self.shared.publish_session(event);
+        }
         Ok(invocation)
     }
 
@@ -1949,9 +2227,14 @@ impl Store {
             None,
             action_event_payload(&invocation, None),
         )?;
+        let input_events =
+            apply_terminal_action_inputs_tx(&transaction, invocation.id, invocation.updated_at)?;
         transaction.commit()?;
         drop(connection);
         self.shared.publish_session(event);
+        for event in input_events {
+            self.shared.publish_session(event);
+        }
         Ok(invocation)
     }
 
@@ -1982,8 +2265,10 @@ impl Store {
             &invocation.session_id.to_string(),
             "session",
         )?;
-        if session.status != SessionStatus::Running {
-            return Err(StoreError::Invariant("Session is not running".to_string()));
+        if !session.status.accepts_actions() {
+            return Err(StoreError::Invariant(
+                "Session is not accepting Actions".to_string(),
+            ));
         }
         let has_active = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM action_attempts
@@ -2198,10 +2483,15 @@ impl Store {
         } else {
             None
         };
+        let input_events =
+            apply_terminal_action_inputs_tx(&transaction, invocation.id, invocation.updated_at)?;
         transaction.commit()?;
         drop(connection);
         self.shared.publish_session(action_event);
         if let Some(event) = usage_event {
+            self.shared.publish_session(event);
+        }
+        for event in input_events {
             self.shared.publish_session(event);
         }
         Ok(invocation)
@@ -2400,105 +2690,76 @@ impl Store {
         Ok(request)
     }
 
-    pub fn create_control_message(
+    pub fn create_agent_input(
         &self,
         session_id: SessionId,
         agent_id: AgentId,
         invocation_id: Option<ActionInvocationId>,
-        kind: ControlMessageKind,
+        source: AgentInputSource,
+        kind: AgentInputKind,
         content: impl Into<String>,
-    ) -> Result<ControlMessage, StoreError> {
+    ) -> Result<AgentInput, StoreError> {
+        self.create_agent_input_with_id(
+            AgentInputId::new(),
+            session_id,
+            agent_id,
+            invocation_id,
+            source,
+            kind,
+            content,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_agent_input_with_id(
+        &self,
+        id: AgentInputId,
+        session_id: SessionId,
+        agent_id: AgentId,
+        invocation_id: Option<ActionInvocationId>,
+        source: AgentInputSource,
+        kind: AgentInputKind,
+        content: impl Into<String>,
+    ) -> Result<AgentInput, StoreError> {
         let content = content.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let session: Session =
-            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
-        if session.status.is_terminal() {
-            return Err(StoreError::Invariant(
-                "cannot control a terminal Session".to_string(),
-            ));
-        }
-        let agent: Agent =
-            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
-        if agent.session_id != session.id {
-            return Err(StoreError::Invariant(
-                "control Agent does not belong to the Session".to_string(),
-            ));
-        }
-        if let Some(invocation_id) = invocation_id {
-            let invocation: ActionInvocation = load_document_tx(
-                &transaction,
-                "action_invocations",
-                &invocation_id.to_string(),
-                "action invocation",
-            )?;
-            if invocation.session_id != session_id || invocation.agent_id != agent_id {
-                return Err(StoreError::Invariant(
-                    "control Action does not belong to the target Agent".to_string(),
-                ));
-            }
-        }
-        let message = ControlMessage {
-            id: ControlMessageId::new(),
+        let (message, event) = insert_agent_input_tx(
+            &transaction,
+            id,
             session_id,
             agent_id,
-            action_invocation_id: invocation_id,
+            invocation_id,
+            source,
             kind,
             content,
-            status: ControlMessageStatus::Pending,
-            created_at: Utc::now(),
-            claimed_turn_id: None,
-            claimed_at: None,
-            applied_at: None,
-        };
-        transaction.execute(
-            "INSERT INTO control_messages
-             (id, session_id, agent_id, status, claimed_turn_id, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            params![
-                message.id.to_string(),
-                session_id.to_string(),
-                agent_id.to_string(),
-                enum_string(message.status)?,
-                message.created_at.to_rfc3339(),
-                serde_json::to_string(&message)?,
-            ],
-        )?;
-        let event = append_session_event_tx(
-            &transaction,
-            session.id,
-            Some(agent_id),
-            None,
-            None,
-            SessionEventPayload::ControlMessageQueued {
-                control_message_id: message.id,
-                kind,
-            },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_session(event);
+        if let Some(event) = event {
+            self.shared.publish_session(event);
+        }
         Ok(message)
     }
 
-    pub fn claim_control_messages(
+    pub fn claim_agent_inputs(
         &self,
         session_id: SessionId,
         agent_id: AgentId,
         invocation_id: Option<ActionInvocationId>,
         turn_id: TurnId,
-    ) -> Result<Vec<ControlMessage>, StoreError> {
+    ) -> Result<Vec<AgentInput>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_session_accepts_effect_tx(&transaction, session_id)?;
         let turn: Turn = load_document_tx(&transaction, "turns", &turn_id.to_string(), "turn")?;
         if turn.agent_id != agent_id || turn.status.is_terminal() {
             return Err(StoreError::Invariant(
-                "control messages can only be claimed by their active target Turn".to_string(),
+                "Agent inputs can only be claimed by their active target Turn".to_string(),
             ));
         }
         let mut statement = transaction.prepare(
-            "SELECT document_json FROM control_messages
+            "SELECT document_json FROM agent_inputs
              WHERE session_id = ?1 AND agent_id = ?2
                AND (status = 'pending' OR (status = 'claimed' AND claimed_turn_id = ?3))
              ORDER BY created_at ASC, id ASC",
@@ -2516,18 +2777,18 @@ impl Store {
         let mut messages = documents
             .into_iter()
             .map(|document| serde_json::from_str(&document))
-            .collect::<Result<Vec<ControlMessage>, _>>()?;
+            .collect::<Result<Vec<AgentInput>, _>>()?;
         messages.retain(|message| {
             message.action_invocation_id.is_none() || message.action_invocation_id == invocation_id
         });
         let claimed_at = Utc::now();
         for message in &mut messages {
-            if message.status == ControlMessageStatus::Pending {
-                message.status = ControlMessageStatus::Claimed;
+            if message.status == AgentInputStatus::Pending {
+                message.status = AgentInputStatus::Claimed;
                 message.claimed_turn_id = Some(turn_id);
                 message.claimed_at = Some(claimed_at);
                 let changed = transaction.execute(
-                    "UPDATE control_messages
+                    "UPDATE agent_inputs
                      SET status = 'claimed', claimed_turn_id = ?1, updated_at = ?2, document_json = ?3
                      WHERE id = ?4 AND status = 'pending'",
                     params![
@@ -2537,19 +2798,16 @@ impl Store {
                         message.id.to_string(),
                     ],
                 )?;
-                ensure_one(changed, "control_messages")?;
+                ensure_one(changed, "agent_inputs")?;
             }
         }
         transaction.commit()?;
         Ok(messages)
     }
 
-    pub fn list_control_messages(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Vec<ControlMessage>, StoreError> {
+    pub fn list_agent_inputs(&self, session_id: SessionId) -> Result<Vec<AgentInput>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM control_messages WHERE session_id = ?1 ORDER BY created_at ASC",
+            "SELECT document_json FROM agent_inputs WHERE session_id = ?1 ORDER BY created_at ASC",
             [session_id.to_string()],
         )
     }
@@ -3306,10 +3564,12 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS sessions_project_program_updated ON sessions(project_id, program_slug, updated_at DESC);
          CREATE TABLE IF NOT EXISTS agents (
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           parent_agent_id TEXT REFERENCES agents(id),
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS agents_session_created ON agents(session_id, created_at ASC);
+         CREATE INDEX IF NOT EXISTS agents_parent ON agents(parent_agent_id);
          CREATE TABLE IF NOT EXISTS session_effects (
            session_id TEXT NOT NULL REFERENCES sessions(id), effect_key TEXT NOT NULL,
            status TEXT NOT NULL, started_at TEXT NOT NULL, document_json TEXT NOT NULL,
@@ -3355,15 +3615,15 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS human_requests_session ON human_requests(session_id, created_at ASC);
-         CREATE TABLE IF NOT EXISTS control_messages (
+         CREATE TABLE IF NOT EXISTS agent_inputs (
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
            agent_id TEXT NOT NULL REFERENCES agents(id), status TEXT NOT NULL,
            claimed_turn_id TEXT REFERENCES turns(id),
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS control_messages_claim
-           ON control_messages(session_id, agent_id, status, claimed_turn_id, created_at ASC);
+         CREATE INDEX IF NOT EXISTS agent_inputs_claim
+           ON agent_inputs(session_id, agent_id, status, claimed_turn_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS artifacts (
            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
@@ -3547,7 +3807,7 @@ fn terminalize_session_resources_tx(
 ) -> Result<(), StoreError> {
     let now = now.to_rfc3339();
     transaction.execute(
-        "UPDATE control_messages
+        "UPDATE agent_inputs
          SET status = 'applied', updated_at = ?2,
              document_json = json_set(
                  json_set(document_json, '$.status', 'applied'),
@@ -3666,89 +3926,85 @@ fn validate_rollout_item_tx(
     transaction: &Transaction<'_>,
     item: &AgentRolloutItem,
 ) -> Result<(), StoreError> {
-    let (turn_id, acknowledged_control_ids) = match item {
+    let (turn_id, acknowledged_agent_input_ids) = match item {
         AgentRolloutItem::ContextCheckpoint {
             turn_id,
-            acknowledged_control_ids,
+            acknowledged_agent_input_ids,
             ..
-        } => (*turn_id, acknowledged_control_ids),
+        } => (*turn_id, acknowledged_agent_input_ids),
         AgentRolloutItem::TurnUpdated {
             turn,
-            acknowledged_control_ids,
+            acknowledged_agent_input_ids,
             ..
-        } => (turn.id, acknowledged_control_ids),
+        } => (turn.id, acknowledged_agent_input_ids),
         _ => return Ok(()),
     };
     let mut seen = std::collections::HashSet::new();
-    for control_id in acknowledged_control_ids {
-        if !seen.insert(*control_id) {
+    for input_id in acknowledged_agent_input_ids {
+        if !seen.insert(*input_id) {
             return Err(StoreError::Invariant(format!(
-                "duplicate acknowledged control message {control_id}"
+                "duplicate acknowledged Agent input {input_id}"
             )));
         }
-        let message: ControlMessage = load_document_tx(
+        let message: AgentInput = load_document_tx(
             transaction,
-            "control_messages",
-            &control_id.to_string(),
-            "control message",
+            "agent_inputs",
+            &input_id.to_string(),
+            "Agent input",
         )?;
-        if message.status != ControlMessageStatus::Claimed
-            || message.claimed_turn_id != Some(turn_id)
-        {
+        if message.status != AgentInputStatus::Claimed || message.claimed_turn_id != Some(turn_id) {
             return Err(StoreError::Invariant(format!(
-                "control message {control_id} is not claimed by Turn {turn_id}"
+                "Agent input {input_id} is not claimed by Turn {turn_id}"
             )));
         }
     }
     Ok(())
 }
 
-fn apply_control_acknowledgements_tx(
+fn apply_agent_input_acknowledgements_tx(
     transaction: &Transaction<'_>,
     turn_id: TurnId,
-    control_ids: &[ControlMessageId],
+    input_ids: &[AgentInputId],
     occurred_at: chrono::DateTime<Utc>,
 ) -> Result<ProjectionEvents, StoreError> {
     let mut events = ProjectionEvents::default();
-    for control_id in control_ids {
-        let mut message: ControlMessage = load_document_tx(
+    for input_id in input_ids {
+        let mut message: AgentInput = load_document_tx(
             transaction,
-            "control_messages",
-            &control_id.to_string(),
-            "control message",
+            "agent_inputs",
+            &input_id.to_string(),
+            "Agent input",
         )?;
-        if message.status == ControlMessageStatus::Applied {
+        if message.status == AgentInputStatus::Applied {
             continue;
         }
-        if message.status != ControlMessageStatus::Claimed
-            || message.claimed_turn_id != Some(turn_id)
-        {
+        if message.status != AgentInputStatus::Claimed || message.claimed_turn_id != Some(turn_id) {
             return Err(StoreError::Invariant(format!(
-                "control message {control_id} is not claimed by Turn {turn_id}"
+                "Agent input {input_id} is not claimed by Turn {turn_id}"
             )));
         }
-        message.status = ControlMessageStatus::Applied;
+        message.status = AgentInputStatus::Applied;
         message.applied_at = Some(occurred_at);
         let changed = transaction.execute(
-            "UPDATE control_messages
+            "UPDATE agent_inputs
              SET status = 'applied', updated_at = ?1, document_json = ?2
              WHERE id = ?3 AND status = 'claimed' AND claimed_turn_id = ?4",
             params![
                 occurred_at.to_rfc3339(),
                 serde_json::to_string(&message)?,
-                control_id.to_string(),
+                input_id.to_string(),
                 turn_id.to_string(),
             ],
         )?;
-        ensure_one(changed, "control_messages")?;
+        ensure_one(changed, "agent_inputs")?;
         events.events.push(append_session_event_tx(
             transaction,
             message.session_id,
             Some(message.agent_id),
             Some(turn_id),
             None,
-            SessionEventPayload::ControlMessageApplied {
-                control_message_id: *control_id,
+            SessionEventPayload::AgentInputApplied {
+                agent_input_id: *input_id,
                 kind: message.kind,
             },
         )?);
@@ -3801,7 +4057,7 @@ fn apply_rollout_record_tx(
             completed_model_steps,
             hosted_search_calls_used,
             checkpoint_message,
-            acknowledged_control_ids,
+            acknowledged_agent_input_ids,
             ..
         } => {
             let document = transaction
@@ -3861,17 +4117,17 @@ fn apply_rollout_record_tx(
                     },
                 )?);
             }
-            let control_events = apply_control_acknowledgements_tx(
+            let input_events = apply_agent_input_acknowledgements_tx(
                 transaction,
                 *turn_id,
-                acknowledged_control_ids,
+                acknowledged_agent_input_ids,
                 record.occurred_at,
             )?;
-            projected_events.events.extend(control_events.events);
+            projected_events.events.extend(input_events.events);
         }
         AgentRolloutItem::TurnUpdated {
             turn,
-            acknowledged_control_ids,
+            acknowledged_agent_input_ids,
         } => {
             update_status_document_tx(
                 transaction,
@@ -3893,16 +4149,16 @@ fn apply_rollout_record_tx(
                     error: turn.error.clone(),
                 },
             )?);
-            let control_events = apply_control_acknowledgements_tx(
+            let input_events = apply_agent_input_acknowledgements_tx(
                 transaction,
                 turn.id,
-                acknowledged_control_ids,
+                acknowledged_agent_input_ids,
                 record.occurred_at,
             )?;
-            projected_events.events.extend(control_events.events);
+            projected_events.events.extend(input_events.events);
             if turn.status.is_terminal() {
                 transaction.execute(
-                    "UPDATE control_messages
+                    "UPDATE agent_inputs
                      SET status = 'pending', claimed_turn_id = NULL, updated_at = ?1,
                          document_json = json_set(
                              json_set(
@@ -4049,6 +4305,311 @@ fn update_status_document_tx<T: Serialize, S: Serialize>(
         ],
     )?;
     ensure_one(changed, table)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_agent_input_tx(
+    transaction: &Transaction<'_>,
+    id: AgentInputId,
+    session_id: SessionId,
+    agent_id: AgentId,
+    invocation_id: Option<ActionInvocationId>,
+    source: AgentInputSource,
+    kind: AgentInputKind,
+    content: String,
+) -> Result<(AgentInput, Option<SessionEvent>), StoreError> {
+    match load_document_tx::<AgentInput>(
+        transaction,
+        "agent_inputs",
+        &id.to_string(),
+        "Agent input",
+    ) {
+        Ok(existing) => {
+            if existing.session_id == session_id
+                && existing.agent_id == agent_id
+                && existing.action_invocation_id == invocation_id
+                && existing.source == source
+                && existing.kind == kind
+                && existing.content == content
+            {
+                return Ok((existing, None));
+            }
+            return Err(StoreError::Invariant(format!(
+                "Agent input id {id} was reused with different content"
+            )));
+        }
+        Err(StoreError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
+    let session: Session =
+        load_document_tx(transaction, "sessions", &session_id.to_string(), "session")?;
+    if session.status.is_terminal() || session.archived_at.is_some() {
+        return Err(StoreError::Invariant(
+            "cannot deliver input to a terminal or archived Session".to_string(),
+        ));
+    }
+    let agent: Agent = load_document_tx(transaction, "agents", &agent_id.to_string(), "agent")?;
+    if agent.session_id != session.id {
+        return Err(StoreError::Invariant(
+            "input Agent does not belong to the Session".to_string(),
+        ));
+    }
+    if let AgentInputSource::Agent { sender_agent_id } = &source {
+        let sender: Agent = load_document_tx(
+            transaction,
+            "agents",
+            &sender_agent_id.to_string(),
+            "sender Agent",
+        )?;
+        let sender_session: Session = load_document_tx(
+            transaction,
+            "sessions",
+            &sender.session_id.to_string(),
+            "sender Session",
+        )?;
+        if sender_session.project_id != session.project_id
+            || sender_session.status.is_terminal()
+            || sender_session.archived_at.is_some()
+        {
+            return Err(StoreError::Invariant(
+                "Agent input must stay inside one live Project".to_string(),
+            ));
+        }
+    }
+    if let Some(invocation_id) = invocation_id {
+        let invocation: ActionInvocation = load_document_tx(
+            transaction,
+            "action_invocations",
+            &invocation_id.to_string(),
+            "action invocation",
+        )?;
+        if invocation.session_id != session_id || invocation.agent_id != agent_id {
+            return Err(StoreError::Invariant(
+                "input Action does not belong to the target Agent".to_string(),
+            ));
+        }
+    }
+    let message = AgentInput {
+        id,
+        session_id,
+        agent_id,
+        action_invocation_id: invocation_id,
+        source,
+        kind,
+        content,
+        status: AgentInputStatus::Pending,
+        created_at: Utc::now(),
+        claimed_turn_id: None,
+        claimed_at: None,
+        applied_at: None,
+    };
+    transaction.execute(
+        "INSERT INTO agent_inputs
+         (id, session_id, agent_id, status, claimed_turn_id, updated_at, document_json)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+        params![
+            message.id.to_string(),
+            session_id.to_string(),
+            agent_id.to_string(),
+            enum_string(message.status)?,
+            message.created_at.to_rfc3339(),
+            serde_json::to_string(&message)?,
+        ],
+    )?;
+    let event = append_session_event_tx(
+        transaction,
+        session.id,
+        Some(agent_id),
+        None,
+        None,
+        SessionEventPayload::AgentInputQueued {
+            agent_input_id: message.id,
+            kind,
+        },
+    )?;
+    Ok((message, Some(event)))
+}
+
+fn apply_terminal_action_inputs_tx(
+    transaction: &Transaction<'_>,
+    invocation_id: ActionInvocationId,
+    occurred_at: chrono::DateTime<Utc>,
+) -> Result<Vec<SessionEvent>, StoreError> {
+    let documents = {
+        let mut statement = transaction.prepare(
+            "SELECT document_json FROM agent_inputs
+             WHERE json_extract(document_json, '$.action_invocation_id') = ?1
+               AND status IN ('pending', 'claimed')
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows =
+            statement.query_map([invocation_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut events = Vec::new();
+    for document in documents {
+        let mut input: AgentInput = serde_json::from_str(&document)?;
+        input.status = AgentInputStatus::Applied;
+        input.applied_at = Some(occurred_at);
+        let changed = transaction.execute(
+            "UPDATE agent_inputs SET status = 'applied', updated_at = ?1, document_json = ?2
+             WHERE id = ?3 AND status IN ('pending', 'claimed')",
+            params![
+                occurred_at.to_rfc3339(),
+                serde_json::to_string(&input)?,
+                input.id.to_string(),
+            ],
+        )?;
+        ensure_one(changed, "agent_inputs")?;
+        events.push(append_session_event_tx(
+            transaction,
+            input.session_id,
+            Some(input.agent_id),
+            input.claimed_turn_id,
+            None,
+            SessionEventPayload::AgentInputApplied {
+                agent_input_id: input.id,
+                kind: input.kind,
+            },
+        )?);
+    }
+    Ok(events)
+}
+
+fn insert_action_invocation_tx(
+    transaction: &Transaction<'_>,
+    invocation_id: ActionInvocationId,
+    action: NewActionInvocation,
+) -> Result<(ActionInvocation, Option<SessionEvent>), StoreError> {
+    match load_document_tx::<ActionInvocation>(
+        transaction,
+        "action_invocations",
+        &invocation_id.to_string(),
+        "action invocation",
+    ) {
+        Ok(existing) => {
+            let same_request = existing.session_id == action.session_id
+                && existing.agent_id == action.agent_id
+                && existing.action_name == action.action_name
+                && existing.contract == action.contract
+                && existing.arguments == action.arguments
+                && existing.input == action.input
+                && existing.source == action.source
+                && existing.tool_policy == action.tool_policy
+                && existing.web_search_context_size == action.web_search_context_size
+                && existing.reasoning_effort == action.reasoning_effort
+                && existing.response_format == action.response_format;
+            if same_request {
+                return Ok((existing, None));
+            }
+            return Err(StoreError::Invariant(format!(
+                "Action id {invocation_id} was reused with a different request"
+            )));
+        }
+        Err(StoreError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
+    let agent: Agent =
+        load_document_tx(transaction, "agents", &action.agent_id.to_string(), "agent")?;
+    if agent.session_id != action.session_id {
+        return Err(StoreError::Invariant(
+            "Action Agent belongs to another Session".to_string(),
+        ));
+    }
+    let session: Session = load_document_tx(
+        transaction,
+        "sessions",
+        &action.session_id.to_string(),
+        "session",
+    )?;
+    if !session.status.accepts_actions() || session.archived_at.is_some() {
+        return Err(StoreError::Invariant(
+            "cannot schedule an Action unless its Session is live and running".to_string(),
+        ));
+    }
+    match &action.source {
+        ActionSource::Workflow => {}
+        ActionSource::HumanRequest { request_id } => {
+            let request: HumanRequest = load_document_tx(
+                transaction,
+                "human_requests",
+                &request_id.to_string(),
+                "HumanRequest",
+            )?;
+            if request.session_id != action.session_id || request.agent_id != action.agent_id {
+                return Err(StoreError::Invariant(
+                    "HumanRequest Action source does not match its target".to_string(),
+                ));
+            }
+        }
+        ActionSource::Agent { sender_agent_id } => {
+            let sender: Agent = load_document_tx(
+                transaction,
+                "agents",
+                &sender_agent_id.to_string(),
+                "sender Agent",
+            )?;
+            let sender_session: Session = load_document_tx(
+                transaction,
+                "sessions",
+                &sender.session_id.to_string(),
+                "sender Session",
+            )?;
+            if sender_session.project_id != session.project_id
+                || sender_session.status.is_terminal()
+                || sender_session.archived_at.is_some()
+            {
+                return Err(StoreError::Invariant(
+                    "Agent Action source must belong to the same live Project".to_string(),
+                ));
+            }
+        }
+    }
+
+    let now = Utc::now();
+    let invocation = ActionInvocation {
+        id: invocation_id,
+        session_id: action.session_id,
+        agent_id: action.agent_id,
+        action_name: action.action_name,
+        contract: action.contract,
+        arguments: action.arguments,
+        input: action.input,
+        source: action.source,
+        tool_policy: action.tool_policy,
+        web_search_context_size: action.web_search_context_size,
+        reasoning_effort: action.reasoning_effort,
+        response_format: action.response_format,
+        status: ActionStatus::Scheduled,
+        output: None,
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    transaction.execute(
+        "INSERT INTO action_invocations
+         (id, session_id, agent_id, status, updated_at, document_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            invocation.id.to_string(),
+            invocation.session_id.to_string(),
+            invocation.agent_id.to_string(),
+            enum_string(invocation.status)?,
+            now.to_rfc3339(),
+            serde_json::to_string(&invocation)?,
+        ],
+    )?;
+    let event = append_session_event_tx(
+        transaction,
+        invocation.session_id,
+        Some(invocation.agent_id),
+        None,
+        None,
+        action_event_payload(&invocation, None),
+    )?;
+    Ok((invocation, Some(event)))
 }
 
 fn action_event_payload(

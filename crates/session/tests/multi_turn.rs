@@ -8,8 +8,9 @@ use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionSource;
 use papermachine_protocol::Agent;
-use papermachine_protocol::ControlMessageKind;
-use papermachine_protocol::ControlMessageStatus;
+use papermachine_protocol::AgentInputKind;
+use papermachine_protocol::AgentInputSource;
+use papermachine_protocol::AgentInputStatus;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
@@ -346,12 +347,13 @@ async fn claimed_guidance_is_checkpointed_before_sampling() {
     let attempt = store
         .start_action_attempt(invocation.id)
         .expect("Attempt should start");
-    let control = store
-        .create_control_message(
+    let input = store
+        .create_agent_input(
             session.id,
             agent.id,
             Some(invocation.id),
-            ControlMessageKind::Guide,
+            AgentInputSource::Human,
+            AgentInputKind::Guide,
             "Verify the final claim",
         )
         .expect("guidance should queue");
@@ -390,12 +392,12 @@ async fn claimed_guidance_is_checkpointed_before_sampling() {
             ))
     );
     let applied = store
-        .list_control_messages(session.id)
-        .expect("control messages should list")
+        .list_agent_inputs(session.id)
+        .expect("Agent inputs should list")
         .into_iter()
-        .find(|message| message.id == control.id)
+        .find(|message| message.id == input.id)
         .expect("guidance should remain queryable");
-    assert_eq!(applied.status, ControlMessageStatus::Applied);
+    assert_eq!(applied.status, AgentInputStatus::Applied);
     assert_eq!(applied.claimed_turn_id, Some(turn.id));
 }
 

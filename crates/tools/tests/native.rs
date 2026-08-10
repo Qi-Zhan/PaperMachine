@@ -40,6 +40,7 @@ fn context(
         session_id,
         agent_id,
         turn_id: TurnId::new(),
+        tool_call_id: "call-test".to_string(),
         action_invocation_id: None,
         action_attempt_id: None,
         sandbox_root: managed.join("sandbox").join(agent_id.to_string()),
@@ -56,11 +57,11 @@ fn context(
 
 fn native_catalog(processes: ProcessTable) -> ToolCatalog {
     ToolCatalog::builder()
-        .register_workspace(ExecCommandTool::new(processes.clone()))
+        .register_native(ExecCommandTool::new(processes.clone()))
         .expect("exec_command should register")
-        .register_workspace(WriteStdinTool::new(processes))
+        .register_native(WriteStdinTool::new(processes))
         .expect("write_stdin should register")
-        .register_workspace(ApplyPatchTool)
+        .register_native(ApplyPatchTool)
         .expect("apply_patch should register")
         .build()
 }
@@ -70,7 +71,7 @@ fn catalog_materializes_access_defaults_and_explicit_subsets() {
     let catalog = native_catalog(ProcessTable::default());
     let names = |access, policy: Option<&[String]>| {
         catalog
-            .materialize_action_tools(policy, access)
+            .materialize_action_tools(policy, access, true)
             .expect("tool set should materialize")
             .definitions
             .into_iter()
@@ -127,25 +128,33 @@ impl ToolExecutor for ProbeTool {
 fn catalog_rejects_conflicts_unknown_tools_and_definition_drift() {
     assert!(
         ToolCatalog::builder()
-            .register_workspace(ProbeTool("one"))
+            .register_native(ProbeTool("one"))
             .expect("first registration should work")
-            .register_workspace(ProbeTool("two"))
+            .register_native(ProbeTool("two"))
             .is_err()
     );
     let catalog = ToolCatalog::builder()
-        .register_workspace(ProbeTool("one"))
+        .register_native(ProbeTool("one"))
         .expect("probe should register")
         .build();
     assert!(
         catalog
-            .materialize_action_tools(Some(&["missing".to_string()]), AccessPreset::Workspace)
+            .materialize_action_tools(
+                Some(&["missing".to_string()]),
+                AccessPreset::Workspace,
+                true,
+            )
             .is_err()
     );
     let snapshot = catalog
-        .materialize_action_tools(Some(&["exec_command".to_string()]), AccessPreset::Workspace)
+        .materialize_action_tools(
+            Some(&["exec_command".to_string()]),
+            AccessPreset::Workspace,
+            true,
+        )
         .expect("snapshot should materialize");
     let changed = ToolCatalog::builder()
-        .register_workspace(ProbeTool("two"))
+        .register_native(ProbeTool("two"))
         .expect("changed probe should register")
         .build();
     assert!(changed.registry_for_snapshot(&snapshot).is_err());

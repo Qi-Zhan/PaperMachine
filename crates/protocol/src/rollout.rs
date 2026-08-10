@@ -1,6 +1,6 @@
 use crate::ActionAttempt;
 use crate::AgentId;
-use crate::ControlMessageId;
+use crate::AgentInputId;
 use crate::ModelInputItem;
 use crate::TokenUsage;
 use crate::Turn;
@@ -64,11 +64,11 @@ pub enum AgentRolloutItem {
         completed_model_steps: u32,
         hosted_search_calls_used: u32,
         checkpoint_message: Option<String>,
-        acknowledged_control_ids: Vec<ControlMessageId>,
+        acknowledged_agent_input_ids: Vec<AgentInputId>,
     },
     TurnUpdated {
         turn: Turn,
-        acknowledged_control_ids: Vec<ControlMessageId>,
+        acknowledged_agent_input_ids: Vec<AgentInputId>,
     },
 }
 

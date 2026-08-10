@@ -165,7 +165,7 @@ fn runtime_on_handle(
     );
     TestSessionRuntime {
         executor,
-        actions: ActionRunner::new(store, turns),
+        actions: ActionRunner::new(store, turns, Default::default()),
     }
 }
 

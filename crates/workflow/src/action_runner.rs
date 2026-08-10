@@ -1,5 +1,6 @@
 use papermachine_protocol::ActionInvocation;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::ActionStatus;
 use papermachine_protocol::AgentId;
 use papermachine_protocol::PromptLayerKind;
@@ -15,7 +16,9 @@ use papermachine_store::StoreHandle;
 use serde_json::json;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -27,11 +30,56 @@ use tokio_util::sync::CancellationToken;
 pub struct ActionRunner {
     store: StoreHandle,
     turns: TurnRuntime,
+    control: ActionControl,
+}
+
+#[derive(Clone, Default)]
+pub struct ActionControl {
+    active: Arc<Mutex<HashMap<ActionInvocationId, CancellationToken>>>,
+}
+
+impl ActionControl {
+    pub async fn cancel(&self, invocation_id: ActionInvocationId) -> bool {
+        let cancellation = self.active.lock().await.get(&invocation_id).cloned();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn register(
+        &self,
+        invocation_id: ActionInvocationId,
+        cancellation: CancellationToken,
+    ) -> Result<(), ActionRunnerError> {
+        if self
+            .active
+            .lock()
+            .await
+            .insert(invocation_id, cancellation)
+            .is_some()
+        {
+            return Err(ActionRunnerError::Join(format!(
+                "Action {invocation_id} is already running"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn unregister(&self, invocation_id: ActionInvocationId) {
+        self.active.lock().await.remove(&invocation_id);
+    }
 }
 
 impl ActionRunner {
-    pub fn new(store: StoreHandle, turns: TurnRuntime) -> Self {
-        Self { store, turns }
+    pub fn new(store: StoreHandle, turns: TurnRuntime, control: ActionControl) -> Self {
+        Self {
+            store,
+            turns,
+            control,
+        }
     }
 
     pub async fn run_session(
@@ -62,7 +110,7 @@ impl ActionRunner {
                 break;
             }
 
-            if session.status == SessionStatus::Running {
+            if session.status.accepts_actions() {
                 for action in first_pending_action_per_agent(actions) {
                     if active_agents.insert(action.agent_id) {
                         let runner = self.clone();
@@ -223,6 +271,19 @@ impl ActionRunner {
         invocation_id: ActionInvocationId,
         cancellation: CancellationToken,
     ) -> Result<(), ActionRunnerError> {
+        self.control
+            .register(invocation_id, cancellation.clone())
+            .await?;
+        let result = self.run_action_inner(invocation_id, cancellation).await;
+        self.control.unregister(invocation_id).await;
+        result
+    }
+
+    async fn run_action_inner(
+        &self,
+        invocation_id: ActionInvocationId,
+        cancellation: CancellationToken,
+    ) -> Result<(), ActionRunnerError> {
         let (invocation, session, mut recovered_attempt) = self
             .store
             .call(move |store| {
@@ -254,7 +315,7 @@ impl ActionRunner {
                 .store
                 .call(move |store| store.get_session(session.id))
                 .await?;
-            if current_session.status != SessionStatus::Running {
+            if !current_session.status.accepts_actions() {
                 return Err(ActionRunnerError::Cancelled);
             }
             let attempt = match recovered_attempt.take() {
@@ -369,6 +430,17 @@ impl ActionRunner {
                             )
                         })
                         .await?;
+                    if matches!(&invocation.source, ActionSource::Agent { .. }) {
+                        self.store
+                            .call(move |store| {
+                                store.cancel_pending_action(
+                                    invocation_id,
+                                    "Agent task was interrupted",
+                                )
+                            })
+                            .await?;
+                        return Ok(());
+                    }
                     interruption_guidance = Some(reason);
                 }
                 Err(TurnRuntimeError::Cancelled) if cancellation.is_cancelled() => {

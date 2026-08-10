@@ -27,7 +27,8 @@ export type StepKind = 'model' | 'tool' | 'workflow' | 'system'
 export type StepStatus = 'running' | 'completed' | 'failed' | 'aborted' | 'cancelled'
 export type ActionStatus = 'scheduled' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
-export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
+export type AgentInputKind = 'message' | 'guide' | 'interrupt' | 'finish'
+export type AgentInputSource = { kind: 'human' } | { kind: 'agent'; sender_agent_id: Id }
 
 export interface Project {
   id: Id
@@ -201,6 +202,7 @@ export interface Session {
 export interface Agent {
   id: Id
   session_id: Id
+  parent_agent_id: Id | null
   class_name: string
   name: string
   role: string
@@ -271,12 +273,13 @@ export interface HumanRequest {
   resolved_at: string | null
 }
 
-export interface ControlMessage {
+export interface AgentInput {
   id: Id
   session_id: Id
   agent_id: Id
   action_invocation_id: Id | null
-  kind: ControlMessageKind
+  source: AgentInputSource
+  kind: AgentInputKind
   content: string
   status: 'pending' | 'claimed' | 'applied'
   created_at: string
@@ -346,7 +349,7 @@ export interface SessionView {
   actions: ActionInvocation[]
   attempts: ActionAttempt[]
   human_requests: HumanRequest[]
-  control_messages: ControlMessage[]
+  agent_inputs: AgentInput[]
   artifacts: Artifact[]
 }
 

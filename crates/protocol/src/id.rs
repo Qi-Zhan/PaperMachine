@@ -78,7 +78,7 @@ entity_id!(AgentId);
 entity_id!(ActionInvocationId);
 entity_id!(ActionAttemptId);
 entity_id!(HumanRequestId);
-entity_id!(ControlMessageId);
+entity_id!(AgentInputId);
 entity_id!(SessionId);
 entity_id!(TurnId);
 entity_id!(StepId);
