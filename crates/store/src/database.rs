@@ -36,7 +36,7 @@ const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectChange {
+pub(crate) struct ProjectChange {
     pub sequence: u64,
     pub kind: String,
     pub entity_id: String,
@@ -44,9 +44,10 @@ pub struct ProjectChange {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectChangeBatch {
+pub(crate) struct ProjectChangeBatch {
     pub captured_cursor: u64,
     pub changes: Vec<ProjectChange>,
+    pub last_sequence: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -365,10 +366,10 @@ impl Store {
         Ok(session)
     }
 
-    pub fn project_changes_after(
+    pub(crate) fn project_changes_after(
         &self,
         project_id: ProjectId,
-        after_cursor: Option<u64>,
+        after_cursor: u64,
     ) -> Result<ProjectChangeBatch, StoreError> {
         self.get_project(project_id)?;
         let connection = self.connection()?;
@@ -377,12 +378,6 @@ impl Store {
             [project_id.to_string()],
             |row| row.get::<_, u64>(0),
         )?;
-        let Some(after_cursor) = after_cursor else {
-            return Ok(ProjectChangeBatch {
-                captured_cursor,
-                changes: Vec::new(),
-            });
-        };
         if after_cursor > captured_cursor {
             return Err(StoreError::Invariant(format!(
                 "Project change cursor {after_cursor} is ahead of current cursor {captured_cursor}"
@@ -424,9 +419,11 @@ impl Store {
                     .map_err(|error| StoreError::Invariant(error.to_string()))?,
             });
         }
+        let last_sequence = changes.last().map(|change| change.sequence);
         Ok(ProjectChangeBatch {
             captured_cursor,
             changes,
+            last_sequence,
         })
     }
 

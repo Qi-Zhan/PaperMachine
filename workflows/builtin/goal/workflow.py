@@ -15,7 +15,7 @@ Use active whenever any required work remains or completion is not proved. Use c
 
     @action(
         search_context_size="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def work(self, objective: str):
         """Continue working toward objective now. Read relevant Project resources when useful. Use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""

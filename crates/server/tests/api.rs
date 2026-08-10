@@ -783,7 +783,8 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
                     .as_array()
                     .expect("ToolSet definitions should be an array")
                     .iter()
-                    .all(|tool| matches!(tool["name"].as_str(), Some("read_resource")))
+                    .next()
+                    .is_none()
             })
     );
     let overview = app
@@ -827,7 +828,7 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
         .filter(|step| step["kind"] == "tool")
         .filter_map(|step| step["name"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(tool_names, vec!["read_resource"]);
+    assert!(tool_names.is_empty());
 
     let (status, value) = run_summary().await;
     assert_eq!(status, StatusCode::CREATED);

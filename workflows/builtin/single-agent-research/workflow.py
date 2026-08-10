@@ -10,7 +10,7 @@ class Researcher(Agent):
         search_context_size="low",
         reasoning_effort="high",
         finalize="after_search",
-        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def research(self, question: str):
         """Research the complete question with the available tools and return only the requested final deliverable. Read relevant Project resources when earlier work may help, but independently verify material claims. Never claim to have searched or opened a source unless a corresponding tool was available and used. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""

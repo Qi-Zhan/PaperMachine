@@ -25,7 +25,7 @@ class Researcher(Agent):
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def research(
         self,

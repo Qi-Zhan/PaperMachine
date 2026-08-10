@@ -7,6 +7,7 @@ mod filesystem;
 mod handle;
 #[doc(hidden)]
 pub mod process_fault;
+mod project_changes;
 mod project_home;
 mod rollout;
 
@@ -37,12 +38,14 @@ use tokio::sync::broadcast;
 pub use catalog::CatalogFailure;
 pub use catalog::CatalogProject;
 pub use catalog::ProjectCatalog;
-pub use database::ProjectChange;
-pub use database::ProjectChangeBatch;
 pub use database::Store;
 pub use filesystem::ManagedFs;
 pub use handle::STORE_QUEUE_CAPACITY;
 pub use handle::StoreHandle;
+pub use project_changes::ProjectEntitySnapshot;
+pub use project_changes::ProjectSnapshotPage;
+
+pub(crate) use database::ProjectChange;
 pub use project_home::PROJECT_HOME_MEDIA_TYPE;
 pub use project_home::PROJECT_HOME_ROLE;
 pub use project_home::PROJECT_HOME_SOURCE_MEDIA_TYPE;

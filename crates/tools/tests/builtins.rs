@@ -20,13 +20,13 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
-struct ProjectProbeTool(&'static str);
+struct ProbeTool(&'static str);
 
 #[async_trait]
-impl ToolExecutor for ProjectProbeTool {
+impl ToolExecutor for ProbeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "project_probe".to_string(),
+            name: "read_file".to_string(),
             description: self.0.to_string(),
             input_schema: json!({"type": "object"}),
             supports_parallel: false,
@@ -92,8 +92,6 @@ fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
         .expect("command tool should register")
         .register_workspace(FetchUrlTool)
         .expect("fetch tool should register")
-        .register_project(ProjectProbeTool("Project probe"))
-        .expect("Project tool should register")
         .build();
     let names = |access| {
         catalog
@@ -128,59 +126,6 @@ fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
         names(AccessPreset::FullAccess),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
     );
-    assert!(!names(AccessPreset::FullAccess).contains(&"project_probe".to_string()));
-}
-
-#[tokio::test]
-async fn project_tools_are_admitted_only_for_declared_actions() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let context = context_with_access(directory.path(), AccessPreset::ModelOnly);
-    let catalog = ToolCatalog::builder()
-        .register_workspace(ReadFileTool)
-        .expect("read tool should register")
-        .register_project(ProjectProbeTool("Project probe"))
-        .expect("Project tool should register")
-        .build();
-
-    let undeclared = catalog
-        .materialize_action_tools(&[], AccessPreset::FullAccess, true)
-        .expect("empty Action tools should materialize");
-    assert_eq!(
-        undeclared
-            .definitions
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        Vec::<&str>::new()
-    );
-    let snapshot = catalog
-        .materialize_action_tools(
-            &["read_file".to_string(), "project_probe".to_string()],
-            AccessPreset::ModelOnly,
-            true,
-        )
-        .expect("Action tools should materialize");
-    assert_eq!(
-        snapshot
-            .definitions
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["project_probe"]
-    );
-    let registry = catalog
-        .registry_for_snapshot(&snapshot)
-        .expect("Workflow registry should rebuild");
-    let output = registry
-        .execute("project_probe", context.clone(), json!({"value": 7}))
-        .await
-        .expect("declared Project tool should execute");
-    assert_eq!(output.value, json!({"value": 7}));
-    let denied = registry
-        .execute("read_file", context, json!({"path": "anything"}))
-        .await
-        .expect_err("filtered Workspace tool must not enter the registry");
-    assert!(matches!(denied, ToolError::UnknownTool(_)));
 }
 
 #[test]
@@ -189,13 +134,13 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
         ToolCatalog::builder()
             .register_workspace(ReadFileTool)
             .expect("first registration should succeed")
-            .register_project(ReadFileTool)
+            .register_workspace(ReadFileTool)
             .is_err()
     );
 
     let catalog = ToolCatalog::builder()
-        .register_project(ProjectProbeTool("version one"))
-        .expect("Project tool should register")
+        .register_workspace(ProbeTool("version one"))
+        .expect("probe tool should register")
         .build();
     let unknown = catalog
         .materialize_action_tools(&["missing_tool".to_string()], AccessPreset::Research, true)
@@ -204,7 +149,7 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
     assert!(
         catalog
             .materialize_action_tools(
-                &["project_probe".to_string(), "project_probe".to_string()],
+                &["read_file".to_string(), "read_file".to_string()],
                 AccessPreset::Research,
                 true,
             )
@@ -212,7 +157,7 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
     );
 
     let snapshot = catalog
-        .materialize_action_tools(&["project_probe".to_string()], AccessPreset::Research, true)
+        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Research, true)
         .expect("snapshot should materialize");
     assert!(
         ToolCatalog::default()
@@ -223,8 +168,8 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
     corrupt.sha256 = "0".repeat(64);
     assert!(catalog.registry_for_snapshot(&corrupt).is_err());
     let changed = ToolCatalog::builder()
-        .register_project(ProjectProbeTool("version two"))
-        .expect("changed Project tool should register")
+        .register_workspace(ProbeTool("version two"))
+        .expect("changed probe tool should register")
         .build();
     assert!(changed.registry_for_snapshot(&snapshot).is_err());
 }

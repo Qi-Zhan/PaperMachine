@@ -664,6 +664,122 @@ fn concurrent_human_answers_use_one_open_request_cas() {
 }
 
 #[test]
+fn project_changes_page_current_entities_and_chunk_text_artifacts() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
+    let project = project(&store, &directory, "changes");
+    let source = create_root_session(&store, project.id, "Evidence", AccessPreset::Research);
+    let source_agent = store
+        .create_agent(
+            source.id,
+            "Researcher",
+            "Researcher",
+            "collect evidence",
+            "",
+            "test-model",
+            Vec::new(),
+            AccessPreset::Workspace,
+        )
+        .expect("source Agent should be created");
+    let summary = create_root_session(&store, project.id, "Summary", AccessPreset::ModelOnly);
+    let action_harness = ActionHarness::create(&store, &source, AccessPreset::Research);
+    let action_turn = action_harness
+        .create_action_turn(&store, "Trace this result", AccessPreset::Research)
+        .expect("provenance Turn should be created");
+    let text = "evidence\n".repeat(160_000);
+    let text_artifact = store
+        .create_artifact(
+            project.id,
+            source.id,
+            Some(source_agent.id),
+            None,
+            ArtifactKind::Report,
+            "evidence.txt",
+            "text/plain",
+            json!({"source": "experiment"}),
+            text.as_bytes(),
+        )
+        .expect("text Artifact should be created");
+    let binary_artifact = store
+        .create_artifact(
+            project.id,
+            source.id,
+            Some(source_agent.id),
+            None,
+            ArtifactKind::Dataset,
+            "samples.bin",
+            "application/octet-stream",
+            json!({}),
+            &[0, 1, 2, 3],
+        )
+        .expect("binary Artifact should be created");
+
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    loop {
+        let page = store
+            .project_snapshot_changes(project.id, summary.id, cursor.as_deref())
+            .expect("Project changes should page");
+        assert!(serde_json::to_vec(&page).expect("page should encode").len() <= 1024 * 1024);
+        cursor = Some(page.cursor);
+        seen.extend(page.resources);
+        if !page.has_more {
+            break;
+        }
+    }
+
+    assert!(seen.iter().any(|resource| resource.kind == "project"));
+    assert!(
+        seen.iter()
+            .any(|resource| { resource.kind == "session" && resource.id == source.id.to_string() })
+    );
+    assert!(
+        !seen.iter().any(|resource| {
+            resource.kind == "session" && resource.id == summary.id.to_string()
+        })
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|resource| {
+                resource.kind == "session" && resource.id == source.id.to_string()
+            })
+            .count(),
+        1
+    );
+    let turn = seen
+        .iter()
+        .find(|resource| resource.id == action_turn.turn.id.to_string())
+        .expect("Turn snapshot should be present");
+    assert_eq!(
+        turn.data["action"]["id"],
+        action_turn.invocation.id.to_string()
+    );
+    let reconstructed = seen
+        .iter()
+        .filter(|resource| resource.id == text_artifact.id.to_string())
+        .filter_map(|resource| resource.data["content"].as_str())
+        .collect::<String>();
+    assert_eq!(reconstructed, text);
+    let binary = seen
+        .iter()
+        .find(|resource| resource.id == binary_artifact.id.to_string())
+        .expect("binary Artifact metadata should be present");
+    assert!(binary.data["content"].is_null());
+
+    let incremental = store
+        .project_snapshot_changes(project.id, summary.id, cursor.as_deref())
+        .expect("stable cursor should resume");
+    assert!(!incremental.changed);
+    assert!(!incremental.has_more);
+    assert!(incremental.resources.is_empty());
+    assert!(
+        store
+            .project_snapshot_changes(project.id, summary.id, Some("not-a-cursor"))
+            .is_err()
+    );
+}
+
+#[test]
 fn control_claim_is_agent_scoped_and_applied_by_checkpoint() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
@@ -773,7 +889,7 @@ fn project_home_is_owned_by_exact_session_action_and_agent() {
             arguments: json!({}),
             input: "{}".to_string(),
             source: ActionSource::Workflow,
-            requested_tools: vec!["read_resource".to_string()],
+            requested_tools: Vec::new(),
             tools_enabled: true,
             web_search_context_size: None,
             reasoning_effort: None,

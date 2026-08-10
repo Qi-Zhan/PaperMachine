@@ -4,11 +4,11 @@ from papermachine import Agent, action, publish_project_home, wait, workflow
 class ProjectSummaryAgent(Agent):
     access = "model_only"
     role = "Project curator"
-    system_prompt = """Maintain the Project home as a concise, evidence-grounded map of this research world. Read the relevant Project resources, including the existing home when useful. Emphasize the objective, key results and decisions, their provenance, open questions, and next actions. Use headings, lists, tables, and links when they improve the page. Never invent facts. Your entire final response must be the complete safe semantic HTML fragment in the Project's language: no commentary, Markdown fence, or outer article element."""
+    system_prompt = """Maintain the Project home as an evidence-grounded map of this research world. Use the supplied Project snapshots to keep its objectives, key results, decisions, provenance, open questions, and useful next actions current. Choose headings, tables, charts, links, or other semantic HTML when they help. Return the complete HTML fragment and do not invent facts."""
 
-    @action(tools=["read_resource"])
+    @action(tools=[])
     async def maintain_project_home(self, changed_resources: list[dict]):
-        """Read the changed resources and anything they point to, then return only the complete current Project home HTML fragment."""
+        """Update the complete current Project home from these Project snapshots."""
 
 
 @workflow(

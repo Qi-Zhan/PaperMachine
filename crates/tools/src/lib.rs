@@ -9,7 +9,6 @@ mod builtins;
 mod fetch;
 mod path;
 mod registry;
-mod resource;
 
 use async_trait::async_trait;
 use papermachine_protocol::AccessPreset;
@@ -33,7 +32,6 @@ pub use fetch::FetchUrlTool;
 pub use registry::ToolCatalog;
 pub use registry::ToolCatalogBuilder;
 pub use registry::ToolRegistry;
-pub use resource::ReadResourceTool;
 
 #[derive(Clone, Debug)]
 pub struct ToolContext {

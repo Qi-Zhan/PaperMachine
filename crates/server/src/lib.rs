@@ -41,7 +41,6 @@ use papermachine_store::StoreHandle;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
-use papermachine_tools::ReadResourceTool;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::WriteFileTool;
 use papermachine_workflow::ActionRunner;
@@ -104,13 +103,7 @@ type InitializedModels = (
     Vec<ModelProviderInfo>,
 );
 
-const LOCAL_TOOL_NAMES: [&str; 5] = [
-    "read_file",
-    "write_file",
-    "exec_command",
-    "fetch_url",
-    "read_resource",
-];
+const LOCAL_TOOL_NAMES: [&str; 4] = ["read_file", "write_file", "exec_command", "fetch_url"];
 
 #[derive(Clone)]
 pub struct AppState {
@@ -308,8 +301,6 @@ impl ProjectRuntimeFactory {
             .context("failed to register fetch_url")?
             .register_workspace(ExecCommandTool)
             .context("failed to register exec_command")?
-            .register_project(ReadResourceTool::new(store.clone()))
-            .context("failed to register read_resource")?
             .build();
         let mut catalog = self.base_catalog.clone();
         let catalog_project = project.clone();

@@ -3791,7 +3791,6 @@ dependencies = [
  "html2text",
  "papermachine-execution",
  "papermachine-protocol",
- "papermachine-store",
  "reqwest",
  "serde",
  "serde_json",

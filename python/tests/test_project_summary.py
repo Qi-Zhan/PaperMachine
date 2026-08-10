@@ -32,18 +32,30 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             if kind == "project_changes":
                 self.assertIsNone(payload["after_cursor"])
                 return {
-                    "cursor": 12,
+                    "cursor": "pc1_snapshot",
                     "has_more": False,
                     "changed": True,
-                    "resources": [{"kind": "project", "uri": "pm://project"}],
+                    "resources": [{
+                        "kind": "project",
+                        "id": "project-1",
+                        "session_id": None,
+                        "deleted": False,
+                        "data": {"id": "project-1", "name": "PaperMachine"},
+                    }],
                 }
             if kind == "invoke_action":
                 self.assertEqual(
                     payload["arguments"]["changed_resources"],
-                    [{"kind": "project", "uri": "pm://project"}],
+                    [{
+                        "kind": "project",
+                        "id": "project-1",
+                        "session_id": None,
+                        "deleted": False,
+                        "data": {"id": "project-1", "name": "PaperMachine"},
+                    }],
                 )
                 self.assertEqual(payload["action_name"], "maintain_project_home")
-                self.assertEqual(payload["requested_tools"], ["read_resource"])
+                self.assertEqual(payload["requested_tools"], [])
                 self.assertIsNone(payload["response_format"])
                 return {
                     "action_invocation_id": "invocation-summary",
@@ -53,7 +65,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     payload["action_invocation_id"], "invocation-summary"
                 )
-                self.assertEqual(payload["metadata"]["project_cursor"], 12)
+                self.assertEqual(payload["metadata"]["project_cursor"], "pc1_snapshot")
                 self.assertEqual(payload["metadata"]["refresh_count"], 1)
                 return {
                     "artifact_id": "artifact-summary",
@@ -87,9 +99,9 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             ],
         )
 
-    def test_summary_uses_one_generic_project_reader(self) -> None:
+    def test_summary_receives_snapshots_without_model_tools(self) -> None:
         agent_type = WORKFLOW["ProjectSummaryAgent"]
-        self.assertEqual(agent_type.maintain_project_home.tools, ["read_resource"])
+        self.assertEqual(agent_type.maintain_project_home.tools, [])
 
 if __name__ == "__main__":
     unittest.main()

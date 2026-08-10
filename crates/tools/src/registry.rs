@@ -10,15 +10,8 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ToolDomain {
-    Workspace,
-    Project,
-}
-
 #[derive(Clone)]
 struct CatalogEntry {
-    domain: ToolDomain,
     executor: Arc<dyn ToolExecutor>,
 }
 
@@ -37,8 +30,7 @@ impl ToolCatalog {
     }
 
     /// Materialize a Workflow Action's declared local tool surface.
-    /// Workspace tools are filtered by the Turn access ceiling; Project tools
-    /// are admitted only through this Workflow-only path.
+    /// Requested tools are filtered by the Turn access ceiling.
     pub fn materialize_action_tools(
         &self,
         requested_tools: &[String],
@@ -57,9 +49,7 @@ impl ToolCatalog {
                 .tools
                 .get(name)
                 .ok_or_else(|| ToolError::UnknownTool(name.clone()))?;
-            if tools_enabled
-                && (entry.domain == ToolDomain::Project || access.tool_capabilities().allows(name))
-            {
+            if tools_enabled && access.tool_capabilities().allows(name) {
                 selected.push((name, entry));
             }
         }
@@ -161,17 +151,10 @@ impl ToolCatalogBuilder {
     where
         T: ToolExecutor + 'static,
     {
-        self.register(tool, ToolDomain::Workspace)
+        self.register(tool)
     }
 
-    pub fn register_project<T>(self, tool: T) -> Result<Self, ToolError>
-    where
-        T: ToolExecutor + 'static,
-    {
-        self.register(tool, ToolDomain::Project)
-    }
-
-    fn register<T>(mut self, tool: T, domain: ToolDomain) -> Result<Self, ToolError>
+    fn register<T>(mut self, tool: T) -> Result<Self, ToolError>
     where
         T: ToolExecutor + 'static,
     {
@@ -184,7 +167,6 @@ impl ToolCatalogBuilder {
         self.tools.insert(
             name,
             CatalogEntry {
-                domain,
                 executor: Arc::new(tool),
             },
         );

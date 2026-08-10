@@ -8,7 +8,7 @@ class InteractiveAgent(Agent):
 
     @action(
         search_context_size="low",
-        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def respond(self, message: HumanMessage):
         """Respond to the human's latest message as the next Turn of this persistent Session. Follow the requested task through to a useful result; do not restate this action contract or expose workflow plumbing."""

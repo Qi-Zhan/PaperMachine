@@ -7,10 +7,7 @@ use papermachine_model::ModelStream;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelRequest;
-use papermachine_protocol::ModelToolCall;
 use papermachine_protocol::TokenUsage;
-use serde_json::Value;
-use serde_json::json;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DemoModelClient;
@@ -18,13 +15,8 @@ pub struct DemoModelClient;
 #[async_trait]
 impl ModelClient for DemoModelClient {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
-        if request.instructions.contains("Maintain the Project home")
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == "read_resource")
-        {
-            return Ok(stream::iter(project_home_response(&request).into_iter().map(Ok)).boxed());
+        if request.instructions.contains("Maintain the Project home") {
+            return Ok(stream::iter(project_home_response().into_iter().map(Ok)).boxed());
         }
         let prompt = request
             .input
@@ -58,46 +50,16 @@ impl ModelClient for DemoModelClient {
     }
 }
 
-fn project_home_response(request: &ModelRequest) -> Vec<ModelEvent> {
-    let tool_output = |call_id: &str| {
-        request.input.iter().rev().find_map(|item| match item {
-            ModelInputItem::FunctionCallOutput {
-                call_id: found,
-                output,
-            } if found == call_id => Some(output),
-            _ => None,
-        })
-    };
+fn project_home_response() -> Vec<ModelEvent> {
     let usage = TokenUsage {
         input_tokens: 160,
         output_tokens: 40,
         cached_input_tokens: 0,
         cache_write_input_tokens: 0,
     };
-    if tool_output("demo-project-read").is_none() {
-        return tool_call(
-            "demo-project-read",
-            "read_resource",
-            json!({"uri": "pm://project"}),
-            usage,
-        );
-    }
     vec![
         ModelEvent::OutputTextDelta {
             delta: "<header><h1>Project overview</h1><p>Demo mode verifies the Project resource and publication path without claiming evidence-bearing research results.</p></header><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section>".to_string(),
-        },
-        ModelEvent::Completed { usage },
-    ]
-}
-
-fn tool_call(call_id: &str, name: &str, arguments: Value, usage: TokenUsage) -> Vec<ModelEvent> {
-    vec![
-        ModelEvent::ToolCallCompleted {
-            call: ModelToolCall {
-                call_id: call_id.to_string(),
-                name: name.to_string(),
-                arguments: serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string()),
-            },
         },
         ModelEvent::Completed { usage },
     ]

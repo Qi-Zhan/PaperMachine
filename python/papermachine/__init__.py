@@ -655,7 +655,7 @@ class ProjectContext:
     async def changes(
         self,
         *,
-        after_cursor: int | None = None,
+        after_cursor: str | None = None,
     ) -> dict[str, Any]:
         return await _effect(
             "project_changes",

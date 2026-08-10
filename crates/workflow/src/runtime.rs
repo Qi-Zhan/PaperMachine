@@ -18,7 +18,6 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -882,58 +881,17 @@ impl SessionEffectContext {
     }
 
     async fn project_changes(&self, payload: Value) -> Result<Value, SessionExecutionError> {
-        const MAX_CHANGED_RESOURCES: usize = 256;
         let payload: ProjectChangesEffect = serde_json::from_value(payload)?;
         let session_id = self.session_id;
         self.store
             .call(move |store| {
                 let session = store.get_session(session_id)?;
-                let batch =
-                    store.project_changes_after(session.project_id, payload.after_cursor)?;
-                let Some(after_cursor) = payload.after_cursor else {
-                    return Ok(json!({
-                        "cursor": batch.captured_cursor,
-                        "changed": true,
-                        "has_more": false,
-                        "resources": [{"kind": "project", "uri": "pm://project"}],
-                    }));
-                };
-                let mut cursor = after_cursor;
-                let mut seen = HashSet::new();
-                let mut resources = Vec::new();
-                for change in batch.changes {
-                    if change.session_id == Some(session_id) {
-                        cursor = change.sequence;
-                        continue;
-                    }
-                    let uri = match change.kind.as_str() {
-                        "project" => "pm://project".to_string(),
-                        "project_home" => "pm://project-home".to_string(),
-                        "session" => format!("pm://session/{}", change.entity_id),
-                        "agent" => format!("pm://agent/{}", change.entity_id),
-                        "turn" => format!("pm://turn/{}", change.entity_id),
-                        "artifact" => format!("pm://artifact/{}", change.entity_id),
-                        kind => {
-                            return Err(StoreError::Invariant(format!(
-                                "unknown Project change kind: {kind}"
-                            ))
-                            .into());
-                        }
-                    };
-                    if seen.insert(uri.clone()) {
-                        if resources.len() == MAX_CHANGED_RESOURCES {
-                            break;
-                        }
-                        resources.push(json!({"kind": change.kind, "uri": uri}));
-                    }
-                    cursor = change.sequence;
-                }
-                Ok(json!({
-                    "cursor": cursor,
-                    "changed": !resources.is_empty(),
-                    "has_more": cursor < batch.captured_cursor,
-                    "resources": resources,
-                }))
+                serde_json::to_value(store.project_snapshot_changes(
+                    session.project_id,
+                    session_id,
+                    payload.after_cursor.as_deref(),
+                )?)
+                .map_err(SessionExecutionError::from)
             })
             .await
     }
@@ -1482,7 +1440,7 @@ struct AskHumanEffect {
 #[derive(Debug, Deserialize)]
 struct ProjectChangesEffect {
     #[serde(default)]
-    after_cursor: Option<u64>,
+    after_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
