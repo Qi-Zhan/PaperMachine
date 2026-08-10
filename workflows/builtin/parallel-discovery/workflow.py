@@ -9,25 +9,14 @@ class Researcher(Agent):
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
     )
     async def investigate(
         self,
         question: str,
         perspective: str,
-        prior_context_brief: str,
     ):
-        """Investigate the question from the assigned perspective. prior_context_brief contains unverified leads from earlier Project work; use relevant leads and avoid repeated dead ends, but independently verify material claims. Use tools when useful and return evidence, counterevidence, and open questions."""
-
-
-class ContextAnalyst(Agent):
-    access = "model_only"
-    role = "prior Project context analyst"
-    system_prompt = "Extract a compact, provenance-preserving set of relevant leads from prior Project work. Never turn an earlier conclusion into verified evidence and never include unrelated history."
-
-    @action(reasoning_effort="medium", tools=[])
-    async def distill(self, question: str, project_context: dict):
-        """Return a compact brief covering relevant prior findings, source leads, contradictions, unresolved gaps, and work to avoid repeating for this question."""
+        """Investigate the question from the assigned perspective. Read relevant Project resources when earlier work may help, but independently verify material claims. Use tools when useful and return evidence, counterevidence, and open questions."""
 
 
 class Synthesizer(Agent):
@@ -82,16 +71,11 @@ async def main(ctx):
         for index, perspective in enumerate(perspectives)
     ]
     synthesizer = Synthesizer(name="Synthesis", model=synthesis_model)
-    context_analyst = ContextAnalyst(name="Prior context", model=synthesis_model)
-    prior_context_brief = ""
-    if ctx.context:
-        prior_context_brief = await context_analyst.distill(ctx.request, ctx.context)
     findings = await together(
         *(
             researcher.investigate(
                 ctx.request,
                 perspective,
-                prior_context_brief,
             )
             for researcher, perspective in zip(researchers, perspectives)
         )

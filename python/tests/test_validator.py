@@ -73,7 +73,7 @@ from papermachine import Agent, action, workflow
 class Curator(Agent):
     access = "model_only"
 
-    @action(tools=["read_project_home", "patch_project_home"])
+    @action(tools=["read_resource", "fetch_url"])
     async def maintain(self):
         """Maintain the page."""
 
@@ -93,7 +93,7 @@ async def main(ctx):
             [
                 {
                     "name": "maintain",
-                    "tools": ["read_project_home", "patch_project_home"],
+                    "tools": ["read_resource", "fetch_url"],
                 }
             ],
         )

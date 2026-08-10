@@ -42,13 +42,11 @@ Launching a Workflow freezes:
 - source, manifest, source SHA-256, and Python runtime ABI SHA-256;
 - one concrete `request` when `request_mode="required"`;
 - validated `params`, optional run `instructions`, and launch provenance;
-- the selected model profile, skills, access ceiling, and Agent overrides;
-- either fresh context or one bounded Project snapshot.
+- the selected model profile, skills, access ceiling, and Agent overrides.
 
-The runner exposes these separately as `ctx.request`, `ctx.params`,
-`ctx.instructions`, `ctx.trigger`, and `ctx.context`. Workflow code must pass
-the data an Action needs; the runtime never silently promotes request or
-Project data into system instructions.
+The runner exposes `ctx.request`, `ctx.params`, `ctx.instructions`, and
+`ctx.trigger`. Workflow code must pass the data an Action needs; the runtime
+never silently promotes request or Project data into system instructions.
 
 `request_mode="none"` is for persistent interaction that obtains messages with
 `ask_human`. New Session uses this path; there is no independent submit-to-
@@ -65,7 +63,7 @@ Agent
 await together(...)
 await ask_human(...)
 await wait(seconds=... | minutes=..., name=...)
-await ctx.project.snapshot(...)
+await ctx.project.changes(...)
 await publish_artifact(...)
 await publish_project_home(action=...)
 ```
@@ -167,16 +165,17 @@ the message.
 
 ## Project APIs
 
-`ctx.project.snapshot()` returns bounded Project-managed state, not Workspace
-files. Passing a prior `cursor` as `after_cursor` returns a committed delta.
+`ctx.project.changes()` returns a cursor and stable URIs for changed
+Project-managed resources, not their contents or Workspace files. Passing the
+cursor back as `after_cursor` returns later committed changes. An Action may
+declare the generic `read_resource` tool to inspect selected `pm://` resources.
 `publish_artifact` writes deterministic Project-managed content.
 
-Project Home is also Project-managed. A normal Action explicitly declares
-`read_project_home`, `patch_project_home`, and `preview_project_home`, may use
-them repeatedly, and then passes that exact awaited `_ActionCall` to
-`publish_project_home`. Publication verifies Action provenance and ToolSet
-membership and uses the draft revision as a CAS base. No Workflow slug or
-special Summary Agent is trusted by the kernel.
+Project Home is also Project-managed. A normal Action returns a complete safe
+HTML fragment and passes that exact awaited `_ActionCall` to
+`publish_project_home`. Publication verifies Action provenance, validates the
+HTML, and atomically updates the canonical page. No Workflow slug or special
+Summary Agent is trusted by the kernel.
 
 ## Persistence and recovery
 

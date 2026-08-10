@@ -15,14 +15,10 @@ Use active whenever any required work remains or completion is not proved. Use c
 
     @action(
         search_context_size="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
     )
-    async def work(
-        self,
-        objective: str,
-        initial_project_context: dict,
-    ):
-        """Continue working toward objective now. initial_project_context contains a captured Project snapshot only on the first Turn and is empty thereafter; the persistent Session already retains prior Turns. Use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""
+    async def work(self, objective: str):
+        """Continue working toward objective now. Read relevant Project resources when useful. Use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""
 
 
 @workflow(
@@ -83,12 +79,11 @@ async def main(ctx):
     )
 
     iterations = 0
-    initial_context = ctx.context
     latest_result = ""
     while True:
         iterations += 1
         result, status = _parse_goal_turn(
-            await agent.work(ctx.request, initial_context)
+            await agent.work(ctx.request)
         )
         if result:
             latest_result = result
@@ -98,7 +93,6 @@ async def main(ctx):
                 "status": status,
                 "iterations": iterations,
             }
-        initial_context = {}
 
 
 def _parse_goal_turn(value):

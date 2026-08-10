@@ -1382,19 +1382,11 @@ async fn workflow_model_params_bind_each_agent_session_to_a_profile() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn workflow_launch_configuration_captures_context_and_enforces_access_bounds() {
+async fn workflow_launch_configuration_enforces_access_bounds() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let (project, origin) =
         create_project_and_session(&app, directory.path(), "Configured launch").await;
-    send_interactive_message(
-        &app,
-        project.id,
-        origin.id,
-        "Reuse this prior evidence instead of restarting.",
-    )
-    .await;
-
     let above_origin = app
         .clone()
         .oneshot(json_request(
@@ -1440,7 +1432,6 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
                 "request": "Continue from the existing Project evidence.",
                 "params": {"perspectives": ["prior primary evidence"]},
                 "started_from_session_id": origin.id,
-                "context_mode": "project_snapshot",
                 "model": "demo-model",
                 "access": "research",
                 "agent_access_overrides": {
@@ -1453,23 +1444,6 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         .expect("configured launch should complete");
     assert_eq!(response.status(), StatusCode::CREATED);
     let run = response_json(response).await;
-    assert_eq!(run["launch_context"]["mode"], "project_snapshot");
-    assert_eq!(
-        run["launch_context"]["snapshot"]["focus_session_id"],
-        origin.id.to_string()
-    );
-    assert!(
-        run["launch_context"]["snapshot"]["sessions"]
-            .as_array()
-            .is_some_and(|sessions| sessions.iter().any(|session| {
-                session["id"] == origin.id.to_string()
-                    && session["turns"].as_array().is_some_and(|turns| {
-                        turns.iter().any(|turn| {
-                            turn["input"] == "Reuse this prior evidence instead of restarting."
-                        })
-                    })
-            }))
-    );
     assert_eq!(run["agent_access_overrides"]["Researcher"], "read_only");
     let workflow_id = run["id"].as_str().expect("Workflow id should exist");
 
@@ -1481,7 +1455,6 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
         let expected_access = match participant["class_name"].as_str() {
             Some("Researcher") => "read_only",
             Some("Synthesizer") => "model_only",
-            Some("ContextAnalyst") => "model_only",
             other => panic!("unexpected Agent class {other:?}"),
         };
         let session_id = &participant["session_id"];
@@ -1493,63 +1466,6 @@ async fn workflow_launch_configuration_captures_context_and_enforces_access_boun
             .expect("participant Session should be present");
         assert_eq!(session["access"], expected_access);
     }
-
-    let context_session_id = completed["participants"]
-        .as_array()
-        .expect("participants should be present")
-        .iter()
-        .find(|participant| participant["class_name"] == "ContextAnalyst")
-        .and_then(|participant| participant["session_id"].as_str())
-        .expect("ContextAnalyst Session id should exist");
-    let context_session = app
-        .clone()
-        .oneshot(empty_request(
-            "GET",
-            &format!("/api/projects/{}/sessions/{context_session_id}", project.id),
-        ))
-        .await
-        .expect("ContextAnalyst Session should load");
-    let context_session = response_json(context_session).await;
-    assert!(
-        context_session["turns"][0]["input"]
-            .as_str()
-            .is_some_and(|input| input.contains("Reuse this prior evidence instead of restarting.")),
-        "the Workflow must explicitly pass selected Project context to its context analyst"
-    );
-
-    let participant_session_id = completed["participants"]
-        .as_array()
-        .expect("participants should be present")
-        .iter()
-        .find(|participant| participant["class_name"] == "Researcher")
-        .and_then(|participant| participant["session_id"].as_str())
-        .expect("Researcher Session id should exist");
-    let participant = app
-        .oneshot(empty_request(
-            "GET",
-            &format!(
-                "/api/projects/{}/sessions/{participant_session_id}",
-                project.id
-            ),
-        ))
-        .await
-        .expect("participant Session should load");
-    let participant = response_json(participant).await;
-    let layers = participant["turns"][0]["prompt"]["layers"]
-        .as_array()
-        .expect("Workflow Turn prompt layers should exist");
-    assert!(
-        layers
-            .iter()
-            .all(|layer| layer["name"] != "Workflow launch context"),
-        "launch context is data and must only enter a Turn when the Workflow passes it"
-    );
-    assert!(
-        participant["turns"][0]["input"].as_str().is_some_and(
-            |input| !input.contains("Reuse this prior evidence instead of restarting.")
-        ),
-        "Researcher receives the compact brief rather than the raw Project snapshot"
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1569,12 +1485,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
                 "program_slug": "project-summary",
                 "request": "Refresh the Project home page now.",
                 "instructions": "Lead with verified progress and unresolved blockers.",
-                "params": {
-                    "interval_minutes": 0,
-                    "max_sessions": 50,
-                    "turns_per_session": 12,
-                    "max_artifacts": 50
-                },
+                "params": {"interval_minutes": 0},
                 "model": "demo-model",
                 "access": "model_only"
             }),
@@ -1598,7 +1509,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
     let source = artifacts
         .iter()
         .find(|artifact| artifact["metadata"]["role"] == "project_summary_source")
-        .expect("Project-home block source Artifact should exist");
+        .expect("Project-home source Artifact should exist");
     let action_id = view["actions"]
         .as_array()
         .expect("summary Actions should exist")
@@ -1673,11 +1584,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
             .iter()
             .filter_map(|definition| definition["name"].as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "patch_project_home",
-            "preview_project_home",
-            "read_project_home"
-        ]
+        vec!["read_resource"]
     );
     assert_eq!(turn_tool_set["sha256"].as_str().map(str::len), Some(64));
     let tool_names = session["steps"]
@@ -1687,14 +1594,7 @@ async fn project_summary_publishes_an_html_home_page_fragment() {
         .filter(|step| step["kind"] == "tool")
         .filter_map(|step| step["name"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        tool_names,
-        vec![
-            "read_project_home",
-            "patch_project_home",
-            "preview_project_home"
-        ]
-    );
+    assert_eq!(tool_names, vec!["read_resource"]);
 
     let overview = app
         .oneshot(empty_request(

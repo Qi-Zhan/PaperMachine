@@ -35,12 +35,11 @@ launch 时一次性冻结：
 - source、manifest、source SHA-256 与 Python runtime ABI SHA-256；
 - `request_mode="required"` 下的一条具体 `request`；
 - 通过校验的 `params`、可选 run `instructions` 与 launch provenance；
-- 显式选择的 model profile、skills、access ceiling 与 Agent overrides；
-- fresh context 或一个有界、不可变 Project snapshot。
+- 显式选择的 model profile、skills、access ceiling 与 Agent overrides。
 
-runner 分别暴露 `ctx.request`、`ctx.params`、`ctx.instructions`、`ctx.trigger` 和
-`ctx.context`。Workflow 必须把 Action 真正需要的数据显式传入；runtime 不会把 request
-或 Project data 偷偷升级成 system instructions。
+runner 暴露 `ctx.request`、`ctx.params`、`ctx.instructions` 与 `ctx.trigger`。Workflow
+必须把 Action 真正需要的数据显式传入；runtime 不会把 request 或 Project data 偷偷
+升级成 system instructions。
 
 `request_mode="none"` 用于通过 `ask_human` 取得消息的持久交互。New Session 就是这条
 路径；内核没有另一套直接 submit Session 的接口。
@@ -56,7 +55,7 @@ Agent
 await together(...)
 await ask_human(...)
 await wait(seconds=... | minutes=..., name=...)
-await ctx.project.snapshot(...)
+await ctx.project.changes(...)
 await publish_artifact(...)
 await publish_project_home(action=...)
 ```
@@ -145,15 +144,15 @@ Control message 状态为 `pending -> claimed -> applied`：
 
 ## Project API
 
-`ctx.project.snapshot()` 读取有界 Project-managed state，不读取 Workspace 文件。把旧
-`cursor` 作为 `after_cursor` 传回可得到 committed delta。`publish_artifact` 写入
-确定性的 Project-managed content。
+`ctx.project.changes()` 只返回 cursor 与发生变化的 Project-managed resource URI，
+不返回内容，也不读取 Workspace 文件。把 cursor 作为 `after_cursor` 传回可得到之后
+的 committed changes。Action 可声明通用 `read_resource` 工具，按需读取选中的
+`pm://` resource。`publish_artifact` 写入确定性的 Project-managed content。
 
-Project Home 同样位于 managed state。普通 Action 显式声明
-`read_project_home`、`patch_project_home`、`preview_project_home`，可反复检查和修正，
+Project Home 同样位于 managed state。普通 Action 返回完整、安全的 HTML fragment，
 再把那一个已经 await 的 `_ActionCall` 传给 `publish_project_home`。发布会验证精确
-Action provenance 与 ToolSet membership，并以 draft revision 做 CAS。内核不信任任何
-Workflow slug，也没有特殊 Summary Agent 分支。
+Action provenance、校验 HTML，并原子更新 canonical page。内核不信任任何 Workflow
+slug，也没有特殊 Summary Agent 分支。
 
 ## 持久化与恢复
 

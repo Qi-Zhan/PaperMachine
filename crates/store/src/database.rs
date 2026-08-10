@@ -7,7 +7,6 @@ use crate::artifact::reconcile_artifact_files;
 use crate::artifact::remove_artifact_file;
 use crate::artifact::store_artifact_file;
 use crate::filesystem::ManagedFs;
-use crate::filesystem::remove_entry;
 use crate::filesystem::write_atomic;
 use chrono::Utc;
 use papermachine_protocol::*;
@@ -30,7 +29,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 20;
+const SCHEMA_VERSION: u32 = 21;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -408,7 +407,7 @@ impl Store {
         };
         if after_cursor > captured_cursor {
             return Err(StoreError::Invariant(format!(
-                "Project snapshot cursor {after_cursor} is ahead of current cursor {captured_cursor}"
+                "Project change cursor {after_cursor} is ahead of current cursor {captured_cursor}"
             )));
         }
         let mut statement = connection.prepare(
@@ -1230,7 +1229,6 @@ impl Store {
             default_model,
             access: request.access,
             enabled_skills,
-            launch_context: request.launch_context,
             agent_access_overrides: request.agent_access_overrides,
             status: WorkflowStatus::Created,
             params: request.params,
@@ -1292,23 +1290,6 @@ impl Store {
 
     pub fn get_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
         self.query_document_by_id("workflows", id.to_string(), "Workflow")
-    }
-
-    pub fn cleanup_terminal_workflow_state(&self, id: WorkflowId) -> Result<(), StoreError> {
-        let workflow = self.get_workflow(id)?;
-        if !workflow.status.is_terminal() {
-            return Err(StoreError::Invariant(format!(
-                "cannot clean runtime state for active Workflow {id}"
-            )));
-        }
-        let draft = self
-            .managed_root
-            .join("runtime/project-home-drafts")
-            .join(id.to_string());
-        if draft.exists() || std::fs::symlink_metadata(&draft).is_ok() {
-            remove_entry(&draft)?;
-        }
-        Ok(())
     }
 
     pub fn list_session_workflows(

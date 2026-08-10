@@ -43,7 +43,6 @@ class RunnerProtocolTest(unittest.TestCase):
                 "        'instructions': ctx.instructions,\n"
                 "        'params': ctx.params,\n"
                 "        'trigger': ctx.trigger,\n"
-                "        'context': ctx.context,\n"
                 "    }\n",
                 encoding="utf-8",
             )
@@ -87,7 +86,6 @@ class RunnerProtocolTest(unittest.TestCase):
                             "kind": "user",
                             "source_session_id": "origin-session",
                         },
-                        "context": {"project": {"name": "Context project"}},
                     }
                 )
                 + "\n"
@@ -107,7 +105,6 @@ class RunnerProtocolTest(unittest.TestCase):
                         "kind": "user",
                         "source_session_id": "origin-session",
                     },
-                    "context": {"project": {"name": "Context project"}},
                 },
             )
             process.stdin.write(
@@ -129,7 +126,7 @@ class RunnerProtocolTest(unittest.TestCase):
                 "from papermachine import _effect, workflow\n"
                 "@workflow(slug='test', name='Test', description='Runner test')\n"
                 "async def main(ctx):\n"
-                "    result = await _effect('project_snapshot', {})\n"
+                "    result = await _effect('probe', {})\n"
                 "    return {'size': len(result['blob'])}\n",
                 encoding="utf-8",
             )
@@ -177,7 +174,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.flush()
 
             request = self.read_request(process)
-            self.assertEqual(request["kind"], "project_snapshot")
+            self.assertEqual(request["kind"], "probe")
             process.stdin.write(
                 json.dumps(
                     {
@@ -210,7 +207,7 @@ class RunnerProtocolTest(unittest.TestCase):
                 "from papermachine import _effect, workflow\n"
                 "@workflow(slug='test', name='Test', description='Runner test')\n"
                 "async def main(ctx):\n"
-                "    await _effect('project_snapshot', {})\n"
+                "    await _effect('probe', {})\n"
                 "    return {'ok': True}\n",
                 encoding="utf-8",
             )
@@ -256,7 +253,7 @@ class RunnerProtocolTest(unittest.TestCase):
                 + "\n"
             )
             process.stdin.flush()
-            self.assertEqual(self.read_request(process)["kind"], "project_snapshot")
+            self.assertEqual(self.read_request(process)["kind"], "probe")
 
             process.stdin.write("not-json\n")
             process.stdin.flush()

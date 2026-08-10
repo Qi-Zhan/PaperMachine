@@ -18,10 +18,11 @@ pub struct DemoModelClient;
 #[async_trait]
 impl ModelClient for DemoModelClient {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
-        if request
-            .tools
-            .iter()
-            .any(|tool| tool.name == "read_project_home")
+        if request.instructions.contains("Maintain the Project home")
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "read_resource")
         {
             return Ok(stream::iter(project_home_response(&request).into_iter().map(Ok)).boxed());
         }
@@ -73,44 +74,17 @@ fn project_home_response(request: &ModelRequest) -> Vec<ModelEvent> {
         cached_input_tokens: 0,
         cache_write_input_tokens: 0,
     };
-    if tool_output("demo-project-home-read").is_none() {
+    if tool_output("demo-project-read").is_none() {
         return tool_call(
-            "demo-project-home-read",
-            "read_project_home",
-            json!({}),
-            usage,
-        );
-    }
-    if tool_output("demo-project-home-patch").is_none() {
-        let revision = tool_output("demo-project-home-read")
-            .and_then(|output| output.pointer("/result/revision"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        return tool_call(
-            "demo-project-home-patch",
-            "patch_project_home",
-            json!({
-                "base_revision": revision,
-                "operations": [{
-                    "kind": "upsert",
-                    "id": "overview",
-                    "html": "<header><h1>Project overview</h1><p>This page was maintained through the Project-home editing and preview tool loop.</p></header><section><h2>Current state</h2><p>Demo mode verifies the runtime path but does not claim evidence-bearing research results.</p></section><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section>"
-                }]
-            }),
-            usage,
-        );
-    }
-    if tool_output("demo-project-home-preview").is_none() {
-        return tool_call(
-            "demo-project-home-preview",
-            "preview_project_home",
-            json!({}),
+            "demo-project-read",
+            "read_resource",
+            json!({"uri": "pm://project"}),
             usage,
         );
     }
     vec![
         ModelEvent::OutputTextDelta {
-            delta: "The Project home page has been edited and previewed.".to_string(),
+            delta: "<header><h1>Project overview</h1><p>Demo mode verifies the Project resource and publication path without claiming evidence-bearing research results.</p></header><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section>".to_string(),
         },
         ModelEvent::Completed { usage },
     ]

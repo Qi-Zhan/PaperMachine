@@ -43,7 +43,6 @@ impl ActionHarness {
                 default_model: "test-model".to_string(),
                 access,
                 enabled_skills: Vec::new(),
-                launch_context: Default::default(),
                 agent_access_overrides: Default::default(),
             })
             .expect("test Workflow should be created");

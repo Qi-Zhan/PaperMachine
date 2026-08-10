@@ -95,20 +95,6 @@ pub struct Project {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowContextMode {
-    #[default]
-    Fresh,
-    ProjectSnapshot,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowLaunchContext {
-    pub mode: WorkflowContextMode,
-    pub snapshot: Option<Value>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum WorkflowTriggerKind {
     /// A person launched the Run from an existing Session.
     User,
@@ -145,10 +131,6 @@ pub struct Workflow {
     pub default_model: String,
     pub access: crate::AccessPreset,
     pub enabled_skills: Vec<String>,
-    /// Immutable Project state captured when this Workflow was launched. It is
-    /// exposed as `ctx.context`; the Workflow must explicitly pass any relevant
-    /// data to an Agent Action.
-    pub launch_context: WorkflowLaunchContext,
     /// Per-run overrides keyed by Python Agent class name. The Workflow access
     /// profile remains the hard upper bound.
     pub agent_access_overrides: BTreeMap<String, crate::AccessPreset>,

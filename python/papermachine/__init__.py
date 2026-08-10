@@ -611,7 +611,7 @@ async def publish_project_home(
     action: _ActionCall,
     metadata: dict[str, Any] | None = None,
 ) -> ArtifactRef:
-    """Publish the Project-home draft produced by one completed Action call."""
+    """Publish the HTML returned by one completed Action call as Project home."""
 
     if not isinstance(action, _ActionCall):
         raise TypeError("publish_project_home action must be an Action call")
@@ -652,28 +652,14 @@ async def wait(
 
 
 class ProjectContext:
-    async def snapshot(
+    async def changes(
         self,
         *,
         after_cursor: int | None = None,
-        max_sessions: int = 50,
-        max_turns_per_session: int = 12,
-        max_workflows: int = 200,
-        max_artifacts: int = 50,
-        include_artifact_content: bool = False,
-        max_text_chars: int = 500_000,
     ) -> dict[str, Any]:
         return await _effect(
-            "project_snapshot",
-            {
-                "after_cursor": after_cursor,
-                "max_sessions": max_sessions,
-                "max_turns_per_session": max_turns_per_session,
-                "max_workflows": max_workflows,
-                "max_artifacts": max_artifacts,
-                "include_artifact_content": include_artifact_content,
-                "max_text_chars": max_text_chars,
-            },
+            "project_changes",
+            {"after_cursor": after_cursor},
         )
 
 
@@ -684,7 +670,6 @@ class WorkflowContext:
     params: dict[str, Any]
     workflow_id: str
     trigger: dict[str, Any] = field(default_factory=dict)
-    context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def project(self) -> ProjectContext:

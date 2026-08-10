@@ -54,7 +54,7 @@ class ConversationalAgent(Agent):
 class ProjectPageAgent(Agent):
     access = "model_only"
 
-    @action(tools=["read_project_home", "patch_project_home"])
+    @action(tools=["read_resource"])
     async def maintain(self) -> str:
         """Maintain the page with its declared tools."""
 
@@ -92,9 +92,7 @@ class ActionOptionsTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(invoke()), "page-artifact")
         action = next(payload for kind, payload in effects if kind == "invoke_action")
-        self.assertEqual(
-            action["requested_tools"], ["read_project_home", "patch_project_home"]
-        )
+        self.assertEqual(action["requested_tools"], ["read_resource"])
         publication = effects[-1][1]
         self.assertEqual(publication["action_invocation_id"], "invocation-page")
 

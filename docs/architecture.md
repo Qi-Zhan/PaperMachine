@@ -173,7 +173,7 @@ replays model tool calls.
 ## Workflow scheduler
 
 The public DSL intentionally exposes only Agent/Action, normal Python control
-flow, `together`, `ask_human`, `wait`, Project snapshots, and Artifact/Home
+flow, `together`, `ask_human`, `wait`, Project change cursors, and Artifact/Home
 publication.
 
 `wait` is one durable Workflow effect. Its wake time is derived from the
@@ -206,11 +206,11 @@ Turn reclaim it.
 
 Project Home is Project-managed structured source plus immutable HTML/source
 Artifacts. It is not in the Workspace. A Summary Action is a normal Agent
-Action whose ToolSet explicitly contains the three Home tools. The Agent may
-read, patch, preview, and correct repeatedly. Publication accepts the exact
-awaited Action call, verifies provenance and ToolSet membership, and commits
-with revision CAS. No Summary slug, Agent class, call count, or fixed tool order
-is hard-coded.
+Action whose ToolSet contains only the generic `read_resource` Project tool.
+It reads relevant resources on demand and returns the complete HTML fragment.
+Publication accepts the exact awaited Action call, verifies provenance,
+validates the fragment, and commits it atomically. No Summary slug or Agent
+class is hard-coded.
 
 ## Adaptation boundary
 

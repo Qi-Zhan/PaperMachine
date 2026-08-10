@@ -264,26 +264,6 @@ async fn run_scheduled(
     workflow_id: WorkflowId,
     cancellation: CancellationToken,
 ) -> WorkflowOutcome {
-    let outcome = run_scheduled_inner(Arc::clone(&inner), workflow_id, cancellation).await;
-    if inner
-        .store
-        .call(move |store| store.get_workflow(workflow_id))
-        .await
-        .is_ok_and(|workflow| workflow.status.is_terminal())
-    {
-        let _ = inner
-            .store
-            .call(move |store| store.cleanup_terminal_workflow_state(workflow_id))
-            .await;
-    }
-    outcome
-}
-
-async fn run_scheduled_inner(
-    inner: Arc<SchedulerInner>,
-    workflow_id: WorkflowId,
-    cancellation: CancellationToken,
-) -> WorkflowOutcome {
     let mut wake_at_hint = None;
     loop {
         let current = inner
@@ -628,7 +608,6 @@ mod tests {
                 default_model: "test-model".to_string(),
                 access: AccessPreset::Research,
                 enabled_skills: Vec::new(),
-                launch_context: Default::default(),
                 agent_access_overrides: Default::default(),
             })
             .expect("workflow should be created")

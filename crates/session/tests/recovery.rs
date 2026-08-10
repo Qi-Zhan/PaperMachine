@@ -211,7 +211,6 @@ fn workflow_recovery_fixture(
             default_model: "test-model".to_string(),
             access: AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");

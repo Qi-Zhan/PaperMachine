@@ -12,16 +12,13 @@ use papermachine_protocol::Project;
 use papermachine_protocol::Session;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolSetSnapshot;
-use papermachine_protocol::WorkflowContextMode;
 use papermachine_protocol::WorkflowEffectStatus;
-use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
 use papermachine_protocol::WorkflowUsage;
 use papermachine_store::NewWorkflow;
-use papermachine_store::ProjectHomePatchOperation;
 use papermachine_store::Store;
 use papermachine_store::TurnContextCheckpoint;
 use serde_json::json;
@@ -193,7 +190,6 @@ fn project_level_workflow_keeps_program_snapshot_after_program_update() {
             default_model: "test-model".to_string(),
             access: AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Project-level Workflow should be created without a Session");
@@ -237,7 +233,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             default_model: "test-model".to_string(),
             access: AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect_err("a Workflow must not exceed its starting Session");
@@ -259,7 +254,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             default_model: "test-model".to_string(),
             access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: BTreeMap::from([(
                 "Researcher".to_string(),
                 AccessPreset::Research,
@@ -272,10 +266,6 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             .contains("exceeds Workflow access")
     );
 
-    let launch_context = WorkflowLaunchContext {
-        mode: WorkflowContextMode::ProjectSnapshot,
-        snapshot: Some(json!({"evidence": "captured once"})),
-    };
     let created = store
         .create_workflow(NewWorkflow {
             project_id: project.id,
@@ -288,14 +278,12 @@ fn workflow_access_is_bounded_by_its_origin_and_agent_overrides() {
             default_model: "test-model".to_string(),
             access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
-            launch_context: launch_context.clone(),
             agent_access_overrides: BTreeMap::from([(
                 "Researcher".to_string(),
                 AccessPreset::ReadOnly,
             )]),
         })
         .expect("an override below the Workflow ceiling should be accepted");
-    assert_eq!(created.launch_context, launch_context);
     assert_eq!(
         created.agent_access_overrides["Researcher"],
         AccessPreset::ReadOnly
@@ -345,7 +333,6 @@ fn workflow_for_session(
             default_model: "test-model".to_string(),
             access: AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("workflow should be created")
@@ -692,7 +679,7 @@ fn workflow_turn_and_action_attempt_are_attached_atomically() {
 }
 
 #[test]
-fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() {
+fn project_home_publishes_an_action_result_and_reuses_unchanged_content() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "Project Home");
@@ -722,172 +709,52 @@ fn project_home_draft_supports_idempotent_semantic_patches_and_preview_source() 
             "maintain_project_home",
             "Maintain the page",
             json!({}),
-            vec![
-                "read_project_home".to_string(),
-                "patch_project_home".to_string(),
-                "preview_project_home".to_string(),
-            ],
+            vec!["read_resource".to_string()],
         )
         .expect("Action should be created");
-
-    let empty = store
-        .read_project_home_draft(workflow.id, invocation.id)
-        .expect("empty draft should load");
-    assert!(empty.blocks.is_empty());
-    let patched = store
-        .patch_project_home_draft(
-            workflow.id,
-            invocation.id,
-            &empty.revision,
-            vec![ProjectHomePatchOperation::Upsert {
-                id: "overview".to_string(),
-                html: "<header><h1>Current research state</h1></header>".to_string(),
-            }],
-        )
-        .expect("semantic patch should apply");
-    assert_ne!(patched.revision, empty.revision);
-    assert_eq!(patched.blocks[0].id, "overview");
-
-    let conflict = store
-        .patch_project_home_draft(
-            workflow.id,
-            invocation.id,
-            &empty.revision,
-            vec![ProjectHomePatchOperation::Remove {
-                id: "overview".to_string(),
-            }],
-        )
-        .expect_err("stale revisions must not overwrite a newer draft");
-    assert!(conflict.to_string().contains("revision conflict"));
-
-    let unsafe_patch = store
-        .patch_project_home_draft(
-            workflow.id,
-            invocation.id,
-            &patched.revision,
-            vec![ProjectHomePatchOperation::Upsert {
-                id: "unsafe".to_string(),
-                html: "<script>alert(1)</script>".to_string(),
-            }],
-        )
-        .expect_err("active content must be rejected before publication");
-    assert!(unsafe_patch.to_string().contains("forbidden <script>"));
-
-    let source = patched.source();
-    assert!(source.html().starts_with("<article>"));
-    assert!(source.html().contains("Current research state"));
-
+    let html = "<header><h1>Current research state</h1></header>".to_string();
     let published = store
-        .publish_project_home_draft(
+        .publish_project_home(
             workflow.id,
             invocation.id,
             participant.session_id,
             papermachine_protocol::ArtifactId::new(),
             papermachine_protocol::ArtifactId::new(),
-            json!({"test": "initial"}),
+            html.clone(),
+            json!({}),
         )
-        .expect("first Project home should publish");
+        .expect("Project home should publish");
     assert!(published.changed);
-    assert_eq!(published.home.revision, patched.revision);
     assert_eq!(
         store
             .get_project_home(project.id)
             .expect("canonical home should load"),
         Some(published.home.clone())
     );
-
-    let action = |name: &str| {
+    let page = String::from_utf8(
         store
-            .create_action_invocation(
-                workflow.id,
-                participant.id,
-                name,
-                "Maintain the page",
-                json!({}),
-                vec![
-                    "read_project_home".to_string(),
-                    "patch_project_home".to_string(),
-                    "preview_project_home".to_string(),
-                ],
-            )
-            .expect("Project-home Action should be created")
-    };
-    let no_op_action = action("no_op");
-    let no_op_draft = store
-        .read_project_home_draft(workflow.id, no_op_action.id)
-        .expect("no-op draft should load current canonical home");
-    assert_eq!(no_op_draft.base_artifact_id, Some(published.artifact.id));
-    let no_op = store
-        .publish_project_home_draft(
-            workflow.id,
-            no_op_action.id,
-            participant.session_id,
-            papermachine_protocol::ArtifactId::new(),
-            papermachine_protocol::ArtifactId::new(),
-            json!({}),
-        )
-        .expect("unchanged Project home should reuse the canonical revision");
-    assert!(!no_op.changed);
-    assert_eq!(no_op.artifact.id, published.artifact.id);
+            .read_artifact(&published.artifact)
+            .expect("published page should be readable"),
+    )
+    .expect("published page should be UTF-8");
     assert_eq!(
-        store
-            .list_project_artifacts(project.id)
-            .expect("Artifacts should list")
-            .len(),
-        2
+        page,
+        "<article>\n<header><h1>Current research state</h1></header>\n</article>"
     );
 
-    let winning_action = action("winning_update");
-    let stale_action = action("stale_update");
-    let winning_base = store
-        .read_project_home_draft(workflow.id, winning_action.id)
-        .expect("winning draft should load");
-    let stale_base = store
-        .read_project_home_draft(workflow.id, stale_action.id)
-        .expect("stale draft should load");
-    store
-        .patch_project_home_draft(
+    let unchanged = store
+        .publish_project_home(
             workflow.id,
-            winning_action.id,
-            &winning_base.revision,
-            vec![ProjectHomePatchOperation::Upsert {
-                id: "status".to_string(),
-                html: "<section><h2>Verified status</h2></section>".to_string(),
-            }],
-        )
-        .expect("winning patch should apply");
-    store
-        .patch_project_home_draft(
-            workflow.id,
-            stale_action.id,
-            &stale_base.revision,
-            vec![ProjectHomePatchOperation::Upsert {
-                id: "status".to_string(),
-                html: "<section><h2>Stale status</h2></section>".to_string(),
-            }],
-        )
-        .expect("concurrent stale draft should patch locally");
-    store
-        .publish_project_home_draft(
-            workflow.id,
-            winning_action.id,
+            invocation.id,
             participant.session_id,
             papermachine_protocol::ArtifactId::new(),
             papermachine_protocol::ArtifactId::new(),
+            html,
             json!({}),
         )
-        .expect("winning revision should publish");
-    let conflict = store
-        .publish_project_home_draft(
-            workflow.id,
-            stale_action.id,
-            participant.session_id,
-            papermachine_protocol::ArtifactId::new(),
-            papermachine_protocol::ArtifactId::new(),
-            json!({}),
-        )
-        .expect_err("stale Project-home base must fail closed");
-    assert!(conflict.to_string().contains("base revision changed"));
+        .expect("unchanged content should be accepted");
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.artifact.id, published.artifact.id);
 }
 
 #[test]

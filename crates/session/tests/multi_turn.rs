@@ -87,7 +87,6 @@ fn workflow_agent(
             default_model: "test-model".to_string(),
             access: papermachine_protocol::AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
@@ -187,7 +186,6 @@ async fn cancelling_a_workflow_action_turn_reaches_its_parent_execution() {
             default_model: "test-model".to_string(),
             access: papermachine_protocol::AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
@@ -567,7 +565,6 @@ async fn workflow_token_usage_is_recorded_at_each_model_step() {
             default_model: "test-model".to_string(),
             access: papermachine_protocol::AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("run should be created");

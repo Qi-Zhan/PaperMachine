@@ -54,8 +54,8 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 - Project Page edits the Project system prompt file.
 - A Session inspector edits that Session's system prompt between active Turns.
 - Starting a Workflow may supply Workflow-wide run `instructions`.
-- Starting from a Session records provenance and may focus captured research
-  context, but does not inherit or copy that Session's system prompt.
+- Starting from a Session records provenance but does not inherit or copy that
+  Session's system prompt.
 - An Agent class uses `system_prompt = "..."`; a constructor may override it.
 - A completed or queued Turn never changes when any source prompt is edited.
   Only subsequently created Turns receive a new snapshot.
@@ -66,48 +66,43 @@ runtime 代码执行，不能靠 prompt 获得或绕过。
 - Project Page 负责修改项目级 system prompt 文件。
 - Session 右侧 inspector 可以在没有 active Turn 时修改该 Session 的 system prompt。
 - 启动 Workflow 时可以提供该 Workflow 共享的 run `instructions`。
-- 从 Session 启动会记录来源，并可在研究上下文中优先包含该 Session，但不会继承或
-  复制它的 system prompt。
+- 从 Session 启动会记录来源，但不会继承或复制该 Session 的 system prompt。
 - Agent class 使用 `system_prompt = "..."`，构造实例时也可以覆盖。
 - 任意源 prompt 的修改都不会追溯改变已有 Turn，只影响之后创建的 Turn。
 - Workflow source 在每个 Run 中不可变。Skill instructions 会完整解析并直接固化到
   PromptSnapshot；只保留 slug/hash 审计信息，不复制 runtime package，恢复时也不
   读取 live file。
 
-`project-summary` makes this split concrete. Its reviewed Agent base prompt and
-Action contract stay in the built-in Workflow source. The contract gives the
-Agent page read, patch, and preview tools and trusts its normal tool loop to
-inspect and correct the result before finishing; it does not impose a second
-review prompt. The Project Page edits the summary run's `instructions`: what to
-emphasize, preserve, or omit.
+`project-summary` makes this split concrete. Its small Agent prompt and Action
+contract stay in the built-in Workflow source. The Action reads selected
+Project resources through the generic `read_resource` tool and returns the
+complete page as its ordinary result. The Project Page edits the summary run's
+`instructions`: what to emphasize, preserve, or omit.
 The Project system prompt still applies underneath it. Updating a scheduled
 summary starts a new snapshotted Workflow run and terminates the old schedule;
 previous summary Turns and HTML Artifacts remain attributable to their original
 prompt snapshots.
 
-`project-summary` 把这个分层直接呈现在 UI 中：内置 Workflow 源码保存经审查的
-Agent 基础 prompt 与 Action contract；同一 Action 通过页面读取、增量修改和预览
-工具自行检查并修正结果，不再由第二个 review prompt 判断；Project Page 编辑的是
-该 summary run 的 run `instructions`，用来说明应优先展示、保留或省略什么；
+`project-summary` 把这个分层直接呈现在 UI 中：内置 Workflow 源码保存精简的 Agent
+prompt 与 Action contract；Action 通过通用 `read_resource` 按需读取 Project resource，
+并把完整页面作为普通结果返回；Project Page 编辑的是该 summary run 的 run
+`instructions`，用来说明应优先展示、保留或省略什么；
 Project system prompt 仍然位于更前面的共享层。修改定时摘要会启动一个使用新
 prompt 快照的 Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到
 原 prompt。
 
-## Launch context / 启动上下文
+## Project data / Project 数据
 
-Run Workflow offers `fresh` and `project_snapshot`. `fresh` adds no previous
-research data. `project_snapshot` stores one bounded Project snapshot on the
-Workflow and exposes the same JSON to the Python program as `ctx.context`.
-It does not add any prompt layer. The Workflow must explicitly select and pass
-the relevant data as Action arguments. The snapshot remains byte-stable for the
-whole run; only an explicit `await ctx.project.snapshot()` effect reads newer
-Project state.
+Project content is never injected at Workflow launch. Long-lived Workflow code
+may call `ctx.project.changes(after_cursor=...)` to receive only a cursor and
+changed `pm://` URIs. An Action must explicitly declare `read_resource` and
+choose what to read; the returned content enters the model as an ordinary tool
+result, not a prompt layer.
 
-Run Workflow 提供 `fresh` 和 `project_snapshot`。`fresh` 不加入既有研究数据；
-`project_snapshot` 在 Workflow 上保存一份有界 Project 快照，通过 `ctx.context`
-把同一份 JSON 交给 Python，但不会加入任何 prompt layer。Workflow 必须显式选择
-相关数据并作为 Action 参数传入。整个 run 期间快照内容不变，只有显式调用
-`await ctx.project.snapshot()` 才会读取较新的 Project 状态。
+Workflow 启动时不会注入 Project 内容。长期运行的 Workflow 可调用
+`ctx.project.changes(after_cursor=...)`，只取得 cursor 与变化的 `pm://` URI。Action
+必须显式声明 `read_resource` 并自行选择读取对象；内容以普通 tool result 进入模型，
+而不是 prompt layer。
 
 For a Workflow whose manifest uses `request_mode="required"`, the concrete run
 `request` follows the same rule: it is available as `ctx.request`, never
@@ -129,14 +124,15 @@ Run `instructions` have deliberately different semantics. The exact string is
 available to Python as `ctx.instructions`, and the runtime also snapshots it as
 a Workflow instruction layer on every Action Turn in that run. Use it for
 cross-Agent rules such as language, evidence policy, output conventions, or a
-summary policy. Use `ctx.request` for the concrete task and `ctx.context` for
-selected prior results. This prevents a Workflow author from accidentally
-treating task data or old model output as system-level authority.
+summary policy. Use `ctx.request` for the concrete task and `read_resource` for
+selected Project results. This prevents task data or old model output from
+becoming system-level authority.
 
 Run `instructions` 的语义刻意不同：Python 可通过 `ctx.instructions` 读取原文，
 runtime 也会把它作为该 run 每个 Action Turn 的 Workflow instruction layer 固化。
 它适合跨 Agent 的语言、证据、输出或摘要策略；具体任务放在 `ctx.request`，选择的
-既有结果放在 `ctx.context`。这样不会误把任务数据或旧模型输出提升成 system 级指令。
+Project 结果通过 `read_resource` 按需读取。这样不会误把任务数据或旧模型输出提升成
+system 级指令。
 
 ## Message origin / 消息来源
 
@@ -159,8 +155,8 @@ request，并不是独立的 Session submit 路径。`Turn.origin=workflow` 表�
 The rendered instruction snapshot is stable for a Turn and usually stable
 across Turns in one Agent Session. The concrete request and Action arguments
 remain message input rather than being rebuilt into system instructions. A
-captured Project snapshot costs no model tokens until Workflow code explicitly
-passes some or all of it. Run instructions and Agent system prompts stay stable;
+Project resource costs no model tokens until an Agent explicitly reads it. Run
+instructions and Agent system prompts stay stable;
 changing Action type, skills, control guidance, or an editable prompt
 intentionally changes the instruction prefix. The routing cache key remains
 Session-scoped, while the provider decides actual reuse by matching request

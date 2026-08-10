@@ -42,16 +42,14 @@ and Session mechanisms; pause, cancellation, provider failure, and completion
 all stop the loop without a separate evaluator Agent.
 
 The **Project Page** can run the reviewed `project-summary` Workflow once or in
-a normal loop separated by durable waits. Its summary Agent reads a bounded snapshot of
-existing Project Sessions, Workflow results, and Artifact metadata. In one
-ordinary tool-capable Action it reads the existing page, applies semantic block
-patches, previews the complete materialized result, and can keep correcting it
-before the runtime publishes an immutable HTML Artifact. The Project stores one
-canonical Artifact/source/revision reference; unchanged refreshes reuse it and
-concurrent stale drafts fail closed. That sanitized fragment is the Project home page itself; there is no fixed dashboard around it
-and no embedded frame. The summary policy is the run's ordinary `instructions`
-field; there is no review Action, hidden summary daemon, or extra instance
-model.
+a normal loop separated by durable waits. Its ordinary Agent receives only
+changed resource URIs, reads relevant Project content on demand, and returns a
+complete HTML fragment. The runtime validates and publishes that exact Action
+result. The Project stores one canonical Artifact/source/revision reference;
+unchanged refreshes reuse it. That sanitized fragment is the Project home page
+itself; there is no fixed dashboard or embedded frame. The summary policy is
+the run's ordinary `instructions` field; there is no review Action, hidden
+summary daemon, or extra instance model.
 
 ```text
 Project
@@ -182,20 +180,15 @@ each Turn's PromptSnapshot; scripts and assets are not a runtime capability.
 - Suspend quiescent human/deadline waits without retaining an idle Python
   process or global execution permit; `wait(...)` is one journaled effect whose
   persisted start time defines its deadline.
-- Read bounded Project state from Workflow code with `ctx.project.snapshot()`;
-  long-lived Workflows can pass `cursor` back as `after_cursor` to receive only
-  later committed changes. Publish deterministic text/HTML Artifacts with
-  `publish_artifact(...)`.
+- Observe Project changes with `ctx.project.changes()` and let Actions inspect
+  selected `pm://` resources through the generic `read_resource` tool. Publish
+  deterministic text/HTML Artifacts with `publish_artifact(...)`.
 - Declare every Action's local tools with `@action(tools=[...])`. Rust validates
   names, filters Workspace tools against the Turn access ceiling, and atomically
   stores the resulting sorted definitions and SHA-256 with the Turn. Project
-  tools are admitted only through a Workflow Action declaration. `project-summary` declares only page read, patch,
-  and preview, then calls `publish_project_home(...)`.
-- Launch with either a fresh context or one immutable, bounded Project snapshot.
-  The latter is exposed as `ctx.context`; the Workflow explicitly routes raw or
-  summarized portions to the Agents that need them. A Session-origin snapshot
-  focuses that Session without copying its mutable system prompt. Workflows may
-  still request live state explicitly with `ctx.project.snapshot()`.
+  tools are admitted only through a Workflow Action declaration.
+  `project-summary` declares only `read_resource`, returns ordinary HTML, then
+  calls `publish_project_home(...)` with that exact completed Action.
 - Generate a Project progress webpage manually or with the built-in scheduled
   `project-summary` Workflow, with an explicit user-editable Workflow prompt.
 - Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
@@ -347,6 +340,4 @@ See the accepted [runtime kernel target](docs/runtime-kernel.md),
 [prompt model](docs/prompt-model.md),
 [workflow ABI](docs/workflow-abi.md),
 [workflow semantics](docs/workflow-language-semantics.md), and
-[security boundaries](docs/security.md). The crash matrix, complete release
-checks, and current real-provider evidence are summarized in
-[the 2026-08-10 simplified-kernel validation report](docs/kernel-validation-2026-08-10.md).
+[security boundaries](docs/security.md).

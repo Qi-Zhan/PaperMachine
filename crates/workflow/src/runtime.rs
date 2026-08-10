@@ -21,6 +21,7 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -38,11 +39,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::ProjectSnapshotOptions;
 use crate::WorkflowExecution;
 use crate::WorkflowRuntime;
 use crate::WorkflowSuspension;
-use crate::build_project_snapshot;
 use crate::python_runtime_sha256;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
@@ -151,7 +150,6 @@ impl PythonWorkflowRuntime {
             "instructions": run.instructions,
             "params": run.params,
             "trigger": run.trigger,
-            "context": run.launch_context.snapshot.clone().unwrap_or_else(|| json!({})),
         });
         stdin
             .write_all(&encode_protocol_frame(&initialization)?)
@@ -506,7 +504,7 @@ impl RunEffectContext {
             "invoke_action" => self.invoke_action(effect_key, payload).await,
             "wait" => self.wait(effect_key, payload).await,
             "ask_human" => self.ask_human(effect_key, payload).await,
-            "project_snapshot" => self.project_snapshot(payload).await,
+            "project_changes" => self.project_changes(payload).await,
             "publish_artifact" => self.publish_artifact(effect_key, payload).await,
             "publish_project_home" => self.publish_project_home(effect_key, payload).await,
             "complete" => self.complete(payload).await,
@@ -1087,27 +1085,64 @@ impl RunEffectContext {
         Ok(json!({"human_request_id": request.id, "answer": answer}))
     }
 
-    async fn project_snapshot(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
-        let payload: ProjectSnapshotEffect = serde_json::from_value(payload)?;
+    async fn project_changes(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+        const MAX_CHANGED_RESOURCES: usize = 256;
+        let payload: ProjectChangesEffect = serde_json::from_value(payload)?;
         let workflow_id = self.workflow_id;
         self.store
             .call(move |store| {
                 let run = store.get_workflow(workflow_id)?;
-                Ok(build_project_snapshot(
-                    store,
-                    run.project_id,
-                    ProjectSnapshotOptions {
-                        exclude_workflow_id: Some(workflow_id),
-                        after_cursor: payload.after_cursor,
-                        max_sessions: payload.max_sessions,
-                        max_turns_per_session: payload.max_turns_per_session,
-                        max_workflows: payload.max_workflows,
-                        max_artifacts: payload.max_artifacts,
-                        include_artifact_content: payload.include_artifact_content,
-                        max_text_chars: payload.max_text_chars,
-                        ..ProjectSnapshotOptions::default()
-                    },
-                )?)
+                let batch = store.project_changes_after(run.project_id, payload.after_cursor)?;
+                let Some(after_cursor) = payload.after_cursor else {
+                    return Ok(json!({
+                        "cursor": batch.captured_cursor,
+                        "changed": true,
+                        "has_more": false,
+                        "resources": [{"kind": "project", "uri": "pm://project"}],
+                    }));
+                };
+                let own_sessions = store
+                    .list_participants(workflow_id)?
+                    .into_iter()
+                    .map(|participant| participant.session_id.to_string())
+                    .collect::<HashSet<_>>();
+                let mut cursor = after_cursor;
+                let mut seen = HashSet::new();
+                let mut resources = Vec::new();
+                for change in batch.changes {
+                    if change.workflow_id == Some(workflow_id)
+                        || change.kind == "session" && own_sessions.contains(&change.entity_id)
+                    {
+                        cursor = change.sequence;
+                        continue;
+                    }
+                    let uri = match change.kind.as_str() {
+                        "project" => "pm://project".to_string(),
+                        "project_home" => "pm://project-home".to_string(),
+                        "session" => format!("pm://session/{}", change.entity_id),
+                        "workflow" => format!("pm://workflow/{}", change.entity_id),
+                        "artifact" => format!("pm://artifact/{}", change.entity_id),
+                        kind => {
+                            return Err(StoreError::Invariant(format!(
+                                "unknown Project change kind: {kind}"
+                            ))
+                            .into());
+                        }
+                    };
+                    if seen.insert(uri.clone()) {
+                        if resources.len() == MAX_CHANGED_RESOURCES {
+                            break;
+                        }
+                        resources.push(json!({"kind": change.kind, "uri": uri}));
+                    }
+                    cursor = change.sequence;
+                }
+                Ok(json!({
+                    "cursor": cursor,
+                    "changed": !resources.is_empty(),
+                    "has_more": cursor < batch.captured_cursor,
+                    "resources": resources,
+                }))
             })
             .await
     }
@@ -1261,24 +1296,24 @@ impl RunEffectContext {
                             .to_string(),
                     ));
                 }
-                let materialized_tools = completed_turn.tool_set.names().collect::<Vec<_>>();
-                for required in [
-                    "read_project_home",
-                    "patch_project_home",
-                    "preview_project_home",
-                ] {
-                    if !materialized_tools.contains(&required) {
-                        return Err(WorkflowRuntimeError::Protocol(format!(
-                            "Project-home Action Turn did not materialize required tool {required}"
-                        )));
-                    }
-                }
-                Ok(store.publish_project_home_draft(
+                let html = invocation
+                    .output
+                    .as_ref()
+                    .and_then(|output| output.get("message"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        WorkflowRuntimeError::Protocol(
+                            "completed Project-home Action has no text output".to_string(),
+                        )
+                    })?
+                    .to_string();
+                Ok(store.publish_project_home(
                     workflow_id,
                     invocation.id,
                     participant.session_id,
                     source_artifact_id,
                     artifact_id,
+                    html,
                     payload.metadata,
                 )?)
             })
@@ -1654,41 +1689,9 @@ struct AskHumanEffect {
 }
 
 #[derive(Debug, Deserialize)]
-struct ProjectSnapshotEffect {
+struct ProjectChangesEffect {
     #[serde(default)]
     after_cursor: Option<u64>,
-    #[serde(default = "default_snapshot_sessions")]
-    max_sessions: usize,
-    #[serde(default = "default_snapshot_turns")]
-    max_turns_per_session: usize,
-    #[serde(default = "default_snapshot_workflows")]
-    max_workflows: usize,
-    #[serde(default = "default_snapshot_artifacts")]
-    max_artifacts: usize,
-    #[serde(default)]
-    include_artifact_content: bool,
-    #[serde(default = "default_snapshot_text_chars")]
-    max_text_chars: usize,
-}
-
-const fn default_snapshot_sessions() -> usize {
-    50
-}
-
-const fn default_snapshot_turns() -> usize {
-    12
-}
-
-const fn default_snapshot_artifacts() -> usize {
-    50
-}
-
-const fn default_snapshot_workflows() -> usize {
-    200
-}
-
-const fn default_snapshot_text_chars() -> usize {
-    500_000
 }
 
 #[derive(Debug, Deserialize)]

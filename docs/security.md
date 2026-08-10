@@ -28,22 +28,16 @@ The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, permissions, and Session serialization before applying them.
 
-`ctx.project.snapshot()` is a Rust-owned read effect, not database access from
-Python. It is fixed to the current Workflow's Project and excludes only the
-calling Workflow's own Sessions and outputs, so published Project state remains
-available to other Agents without recursive self-ingestion. It caps collection
-counts and per-Turn text and omits provider reasoning and credentials.
-`publish_artifact(...)` accepts bounded
-text only, derives a deterministic Artifact ID from the Workflow/effect path,
-and verifies optional Agent ownership.
+`ctx.project.changes()` is a Rust-owned effect fixed to the current Workflow's
+Project. It returns only a durable cursor and changed `pm://` resource URIs,
+excluding the calling Workflow's own Sessions and outputs. Project contents are
+never injected into a Workflow or model prompt. An Action must explicitly
+declare `read_resource` and choose which current-Project resource to read;
+ownership and response-size bounds are enforced by Rust.
 
-The optional launch-time Project snapshot uses the same bounded builder. It is
-persisted once on the Workflow, exposed read-only as `ctx.context`, and rendered
-inside an explicit untrusted-data delimiter for Agent Turns. Starting from a
-Session only changes focus/provenance; it does not copy that Session's system
-prompt or permissions into prompt text. A live Project read remains an explicit
-`ctx.project.snapshot()` effect, so unrelated Project updates cannot silently
-alter an active run's context.
+`publish_artifact(...)` accepts bounded text only, derives a deterministic
+Artifact ID from the Workflow/effect path, and verifies optional Agent
+ownership.
 
 Python also cannot label arbitrary action text as a human message. A
 user-origin workflow Action must name an answered direct HumanRequest and its
@@ -62,20 +56,13 @@ It accepts only bounded root-relative operations, never follows symlinks,
 requires regular files, atomically replaces and syncs content, and confines
 traversal/deletion beneath the opened Project root.
 
-The ordinary `project-summary` Agent does not receive PaperMachine's managed
-directory as a Workspace. Its Action declares exactly `read_project_home`,
-`patch_project_home`, and `preview_project_home`; the host materializes those
-Project tools into that Action Turn's immutable ToolSet. They operate on a
-bounded managed draft keyed to that exact Workflow Action. Semantic patches use revision checks and stable block IDs;
-unsafe active tags, inline event/style attributes, script URLs, oversized
-blocks, stale revisions, and no-op edits fail as tool results that the same
-Agent can inspect and correct. The awaited `_ActionCall` retains its exact first
+The ordinary `project-summary` Agent declares only `read_resource`. It reads
+relevant Project state on demand and returns a complete HTML fragment as its
+normal Action result. The awaited `_ActionCall` retains its exact first
 ActionInvocation ID; `publish_project_home(action=call)` accepts only that
-completed Action and verifies that its Turn ToolSet contains the Project-home
-tools. It compares the draft's base to the canonical Project-home revision,
-atomically commits the source, page, and canonical pointer, and reuses the
-current revision for a no-op. Generic Artifact metadata cannot claim the
-reserved Project-home roles.
+completed Action, validates the HTML, atomically commits source, page, and the
+canonical pointer, and reuses the current revision for identical content.
+Generic Artifact metadata cannot claim the reserved Project-home roles.
 
 Generated project-summary HTML remains untrusted model output. It is served
 with `nosniff` and a restrictive CSP (`sandbox`, no default network/source

@@ -2,9 +2,9 @@
 
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
-    AccessPreset, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowContextMode,
-    WorkflowEffectStatus, WorkflowLaunchContext, WorkflowProgramId, WorkflowProgramManifest,
-    WorkflowProgramSnapshot, WorkflowProgramSource, WorkflowStatus,
+    AccessPreset, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowEffectStatus,
+    WorkflowProgramId, WorkflowProgramManifest, WorkflowProgramSnapshot, WorkflowProgramSource,
+    WorkflowStatus,
 };
 use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
@@ -62,7 +62,7 @@ async def main(ctx):
     return {"completed": True}
 "#;
 
-const LAUNCH_CONTEXT_SOURCE: &str = r#"from papermachine import Agent, action, workflow
+const RUN_ACCESS_SOURCE: &str = r#"from papermachine import Agent, action, workflow
 
 
 class Conservative(Agent):
@@ -90,22 +90,19 @@ class Clamped(Agent):
 
 
 @workflow(
-    slug="launch-context-access",
-    name="Launch context and access",
-    description="Exercise immutable launch context and per-Agent access.",
+    slug="run-access",
+    name="Run access",
+    description="Exercise per-Agent access.",
     params_schema={"type": "object", "additionalProperties": False},
 )
 async def main(ctx):
     conservative = Conservative(name="Conservative")
     elevated = Elevated(name="Elevated")
     clamped = Clamped(name="Clamped")
-    first = await conservative.inspect(ctx.context["project"]["name"])
-    second = await elevated.compare(ctx.context["project"]["name"])
-    third = await clamped.verify(ctx.context["project"]["name"])
-    return {
-        "context": ctx.context,
-        "answers": [first, second, third],
-    }
+    first = await conservative.inspect(ctx.request)
+    second = await elevated.compare(ctx.request)
+    third = await clamped.verify(ctx.request)
+    return {"answers": [first, second, third]}
 "#;
 
 fn program_with_source(slug: &str, source_code: &str) -> WorkflowProgramSnapshot {
@@ -219,7 +216,6 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
             default_model: "scripted".to_string(),
             access: AccessPreset::ModelOnly,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
@@ -241,7 +237,7 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
 }
 
 #[tokio::test]
-async fn launch_context_is_stable_and_agent_access_respects_run_configuration() {
+async fn agent_access_respects_run_configuration() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
         Store::open_in_memory(directory.path().join("artifacts"))
@@ -250,29 +246,18 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
     let project = store
         .create_project("Configured run", directory.path().join("project"))
         .expect("Project should be created");
-    let launch_context = WorkflowLaunchContext {
-        mode: WorkflowContextMode::ProjectSnapshot,
-        snapshot: Some(json!({
-            "cursor": 7,
-            "project": {
-                "id": project.id,
-                "name": project.name,
-            },
-        })),
-    };
     let workflow = store
         .create_workflow(NewWorkflow {
             project_id: project.id,
             started_from_session_id: None,
-            program: program_with_source("launch-context-access", LAUNCH_CONTEXT_SOURCE),
-            request: "Continue from captured Project evidence.".to_string(),
+            program: program_with_source("run-access", RUN_ACCESS_SOURCE),
+            request: "Inspect the configured run.".to_string(),
             instructions: "Keep provenance visible.".to_string(),
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
             access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
-            launch_context: launch_context.clone(),
             agent_access_overrides: BTreeMap::from([
                 ("Conservative".to_string(), AccessPreset::ReadOnly),
                 ("Elevated".to_string(), AccessPreset::Workspace),
@@ -301,10 +286,6 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
     let WorkflowExecution::Completed(output) = execution else {
         panic!("Workflow should complete without suspension")
     };
-    let Some(expected_context) = launch_context.snapshot.as_ref() else {
-        panic!("test launch context should contain a snapshot")
-    };
-    assert_eq!(&output["context"], expected_context);
     assert_eq!(
         output["answers"],
         json!(["conservative answer", "elevated answer", "clamped answer"])
@@ -343,17 +324,7 @@ async fn launch_context_is_stable_and_agent_access_respects_run_configuration() 
             .into_iter()
             .next()
             .expect("each Agent should have one Turn");
-        assert!(
-            turn.prompt
-                .layers
-                .iter()
-                .all(|layer| layer.name != "Workflow launch context"),
-            "launch context must not be injected as instructions"
-        );
-        assert!(
-            turn.input.contains("Configured run"),
-            "the Workflow explicitly passed ctx.context as Action Turn data"
-        );
+        assert!(turn.input.contains("Inspect the configured run"));
     }
 }
 
@@ -379,7 +350,6 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             default_model: "scripted".to_string(),
             access: AccessPreset::Research,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");
@@ -493,7 +463,6 @@ async fn durable_wait_suspends_the_python_process_and_replays_when_due() {
             default_model: "scripted".to_string(),
             access: AccessPreset::ModelOnly,
             enabled_skills: Vec::new(),
-            launch_context: Default::default(),
             agent_access_overrides: Default::default(),
         })
         .expect("Workflow should be created");

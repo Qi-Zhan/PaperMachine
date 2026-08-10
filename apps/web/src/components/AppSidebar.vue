@@ -7,22 +7,13 @@
       </button>
       <div class="toolbar-actions">
         <button
-          class="icon-button"
+          class="icon-button sidebar-desktop-toggle"
           type="button"
-          :title="t('sidebar.searchProject')"
-          :aria-label="t('sidebar.searchProject')"
-          @click="searchVisible = !searchVisible"
+          :title="t('common.toggleSidebar')"
+          :aria-label="t('common.toggleSidebar')"
+          @click="$emit('toggle-sidebar')"
         >
-          <Search :size="16" />
-        </button>
-        <button
-          class="icon-button"
-          type="button"
-          :title="t('sidebar.newProject')"
-          :aria-label="t('sidebar.newProject')"
-          @click="$emit('new-project')"
-        >
-          <FolderPlus :size="16" />
+          <PanelLeft :size="18" />
         </button>
         <button
           class="icon-button sidebar-mobile-close"
@@ -36,14 +27,6 @@
       </div>
     </header>
 
-    <div v-if="searchVisible" class="sidebar-search">
-      <Search :size="14" />
-      <input v-model="query" :aria-label="t('sidebar.filter')" :placeholder="t('sidebar.filter')" />
-      <button v-if="query" type="button" :title="t('sidebar.clearSearch')" :aria-label="t('sidebar.clearSearch')" @click="query = ''">
-        <X :size="14" />
-      </button>
-    </div>
-
     <div class="sidebar-primary-nav">
       <button type="button" :data-active="workflowsActive" @click="$emit('open-workflows')">
         <GitBranch :size="15" />
@@ -52,7 +35,36 @@
     </div>
 
     <nav class="project-tree" :aria-label="t('sidebar.project')">
-      <p class="sidebar-section-label">{{ t('sidebar.project') }}</p>
+      <div class="sidebar-section-heading">
+        <p class="sidebar-section-label">{{ t('sidebar.project') }}</p>
+        <div class="sidebar-section-actions">
+          <button
+            class="icon-button"
+            type="button"
+            :title="t('sidebar.searchProject')"
+            :aria-label="t('sidebar.searchProject')"
+            @click="searchVisible = !searchVisible"
+          >
+            <Search :size="15" />
+          </button>
+          <button
+            class="icon-button"
+            type="button"
+            :title="t('sidebar.newProject')"
+            :aria-label="t('sidebar.newProject')"
+            @click="$emit('new-project')"
+          >
+            <FolderPlus :size="15" />
+          </button>
+        </div>
+      </div>
+      <div v-if="searchVisible" class="sidebar-search">
+        <Search :size="14" />
+        <input v-model="query" :aria-label="t('sidebar.filter')" :placeholder="t('sidebar.filter')" />
+        <button v-if="query" type="button" :title="t('sidebar.clearSearch')" :aria-label="t('sidebar.clearSearch')" @click="query = ''">
+          <X :size="14" />
+        </button>
+      </div>
       <p v-if="projects.length === 0" class="sidebar-empty">{{ t('sidebar.noProject') }}</p>
       <section v-for="project in filteredProjects" :key="project.id" class="project-group">
         <div
@@ -146,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { AlertTriangle, ChevronDown, Folder, FolderPlus, GitBranch, MapPin, MoreHorizontal, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
+import { AlertTriangle, ChevronDown, Folder, FolderPlus, GitBranch, MapPin, MoreHorizontal, PanelLeft, Plus, ScanSearch, Search, Trash2, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { formatDate, statusLabel } from '../format'
 import { useAppI18n } from '../i18n'
@@ -166,6 +178,7 @@ const props = defineProps<{
 defineEmits<{
   home: []
   'close-sidebar': []
+  'toggle-sidebar': []
   'new-project': []
   'new-session': [projectId: string]
   'relocate-project': [projectId: string]

@@ -10,10 +10,10 @@ class Researcher(Agent):
         search_context_size="low",
         reasoning_effort="high",
         finalize="after_search",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
     )
-    async def research(self, question: str, prior_project_context: dict):
-        """Research the complete question with the available live research tools and return only the requested final deliverable. Never claim to have searched or opened a source unless a corresponding tool was available and used. prior_project_context contains optional earlier Project work selected by the user: use it to continue useful leads and avoid repetition, but independently verify material claims and do not expose unrelated history. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
+    async def research(self, question: str):
+        """Research the complete question with the available tools and return only the requested final deliverable. Read relevant Project resources when earlier work may help, but independently verify material claims. Never claim to have searched or opened a source unless a corresponding tool was available and used. Obey any structured-output contract exactly; for reports, answer every requested part, explain the evidence-to-conclusion reasoning, include direct inline source links, and state material limitations."""
 
 
 @workflow(
@@ -24,5 +24,5 @@ class Researcher(Agent):
 )
 async def main(ctx):
     researcher = Researcher(name="Single researcher")
-    report = await researcher.research(ctx.request, ctx.context)
+    report = await researcher.research(ctx.request)
     return {"report": report}

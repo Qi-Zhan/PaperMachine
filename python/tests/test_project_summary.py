@@ -30,46 +30,31 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     "session_id": "session-summary",
                     "access": "model_only",
                 }
-            if kind == "project_snapshot":
-                self.assertTrue(payload["include_artifact_content"])
+            if kind == "project_changes":
                 self.assertIsNone(payload["after_cursor"])
-                self.assertEqual(payload["max_workflows"], 200)
-                self.assertEqual(payload["max_text_chars"], 500_000)
                 return {
                     "cursor": 12,
                     "has_more": False,
                     "changed": True,
-                    "mode": "full",
-                    "after_cursor": None,
-                    "project": {"name": "PaperMachine"},
-                    "sessions": [{"title": "Research route"}],
-                    "workflows": [],
-                    "artifacts": [],
+                    "resources": [{"kind": "project", "uri": "pm://project"}],
                 }
             if kind == "invoke_action":
                 self.assertEqual(
-                    payload["arguments"]["project_changes"]["project"]["name"],
-                    "PaperMachine",
+                    payload["arguments"]["changed_resources"],
+                    [{"kind": "project", "uri": "pm://project"}],
                 )
                 self.assertEqual(payload["action_name"], "maintain_project_home")
-                self.assertEqual(
-                    payload["requested_tools"],
-                    [
-                        "read_project_home",
-                        "patch_project_home",
-                        "preview_project_home",
-                    ],
-                )
+                self.assertEqual(payload["requested_tools"], ["read_resource"])
                 self.assertIsNone(payload["response_format"])
                 return {
                     "action_invocation_id": "invocation-summary",
-                    "output": "The Project home page is current.",
+                    "output": "<h1>PaperMachine</h1>",
                 }
             if kind == "publish_project_home":
                 self.assertEqual(
                     payload["action_invocation_id"], "invocation-summary"
                 )
-                self.assertEqual(payload["metadata"]["snapshot_mode"], "full")
+                self.assertEqual(payload["metadata"]["project_cursor"], 12)
                 self.assertEqual(payload["metadata"]["refresh_count"], 1)
                 return {
                     "artifact_id": "artifact-summary",
@@ -96,26 +81,16 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         self.assertEqual(
             [kind for kind, _ in effects],
             [
-                "project_snapshot",
+                "project_changes",
                 "create_agent",
                 "invoke_action",
                 "publish_project_home",
             ],
         )
 
-    def test_summary_prompt_delegates_iteration_to_one_tool_capable_action(self) -> None:
+    def test_summary_uses_one_generic_project_reader(self) -> None:
         agent_type = WORKFLOW["ProjectSummaryAgent"]
-        self.assertEqual(
-            agent_type.maintain_project_home.tools,
-            [
-                "read_project_home",
-                "patch_project_home",
-                "preview_project_home",
-            ],
-        )
-        prompt = agent_type.system_prompt
-        self.assertIn("as many editing and inspection passes as needed", prompt)
-        self.assertNotIn("complete or continue", prompt.lower())
+        self.assertEqual(agent_type.maintain_project_home.tools, ["read_resource"])
 
 if __name__ == "__main__":
     unittest.main()

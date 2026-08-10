@@ -39,7 +39,6 @@ class PlannerStub:
         _question: str,
         _route_count: int,
         _extra_requirements: list[str],
-        _prior_context_brief: str,
         feedback: str,
     ) -> dict:
         self.feedback.append(feedback)
@@ -50,7 +49,7 @@ class EvidenceLoopStructureTests(unittest.IsolatedAsyncioTestCase):
     async def test_planner_gets_one_self_correction_turn_without_fallback_routes(self) -> None:
         planner = PlannerStub([{"deliverable": "Incomplete", "routes": []}, valid_plan()])
 
-        plan = await create_plan(planner, "Question", 2, [], "")
+        plan = await create_plan(planner, "Question", 2, [])
 
         self.assertEqual(plan, valid_plan())
         self.assertEqual(planner.feedback[0], "")

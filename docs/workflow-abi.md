@@ -73,12 +73,12 @@ The runtime supplies:
 | `ctx.instructions` | optional run-wide guidance; also a Workflow prompt layer |
 | `ctx.params` | launch parameters validated before scheduling |
 | `ctx.trigger` | `manual`, `user`, or `workflow` provenance |
-| `ctx.context` | fresh `{}` or one immutable bounded Project snapshot |
 | `ctx.workflow_id` | current run ID |
-| `ctx.project` | structured Project snapshot API |
+| `ctx.project` | changed-resource cursor API |
 
-Request and context become model data only when Workflow code passes them to
-an Action.
+Request and changed resource URIs become model data only when Workflow code
+passes them to an Action. Project contents require an explicit `read_resource`
+tool call.
 
 ## Public surface
 
@@ -90,9 +90,9 @@ an Action.
 | `await together(...)` | explicit concurrency; direct same-Agent duplicates are rejected |
 | `await ask_human(...)` | durable, schema-validated human input |
 | `await wait(...)` | durable deadline derived from the effect start time |
-| `await ctx.project.snapshot(...)` | bounded current Project state or cursor-based delta |
+| `await ctx.project.changes(...)` | cursor and changed Project resource URIs |
 | `await publish_artifact(...)` | deterministic Project-managed text Artifact |
-| `await publish_project_home(action=call)` | publish the draft created by that exact completed Action |
+| `await publish_project_home(action=call)` | publish that exact completed Action's HTML result |
 
 The only exports are `Agent`, `ArtifactRef`, `HumanMessage`, `ProjectContext`,
 `WorkflowContext`, `action`, `ask_human`, `publish_artifact`,
@@ -151,7 +151,7 @@ The complete effect set is:
 
 ```text
 create_agent       set_agent_access   invoke_action
-wait               ask_human          project_snapshot
+wait               ask_human          project_changes
 publish_artifact   publish_project_home
 complete
 ```

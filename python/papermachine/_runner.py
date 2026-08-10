@@ -174,7 +174,6 @@ async def run() -> None:
             params=dict(initialization.get("params") or {}),
             workflow_id=str(initialization["workflow_id"]),
             trigger=dict(initialization.get("trigger") or {}),
-            context=dict(initialization.get("context") or {}),
         )
         result = await function(context)
         await _effect("complete", {"output": result})

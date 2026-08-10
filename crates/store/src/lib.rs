@@ -18,7 +18,6 @@ use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::WorkflowEvent;
-use papermachine_protocol::WorkflowLaunchContext;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowTrigger;
 use serde_json::Value;
@@ -44,10 +43,6 @@ pub use project_home::PROJECT_HOME_MEDIA_TYPE;
 pub use project_home::PROJECT_HOME_ROLE;
 pub use project_home::PROJECT_HOME_SOURCE_MEDIA_TYPE;
 pub use project_home::PROJECT_HOME_SOURCE_ROLE;
-pub use project_home::ProjectHomeBlock;
-pub use project_home::ProjectHomeDraft;
-pub use project_home::ProjectHomePatchOperation;
-pub use project_home::ProjectHomeSource;
 pub use project_home::PublishedProjectHome;
 
 #[derive(Clone, Debug)]
@@ -62,7 +57,6 @@ pub struct NewWorkflow {
     pub default_model: String,
     pub access: AccessPreset,
     pub enabled_skills: Vec<String>,
-    pub launch_context: WorkflowLaunchContext,
     pub agent_access_overrides: BTreeMap<String, AccessPreset>,
 }
 

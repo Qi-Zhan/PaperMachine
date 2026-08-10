@@ -146,22 +146,6 @@
             <LoaderCircle v-if="programLoading" class="spin" :size="15" />
           </header>
 
-          <div class="workflow-context-options">
-            <label :data-active="contextMode === 'project_snapshot'">
-              <input v-model="contextMode" type="radio" value="project_snapshot" />
-              <span>
-                <strong>{{ t('dialog.existingProjectContext') }}</strong>
-                <small>{{ t(session ? 'dialog.existingSessionContextDescription' : 'dialog.existingProjectContextDescription') }}</small>
-              </span>
-            </label>
-            <label :data-active="contextMode === 'fresh'">
-              <input v-model="contextMode" type="radio" value="fresh" />
-              <span>
-                <strong>{{ t('dialog.freshContext') }}</strong>
-                <small>{{ t('dialog.freshContextDescription') }}</small>
-              </span>
-            </label>
-          </div>
           <div class="workflow-launch-grid">
             <label>
               <span class="field-label">{{ t('common.model') }}</span>
@@ -270,7 +254,6 @@ import type {
   ProjectSkill,
   Session,
   WorkflowAgentDeclaration,
-  WorkflowContextMode,
   WorkflowProgram,
   WorkflowValidation,
 } from '../types'
@@ -293,7 +276,6 @@ const emit = defineEmits<{
     request: string
     instructions: string
     params: Record<string, unknown>
-    contextMode: WorkflowContextMode
     model: string
     access: AccessPreset
     enabledSkills: string[]
@@ -339,7 +321,6 @@ const programError = ref('')
 const programLoading = ref(false)
 const validation = ref<WorkflowValidation | null>(null)
 const requestInput = ref<HTMLTextAreaElement | null>(null)
-const contextMode = ref<WorkflowContextMode>('project_snapshot')
 const model = ref('')
 const access = ref<AccessPreset>('research')
 const enabledSkills = ref<string[]>([])
@@ -409,7 +390,6 @@ watch(
     advancedVisible.value = false
     localError.value = ''
     programError.value = ''
-    contextMode.value = 'project_snapshot'
     model.value = props.session?.model ?? props.defaultModel
     access.value = props.session?.access ?? 'research'
     enabledSkills.value = [...(props.session?.enabled_skills ?? [])]
@@ -502,7 +482,6 @@ function submit() {
     request: requestMode.value === 'required' ? requestText.value.trim() : '',
     instructions: instructions.value.trim(),
     params,
-    contextMode: contextMode.value,
     model: model.value.trim(),
     access: access.value,
     enabledSkills: [...enabledSkills.value],

@@ -54,7 +54,6 @@ class GoalWorkflowTests(unittest.TestCase):
                     instructions="",
                     params={"session_title": "Cache goal", "agent_model": "glm"},
                     workflow_id="workflow-goal",
-                    context={"sessions": [{"title": "Earlier investigation"}]},
                 )
             )
         )
@@ -91,11 +90,6 @@ class GoalWorkflowTests(unittest.TestCase):
         self.assertEqual(second["action_name"], "work")
         self.assertEqual(first["arguments"]["objective"], "Find and fix the cache bug.")
         self.assertEqual(second["arguments"]["objective"], "Find and fix the cache bug.")
-        self.assertEqual(
-            first["arguments"]["initial_project_context"]["sessions"][0]["title"],
-            "Earlier investigation",
-        )
-        self.assertEqual(second["arguments"]["initial_project_context"], {})
         self.assertNotIn("ask_human", [kind for kind, _ in effects])
 
     def test_goal_can_finish_on_the_first_turn(self) -> None:

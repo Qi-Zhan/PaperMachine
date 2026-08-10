@@ -18,6 +18,7 @@
         :workflows-active="workflowLibraryOpen"
         @home="showHome"
         @close-sidebar="mobileSidebarOpen = false"
+        @toggle-sidebar="toggleSidebar"
         @new-project="projectDialogOpen = true"
         @new-session="openSessionDialog"
         @relocate-project="openRelocateProjectDialog"
@@ -203,7 +204,6 @@ import type {
   SessionEvent,
   SessionView,
   WorkflowProgram,
-  WorkflowContextMode,
   Workflow,
   WorkflowView,
 } from './types'
@@ -938,12 +938,7 @@ async function runProjectSummary(input: {
           ? `Refresh the Project home page every ${input.intervalMinutes} minutes.`
           : 'Refresh the Project home page now.',
       instructions: input.instructions.trim(),
-      params: {
-        interval_minutes: input.intervalMinutes,
-        max_sessions: 50,
-        turns_per_session: 12,
-        max_artifacts: 50,
-      },
+      params: { interval_minutes: input.intervalMinutes },
       model,
       access: 'model_only',
       enabled_skills: [],
@@ -979,7 +974,6 @@ async function createWorkflow(input: {
   request: string
   instructions: string
   params: Record<string, unknown>
-  contextMode: WorkflowContextMode
   model: string
   access: AccessPreset
   enabledSkills: string[]
@@ -1000,7 +994,6 @@ async function createWorkflow(input: {
       model: input.model,
       access: input.access,
       enabled_skills: input.enabledSkills,
-      context_mode: input.contextMode,
       agent_access_overrides: input.agentAccessOverrides,
     })
     workflowDialogOpen.value = false

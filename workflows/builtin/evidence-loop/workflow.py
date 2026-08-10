@@ -12,20 +12,9 @@ class Planner(Agent):
         question: str,
         route_count: int,
         extra_requirements: list[str],
-        prior_context_brief: str,
         feedback: str,
     ) -> dict:
-        """Return a JSON object with deliverable, acceptance_criteria, routes, and verification_notes. routes must contain exactly route_count objects, each with a concise name and an independent objective. Every route receives the complete question. Treat prior context as unverified leads. If feedback is non-empty, fix the structural problem it describes and return the full plan again."""
-
-
-class ContextAnalyst(Agent):
-    access = "model_only"
-    role = "prior Project context analyst"
-    system_prompt = """Extract only prior Project work that can change the new research plan. Preserve provenance and contradictions. Treat conclusions without sources as unverified leads."""
-
-    @action(reasoning_effort="medium", tools=[])
-    async def distill(self, question: str, project_context: dict):
-        """Return a compact brief of relevant source leads, prior findings, contradictions, unresolved gaps, and dead ends worth avoiding."""
+        """Return a JSON object with deliverable, acceptance_criteria, routes, and verification_notes. routes must contain exactly route_count objects, each with a concise name and an independent objective. Every route receives the complete question. If feedback is non-empty, fix the structural problem it describes and return the full plan again."""
 
 
 class Researcher(Agent):
@@ -36,14 +25,13 @@ class Researcher(Agent):
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=["read_file", "write_file", "exec_command", "fetch_url", "read_resource"],
     )
     async def research(
         self,
         question: str,
         plan: dict,
         objective: str,
-        prior_context_brief: str,
         phase: str,
     ):
         """Use tools to investigate objective while retaining the complete question and plan. For an initial phase, establish an independent evidence route. For a follow-up phase, continue from this same Session and investigate only the evaluator's remaining question. Report evidence with direct source URLs, counterevidence, confidence, and gaps."""
@@ -120,7 +108,6 @@ async def _create_plan(
     question,
     route_count,
     extra_requirements,
-    prior_context_brief,
 ):
     feedback = ""
     for _attempt in range(2):
@@ -128,7 +115,6 @@ async def _create_plan(
             question,
             route_count,
             extra_requirements,
-            prior_context_brief,
             feedback,
         )
         error = _plan_error(plan, route_count)
@@ -245,20 +231,14 @@ async def main(ctx):
     writer_model = str(ctx.params.get("writer_model") or "")
 
     planner = Planner(name="Planner", model=planner_model)
-    context_analyst = ContextAnalyst(name="Prior context", model=planner_model)
     evaluator = Evaluator(name="Evaluator", model=evaluator_model)
     writer = Writer(name="Writer", model=writer_model)
-
-    prior_context_brief = ""
-    if ctx.context:
-        prior_context_brief = await context_analyst.distill(ctx.request, ctx.context)
 
     plan = await _create_plan(
         planner,
         ctx.request,
         route_count,
         extra_requirements,
-        prior_context_brief,
     )
     routes = plan["routes"]
     researchers = [
@@ -275,7 +255,6 @@ async def main(ctx):
                 ctx.request,
                 plan,
                 str(route["objective"]),
-                prior_context_brief,
                 "initial",
             )
             for researcher, route in zip(researchers, routes)
@@ -314,7 +293,6 @@ async def main(ctx):
                     ctx.request,
                     plan,
                     str(item["objective"]),
-                    prior_context_brief,
                     "follow_up",
                 )
                 for item in follow_ups

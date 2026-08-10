@@ -114,15 +114,15 @@ Project 工具只允许通过这条路径进入。排序后的 definitions 与 S
 prompt 文本无法改变任一边界，后续 relocation、权限变化或 Action 调用只影响后续 Turn。
 
 Project Summary is ordinary Agent work but uses Project tools, not filesystem
-access. Its source, draft, canonical page, and history remain in managed Project
-state. Other Agents do not see them through Workspace and never receive those
-tools automatically; Workflow code must explicitly request a bounded Project
-snapshot or declare the relevant Project tools on an Action.
+access. Its source, canonical page, and history remain in managed Project state.
+Other Agents do not see them through Workspace and never receive Project tools
+automatically; an Action must explicitly declare `read_resource` and choose a
+`pm://` resource.
 
 Project Summary 是普通 Agent 工作，但它使用 Project 工具，而不是文件系统权限。
-其 source、draft、canonical page 与历史留在 managed Project state。其他 Agent
-不会通过 Workspace 看到这些内容，也不会自动获得这些工具；Workflow 必须显式读取
-有界 Project snapshot，或在 Action 上声明相应 Project 工具。
+其 source、canonical page 与历史留在 managed Project state。其他 Agent 不会通过
+Workspace 看到这些内容，也不会自动获得 Project 工具；Action 必须显式声明
+`read_resource` 并选择一个 `pm://` resource。
 
 ## Recovery and inspection
 

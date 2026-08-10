@@ -42,13 +42,10 @@ use papermachine_store::StoreError;
 use papermachine_store::StoreHandle;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
-use papermachine_tools::PatchProjectHomeTool;
-use papermachine_tools::PreviewProjectHomeTool;
 use papermachine_tools::ReadFileTool;
-use papermachine_tools::ReadProjectHomeTool;
+use papermachine_tools::ReadResourceTool;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::WriteFileTool;
-use papermachine_workflow::ProjectSnapshotOptions;
 use papermachine_workflow::PythonWorkflowRuntime;
 use papermachine_workflow::WorkflowGenerationRequest;
 use papermachine_workflow::WorkflowGenerator;
@@ -57,7 +54,6 @@ use papermachine_workflow::WorkflowProgramCatalogError;
 use papermachine_workflow::WorkflowRuntime;
 use papermachine_workflow::WorkflowScheduler;
 use papermachine_workflow::WorkflowSchedulerError;
-use papermachine_workflow::build_project_snapshot;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -109,14 +105,12 @@ type InitializedModels = (
     Vec<ModelProviderInfo>,
 );
 
-const LOCAL_TOOL_NAMES: [&str; 7] = [
+const LOCAL_TOOL_NAMES: [&str; 5] = [
     "read_file",
     "write_file",
     "exec_command",
     "fetch_url",
-    "read_project_home",
-    "patch_project_home",
-    "preview_project_home",
+    "read_resource",
 ];
 
 #[derive(Clone)]
@@ -294,7 +288,6 @@ impl ProjectRuntimeFactory {
     async fn build(&self, project: &Project, store: StoreHandle) -> anyhow::Result<ProjectRuntime> {
         let workflow_runtime_root = store.managed_root().join("workflow-runtime");
         let sandbox_root = store.managed_root().join("runtime/sandboxes");
-        let project_id = project.id;
         let runtime_root = workflow_runtime_root.clone();
         store
             .call::<_, anyhow::Error, _>(move |core| {
@@ -304,11 +297,6 @@ impl ProjectRuntimeFactory {
                     .context("failed to reset Python Workflow runtime")?;
                 reset_ephemeral_directory(&sandbox_root)
                     .context("failed to reset Agent sandboxes")?;
-                for workflow in core.list_project_workflows(project_id)? {
-                    if workflow.status.is_terminal() {
-                        core.cleanup_terminal_workflow_state(workflow.id)?;
-                    }
-                }
                 Ok(())
             })
             .await?;
@@ -321,12 +309,8 @@ impl ProjectRuntimeFactory {
             .context("failed to register fetch_url")?
             .register_workspace(ExecCommandTool)
             .context("failed to register exec_command")?
-            .register_project(ReadProjectHomeTool::new(store.clone()))
-            .context("failed to register read_project_home")?
-            .register_project(PatchProjectHomeTool::new(store.clone()))
-            .context("failed to register patch_project_home")?
-            .register_project(PreviewProjectHomeTool::new(store.clone()))
-            .context("failed to register preview_project_home")?
+            .register_project(ReadResourceTool::new(store.clone()))
+            .context("failed to register read_resource")?
             .build();
         let mut catalog = self.base_catalog.clone();
         let catalog_project = project.clone();
@@ -1595,8 +1579,6 @@ struct CreateWorkflowRequest {
     #[serde(default)]
     enabled_skills: Vec<String>,
     #[serde(default)]
-    context_mode: WorkflowContextMode,
-    #[serde(default)]
     agent_access_overrides: BTreeMap<String, AccessPreset>,
 }
 
@@ -1728,33 +1710,6 @@ async fn create_workflow(
     validate_schema_value(&snapshot.manifest.params_schema, &request.params, "params")
         .map_err(ApiError::bad_request)?;
     validate_model_profile_params(&state, &snapshot.manifest.params_schema, &request.params)?;
-    let launch_context = match request.context_mode {
-        WorkflowContextMode::Fresh => WorkflowLaunchContext::default(),
-        WorkflowContextMode::ProjectSnapshot => WorkflowLaunchContext {
-            mode: WorkflowContextMode::ProjectSnapshot,
-            snapshot: Some(
-                runtime
-                    .store
-                    .call(move |store| {
-                        build_project_snapshot(
-                            store,
-                            project_id,
-                            ProjectSnapshotOptions {
-                                focus_session_id: request.started_from_session_id,
-                                max_sessions: 20,
-                                max_turns_per_session: 8,
-                                max_workflows: 100,
-                                max_artifacts: 30,
-                                include_artifact_content: true,
-                                max_text_chars: 300_000,
-                                ..ProjectSnapshotOptions::default()
-                            },
-                        )
-                    })
-                    .await?,
-            ),
-        },
-    };
     let workflow = runtime
         .store
         .call(move |store| {
@@ -1777,7 +1732,6 @@ async fn create_workflow(
                 default_model: model,
                 access: request.access,
                 enabled_skills: request.enabled_skills,
-                launch_context,
                 agent_access_overrides: request.agent_access_overrides,
             })
         })

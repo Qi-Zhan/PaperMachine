@@ -24,7 +24,6 @@ export type WorkflowStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-export type WorkflowContextMode = 'fresh' | 'project_snapshot'
 export type ActionStatus = 'scheduled' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
 export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
@@ -186,11 +185,6 @@ export interface WorkflowProgramSnapshot extends WorkflowProgram {
   source_code: string
 }
 
-export interface WorkflowLaunchContext {
-  mode: WorkflowContextMode
-  snapshot: Record<string, unknown> | null
-}
-
 export type WorkflowTriggerKind = 'user' | 'workflow' | 'manual'
 
 export interface WorkflowTrigger {
@@ -210,7 +204,6 @@ export interface Workflow {
   default_model: string
   access: AccessPreset
   enabled_skills: string[]
-  launch_context: WorkflowLaunchContext
   agent_access_overrides: Record<string, AccessPreset>
   status: WorkflowStatus
   params: Record<string, unknown>
@@ -450,6 +443,5 @@ export interface CreateWorkflowInput {
   model: string
   access: AccessPreset
   enabled_skills: string[]
-  context_mode?: WorkflowContextMode
   agent_access_overrides?: Record<string, AccessPreset>
 }
