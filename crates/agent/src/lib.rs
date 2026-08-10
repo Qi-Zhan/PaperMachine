@@ -12,6 +12,7 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::ControlMessageId;
 use papermachine_protocol::HostedTool;
 use papermachine_protocol::MessageRole;
@@ -32,7 +33,6 @@ use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
-use papermachine_protocol::WorkflowId;
 use papermachine_tools::ToolContext;
 use papermachine_tools::ToolRegistry;
 use papermachine_tools::model_visible_tool_result;
@@ -56,15 +56,15 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 const COMPACTION_PROMPT: &str = "You are performing a context checkpoint compaction. Create a concise handoff summary for the model that will continue this research session. Include current progress and decisions, important constraints and user guidance, verified evidence with source URLs, unresolved questions, and concrete next steps. Preserve exact identifiers, quantities, and caveats that matter. Do not continue the research or call tools; return only the handoff summary.";
 const SUMMARY_PREFIX: &str = "Another model worked on this research session and produced the following checkpoint. Use it to continue without repeating completed work:";
 const CONTROL_FINISH_PROMPT: &str = "Do not call tools. Synthesize the best self-contained answer supported by the evidence already gathered, follow the control-plane instruction above, and state any remaining limitations.";
-const PROMPT_CACHE_KEY_NAMESPACE: &str = "papermachine-session";
+const PROMPT_CACHE_KEY_NAMESPACE: &str = "papermachine-agent";
 const MAX_TOOL_CALL_ID_BYTES: usize = 512;
 
 #[derive(Clone, Debug)]
 pub struct AgentTurnRequest {
     pub project_id: ProjectId,
     pub session_id: SessionId,
+    pub agent_id: AgentId,
     pub turn_id: TurnId,
-    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub sandbox_root: PathBuf,
@@ -92,6 +92,7 @@ impl AgentTurnRequest {
     pub fn new(
         project_id: ProjectId,
         session_id: SessionId,
+        agent_id: AgentId,
         turn_id: TurnId,
         environment: TurnEnvironmentSnapshot,
         sandbox_root: PathBuf,
@@ -102,8 +103,8 @@ impl AgentTurnRequest {
         Self {
             project_id,
             session_id,
+            agent_id,
             turn_id,
-            workflow_id: None,
             action_invocation_id: None,
             action_attempt_id: None,
             sandbox_root,
@@ -220,8 +221,8 @@ pub struct AgentCheckpoint {
 pub struct AgentCheckpointContext {
     pub project_id: ProjectId,
     pub session_id: SessionId,
+    pub agent_id: AgentId,
     pub turn_id: TurnId,
-    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
 }
@@ -406,8 +407,8 @@ impl AgentRuntime {
                     AgentCheckpointContext {
                         project_id: request.project_id,
                         session_id: request.session_id,
+                        agent_id: request.agent_id,
                         turn_id: request.turn_id,
-                        workflow_id: request.workflow_id,
                         action_invocation_id: request.action_invocation_id,
                         action_attempt_id: request.action_attempt_id,
                     },
@@ -523,7 +524,7 @@ impl AgentRuntime {
                 instructions: model_instructions.clone(),
                 input: history.clone(),
                 prompt_cache: None,
-                transport_session_key: Some(request.session_id.to_string()),
+                transport_session_key: Some(request.agent_id.to_string()),
                 tools: step_tools,
                 hosted_tools: step_hosted_tools,
                 web_search_context_size: request.web_search_context_size,
@@ -927,7 +928,7 @@ impl AgentRuntime {
             instructions: request.instructions.clone(),
             input,
             prompt_cache: None,
-            transport_session_key: Some(request.session_id.to_string()),
+            transport_session_key: Some(request.agent_id.to_string()),
             tools: Vec::new(),
             hosted_tools: Vec::new(),
             web_search_context_size: None,
@@ -962,8 +963,8 @@ impl AgentRuntime {
                 let context = ToolContext {
                     project_id: request.project_id,
                     session_id: request.session_id,
+                    agent_id: request.agent_id,
                     turn_id: request.turn_id,
-                    workflow_id: request.workflow_id,
                     action_invocation_id: request.action_invocation_id,
                     action_attempt_id: request.action_attempt_id,
                     sandbox_root: request.sandbox_root.clone(),
@@ -1056,10 +1057,10 @@ fn prompt_cache_config(request: &ModelRequest) -> PromptCacheConfig {
         "namespace": PROMPT_CACHE_KEY_NAMESPACE,
         // This is a routing/cache-affinity key, not a content digest. Keep it
         // stable across actions, response schemas, tools, and compaction in one
-        // durable Session; the provider still matches reusable content by the
-        // actual prompt prefix. Session scoping prevents compatible gateways
-        // from returning another concurrent Session's cached completion.
-        "session": request.transport_session_key,
+        // durable Agent; the provider still matches reusable content by the
+        // actual prompt prefix. Agent scoping prevents compatible gateways
+        // from returning another concurrent Agent's cached completion.
+        "agent": request.transport_session_key,
         "model": request.model,
     });
     let digest = Sha256::digest(stable_prefix.to_string().as_bytes());
@@ -1067,7 +1068,7 @@ fn prompt_cache_config(request: &ModelRequest) -> PromptCacheConfig {
     PromptCacheConfig {
         // Put entropy first as a defensive measure for compatible gateways
         // that truncate or namespace routing keys at punctuation.
-        key: format!("{}-session", &hash[..32]),
+        key: format!("{}-agent", &hash[..32]),
         strategy: PromptCacheStrategy::Auto,
     }
 }
@@ -1298,8 +1299,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_key_is_stable_within_session_and_isolated_between_sessions() {
-        let build = |session: &str, question: &str, instructions: &str| ModelRequest {
+    fn prompt_cache_key_is_stable_within_agent_and_isolated_between_agents() {
+        let build = |agent: &str, question: &str, instructions: &str| ModelRequest {
             model: "gpt-test".to_string(),
             reasoning_effort: None,
             instructions: instructions.to_string(),
@@ -1308,7 +1309,7 @@ mod tests {
                 content: question.to_string(),
             }],
             prompt_cache: None,
-            transport_session_key: Some(session.to_string()),
+            transport_session_key: Some(agent.to_string()),
             tools: vec![ToolDefinition {
                 name: "search".to_string(),
                 description: "Search evidence".to_string(),
@@ -1321,13 +1322,13 @@ mod tests {
             tool_choice: ModelToolChoice::Auto,
             response_format: None,
         };
-        let first = prompt_cache_config(&build("session-a", "question A", "shared instructions"));
-        let same_session =
-            prompt_cache_config(&build("session-a", "question B", "shared instructions"));
-        let second = prompt_cache_config(&build("session-b", "question A", "shared instructions"));
+        let first = prompt_cache_config(&build("agent-a", "question A", "shared instructions"));
+        let same_agent =
+            prompt_cache_config(&build("agent-a", "question B", "shared instructions"));
+        let second = prompt_cache_config(&build("agent-b", "question A", "shared instructions"));
         let changed =
-            prompt_cache_config(&build("session-a", "question A", "different instructions"));
-        let mut changed_shape = build("session-a", "question A", "shared instructions");
+            prompt_cache_config(&build("agent-a", "question A", "different instructions"));
+        let mut changed_shape = build("agent-a", "question A", "shared instructions");
         changed_shape.tools.clear();
         changed_shape.response_format = Some(ModelResponseFormat {
             name: "audit_result".to_string(),
@@ -1336,12 +1337,12 @@ mod tests {
         });
         let changed_shape = prompt_cache_config(&changed_shape);
 
-        assert_eq!(first, same_session);
+        assert_eq!(first, same_agent);
         assert_eq!(first, changed);
         assert_eq!(first, changed_shape);
         assert_ne!(first, second);
-        assert!(first.key.ends_with("-session"));
-        assert!(!first.key.contains("session-a"));
+        assert!(first.key.ends_with("-agent"));
+        assert!(!first.key.contains("agent-a"));
     }
 
     #[test]

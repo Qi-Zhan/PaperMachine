@@ -1,172 +1,146 @@
-# Prompt model / Prompt 机制
+# Prompt and model snapshots / Prompt 与模型快照
 
-PaperMachine does not keep one mutable, opaque `system_prompt` string for a
-Session. Every Turn stores an immutable `PromptSnapshot` containing the exact
-ordered layers, their origins, individual SHA-256 hashes, the rendered provider
-instructions, and a hash of that rendered value.
+Every Turn stores the exact instructions and model route it used. Prompt text,
+model routing, tool membership, and authorization are independent surfaces;
+none can grant another.
 
-PaperMachine 不把所有指令藏进一个不断变化、无法追溯的字符串里。每个 Turn 都会
-保存不可变的 `PromptSnapshot`：包括各层内容、来源、各自的 SHA-256、最终发给
-provider 的完整 instructions，以及该最终文本的 hash。
+每个 Turn 都保存实际使用的完整 instructions 与模型路由。prompt、model route、
+tool membership 与 authorization 是相互独立的边界，任何一项都不能为另一项扩权。
 
-Project prompt state is PaperMachine-managed. Workspace files are user-owned
-resources, not prompt layers or Project storage: no Workspace file enters a
-model request unless a tool reads it or Workflow code explicitly passes its
-content through a structured runtime result. The Turn's authorization snapshot
-is enforced independently of all prompt text.
+## PromptSnapshot
 
-Project prompt 由 PaperMachine 持久管理；Workspace 文件属于用户资源，既不是
-prompt layer，也不是 Project 存储。只有工具明确读取文件，或 Workflow 通过结构化
-runtime result 显式传递内容时，Workspace 数据才会进入模型请求。Turn 的权限快照
-始终独立于 prompt 文本执行。
+The host renders these ordered layers:
 
-Model routing is another independent immutable surface. Before Turn creation,
-`ModelRouteSnapshot` pins profile, provider, upstream model, context window,
-capabilities, final reasoning effort, and a SHA-256 of relevant non-secret
-configuration. Prompts cannot change that route, and API keys never enter it.
+| Order | Kind | Source |
+| ---: | --- | --- |
+| 1 | runtime | PaperMachine's model-facing runtime contract |
+| 2 | project | Project-managed system prompt |
+| 3 | session | immutable Session instructions and current Action contract |
+| 4 | agent | Agent class or constructor system prompt |
+| 5 | skills | complete resolved instructions of enabled Project Skills |
+| 6 | control | explicit guidance for the current ActionAttempt |
 
-模型路由是另一条独立的不可变边界。Turn 创建前，`ModelRouteSnapshot` 会固化
-profile、provider、upstream model、context window、capabilities、最终 reasoning
-effort 与相关非秘密配置的 SHA-256。prompt 无法改变这条路由，API key 也不会进入快照。
+Each layer records its kind, name, stable source, content, and SHA-256.
+PromptSnapshot also stores the rendered provider instructions and their hash.
+The internal kind is **session**, because Session is the runtime owner; the
+WorkflowProgram remains only the definition that supplied the Action contract.
 
-## Resolution order / 解析顺序
+host 按表中顺序渲染 prompt。每层保存 kind、name、稳定 source、content 与 SHA-256，
+PromptSnapshot 还保存最终 provider instructions 及其 hash。第三层叫 **session**：
+Session 是运行时 owner，WorkflowProgram 只是提供 Action contract 的定义。
 
-| Order | Layer | User control | Source |
-|---:|---|---|---|
-| 1 | `runtime` | no | PaperMachine built-in runtime contract |
-| 2 | `project` | yes | `<data-dir>/projects/<project-id>/prompts/system.md` |
-| 3 | `workflow` | yes | Optional run `instructions` and Action contract |
-| 4 | `agent` or `session` | yes | Agent class/constructor `system_prompt`, or an interactive Session system prompt |
-| 5 | `skills` | yes | complete resolved instructions from enabled Project Skills |
-| 6 | `control` | yes | explicit runtime or human attempt guidance |
+Later layers specialize the task but never change filesystem, tool, network,
+model, or approval authority. Workspace files do not become prompt layers
+implicitly. Their content reaches a model only when a tool reads it or program
+data is explicitly passed to an Action.
 
-Layers are rendered in this order into the single `instructions` field used by
-the Responses-compatible provider API. Later layers specialize the context but
-do not grant permissions. Filesystem, command, network, and approval
-rules are always enforced by runtime code, never by prompt text.
+后面的层可以细化任务，但不能改变文件、工具、网络、模型或人工授权边界。
+Workspace 文件不会隐式成为 prompt；只有工具读取，或程序显式传给 Action 时才会
+进入模型上下文。
 
-这些层按表中顺序渲染到 Responses-compatible API 的单一 `instructions` 字段。
-后面的层可以细化任务语境，但不能提升权限。文件、命令、网络与人工授权都由
-runtime 代码执行，不能靠 prompt 获得或绕过。
+## Editing and immutability / 修改与不可变性
 
-## Editing semantics / 修改语义
+- The Project prompt is managed below the Project data root.
+- Session instructions are fixed when that Session is launched.
+- Agent system prompts are fixed when each Agent is created.
+- WorkflowProgram source is snapshotted into the Session.
+- Skill instructions are resolved in full into each Turn; recovery never reads
+  a live Skill file.
+- Control guidance applies only to the targeted attempt.
+- Editing any source affects only future Sessions or Turns, never an existing
+  Turn snapshot.
 
-- Project Page edits the Project system prompt file.
-- A Session inspector edits that Session's system prompt between active Turns.
-- Starting a Workflow may supply Workflow-wide run `instructions`.
-- Starting from a Session records provenance but does not inherit or copy that
-  Session's system prompt.
-- An Agent class uses `system_prompt = "..."`; a constructor may override it.
-- A completed or queued Turn never changes when any source prompt is edited.
-  Only subsequently created Turns receive a new snapshot.
-- Workflow source is immutable per Run. Skill instructions are resolved in full
-  and frozen directly into PromptSnapshot; only slug/hash audit metadata remains,
-  with no runtime package copy or live-file read during recovery.
+- Project prompt 位于 Project managed root。
+- Session instructions 在启动时固定。
+- Agent system prompt 在创建 Agent 时固定。
+- WorkflowProgram source 会完整固化到 Session。
+- Skill instructions 会解析进 Turn，恢复时不会读取 live Skill。
+- control guidance 只作用于目标 attempt。
+- 修改任何来源都只影响之后创建的 Session 或 Turn，不会改写已有快照。
 
-- Project Page 负责修改项目级 system prompt 文件。
-- Session 右侧 inspector 可以在没有 active Turn 时修改该 Session 的 system prompt。
-- 启动 Workflow 时可以提供该 Workflow 共享的 run `instructions`。
-- 从 Session 启动会记录来源，但不会继承或复制该 Session 的 system prompt。
-- Agent class 使用 `system_prompt = "..."`，构造实例时也可以覆盖。
-- 任意源 prompt 的修改都不会追溯改变已有 Turn，只影响之后创建的 Turn。
-- Workflow source 在每个 Run 中不可变。Skill instructions 会完整解析并直接固化到
-  PromptSnapshot；只保留 slug/hash 审计信息，不复制 runtime package，恢复时也不
-  读取 live file。
+The New Session dialog launches **interactive-agent**. Its optional “Agent
+instructions” value becomes that Agent's system prompt; it is not a mutable
+Session-level chat property.
 
-`project-summary` makes this split concrete. Its small Agent prompt and Action
-contract stay in the built-in Workflow source. The Action reads selected
-Project resources through the generic `read_resource` tool and returns the
-complete page as its ordinary result. The Project Page edits the summary run's
-`instructions`: what to emphasize, preserve, or omit.
-The Project system prompt still applies underneath it. Updating a scheduled
-summary starts a new snapshotted Workflow run and terminates the old schedule;
-previous summary Turns and HTML Artifacts remain attributable to their original
-prompt snapshots.
+New Session 对话框启动 **interactive-agent**。其中可选的 “Agent instructions”
+会成为该 Agent 的 system prompt，而不是可变的 Session chat 属性。
 
-`project-summary` 把这个分层直接呈现在 UI 中：内置 Workflow 源码保存精简的 Agent
-prompt 与 Action contract；Action 通过通用 `read_resource` 按需读取 Project resource，
-并把完整页面作为普通结果返回；Project Page 编辑的是该 summary run 的 run
-`instructions`，用来说明应优先展示、保留或省略什么；
-Project system prompt 仍然位于更前面的共享层。修改定时摘要会启动一个使用新
-prompt 快照的 Workflow，并结束旧定时 run；旧 Turn 与 HTML Artifact 仍可追溯到
-原 prompt。
+## Data versus instructions / 数据与指令
 
-## Project data / Project 数据
+Session launch stores two different inputs:
 
-Project content is never injected at Workflow launch. Long-lived Workflow code
-may call `ctx.project.changes(after_cursor=...)` to receive only a cursor and
-changed `pm://` URIs. An Action must explicitly declare `read_resource` and
-choose what to read; the returned content enters the model as an ordinary tool
-result, not a prompt layer.
+- **request**: a concrete task exposed as **ctx.request**;
+- **instructions**: policy shared by the Session's Actions and also exposed as
+  **ctx.instructions**.
 
-Workflow 启动时不会注入 Project 内容。长期运行的 Workflow 可调用
-`ctx.project.changes(after_cursor=...)`，只取得 cursor 与变化的 `pm://` URI。Action
-必须显式声明 `read_resource` 并自行选择读取对象；内容以普通 tool result 进入模型，
-而不是 prompt layer。
+Program code must explicitly pass request data to an Action; it is never
+promoted into provider instructions. Session instructions are the deliberate
+instruction layer.
 
-For a Workflow whose manifest uses `request_mode="required"`, the concrete run
-`request` follows the same rule: it is available as `ctx.request`, never
-automatically inserted into provider instructions. When a Workflow calls
-`agent.act(ctx.request, ...)`, it becomes inspectable Turn data. A
-`request_mode="none"` Workflow starts without a user task and receives an empty
-`ctx.request`; persistent interactive Sessions obtain true user Turns through
-`ask_human` and `HumanMessage`. `ctx.params` are reusable run controls and only
-reach a model when explicitly passed by the program.
+Session launch 保存两种不同输入：**request** 是具体任务，**instructions** 是该
+Session Action 共享的策略。request 必须由程序显式传入 Action，不会被提升为 system
+instruction；instructions 则刻意进入 Session prompt layer。
 
-manifest 使用 `request_mode="required"` 时，具体 run `request` 遵循同一规则：它通过
-`ctx.request` 提供，但绝不会自动插入 provider instructions。Workflow 调用
-`agent.act(ctx.request, ...)` 时，它才成为可检查的 Turn data。
-`request_mode="none"` 的 Workflow 不带用户任务启动，并得到空的 `ctx.request`；持久
-交互 Session 通过 `ask_human` 和 `HumanMessage` 接收真正的用户 Turn。`ctx.params`
-是可复用的 run 控制参数，也只有被程序显式传入才会到达模型。
+Project content is never injected at launch. `ctx.project.changes()` exposes
+only changed `pm://` URIs. An Action must declare `read_resource` and choose
+what to read; content enters as an ordinary tool result, not a prompt layer.
 
-Run `instructions` have deliberately different semantics. The exact string is
+Project 内容不会在启动时注入。`ctx.project.changes()` 只给出变化的 `pm://` URI；
+Action 必须声明 `read_resource` 并自行选择读取对象，内容以普通 tool result 进入模型。
+
+For interactive input, an answered HumanRequest is passed as a HumanMessage
+argument. Provenance is stored on HumanRequest and ActionInvocation; Turn no
+longer has a separate user/workflow origin enum.
+
+Session `instructions` have deliberately different semantics. The exact string is
 available to Python as `ctx.instructions`, and the runtime also snapshots it as
-a Workflow instruction layer on every Action Turn in that run. Use it for
+a Session instruction layer on every Action Turn. Use it for
 cross-Agent rules such as language, evidence policy, output conventions, or a
 summary policy. Use `ctx.request` for the concrete task and `read_resource` for
 selected Project results. This prevents task data or old model output from
 becoming system-level authority.
 
-Run `instructions` 的语义刻意不同：Python 可通过 `ctx.instructions` 读取原文，
-runtime 也会把它作为该 run 每个 Action Turn 的 Workflow instruction layer 固化。
+Session `instructions` 的语义刻意不同：Python 可通过 `ctx.instructions` 读取原文，
+runtime 也会把它作为每个 Action Turn 的 Session instruction layer 固化。
 它适合跨 Agent 的语言、证据、输出或摘要策略；具体任务放在 `ctx.request`，选择的
 Project 结果通过 `read_resource` 按需读取。这样不会误把任务数据或旧模型输出提升成
 system 级指令。
 
-## Message origin / 消息来源
+交互输入通过 HumanMessage 参数传递已回答的 HumanRequest。来源记录在
+HumanRequest 与 ActionInvocation 上；Turn 不再维护另一套 user/workflow origin。
 
-`Turn.origin` is `user` only when Rust verifies a string HumanRequest answer and
-binds it to a `HumanMessage` action parameter. The Session composer answers the
-open request owned by `interactive-agent`; it is not a standalone Session
-submit path. `Turn.origin` is `workflow` for an Action dispatched from
-program-generated data. Both use the same Agent runtime, history, model, tools,
-and Step representation. The distinction is a display and provenance contract:
-the UI must never render a Workflow-generated task as if the human typed it.
+## ModelRouteSnapshot
 
-`Turn.origin=user` 只表示 Rust 已核验字符串 HumanRequest 回答，并将其绑定到
-`HumanMessage` action 参数。Session 输入框回答的是 `interactive-agent` 拥有的 open
-request，并不是独立的 Session submit 路径。`Turn.origin=workflow` 表示 Action 使用
-程序生成的数据。二者共享同一 Agent runtime、history、model、tools 与 Step 结构，
-但 UI 必须明确显示来源，不能把 Workflow 生成的任务伪装成人类消息。
+Before Turn creation, routing resolves:
+
+- model profile and provider;
+- concrete upstream model;
+- context window and declared capabilities;
+- final reasoning effort;
+- SHA-256 of relevant non-secret provider/model configuration.
+
+The API key never enters the snapshot. Sampling, hosted-tool decisions, resume,
+and recovery use the immutable route. If the configured route no longer
+matches, recovery fails closed.
+
+Turn 创建前会固化 profile、provider、upstream model、context window、
+capabilities、最终 reasoning effort 与非秘密配置 hash。API key 不进入快照。
+sampling、hosted tool、resume 与 recovery 都使用这条不可变路由；配置漂移时
+fail closed。
 
 ## Cache behavior / 缓存行为
 
-The rendered instruction snapshot is stable for a Turn and usually stable
-across Turns in one Agent Session. The concrete request and Action arguments
-remain message input rather than being rebuilt into system instructions. A
-Project resource costs no model tokens until an Agent explicitly reads it. Run
-instructions and Agent system prompts stay stable;
-changing Action type, skills, control guidance, or an editable prompt
-intentionally changes the instruction prefix. The routing cache key remains
-Session-scoped, while the provider decides actual reuse by matching request
-prefixes. Session history still grows and may be compacted; this separation
-makes misses attributable instead of silently re-sending unrelated Project data.
+The cache identity is Agent-scoped. Stable runtime, Project, Session, Agent,
+and Skill layers form a reusable prefix across that Agent's Turns. Concrete
+Action input remains message data. Action contract, controls, or Skill changes
+intentionally change the prefix. The provider ultimately decides cache reuse
+from the request it receives.
 
-同一 Turn 的 instruction snapshot 完全固定，同一 Agent Session 的多个 Turns 通常
-共享稳定前缀。具体 request 与 Action 参数保留在 message input，不会反复拼进 system
-instructions；捕获的 Project 快照在 Workflow 显式传入前也不消耗模型 token。run
-instructions 与 Agent system prompt 保持稳定；切换 Action、修改 skills、
-control guidance 或可编辑 prompt 会有意改变 instruction prefix。cache routing key
-仍以 Session 为作用域，真正复用由 provider 的请求前缀匹配决定。Session 历史仍会
-增长并可能触发 compaction，但缓存 miss 不再来自无关 Project 数据的隐式重发。
+cache identity 以 Agent 为单位。同一 Agent 的 runtime、Project、Session、Agent 与
+Skill 层通常形成稳定前缀；具体 Action input 保留为 message data。Action contract、
+control 或 Skill 改变会有意改变前缀，最终是否命中由 provider 根据实际请求决定。
+
+Project Summary follows the same rules: one ordinary Agent, one ordinary Action
+contract, the generic `read_resource` tool, and optional Session instructions
+describing what to emphasize. It has no hidden reviewer prompt or special
+kernel prompt path.

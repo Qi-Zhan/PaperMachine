@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowId;
 use serde_json::Value;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -39,8 +39,8 @@ pub use resource::ReadResourceTool;
 pub struct ToolContext {
     pub project_id: ProjectId,
     pub session_id: SessionId,
+    pub agent_id: AgentId,
     pub turn_id: TurnId,
-    pub workflow_id: Option<WorkflowId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub action_attempt_id: Option<ActionAttemptId>,
     pub sandbox_root: PathBuf,

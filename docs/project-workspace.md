@@ -10,15 +10,16 @@
 ## Project
 
 A Project is an identity and ownership boundary, not the directory in which an
-Agent happens to run. Its authoritative row, Sessions, Workflows, immutable
-program and prompt snapshots, Skills, Artifacts, event projections, effect
-journal, and Session rollouts live below
+Agent happens to run. Its authoritative row, WorkflowPrograms, Sessions,
+Agents, immutable program and prompt snapshots, Skills, Artifacts, event
+projections, effect journals, and Agent rollouts live below
 `<data_dir>/projects/<project-id>/`. Python Workflow code and Agent tools cannot
 read or write this managed root.
 
 Project 是 identity 与 ownership boundary，不是 Agent 的工作目录。它的权威记录、
-Session、Workflow、不可变 program/prompt 快照、Skill、Artifact、event projection、
-effect journal 与 Session rollout 都位于 `<data_dir>/projects/<project-id>/`。
+WorkflowProgram、Session、Agent、不可变 program/prompt 快照、Skill、Artifact、
+event projection、effect journal 与 Agent rollout 都位于
+`<data_dir>/projects/<project-id>/`。
 Python Workflow 与 Agent 工具都不能读写这个 managed root。
 
 Deleting a Project retires and deletes only that managed world. Its attached
@@ -72,7 +73,8 @@ attachment 及 revision，不移动 managed Project state，也不移动用户�
 
 Before a Turn is created, the Store verifies that the attached path still
 exists as a real directory at its recorded canonical path. It then
-materializes the Session access preset into a `TurnEnvironmentSnapshot`:
+materializes the Agent access preset, bounded by its Session ceiling, into a
+`TurnEnvironmentSnapshot`:
 
 - Workspace attachment ID, revision, path, and cwd;
 - exact filesystem, tool, network, and child-environment policy;
@@ -80,9 +82,9 @@ materializes the Session access preset into a `TurnEnvironmentSnapshot`:
 - a SHA-256 authorization hash.
 
 创建 Turn 前，Store 会确认挂载路径仍是 recorded canonical path 上的真实目录，
-再把 Session access preset 实体化成 `TurnEnvironmentSnapshot`，包括 Workspace
-ID/revision/path/cwd、精确的文件/工具/网络/子进程环境策略、受保护的 managed
-roots 与权限 SHA-256。
+再把受 Session ceiling 约束的 Agent access preset 实体化成
+`TurnEnvironmentSnapshot`，包括 Workspace ID/revision/path/cwd、精确的
+文件/工具/网络/子进程环境策略、受保护的 managed roots 与权限 SHA-256。
 
 `read_only`, `workspace`, and `research` may read ordinary host files, while
 only `workspace`/`research` may write inside the Workspace; non-`full_access`
@@ -126,13 +128,13 @@ Workspace 看到这些内容，也不会自动获得 Project 工具；Action 必
 
 ## Recovery and inspection
 
-The Session API exposes each Turn environment, ModelRouteSnapshot,
+The Session API exposes its Agents and each Turn environment, ModelRouteSnapshot,
 ToolSetSnapshot, Tool Step status, canonical rollout sequence, and SQLite
 projection sequence. A canonical FunctionCall without output recovers as
-`"aborted"` and is never dispatched again. Every Turn is recovered only through
-its owning Workflow.
+`"aborted"` and is never dispatched again. Every Turn is recovered through
+its owning Agent, ActionAttempt, and Session.
 
-Session API 会暴露每个 Turn 的 environment、ModelRouteSnapshot、ToolSetSnapshot、
-Tool Step 状态、canonical rollout 序号和 SQLite projection 序号。canonical
-FunctionCall 若缺少 output，恢复时会得到 `"aborted"`，旧 call 永不再次 dispatch。
-每个 Turn 只通过其所属 Workflow 恢复。
+Session API 会暴露其 Agent，以及每个 Turn 的 environment、ModelRouteSnapshot、
+ToolSetSnapshot、Tool Step 状态、canonical rollout 序号和 SQLite projection 序号。
+canonical FunctionCall 若缺少 output，恢复时会得到 `"aborted"`，旧 call 永不再次
+dispatch。每个 Turn 通过所属 Agent、ActionAttempt 与 Session 恢复。

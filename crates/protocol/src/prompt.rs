@@ -7,7 +7,7 @@ use serde::Serialize;
 pub enum PromptLayerKind {
     Runtime,
     Project,
-    Workflow,
+    Session,
     Agent,
     Skills,
     Control,
@@ -18,7 +18,7 @@ impl PromptLayerKind {
         match self {
             Self::Runtime => "runtime",
             Self::Project => "project",
-            Self::Workflow => "workflow",
+            Self::Session => "session",
             Self::Agent => "agent",
             Self::Skills => "skills",
             Self::Control => "control",
@@ -31,7 +31,7 @@ pub struct PromptLayer {
     pub kind: PromptLayerKind,
     pub name: String,
     /// Stable, inspectable origin such as `builtin:runtime`, a Project-relative
-    /// path, or a Workflow/Session identifier.
+    /// path, or a Session/Agent identifier.
     pub source: String,
     pub content: String,
     pub sha256: String,

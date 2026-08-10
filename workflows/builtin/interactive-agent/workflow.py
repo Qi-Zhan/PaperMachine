@@ -31,7 +31,7 @@ class InteractiveAgent(Agent):
                 "type": "string",
                 "title": "Agent system prompt",
                 "default": "",
-                "description": "Instructions for this Session.",
+                "description": "Instructions for this Agent.",
                 "x-ui-order": 2,
             },
             "agent_access": {
@@ -57,7 +57,7 @@ async def main(ctx):
     access = str(ctx.params.get("agent_access") or "research")
     system_prompt = InteractiveAgent.system_prompt
     if custom_prompt:
-        system_prompt = f"{system_prompt}\n\nUser-configured Session instructions:\n{custom_prompt}"
+        system_prompt = f"{system_prompt}\n\nUser-configured Agent instructions:\n{custom_prompt}"
     agent = InteractiveAgent(
         name=title or "New project Session",
         system_prompt=system_prompt,

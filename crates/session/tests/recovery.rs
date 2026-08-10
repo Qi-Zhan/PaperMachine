@@ -10,17 +10,16 @@ use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
-use papermachine_session::SessionRuntime;
-use papermachine_session::SessionRuntimeConfig;
-use papermachine_session::WorkflowTurnContext;
+use papermachine_session::ActionTurnContext;
+use papermachine_session::TurnRuntime;
+use papermachine_session::TurnRuntimeConfig;
 use papermachine_skills::ProjectSkillCatalog;
-use papermachine_store::NewWorkflow;
+use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::StoreHandle;
 use papermachine_store::TurnContextCheckpoint;
@@ -39,11 +38,11 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn workflow_restart_aborts_an_unfinished_tool_without_dispatching_it() {
+async fn turn_restart_aborts_an_unfinished_tool_without_dispatching_it() {
     let fixture = workflow_recovery_fixture(true, None);
     let turn = fixture
         .runtime()
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .resume_action_attempt(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
         .expect("Workflow Turn should resume");
 
@@ -64,7 +63,7 @@ async fn workflow_restart_aborts_an_unfinished_tool_without_dispatching_it() {
     )));
     let rollout = fixture
         .store
-        .reconstruct_session_rollout(turn.session_id)
+        .reconstruct_agent_rollout(turn.agent_id)
         .expect("canonical rollout should reconstruct");
     assert_eq!(
         rollout
@@ -82,11 +81,11 @@ async fn workflow_restart_aborts_an_unfinished_tool_without_dispatching_it() {
 }
 
 #[tokio::test]
-async fn workflow_restart_creates_an_aborted_projection_for_a_canonical_call() {
+async fn turn_restart_creates_an_aborted_projection_for_a_canonical_call() {
     let fixture = workflow_recovery_fixture(false, None);
     fixture
         .runtime()
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .resume_action_attempt(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
         .expect("Workflow Turn should resume");
 
@@ -103,12 +102,12 @@ async fn workflow_restart_creates_an_aborted_projection_for_a_canonical_call() {
 }
 
 #[tokio::test]
-async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
+async fn turn_restart_repairs_projection_from_a_canonical_tool_output() {
     let output = json!({"ok": true, "result": {"durable": true}});
     let fixture = workflow_recovery_fixture(false, Some(output.clone()));
     fixture
         .runtime()
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .resume_action_attempt(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
         .expect("Workflow Turn should resume");
 
@@ -131,11 +130,11 @@ async fn workflow_restart_repairs_projection_from_a_canonical_tool_output() {
 }
 
 #[tokio::test]
-async fn workflow_restart_fails_closed_when_the_model_route_changes() {
+async fn turn_restart_fails_closed_when_the_model_route_changes() {
     let fixture = workflow_recovery_fixture(true, None);
     let error = fixture
         .runtime_with_context_window(64_000)
-        .resume_workflow_action(fixture.turn_id, fixture.context, CancellationToken::new())
+        .resume_action_attempt(fixture.turn_id, fixture.context, CancellationToken::new())
         .await
         .expect_err("a changed model route must fail closed");
     assert!(
@@ -162,21 +161,21 @@ struct WorkflowRecoveryFixture {
     calls: Arc<AtomicUsize>,
     turn_id: papermachine_protocol::TurnId,
     step_id: Option<papermachine_protocol::StepId>,
-    context: WorkflowTurnContext,
+    context: ActionTurnContext,
 }
 
 impl WorkflowRecoveryFixture {
-    fn runtime(&self) -> SessionRuntime {
+    fn runtime(&self) -> TurnRuntime {
         self.runtime_with_context_window(128_000)
     }
 
-    fn runtime_with_context_window(&self, model_context_window: usize) -> SessionRuntime {
-        SessionRuntime::new(
+    fn runtime_with_context_window(&self, model_context_window: usize) -> TurnRuntime {
+        TurnRuntime::new(
             self.store_handle.clone(),
             Arc::new(self.model.clone()),
             self.catalog.clone(),
             Arc::clone(&self.skills),
-            SessionRuntimeConfig {
+            TurnRuntimeConfig {
                 default_model: "test-model".to_string(),
                 model_context_window,
                 max_concurrent_turns: 1,
@@ -196,14 +195,11 @@ fn workflow_recovery_fixture(
     let project = store
         .create_project("Workflow", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Origin", "", "test-model", Vec::new())
-        .expect("origin Session should be created");
     let run = store
-        .create_workflow(NewWorkflow {
+        .create_session(NewSession {
             project_id: project.id,
-            started_from_session_id: Some(origin.id),
             program: workflow_snapshot(),
+            title: "Recovery".to_string(),
             request: "recover".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
@@ -213,10 +209,10 @@ fn workflow_recovery_fixture(
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })
-        .expect("Workflow should be created");
-    store.start_workflow(run.id).expect("Workflow should run");
-    let participant = store
-        .create_participant(
+        .expect("Session should be created");
+    store.start_session(run.id).expect("Session should run");
+    let agent = store
+        .create_agent(
             run.id,
             "Worker",
             "Worker",
@@ -226,7 +222,7 @@ fn workflow_recovery_fixture(
             Vec::new(),
             AccessPreset::Research,
         )
-        .expect("participant should be created");
+        .expect("Agent should be created");
     let calls = Arc::new(AtomicUsize::new(0));
     let catalog = ToolCatalog::builder()
         .register_workspace(CountingTool {
@@ -238,7 +234,7 @@ fn workflow_recovery_fixture(
     let invocation = store
         .create_action_invocation(
             run.id,
-            participant.id,
+            agent.id,
             "recover",
             "recover",
             json!({}),
@@ -258,8 +254,7 @@ fn workflow_recovery_fixture(
     let turn = store
         .create_turn_for_attempt(
             attempt.id,
-            participant.session_id,
-            TurnOrigin::Workflow,
+            agent.id,
             "recover",
             model_route,
             empty_prompt_snapshot(),
@@ -324,8 +319,7 @@ fn workflow_recovery_fixture(
         calls,
         turn_id: turn.id,
         step_id,
-        context: WorkflowTurnContext {
-            workflow_id: run.id,
+        context: ActionTurnContext {
             action_invocation_id: invocation.id,
             action_attempt_id: attempt.id,
         },

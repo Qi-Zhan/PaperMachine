@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from papermachine import WorkflowContext, _Runtime, _set_runtime
+from papermachine import SessionContext, _Runtime, _set_runtime
 
 
 WORKFLOW = runpy.run_path(
@@ -26,8 +26,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent-summary",
-                    "session_id": "session-summary",
+                    "agent_id": "agent-summary",
                     "access": "model_only",
                 }
             if kind == "project_changes":
@@ -68,11 +67,11 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
         _set_runtime(_Runtime(send))
         output = asyncio.run(
             WORKFLOW["main"](
-                WorkflowContext(
+                SessionContext(
                     request="Refresh progress.",
                     instructions="",
                     params={"interval_minutes": 0},
-                    workflow_id="workflow-summary",
+                    session_id="session-summary",
                 )
             )
         )

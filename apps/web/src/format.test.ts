@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, shortId, statusLabel, workflowIsTerminal, workflowTitle } from './format'
+import { agentActivityKind, agentActivitySubject, primaryActionText, sessionEventTitle, sessionIsTerminal, sessionTitle, shortId, statusLabel } from './format'
 import { setLocale } from './i18n'
-import type { Workflow } from './types'
+import type { Session } from './types'
 
 describe('format helpers', () => {
   it('formats canonical session labels', () => {
@@ -11,7 +11,9 @@ describe('format helpers', () => {
       sessionEventTitle({
         id: 'event',
         sequence: 3,
+        project_id: 'project',
         session_id: 'session',
+        agent_id: 'agent',
         turn_id: 'turn',
         step_id: null,
         occurred_at: '2026-08-04T00:00:00Z',
@@ -26,7 +28,9 @@ describe('format helpers', () => {
       sessionEventTitle({
         id: 'event',
         sequence: 3,
+        project_id: 'project',
         session_id: 'session',
+        agent_id: 'agent',
         turn_id: 'turn',
         step_id: null,
         occurred_at: '2026-08-04T00:00:00Z',
@@ -56,18 +60,19 @@ describe('format helpers', () => {
     expect(agentActivitySubject({ opaque: {} })).toBeNull()
   })
 
-  it('uses the Workflow name when an interactive run has no user task', () => {
-    const workflow = {
+  it('uses the Session title for a running WorkflowProgram', () => {
+    const session = {
+      title: 'Investigation',
       request: '',
       program: { manifest: { name: 'Interactive agent' } },
-    } as Workflow
-    expect(workflowTitle(workflow)).toBe('Interactive agent')
+    } as Session
+    expect(sessionTitle(session)).toBe('Investigation')
   })
 
-  it('releases a Session composer when its Workflow reaches a terminal state', () => {
-    expect(workflowIsTerminal({ status: 'running' } as Workflow)).toBe(false)
-    expect(workflowIsTerminal({ status: 'completed' } as Workflow)).toBe(true)
-    expect(workflowIsTerminal({ status: 'failed' } as Workflow)).toBe(true)
-    expect(workflowIsTerminal({ status: 'cancelled' } as Workflow)).toBe(true)
+  it('recognizes terminal Session states', () => {
+    expect(sessionIsTerminal({ status: 'running' } as Session)).toBe(false)
+    expect(sessionIsTerminal({ status: 'completed' } as Session)).toBe(true)
+    expect(sessionIsTerminal({ status: 'failed' } as Session)).toBe(true)
+    expect(sessionIsTerminal({ status: 'cancelled' } as Session)).toBe(true)
   })
 })

@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Utc;
 use papermachine_protocol::HumanRequestStatus;
-use papermachine_protocol::WorkflowId;
-use papermachine_protocol::WorkflowStatus;
-use papermachine_protocol::WorkflowUsage;
+use papermachine_protocol::SessionId;
+use papermachine_protocol::SessionStatus;
+use papermachine_protocol::SessionUsage;
 #[cfg(test)]
 use papermachine_store::Store;
 use papermachine_store::StoreError;
@@ -22,56 +22,56 @@ use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-pub type WorkflowOutcome = Result<Value, String>;
+pub type SessionOutcome = Result<Value, String>;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct WorkflowSuspension {
-    pub status: WorkflowStatus,
+pub struct SessionSuspension {
+    pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
 }
 
-impl WorkflowSuspension {
-    pub const fn new(status: WorkflowStatus, wake_at: Option<DateTime<Utc>>) -> Self {
+impl SessionSuspension {
+    pub const fn new(status: SessionStatus, wake_at: Option<DateTime<Utc>>) -> Self {
         Self { status, wake_at }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum WorkflowExecution {
+pub enum SessionExecution {
     Completed(Value),
-    Suspended(WorkflowSuspension),
+    Suspended(SessionSuspension),
 }
 
 #[async_trait]
-pub trait WorkflowRuntime: Send + Sync {
+pub trait SessionExecutor: Send + Sync {
     async fn execute(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         cancellation: CancellationToken,
-    ) -> Result<WorkflowExecution, String>;
+    ) -> Result<SessionExecution, String>;
 }
 
 #[derive(Clone)]
-pub struct WorkflowScheduler {
-    inner: Arc<SchedulerInner>,
+pub struct SessionScheduler {
+    inner: Arc<SessionSchedulerInner>,
 }
 
-struct SchedulerInner {
+struct SessionSchedulerInner {
     store: StoreHandle,
-    executor: Arc<dyn WorkflowRuntime>,
+    executor: Arc<dyn SessionExecutor>,
     permits: Arc<Semaphore>,
-    handles: Mutex<HashMap<WorkflowId, ScheduledRun>>,
+    handles: Mutex<HashMap<SessionId, ScheduledRun>>,
 }
 
 struct ScheduledRun {
     cancellation: CancellationToken,
-    outcome: watch::Receiver<Option<WorkflowOutcome>>,
+    outcome: watch::Receiver<Option<SessionOutcome>>,
 }
 
-impl WorkflowScheduler {
+impl SessionScheduler {
     pub fn new(
         store: StoreHandle,
-        executor: Arc<dyn WorkflowRuntime>,
+        executor: Arc<dyn SessionExecutor>,
         max_concurrent_runs: usize,
     ) -> Self {
         let permits = Arc::new(Semaphore::new(max_concurrent_runs.max(1)));
@@ -80,11 +80,11 @@ impl WorkflowScheduler {
 
     pub fn new_with_permits(
         store: StoreHandle,
-        executor: Arc<dyn WorkflowRuntime>,
+        executor: Arc<dyn SessionExecutor>,
         permits: Arc<Semaphore>,
     ) -> Self {
         Self {
-            inner: Arc::new(SchedulerInner {
+            inner: Arc::new(SessionSchedulerInner {
                 store,
                 executor,
                 permits,
@@ -93,26 +93,26 @@ impl WorkflowScheduler {
         }
     }
 
-    pub async fn start(&self, workflow_id: WorkflowId) -> Result<bool, WorkflowSchedulerError> {
-        let run = self
+    pub async fn start(&self, session_id: SessionId) -> Result<bool, SessionSchedulerError> {
+        let session = self
             .inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalWorkflow {
-                workflow_id,
-                status: run.status,
+        if session.status.is_terminal() {
+            return Err(SessionSchedulerError::TerminalSession {
+                session_id,
+                status: session.status,
             });
         }
         let mut handles = self.inner.handles.lock().await;
-        if handles.contains_key(&workflow_id) {
+        if handles.contains_key(&session_id) {
             return Ok(false);
         }
         let cancellation = CancellationToken::new();
         let (outcome_tx, outcome_rx) = watch::channel(None);
         handles.insert(
-            workflow_id,
+            session_id,
             ScheduledRun {
                 cancellation: cancellation.clone(),
                 outcome: outcome_rx,
@@ -121,89 +121,87 @@ impl WorkflowScheduler {
         drop(handles);
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let outcome = run_scheduled(Arc::clone(&inner), workflow_id, cancellation).await;
-            inner.handles.lock().await.remove(&workflow_id);
+            let outcome = run_scheduled(Arc::clone(&inner), session_id, cancellation).await;
+            inner.handles.lock().await.remove(&session_id);
             let _ = outcome_tx.send(Some(outcome));
         });
         Ok(true)
     }
 
-    /// Restarts every non-terminal Workflow. The Python program executes from
+    /// Restarts every non-terminal Session. The Python program executes from
     /// its snapshotted source while deterministic effects replay from the
     /// durable journal; an unfinished Action resumes its checkpointed Turn.
-    pub async fn recover(&self) -> Result<Vec<WorkflowId>, WorkflowSchedulerError> {
+    pub async fn recover(&self) -> Result<Vec<SessionId>, SessionSchedulerError> {
         let mut started = Vec::new();
-        let workflows = self
+        let sessions = self
             .inner
             .store
-            .call(|store| store.list_recoverable_workflows())
+            .call(|store| store.list_recoverable_sessions())
             .await?;
-        for run in workflows {
-            if self.start(run.id).await? {
-                started.push(run.id);
+        for session in sessions {
+            if self.start(session.id).await? {
+                started.push(session.id);
             }
         }
         Ok(started)
     }
 
-    pub async fn pause(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self
+    pub async fn pause(&self, session_id: SessionId) -> Result<(), SessionSchedulerError> {
+        let session = self
             .inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalWorkflow {
-                workflow_id,
-                status: run.status,
+        if session.status.is_terminal() {
+            return Err(SessionSchedulerError::TerminalSession {
+                session_id,
+                status: session.status,
             });
         }
         self.inner
             .store
-            .call(move |store| {
-                store.pause_workflow(workflow_id, Some("paused by user".to_string()))
-            })
+            .call(move |store| store.pause_session(session_id, Some("paused by user".to_string())))
             .await?;
         Ok(())
     }
 
-    pub async fn resume(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self
+    pub async fn resume(&self, session_id: SessionId) -> Result<(), SessionSchedulerError> {
+        let session = self
             .inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalWorkflow {
-                workflow_id,
-                status: run.status,
+        if session.status.is_terminal() {
+            return Err(SessionSchedulerError::TerminalSession {
+                session_id,
+                status: session.status,
             });
         }
         self.inner
             .store
-            .call(move |store| store.resume_workflow(workflow_id))
+            .call(move |store| store.resume_session(session_id))
             .await?;
-        self.start(workflow_id).await?;
+        self.start(session_id).await?;
         Ok(())
     }
 
-    pub async fn cancel(&self, workflow_id: WorkflowId) -> Result<(), WorkflowSchedulerError> {
-        let run = self
+    pub async fn cancel(&self, session_id: SessionId) -> Result<(), SessionSchedulerError> {
+        let session = self
             .inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        if run.status.is_terminal() {
-            return Err(WorkflowSchedulerError::TerminalWorkflow {
-                workflow_id,
-                status: run.status,
+        if session.status.is_terminal() {
+            return Err(SessionSchedulerError::TerminalSession {
+                session_id,
+                status: session.status,
             });
         }
         self.inner
             .store
-            .call(move |store| store.cancel_workflow(workflow_id, "cancelled by user"))
+            .call(move |store| store.cancel_session(session_id, "cancelled by user"))
             .await?;
-        if let Some(handle) = self.inner.handles.lock().await.get(&workflow_id) {
+        if let Some(handle) = self.inner.handles.lock().await.get(&session_id) {
             handle.cancellation.cancel();
         }
         Ok(())
@@ -211,84 +209,79 @@ impl WorkflowScheduler {
 
     pub async fn wait(
         &self,
-        workflow_id: WorkflowId,
-    ) -> Result<WorkflowOutcome, WorkflowSchedulerError> {
+        session_id: SessionId,
+    ) -> Result<SessionOutcome, SessionSchedulerError> {
         let outcome = self
             .inner
             .handles
             .lock()
             .await
-            .get(&workflow_id)
+            .get(&session_id)
             .map(|handle| handle.outcome.clone());
         let Some(mut outcome) = outcome else {
-            return self.persisted_outcome(workflow_id).await;
+            return self.persisted_outcome(session_id).await;
         };
         loop {
             if let Some(result) = outcome.borrow().clone() {
                 return Ok(result);
             }
             if outcome.changed().await.is_err() {
-                return self.persisted_outcome(workflow_id).await;
+                return self.persisted_outcome(session_id).await;
             }
         }
     }
 
     async fn persisted_outcome(
         &self,
-        workflow_id: WorkflowId,
-    ) -> Result<WorkflowOutcome, WorkflowSchedulerError> {
-        let workflow = self
+        session_id: SessionId,
+    ) -> Result<SessionOutcome, SessionSchedulerError> {
+        let session = self
             .inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        if !workflow.status.is_terminal() {
-            return Err(WorkflowSchedulerError::NotScheduled(workflow_id));
+        if !session.status.is_terminal() {
+            return Err(SessionSchedulerError::NotScheduled(session_id));
         }
-        Ok(match workflow.status {
-            WorkflowStatus::Completed => workflow.output.ok_or_else(|| {
-                workflow
+        Ok(match session.status {
+            SessionStatus::Completed => session.output.ok_or_else(|| {
+                session
                     .error
-                    .unwrap_or_else(|| "Workflow completed without output".to_string())
+                    .unwrap_or_else(|| "Session completed without output".to_string())
             }),
-            WorkflowStatus::Failed | WorkflowStatus::Cancelled => Err(workflow
+            SessionStatus::Failed | SessionStatus::Cancelled => Err(session
                 .error
-                .unwrap_or_else(|| format!("Workflow ended as {:?}", workflow.status))),
+                .unwrap_or_else(|| format!("Session ended as {:?}", session.status))),
             _ => unreachable!("terminal status checked above"),
         })
     }
 }
 
 async fn run_scheduled(
-    inner: Arc<SchedulerInner>,
-    workflow_id: WorkflowId,
+    inner: Arc<SessionSchedulerInner>,
+    session_id: SessionId,
     cancellation: CancellationToken,
-) -> WorkflowOutcome {
+) -> SessionOutcome {
     let mut wake_at_hint = None;
     loop {
         let current = inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await
             .map_err(|error| error.to_string())?;
         if current.status.is_terminal() {
             return current.output.ok_or_else(|| {
                 current
                     .error
-                    .unwrap_or_else(|| format!("Workflow ended as {:?}", current.status))
+                    .unwrap_or_else(|| format!("Session ended as {:?}", current.status))
             });
         }
         if !matches!(
             current.status,
-            WorkflowStatus::Created | WorkflowStatus::Running
+            SessionStatus::Created | SessionStatus::Running
         ) {
-            wait_until_runnable(
-                &inner.store,
-                workflow_id,
-                &cancellation,
-                wake_at_hint.take(),
-            )
-            .await?;
+            wait_until_runnable(&inner.store, session_id, &cancellation, wake_at_hint.take())
+                .await?;
             continue;
         }
 
@@ -296,26 +289,26 @@ async fn run_scheduled(
             permit = Arc::clone(&inner.permits).acquire_owned() => permit.map_err(|error| error.to_string())?,
             _ = cancellation.cancelled() => return Err("cancelled before execution started".to_string()),
         };
-        let mut run = inner
+        let mut session = inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await
             .map_err(|error| error.to_string())?;
-        if run.status == WorkflowStatus::Created {
-            run = inner
+        if session.status == SessionStatus::Created {
+            session = inner
                 .store
-                .call(move |store| store.start_workflow(workflow_id))
+                .call(move |store| store.start_session(session_id))
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        if run.status != WorkflowStatus::Running {
+        if session.status != SessionStatus::Running {
             drop(permit);
             continue;
         }
 
         let started = Instant::now();
         let execution = cancellation.child_token();
-        let result = inner.executor.execute(workflow_id, execution).await;
+        let result = inner.executor.execute(session_id, execution).await;
         let elapsed = started
             .elapsed()
             .as_secs()
@@ -323,11 +316,11 @@ async fn run_scheduled(
         inner
             .store
             .call(move |store| {
-                store.add_workflow_usage(
-                    workflow_id,
-                    WorkflowUsage {
+                store.add_session_usage(
+                    session_id,
+                    SessionUsage {
                         wall_time_seconds: elapsed,
-                        ..WorkflowUsage::default()
+                        ..SessionUsage::default()
                     },
                 )
             })
@@ -337,14 +330,14 @@ async fn run_scheduled(
 
         let current = inner
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await
             .map_err(|error| error.to_string())?;
         if cancellation.is_cancelled() {
             if !current.status.is_terminal() {
                 inner
                     .store
-                    .call(move |store| store.cancel_workflow(workflow_id, "cancelled by user"))
+                    .call(move |store| store.cancel_session(session_id, "cancelled by user"))
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -354,34 +347,34 @@ async fn run_scheduled(
             continue;
         }
         match result {
-            Ok(WorkflowExecution::Completed(output)) => {
+            Ok(SessionExecution::Completed(output)) => {
                 inner
                     .store
                     .call({
                         let output = output.clone();
-                        move |store| store.complete_workflow(workflow_id, output)
+                        move |store| store.complete_session(session_id, output)
                     })
                     .await
                     .map_err(|error| error.to_string())?;
                 return Ok(output);
             }
-            Ok(WorkflowExecution::Suspended(suspension)) => {
+            Ok(SessionExecution::Suspended(suspension)) => {
                 if current.status != suspension.status {
                     match suspension.status {
-                        WorkflowStatus::WaitingForUser => {
+                        SessionStatus::WaitingForInput => {
                             inner
                                 .store
-                                .call(move |store| store.wait_workflow_for_user(workflow_id))
+                                .call(move |store| store.wait_session_for_input(session_id))
                                 .await
                         }
-                        WorkflowStatus::WaitingForDeadline => {
+                        SessionStatus::WaitingForDeadline => {
                             inner
                                 .store
-                                .call(move |store| store.wait_workflow_for_deadline(workflow_id))
+                                .call(move |store| store.wait_session_for_deadline(session_id))
                                 .await
                         }
                         status => Err(StoreError::Invariant(format!(
-                            "Workflow runtime returned invalid suspension status {status:?}"
+                            "Session runtime returned invalid suspension status {status:?}"
                         ))),
                     }
                     .map_err(|error| error.to_string())?;
@@ -393,7 +386,7 @@ async fn run_scheduled(
                     .store
                     .call({
                         let error = error.clone();
-                        move |store| store.fail_workflow(workflow_id, error)
+                        move |store| store.fail_session(session_id, error)
                     })
                     .await
                     .map_err(|store_error| store_error.to_string())?;
@@ -405,7 +398,7 @@ async fn run_scheduled(
 
 async fn wait_until_runnable(
     store: &StoreHandle,
-    workflow_id: WorkflowId,
+    session_id: SessionId,
     cancellation: &CancellationToken,
     wake_at_hint: Option<DateTime<Utc>>,
 ) -> Result<(), String> {
@@ -415,31 +408,31 @@ async fn wait_until_runnable(
         .map_err(|error| error.to_string())?;
     loop {
         if cancellation.is_cancelled() {
-            return Err("cancelled while Workflow was suspended".to_string());
+            return Err("cancelled while Session was suspended".to_string());
         }
-        let run = store
-            .call::<_, StoreError, _>(move |store| store.get_workflow(workflow_id))
+        let session = store
+            .call::<_, StoreError, _>(move |store| store.get_session(session_id))
             .await
             .map_err(|error| error.to_string())?;
-        match run.status {
-            WorkflowStatus::Created | WorkflowStatus::Running => return Ok(()),
-            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
-                return Err(run
+        match session.status {
+            SessionStatus::Created | SessionStatus::Running => return Ok(()),
+            SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+                return Err(session
                     .error
-                    .unwrap_or_else(|| format!("Workflow ended as {:?}", run.status)));
+                    .unwrap_or_else(|| format!("Session ended as {:?}", session.status)));
             }
-            WorkflowStatus::Paused => {
+            SessionStatus::Paused => {
                 tokio::select! {
-                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was paused".to_string()),
+                    _ = cancellation.cancelled() => return Err("cancelled while Session was paused".to_string()),
                     _ = events.recv() => {}
                 }
             }
-            WorkflowStatus::WaitingForUser => {
+            SessionStatus::WaitingForInput => {
                 let open_request = store
                     .call(move |store| {
                         Ok::<_, StoreError>(
                             store
-                                .list_human_requests(workflow_id)?
+                                .list_human_requests(session_id)?
                                 .into_iter()
                                 .any(|request| request.status == HumanRequestStatus::Open),
                         )
@@ -448,33 +441,33 @@ async fn wait_until_runnable(
                     .map_err(|error| error.to_string())?;
                 if !open_request {
                     store
-                        .call(move |store| store.resume_workflow(workflow_id))
+                        .call(move |store| store.resume_session(session_id))
                         .await
                         .map_err(|error| error.to_string())?;
                     return Ok(());
                 }
                 tokio::select! {
-                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                    _ = cancellation.cancelled() => return Err("cancelled while Session was suspended".to_string()),
                     _ = events.recv() => {}
                 }
             }
-            WorkflowStatus::WaitingForDeadline => {
+            SessionStatus::WaitingForDeadline => {
                 let wake_at = wake_at_hint.ok_or_else(|| {
-                    "Workflow deadline suspension is missing its wake time".to_string()
+                    "Session deadline suspension is missing its wake time".to_string()
                 })?;
                 let wait = (wake_at - Utc::now()).to_std().unwrap_or_default();
                 if wait.is_zero() {
                     store
-                        .call(move |store| store.resume_workflow(workflow_id))
+                        .call(move |store| store.resume_session(session_id))
                         .await
                         .map_err(|error| error.to_string())?;
                     return Ok(());
                 }
                 tokio::select! {
-                    _ = cancellation.cancelled() => return Err("cancelled while Workflow was suspended".to_string()),
+                    _ = cancellation.cancelled() => return Err("cancelled while Session was suspended".to_string()),
                     _ = tokio::time::sleep(wait) => {
                         store
-                            .call(move |store| store.resume_workflow(workflow_id))
+                            .call(move |store| store.resume_session(session_id))
                             .await
                             .map_err(|error| error.to_string())?;
                         return Ok(());
@@ -487,16 +480,16 @@ async fn wait_until_runnable(
 }
 
 #[derive(Debug, Error)]
-pub enum WorkflowSchedulerError {
+pub enum SessionSchedulerError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("Workflow {workflow_id} is terminal with status {status:?}")]
-    TerminalWorkflow {
-        workflow_id: WorkflowId,
-        status: WorkflowStatus,
+    #[error("Session {session_id} is terminal with status {status:?}")]
+    TerminalSession {
+        session_id: SessionId,
+        status: SessionStatus,
     },
-    #[error("Workflow {0} is not scheduled in this process")]
-    NotScheduled(WorkflowId),
+    #[error("Session {0} is not scheduled in this process")]
+    NotScheduled(SessionId),
 }
 
 #[cfg(test)]
@@ -504,12 +497,11 @@ mod tests {
     use super::*;
     use papermachine_protocol::AccessPreset;
     use papermachine_protocol::Session;
-    use papermachine_protocol::Workflow;
     use papermachine_protocol::WorkflowProgramId;
     use papermachine_protocol::WorkflowProgramManifest;
     use papermachine_protocol::WorkflowProgramSnapshot;
     use papermachine_protocol::WorkflowProgramSource;
-    use papermachine_store::NewWorkflow;
+    use papermachine_store::NewSession;
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
@@ -520,58 +512,58 @@ mod tests {
     }
 
     struct SuspendOnceExecutor {
-        suspend_once: HashSet<WorkflowId>,
-        suspended: StdMutex<HashSet<WorkflowId>>,
+        suspend_once: HashSet<SessionId>,
+        suspended: StdMutex<HashSet<SessionId>>,
     }
 
     struct BlockingExecutor;
 
     #[async_trait]
-    impl WorkflowRuntime for BlockingExecutor {
+    impl SessionExecutor for BlockingExecutor {
         async fn execute(
             &self,
-            _workflow_id: WorkflowId,
+            _session_id: SessionId,
             cancellation: CancellationToken,
-        ) -> Result<WorkflowExecution, String> {
+        ) -> Result<SessionExecution, String> {
             cancellation.cancelled().await;
             Err("cancelled by scheduler".to_string())
         }
     }
 
     #[async_trait]
-    impl WorkflowRuntime for SuspendOnceExecutor {
+    impl SessionExecutor for SuspendOnceExecutor {
         async fn execute(
             &self,
-            workflow_id: WorkflowId,
+            session_id: SessionId,
             _cancellation: CancellationToken,
-        ) -> Result<WorkflowExecution, String> {
-            let should_suspend = self.suspend_once.contains(&workflow_id)
+        ) -> Result<SessionExecution, String> {
+            let should_suspend = self.suspend_once.contains(&session_id)
                 && self
                     .suspended
                     .lock()
                     .map_err(|error| error.to_string())?
-                    .insert(workflow_id);
+                    .insert(session_id);
             if should_suspend {
-                Ok(WorkflowExecution::Suspended(WorkflowSuspension::new(
-                    WorkflowStatus::WaitingForDeadline,
+                Ok(SessionExecution::Suspended(SessionSuspension::new(
+                    SessionStatus::WaitingForDeadline,
                     Some(Utc::now() + chrono::Duration::hours(1)),
                 )))
             } else {
-                Ok(WorkflowExecution::Completed(json!({
-                    "workflow_id": workflow_id
+                Ok(SessionExecution::Completed(json!({
+                    "session_id": session_id
                 })))
             }
         }
     }
 
     #[async_trait]
-    impl WorkflowRuntime for StaticExecutor {
+    impl SessionExecutor for StaticExecutor {
         async fn execute(
             &self,
-            _workflow_id: WorkflowId,
+            _session_id: SessionId,
             _cancellation: CancellationToken,
-        ) -> Result<WorkflowExecution, String> {
-            Ok(WorkflowExecution::Completed(self.output.clone()))
+        ) -> Result<SessionExecution, String> {
+            Ok(SessionExecution::Completed(self.output.clone()))
         }
     }
 
@@ -595,12 +587,16 @@ mod tests {
         }
     }
 
-    fn create_test_workflow(store: &Store, session: &Session, objective: &str) -> Workflow {
+    fn create_test_session(
+        store: &Store,
+        project_id: papermachine_protocol::ProjectId,
+        objective: &str,
+    ) -> Session {
         store
-            .create_workflow(NewWorkflow {
-                project_id: session.project_id,
-                started_from_session_id: Some(session.id),
+            .create_session(NewSession {
+                project_id,
                 program: workflow(),
+                title: objective.to_string(),
                 request: objective.to_string(),
                 instructions: String::new(),
                 trigger: Default::default(),
@@ -610,7 +606,7 @@ mod tests {
                 enabled_skills: Vec::new(),
                 agent_access_overrides: Default::default(),
             })
-            .expect("workflow should be created")
+            .expect("Session should be created")
     }
 
     #[tokio::test]
@@ -623,11 +619,8 @@ mod tests {
         let research = store
             .create_project("Scheduler", directory.path().join("project"))
             .expect("research should be created");
-        let session = store
-            .create_session(research.id, "Origin", "", "test-model", Vec::new())
-            .expect("session should be created");
-        let run = create_test_workflow(&store, &session, "Run");
-        let scheduler = WorkflowScheduler::new(
+        let session = create_test_session(&store, research.id, "Run");
+        let scheduler = SessionScheduler::new(
             StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
@@ -635,34 +628,44 @@ mod tests {
             1,
         );
 
-        scheduler.start(run.id).await.expect("run should start");
-        let output = scheduler
-            .wait(run.id)
+        scheduler
+            .start(session.id)
             .await
-            .expect("run should remain scheduled")
+            .expect("Session should start");
+        let output = scheduler
+            .wait(session.id)
+            .await
+            .expect("Session should remain scheduled")
             .expect("execution should succeed");
         let completed = store
-            .get_workflow(run.id)
-            .expect("completed run should load");
+            .get_session(session.id)
+            .expect("completed Session should load");
 
         assert_eq!(output, json!({"report": "done"}));
-        assert_eq!(completed.status, WorkflowStatus::Completed);
+        assert_eq!(completed.status, SessionStatus::Completed);
         assert_eq!(completed.output, Some(output));
         assert_eq!(completed.usage.wall_time_seconds, 1);
         tokio::task::yield_now().await;
-        assert!(!scheduler.inner.handles.lock().await.contains_key(&run.id));
+        assert!(
+            !scheduler
+                .inner
+                .handles
+                .lock()
+                .await
+                .contains_key(&session.id)
+        );
         assert_eq!(
             scheduler
-                .wait(run.id)
+                .wait(session.id)
                 .await
                 .expect("late wait should read the durable terminal outcome")
-                .expect("completed Workflow should retain its output"),
+                .expect("completed Session should retain its output"),
             json!({"report": "done"})
         );
     }
 
     #[tokio::test]
-    async fn process_restart_recovers_running_and_created_workflows() {
+    async fn process_restart_recovers_running_and_created_sessions() {
         let directory = tempdir().expect("temporary directory should be created");
         let store = Arc::new(
             Store::open_in_memory(directory.path().join("managed"))
@@ -671,16 +674,13 @@ mod tests {
         let research = store
             .create_project("Restart", directory.path().join("project"))
             .expect("research should be created");
-        let session = store
-            .create_session(research.id, "Origin", "", "test-model", Vec::new())
-            .expect("session should be created");
-        let running_run = create_test_workflow(&store, &session, "Running");
+        let running_run = create_test_session(&store, research.id, "Running");
         store
-            .start_workflow(running_run.id)
-            .expect("run should be running");
-        let created_run = create_test_workflow(&store, &session, "Created");
+            .start_session(running_run.id)
+            .expect("Session should be running");
+        let created_run = create_test_session(&store, research.id, "Created");
 
-        let scheduler = WorkflowScheduler::new(
+        let scheduler = SessionScheduler::new(
             StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(StaticExecutor {
                 output: json!({"report": "done"}),
@@ -694,24 +694,24 @@ mod tests {
         assert_eq!(recovered.len(), 2);
         assert!(recovered.contains(&running_run.id));
         assert!(recovered.contains(&created_run.id));
-        for workflow_id in [running_run.id, created_run.id] {
+        for session_id in [running_run.id, created_run.id] {
             scheduler
-                .wait(workflow_id)
+                .wait(session_id)
                 .await
-                .expect("recovered run should remain scheduled")
-                .expect("recovered run should complete");
+                .expect("recovered Session should remain scheduled")
+                .expect("recovered Session should complete");
             assert_eq!(
                 store
-                    .get_workflow(workflow_id)
-                    .expect("recovered run should load")
+                    .get_session(session_id)
+                    .expect("recovered Session should load")
                     .status,
-                WorkflowStatus::Completed
+                SessionStatus::Completed
             );
         }
     }
 
     #[tokio::test]
-    async fn cancelling_a_running_workflow_reaches_its_executor() {
+    async fn cancelling_a_running_session_reaches_its_executor() {
         let directory = tempdir().expect("temporary directory should be created");
         let store = Arc::new(
             Store::open_in_memory(directory.path().join("managed"))
@@ -720,27 +720,24 @@ mod tests {
         let project = store
             .create_project("Cancellation", directory.path().join("workspace"))
             .expect("Project should be created");
-        let session = store
-            .create_session(project.id, "Origin", "", "test-model", Vec::new())
-            .expect("Session should be created");
-        let run = create_test_workflow(&store, &session, "Block until cancelled");
-        let scheduler = WorkflowScheduler::new(
+        let session = create_test_session(&store, project.id, "Block until cancelled");
+        let scheduler = SessionScheduler::new(
             StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(BlockingExecutor),
             1,
         );
 
         scheduler
-            .start(run.id)
+            .start(session.id)
             .await
-            .expect("Workflow should start");
+            .expect("Session should start");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if store
-                    .get_workflow(run.id)
-                    .expect("Workflow should load")
+                    .get_session(session.id)
+                    .expect("Session should load")
                     .status
-                    == WorkflowStatus::Running
+                    == SessionStatus::Running
                 {
                     break;
                 }
@@ -748,29 +745,29 @@ mod tests {
             }
         })
         .await
-        .expect("Workflow should become running");
+        .expect("Session should become running");
         scheduler
-            .cancel(run.id)
+            .cancel(session.id)
             .await
-            .expect("Workflow should cancel");
+            .expect("Session should cancel");
         assert!(
-            tokio::time::timeout(Duration::from_secs(5), scheduler.wait(run.id))
+            tokio::time::timeout(Duration::from_secs(5), scheduler.wait(session.id))
                 .await
                 .expect("cancel should reach the executor promptly")
-                .expect("cancelled Workflow should remain scheduled")
+                .expect("cancelled Session should remain scheduled")
                 .is_err()
         );
         assert_eq!(
             store
-                .get_workflow(run.id)
-                .expect("Workflow should load")
+                .get_session(session.id)
+                .expect("Session should load")
                 .status,
-            WorkflowStatus::Cancelled
+            SessionStatus::Cancelled
         );
     }
 
     #[tokio::test]
-    async fn suspended_workflow_releases_the_global_execution_permit() {
+    async fn suspended_session_releases_the_global_execution_permit() {
         let directory = tempdir().expect("temporary directory should be created");
         let store = Arc::new(
             Store::open_in_memory(directory.path().join("managed"))
@@ -779,12 +776,9 @@ mod tests {
         let research = store
             .create_project("Suspension", directory.path().join("project"))
             .expect("research should be created");
-        let session = store
-            .create_session(research.id, "Origin", "", "test-model", Vec::new())
-            .expect("session should be created");
-        let suspended_run = create_test_workflow(&store, &session, "Suspend");
-        let other_run = create_test_workflow(&store, &session, "Other");
-        let scheduler = WorkflowScheduler::new(
+        let suspended_run = create_test_session(&store, research.id, "Suspend");
+        let other_run = create_test_session(&store, research.id, "Other");
+        let scheduler = SessionScheduler::new(
             StoreHandle::spawn((*store).clone()).expect("Store thread should start"),
             Arc::new(SuspendOnceExecutor {
                 suspend_once: HashSet::from([suspended_run.id]),
@@ -796,14 +790,14 @@ mod tests {
         scheduler
             .start(suspended_run.id)
             .await
-            .expect("suspending Workflow should start");
+            .expect("suspending Session should start");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if store
-                    .get_workflow(suspended_run.id)
-                    .expect("Workflow should load")
+                    .get_session(suspended_run.id)
+                    .expect("Session should load")
                     .status
-                    == WorkflowStatus::WaitingForDeadline
+                    == SessionStatus::WaitingForDeadline
                 {
                     break;
                 }
@@ -811,25 +805,25 @@ mod tests {
             }
         })
         .await
-        .expect("Workflow should suspend");
+        .expect("Session should suspend");
 
         scheduler
             .start(other_run.id)
             .await
-            .expect("other Workflow should start");
+            .expect("other Session should start");
         tokio::time::timeout(Duration::from_secs(5), scheduler.wait(other_run.id))
             .await
-            .expect("other Workflow must not starve behind the suspended run")
-            .expect("other Workflow should remain scheduled")
-            .expect("other Workflow should complete");
+            .expect("other Session must not starve behind the suspended Session")
+            .expect("other Session should remain scheduled")
+            .expect("other Session should complete");
 
         store
-            .resume_workflow(suspended_run.id)
-            .expect("suspended Workflow should be resumed");
+            .resume_session(suspended_run.id)
+            .expect("suspended Session should be resumed");
         tokio::time::timeout(Duration::from_secs(5), scheduler.wait(suspended_run.id))
             .await
-            .expect("resumed Workflow should finish")
-            .expect("resumed Workflow should remain scheduled")
-            .expect("resumed Workflow should complete");
+            .expect("resumed Session should finish")
+            .expect("resumed Session should remain scheduled")
+            .expect("resumed Session should complete");
     }
 }

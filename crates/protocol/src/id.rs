@@ -74,8 +74,7 @@ macro_rules! entity_id {
 entity_id!(ProjectId);
 entity_id!(WorkspaceId);
 entity_id!(WorkflowProgramId);
-entity_id!(WorkflowId);
-entity_id!(AgentInstanceId);
+entity_id!(AgentId);
 entity_id!(ActionInvocationId);
 entity_id!(ActionAttemptId);
 entity_id!(HumanRequestId);

@@ -1,4 +1,4 @@
-//! Durable metadata, append-only Workflow events, and content-addressed artifacts.
+//! Durable Project, Session, Agent, event, rollout, and Artifact storage.
 
 mod artifact;
 mod catalog;
@@ -11,15 +11,14 @@ mod project_home;
 mod rollout;
 
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::ControlMessageId;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
-use papermachine_protocol::SessionId;
+use papermachine_protocol::SessionTrigger;
 use papermachine_protocol::TokenUsage;
-use papermachine_protocol::WorkflowEvent;
 use papermachine_protocol::WorkflowProgramSnapshot;
-use papermachine_protocol::WorkflowTrigger;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -46,13 +45,13 @@ pub use project_home::PROJECT_HOME_SOURCE_ROLE;
 pub use project_home::PublishedProjectHome;
 
 #[derive(Clone, Debug)]
-pub struct NewWorkflow {
+pub struct NewSession {
     pub project_id: ProjectId,
-    pub started_from_session_id: Option<SessionId>,
     pub program: WorkflowProgramSnapshot,
+    pub title: String,
     pub request: String,
     pub instructions: String,
-    pub trigger: WorkflowTrigger,
+    pub trigger: SessionTrigger,
     pub params: Value,
     pub default_model: String,
     pub access: AccessPreset,
@@ -96,9 +95,8 @@ impl From<serde_json::Error> for StoreError {
 struct StoreShared {
     artifact_root: Arc<PathBuf>,
     rollout_root: Arc<PathBuf>,
-    session_rollout_locks: Arc<Mutex<HashMap<SessionId, Arc<Mutex<()>>>>>,
-    rollout_sequences: Arc<Mutex<HashMap<SessionId, u64>>>,
-    workflow_events: broadcast::Sender<WorkflowEvent>,
+    agent_rollout_locks: Arc<Mutex<HashMap<AgentId, Arc<Mutex<()>>>>>,
+    rollout_sequences: Arc<Mutex<HashMap<AgentId, u64>>>,
     session_events: broadcast::Sender<SessionEvent>,
 }
 
@@ -110,32 +108,26 @@ impl StoreShared {
             .map_err(|error| StoreError::Io(error.to_string()))?;
         std::fs::create_dir_all(&rollout_root)
             .map_err(|error| StoreError::Io(error.to_string()))?;
-        let (workflow_events, _) = broadcast::channel(4096);
         let (session_events, _) = broadcast::channel(4096);
         Ok(Self {
             artifact_root: Arc::new(artifact_root),
             rollout_root: Arc::new(rollout_root),
-            session_rollout_locks: Arc::new(Mutex::new(HashMap::new())),
+            agent_rollout_locks: Arc::new(Mutex::new(HashMap::new())),
             rollout_sequences: Arc::new(Mutex::new(HashMap::new())),
-            workflow_events,
             session_events,
         })
     }
 
-    fn session_rollout_lock(&self, session_id: SessionId) -> Result<Arc<Mutex<()>>, StoreError> {
+    fn agent_rollout_lock(&self, agent_id: AgentId) -> Result<Arc<Mutex<()>>, StoreError> {
         let mut locks = self
-            .session_rollout_locks
+            .agent_rollout_locks
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?;
         Ok(Arc::clone(
             locks
-                .entry(session_id)
+                .entry(agent_id)
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         ))
-    }
-
-    fn publish_workflow(&self, event: WorkflowEvent) {
-        let _ = self.workflow_events.send(event);
     }
 
     fn publish_session(&self, event: SessionEvent) {

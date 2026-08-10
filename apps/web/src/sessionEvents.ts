@@ -1,72 +1,51 @@
 import type {
+  ActionAttempt,
+  ActionInvocation,
+  Agent,
   AgentStep,
   HumanRequest,
   Session,
   SessionEvent,
   SessionView,
   Turn,
-  Workflow,
-  WorkflowParticipant,
 } from './types'
 
-export type SessionEntityUpdate = SessionEvent & {
+export type SessionStreamUpdate = SessionEvent & {
   session?: Session
+  agent?: Agent
   turn?: Turn
   step?: AgentStep
-  workflow?: Workflow
-  participant?: WorkflowParticipant
   human_request?: HumanRequest
+  action?: ActionInvocation
+  attempt?: ActionAttempt
 }
 
-export interface SessionWorkflowUpdate {
-  type: 'workflow_changed'
-  workflow: Workflow
-}
-
-export interface SessionResyncUpdate {
-  type: 'session_resync'
-}
-
-export type SessionStreamUpdate = SessionEntityUpdate | SessionWorkflowUpdate | SessionResyncUpdate
 export type LiveAssistantOutputs = Record<string, string>
 
 export function applySessionStreamUpdate(
   view: SessionView,
   update: SessionStreamUpdate,
 ): SessionView {
-  const sessionUpdate = isSessionEntityUpdate(update) ? update : null
-  const workflow = 'workflow' in update ? update.workflow : undefined
-  const turns = sessionUpdate?.turn ? upsert(view.turns, sessionUpdate.turn, byCreatedAt) : view.turns
+  const turns = update.turn ? upsert(view.turns, update.turn, byCreatedAt) : view.turns
   const turnOrder = new Map(turns.map((turn, index) => [turn.id, index]))
-
   return {
     ...view,
-    session:
-      sessionUpdate?.session?.id === view.session.id ? sessionUpdate.session : view.session,
+    session: update.session?.id === view.session.id ? update.session : view.session,
+    agents: update.agent ? upsert(view.agents, update.agent, byCreatedAt) : view.agents,
     turns,
-    steps: sessionUpdate?.step
-      ? upsert(view.steps, sessionUpdate.step, (left, right) => {
+    steps: update.step
+      ? upsert(view.steps, update.step, (left, right) => {
           const turnDifference =
             (turnOrder.get(left.turn_id) ?? Number.MAX_SAFE_INTEGER) -
             (turnOrder.get(right.turn_id) ?? Number.MAX_SAFE_INTEGER)
           return turnDifference || left.sequence - right.sequence
         })
       : view.steps,
-    workflows: workflow ? upsert(view.workflows, workflow, byUpdatedAtDescending) : view.workflows,
-    workflow_memberships: sessionUpdate?.participant
-      ? upsert(view.workflow_memberships, sessionUpdate.participant, byCreatedAt)
-      : view.workflow_memberships,
-    human_requests: sessionUpdate?.human_request
-      ? upsert(view.human_requests, sessionUpdate.human_request, byCreatedAt)
+    human_requests: update.human_request
+      ? upsert(view.human_requests, update.human_request, byCreatedAt)
       : view.human_requests,
-    rollout:
-      sessionUpdate && sessionUpdate.sequence > 0
-        ? {
-            ...view.rollout,
-            last_sequence: Math.max(view.rollout.last_sequence, sessionUpdate.sequence),
-            projected_sequence: Math.max(view.rollout.projected_sequence, sessionUpdate.sequence),
-          }
-        : view.rollout,
+    actions: update.action ? upsert(view.actions, update.action, byCreatedAt) : view.actions,
+    attempts: update.attempt ? upsert(view.attempts, update.attempt, byCreatedAt) : view.attempts,
   }
 }
 
@@ -74,7 +53,7 @@ export function applyLiveAssistantUpdate(
   outputs: LiveAssistantOutputs,
   update: SessionStreamUpdate,
 ): LiveAssistantOutputs {
-  if (!isSessionEntityUpdate(update) || !update.turn_id) return outputs
+  if (!update.turn_id) return outputs
   if (update.type === 'assistant_message_delta') {
     return {
       ...outputs,
@@ -82,32 +61,27 @@ export function applyLiveAssistantUpdate(
     }
   }
   if (update.type === 'assistant_message_reset') {
-    if (!(update.turn_id in outputs)) return outputs
-    const next = { ...outputs }
-    delete next[update.turn_id]
-    return next
+    return omit(outputs, update.turn_id)
   }
   if (update.type === 'turn_status_changed' && update.turn && isTerminalTurn(update.turn)) {
-    if (!(update.turn_id in outputs)) return outputs
-    const next = { ...outputs }
-    delete next[update.turn_id]
-    return next
+    return omit(outputs, update.turn_id)
   }
   return outputs
 }
 
-export function isDurableSessionUpdate(
-  update: SessionStreamUpdate,
-): update is SessionEntityUpdate {
-  return isSessionEntityUpdate(update) && update.sequence > 0
+export function isDurableSessionUpdate(update: SessionStreamUpdate): boolean {
+  return update.sequence > 0
 }
 
-function isSessionEntityUpdate(update: SessionStreamUpdate): update is SessionEntityUpdate {
-  return 'session_id' in update
+function omit(outputs: LiveAssistantOutputs, turnId: string): LiveAssistantOutputs {
+  if (!(turnId in outputs)) return outputs
+  const next = { ...outputs }
+  delete next[turnId]
+  return next
 }
 
 function isTerminalTurn(turn: Turn): boolean {
-  return ['completed', 'failed', 'cancelled'].includes(turn.status)
+  return ['completed', 'failed', 'interrupted', 'cancelled'].includes(turn.status)
 }
 
 function upsert<T extends { id: string }>(
@@ -120,11 +94,4 @@ function upsert<T extends { id: string }>(
 
 function byCreatedAt<T extends { created_at: string; id: string }>(left: T, right: T): number {
   return left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)
-}
-
-function byUpdatedAtDescending<T extends { updated_at: string; id: string }>(
-  left: T,
-  right: T,
-): number {
-  return right.updated_at.localeCompare(left.updated_at) || left.id.localeCompare(right.id)
 }

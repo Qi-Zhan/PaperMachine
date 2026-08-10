@@ -78,7 +78,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.write(
                 json.dumps(
                     {
-                        "workflow_id": "test-workflow",
+                        "session_id": "test-workflow",
                         "request": "concrete user task",
                         "instructions": "Prefer primary sources.",
                         "params": {"route_count": 2},
@@ -162,7 +162,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.write(
                 json.dumps(
                     {
-                        "workflow_id": "test-workflow",
+                        "session_id": "test-workflow",
                         "request": "test",
                         "instructions": "",
                         "params": {},
@@ -243,7 +243,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.write(
                 json.dumps(
                     {
-                        "workflow_id": "test-workflow",
+                        "session_id": "test-workflow",
                         "request": "test",
                         "instructions": "",
                         "params": {},
@@ -296,7 +296,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.write(
                 json.dumps(
                     {
-                        "workflow_id": "test-workflow",
+                        "session_id": "test-workflow",
                         "request": "test",
                         "instructions": "",
                         "params": {},
@@ -343,7 +343,7 @@ class RunnerProtocolTest(unittest.TestCase):
             process.stdin.write(
                 json.dumps(
                     {
-                        "workflow_id": "test-workflow",
+                        "session_id": "test-workflow",
                         "request": "test",
                         "instructions": "",
                         "params": {},

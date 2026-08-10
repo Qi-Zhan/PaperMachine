@@ -13,6 +13,7 @@ use papermachine_model::ModelError;
 use papermachine_model::ModelStream;
 use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
@@ -23,7 +24,6 @@ use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowId;
 use papermachine_protocol::WorkspaceAttachment;
 use papermachine_tools::ReadFileTool;
 use papermachine_tools::ToolCatalog;
@@ -157,9 +157,10 @@ async fn agent_executes_a_tool_then_follows_up() {
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -167,7 +168,6 @@ async fn agent_executes_a_tool_then_follows_up() {
         "Use tools and report evidence.",
         "Write the evidence file.",
     );
-    request.workflow_id = Some(WorkflowId::new());
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -282,6 +282,7 @@ async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_executio
     let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -347,6 +348,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -393,6 +395,7 @@ async fn tools_enabled_false_omits_local_and_hosted_tools() {
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -437,6 +440,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
     let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -484,6 +488,7 @@ async fn empty_turn_registry_omits_local_tools_and_model_only_omits_hosted_tools
     let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::ModelOnly),
         directory.path().join("sandbox"),
@@ -539,9 +544,11 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
     );
     let directory = tempdir().expect("temporary workspace should be created");
     let session_id = SessionId::new();
+    let agent_id = AgentId::new();
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         session_id,
+        agent_id,
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -571,7 +578,7 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
 
     let requests = model.requests().expect("requests should be recorded");
     assert_eq!(requests.len(), 2);
-    let expected_transport_key = session_id.to_string();
+    let expected_transport_key = agent_id.to_string();
     let compact_cache = requests[0]
         .prompt_cache
         .as_ref()
@@ -580,7 +587,7 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         .prompt_cache
         .as_ref()
         .expect("final request should have a prompt-cache configuration");
-    assert!(compact_cache.key.ends_with("-session"));
+    assert!(compact_cache.key.ends_with("-agent"));
     assert_ne!(compact_cache.key, expected_transport_key);
     assert_eq!(compact_cache, final_cache);
     assert_eq!(
@@ -697,6 +704,7 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -745,6 +753,7 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
     let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -813,9 +822,10 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         Arc::new(events.clone()),
     );
     let directory = tempdir().expect("temporary workspace should be created");
-    let mut request = AgentTurnRequest::new(
+    let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),
@@ -823,7 +833,6 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         "Return a short response.",
         "Test stream recovery.",
     );
-    request.workflow_id = Some(WorkflowId::new());
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -888,6 +897,7 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
     let request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
+        AgentId::new(),
         TurnId::new(),
         turn_environment(directory.path(), AccessPreset::Research),
         directory.path().join("sandbox"),

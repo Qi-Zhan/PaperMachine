@@ -13,6 +13,8 @@ use papermachine_model::ModelClient;
 use papermachine_model::ModelError;
 use papermachine_protocol::ActionAttemptId;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::Agent;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ModelContextMutation;
@@ -22,21 +24,18 @@ use papermachine_protocol::PromptLayer;
 use papermachine_protocol::PromptLayerKind;
 use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::ReasoningEffort;
-use papermachine_protocol::Session;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
+use papermachine_protocol::SessionStatus;
+use papermachine_protocol::SessionUsage;
 use papermachine_protocol::StepId;
 use papermachine_protocol::StepKind;
 use papermachine_protocol::StepStatus;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::Turn;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::TurnOrigin;
 use papermachine_protocol::TurnStatus;
 use papermachine_protocol::WebSearchContextSize;
-use papermachine_protocol::WorkflowId;
-use papermachine_protocol::WorkflowStatus;
-use papermachine_protocol::WorkflowUsage;
 use papermachine_skills::ProjectSkillCatalog;
 use papermachine_skills::ResolvedSkills;
 use papermachine_skills::SkillError;
@@ -60,11 +59,11 @@ use tokio_util::sync::CancellationToken;
 const RUNTIME_SYSTEM_PROMPT: &str = "You are an agent working in a persistent PaperMachine Session. Complete the current request using the available tools and prior Session context. Preserve exact evidence and provenance, distinguish verified observations from inference, and state material uncertainty or limitations. Runtime permissions are enforced by code; never claim capabilities or completed tool actions that are not present in the Session history. If a recovered tool result is aborted, inspect durable Workspace or external state before deciding whether any effect should be attempted again.";
 
 #[derive(Clone)]
-pub struct SessionRuntime {
-    inner: Arc<SessionRuntimeInner>,
+pub struct TurnRuntime {
+    inner: Arc<TurnRuntimeInner>,
 }
 
-struct SessionRuntimeInner {
+struct TurnRuntimeInner {
     store: StoreHandle,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
@@ -76,15 +75,14 @@ struct SessionRuntimeInner {
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionRuntimeConfig {
+pub struct TurnRuntimeConfig {
     pub default_model: String,
     pub model_context_window: usize,
     pub max_concurrent_turns: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct WorkflowTurnContext {
-    pub workflow_id: WorkflowId,
+pub struct ActionTurnContext {
     pub action_invocation_id: ActionInvocationId,
     pub action_attempt_id: ActionAttemptId,
 }
@@ -113,13 +111,13 @@ impl PromptLayerInput {
     }
 }
 
-impl SessionRuntime {
+impl TurnRuntime {
     pub fn new(
         store: StoreHandle,
         model: Arc<dyn ModelClient>,
         tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
-        config: SessionRuntimeConfig,
+        config: TurnRuntimeConfig,
     ) -> Self {
         let permits = Arc::new(Semaphore::new(config.max_concurrent_turns.max(1)));
         Self::new_with_permits(store, model, tools, skills, config, permits)
@@ -130,11 +128,11 @@ impl SessionRuntime {
         model: Arc<dyn ModelClient>,
         tools: ToolCatalog,
         skills: Arc<ProjectSkillCatalog>,
-        config: SessionRuntimeConfig,
+        config: TurnRuntimeConfig,
         permits: Arc<Semaphore>,
     ) -> Self {
         Self {
-            inner: Arc::new(SessionRuntimeInner {
+            inner: Arc::new(TurnRuntimeInner {
                 store,
                 model,
                 tools,
@@ -148,10 +146,9 @@ impl SessionRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn execute_workflow_action(
+    pub async fn execute_action_attempt(
         &self,
-        session_id: SessionId,
-        origin: TurnOrigin,
+        agent_id: AgentId,
         input: impl Into<String>,
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
@@ -160,13 +157,12 @@ impl SessionRuntime {
         tools_enabled: bool,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
-        context: WorkflowTurnContext,
+        context: ActionTurnContext,
         cancellation: CancellationToken,
-    ) -> Result<Turn, SessionRuntimeError> {
+    ) -> Result<Turn, TurnRuntimeError> {
         let turn = self
             .prepare_turn(
-                session_id,
-                origin,
+                agent_id,
                 input,
                 model_override,
                 prompt_layers,
@@ -187,12 +183,12 @@ impl SessionRuntime {
             .await?)
     }
 
-    pub async fn resume_workflow_action(
+    pub async fn resume_action_attempt(
         &self,
         turn_id: TurnId,
-        context: WorkflowTurnContext,
+        context: ActionTurnContext,
         cancellation: CancellationToken,
-    ) -> Result<Turn, SessionRuntimeError> {
+    ) -> Result<Turn, TurnRuntimeError> {
         self.run_tracked_turn(turn_id, context, cancellation)
             .await?;
         Ok(self
@@ -205,14 +201,14 @@ impl SessionRuntime {
     async fn run_tracked_turn(
         &self,
         turn_id: TurnId,
-        workflow_context: WorkflowTurnContext,
+        action_context: ActionTurnContext,
         parent_cancellation: CancellationToken,
-    ) -> Result<(), SessionRuntimeError> {
+    ) -> Result<(), TurnRuntimeError> {
         let cancellation = parent_cancellation.child_token();
         {
             let mut active = self.inner.active.lock().await;
             if active.contains_key(&turn_id) {
-                return Err(SessionRuntimeError::Scheduling(format!(
+                return Err(TurnRuntimeError::Scheduling(format!(
                     "Turn {turn_id} is already running"
                 )));
             }
@@ -221,7 +217,7 @@ impl SessionRuntime {
         let result = run_scheduled_turn(
             Arc::clone(&self.inner),
             turn_id,
-            workflow_context,
+            action_context,
             cancellation,
         )
         .await;
@@ -232,8 +228,7 @@ impl SessionRuntime {
     #[allow(clippy::too_many_arguments)]
     async fn prepare_turn(
         &self,
-        session_id: SessionId,
-        origin: TurnOrigin,
+        agent_id: AgentId,
         input: impl Into<String>,
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
@@ -243,7 +238,13 @@ impl SessionRuntime {
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: ActionAttemptId,
-    ) -> Result<Turn, SessionRuntimeError> {
+    ) -> Result<Turn, TurnRuntimeError> {
+        let agent = self
+            .inner
+            .store
+            .call(move |store| store.get_agent(agent_id))
+            .await?;
+        let session_id = agent.session_id;
         let session = self
             .inner
             .store
@@ -251,15 +252,15 @@ impl SessionRuntime {
             .await?;
         let model = if model_override.is_some_and(|model| !model.trim().is_empty()) {
             model_override.unwrap_or_default().trim().to_string()
-        } else if session.model.trim().is_empty() {
+        } else if agent.model.trim().is_empty() {
             self.inner.default_model.clone()
         } else {
-            session.model.clone()
+            agent.model.clone()
         };
         let resolved = self
             .inner
             .skills
-            .resolve(session.project_id, &session.enabled_skills)
+            .resolve(session.project_id, &agent.skills)
             .await?;
         let project_id = session.project_id;
         let project_prompt = self
@@ -267,10 +268,10 @@ impl SessionRuntime {
             .store
             .call(move |store| store.get_project_system_prompt(project_id))
             .await?;
-        let prompt = build_prompt_snapshot(&session, project_prompt, prompt_layers, &resolved);
+        let prompt = build_prompt_snapshot(&agent, project_prompt, prompt_layers, &resolved);
         let tool_set = self.inner.tools.materialize_action_tools(
             &requested_tools,
-            session.access,
+            agent.access,
             tools_enabled,
         )?;
         let model_route = self.inner.model.resolve_route_snapshot(
@@ -278,7 +279,7 @@ impl SessionRuntime {
             reasoning_effort,
             self.inner.model_context_window,
         )?;
-        let access = session.access;
+        let access = agent.access;
         let snapshots = resolved.snapshots;
         let input = input.into();
         Ok(self
@@ -287,8 +288,7 @@ impl SessionRuntime {
             .call(move |store| {
                 store.create_turn_for_attempt(
                     action_attempt_id,
-                    session_id,
-                    origin,
+                    agent_id,
                     input,
                     model_route,
                     prompt,
@@ -303,7 +303,7 @@ impl SessionRuntime {
             .await?)
     }
 
-    pub async fn cancel(&self, turn_id: TurnId) -> Result<(), SessionRuntimeError> {
+    pub async fn cancel(&self, turn_id: TurnId) -> Result<(), TurnRuntimeError> {
         if let Some(cancellation) = self.inner.active.lock().await.get(&turn_id) {
             cancellation.cancel();
             return Ok(());
@@ -323,16 +323,16 @@ impl SessionRuntime {
                 .await?;
             return Ok(());
         }
-        Err(SessionRuntimeError::TerminalTurn(turn_id))
+        Err(TurnRuntimeError::TerminalTurn(turn_id))
     }
 }
 
 async fn run_scheduled_turn(
-    inner: Arc<SessionRuntimeInner>,
+    inner: Arc<TurnRuntimeInner>,
     turn_id: TurnId,
-    workflow_context: WorkflowTurnContext,
+    action_context: ActionTurnContext,
     cancellation: CancellationToken,
-) -> Result<(), SessionRuntimeError> {
+) -> Result<(), TurnRuntimeError> {
     let sandbox = inner
         .store
         .call(move |store| store.get_turn(turn_id))
@@ -343,11 +343,11 @@ async fn run_scheduled_turn(
                 .store
                 .managed_root()
                 .join("runtime/sandboxes")
-                .join(turn.session_id.to_string())
+                .join(turn.agent_id.to_string())
                 .join(turn.id.to_string())
         });
     let result =
-        run_scheduled_turn_inner(Arc::clone(&inner), turn_id, workflow_context, cancellation).await;
+        run_scheduled_turn_inner(Arc::clone(&inner), turn_id, action_context, cancellation).await;
     if let Some(sandbox) = sandbox
         && tokio::fs::try_exists(&sandbox).await.unwrap_or(false)
     {
@@ -363,24 +363,25 @@ async fn run_scheduled_turn(
 }
 
 async fn run_scheduled_turn_inner(
-    inner: Arc<SessionRuntimeInner>,
+    inner: Arc<TurnRuntimeInner>,
     turn_id: TurnId,
-    workflow_context: WorkflowTurnContext,
+    action_context: ActionTurnContext,
     cancellation: CancellationToken,
-) -> Result<(), SessionRuntimeError> {
+) -> Result<(), TurnRuntimeError> {
     let _permit = tokio::select! {
         permit = Arc::clone(&inner.permits).acquire_owned() => {
-            permit.map_err(|error| SessionRuntimeError::Scheduling(error.to_string()))?
+            permit.map_err(|error| TurnRuntimeError::Scheduling(error.to_string()))?
         }
-        _ = cancellation.cancelled() => return Err(SessionRuntimeError::Cancelled),
+        _ = cancellation.cancelled() => return Err(TurnRuntimeError::Cancelled),
     };
-    let (turn, session, rollout) = inner
+    let (turn, agent, session, rollout) = inner
         .store
         .call(move |store| {
             let turn = store.start_turn(turn_id)?;
-            let session = store.get_session(turn.session_id)?;
-            let rollout = store.reconstruct_session_rollout(session.id)?;
-            Ok::<_, StoreError>((turn, session, rollout))
+            let agent = store.get_agent(turn.agent_id)?;
+            let session = store.get_session(agent.session_id)?;
+            let rollout = store.reconstruct_agent_rollout(agent.id)?;
+            Ok::<_, StoreError>((turn, agent, session, rollout))
         })
         .await?;
     verify_prompt_snapshot(&turn.prompt)?;
@@ -390,13 +391,13 @@ async fn run_scheduled_turn_inner(
     let tools = inner.tools.registry_for_snapshot(&turn.tool_set)?;
     let active_rollout = rollout.active_turn.ok_or_else(|| {
         StoreError::Invariant(format!(
-            "Session rollout has no active state for running Turn {}",
+            "Agent rollout has no active state for running Turn {}",
             turn.id
         ))
     })?;
     if active_rollout.turn_id != turn.id {
         return Err(StoreError::Invariant(format!(
-            "Session rollout active Turn {} does not match running Turn {}",
+            "Agent rollout active Turn {} does not match running Turn {}",
             active_rollout.turn_id, turn.id
         ))
         .into());
@@ -413,7 +414,8 @@ async fn run_scheduled_turn_inner(
                     reconcile_step_projections(store, &projected_turn, &projected_context)?;
                 if recovered > 0 {
                     store.publish_transient_session_event(
-                        projected_turn.session_id,
+                        session.id,
+                        Some(projected_turn.agent_id),
                         Some(projected_turn.id),
                         None,
                         SessionEventPayload::AssistantMessageReset,
@@ -443,11 +445,11 @@ async fn run_scheduled_turn_inner(
         }
     }
     let history = rollout_context.clone();
-    let event_sink = Arc::new(SessionAgentEventSink::new(
+    let event_sink = Arc::new(TurnEventSink::new(
         inner.store.clone(),
         session.id,
+        agent.id,
         turn.id,
-        Some(workflow_context.workflow_id),
         rollout_context,
         active_rollout.completed_model_steps,
     ));
@@ -459,21 +461,21 @@ async fn run_scheduled_turn_inner(
     let mut request = AgentTurnRequest::new(
         session.project_id,
         session.id,
+        agent.id,
         turn.id,
         turn.environment.clone(),
         inner
             .store
             .managed_root()
             .join("runtime/sandboxes")
-            .join(session.id.to_string())
+            .join(agent.id.to_string())
             .join(turn.id.to_string()),
         turn.model_route.profile.clone(),
         turn.prompt.rendered.clone(),
         turn.input.clone(),
     );
-    request.workflow_id = Some(workflow_context.workflow_id);
-    request.action_invocation_id = Some(workflow_context.action_invocation_id);
-    request.action_attempt_id = Some(workflow_context.action_attempt_id);
+    request.action_invocation_id = Some(action_context.action_invocation_id);
+    request.action_attempt_id = Some(action_context.action_attempt_id);
     request.initial_history = history;
     request.initial_usage = active_rollout.usage;
     request.completed_model_steps = active_rollout.completed_model_steps;
@@ -506,7 +508,7 @@ async fn run_scheduled_turn_inner(
                 .store
                 .call(move |store| store.cancel_turn(turn_id))
                 .await?;
-            Err(SessionRuntimeError::Cancelled)
+            Err(TurnRuntimeError::Cancelled)
         }
         Err(AgentError::Interrupted {
             reason,
@@ -523,7 +525,7 @@ async fn run_scheduled_turn_inner(
                     store.interrupt_turn_with_controls(turn_id, stored_reason, &control_message_ids)
                 })
                 .await?;
-            Err(SessionRuntimeError::Interrupted(reason))
+            Err(TurnRuntimeError::Interrupted(reason))
         }
         Err(error) => {
             event_sink
@@ -535,7 +537,7 @@ async fn run_scheduled_turn_inner(
                 .store
                 .call(move |store| store.fail_turn(turn_id, message))
                 .await?;
-            Err(SessionRuntimeError::Agent(error))
+            Err(TurnRuntimeError::Agent(error))
         }
     }
 }
@@ -551,19 +553,17 @@ impl AgentControlPlane for StoreAgentControlPlane {
         context: AgentCheckpointContext,
         cancellation: CancellationToken,
     ) -> Result<AgentCheckpoint, String> {
-        let Some(workflow_id) = context.workflow_id else {
-            return Ok(AgentCheckpoint::default());
-        };
+        let session_id = context.session_id;
         loop {
             let run = self
                 .store
-                .call::<_, StoreError, _>(move |store| store.get_workflow(workflow_id))
+                .call::<_, StoreError, _>(move |store| store.get_session(session_id))
                 .await
                 .map_err(|error| error.to_string())?;
             match run.status {
-                WorkflowStatus::Paused
-                | WorkflowStatus::WaitingForUser
-                | WorkflowStatus::WaitingForDeadline => {
+                SessionStatus::Paused
+                | SessionStatus::WaitingForInput
+                | SessionStatus::WaitingForDeadline => {
                     let turn_id = context.turn_id;
                     let mut events = self
                         .store
@@ -585,11 +585,11 @@ impl AgentControlPlane for StoreAgentControlPlane {
                         }
                     }
                 }
-                WorkflowStatus::Created | WorkflowStatus::Running => break,
-                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
+                SessionStatus::Created | SessionStatus::Running => break,
+                SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
                     return Ok(AgentCheckpoint {
                         guidance: Vec::new(),
-                        interrupt: Some(format!("Workflow entered {:?}", run.status)),
+                        interrupt: Some(format!("Session entered {:?}", run.status)),
                         finish: None,
                         control_message_ids: Vec::new(),
                     });
@@ -597,7 +597,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
             }
         }
         let turn_id = context.turn_id;
-        let session_id = context.session_id;
+        let agent_id = context.agent_id;
         let action_invocation_id = context.action_invocation_id;
         let messages = self
             .store
@@ -606,7 +606,7 @@ impl AgentControlPlane for StoreAgentControlPlane {
                 if turn.status == TurnStatus::Paused {
                     store.resume_turn(turn_id)?;
                 }
-                store.claim_control_messages(workflow_id, session_id, action_invocation_id, turn_id)
+                store.claim_control_messages(session_id, agent_id, action_invocation_id, turn_id)
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -697,6 +697,7 @@ fn reconcile_step_projections(
     turn: &Turn,
     history: &[ModelInputItem],
 ) -> Result<usize, StoreError> {
+    let agent = store.get_agent(turn.agent_id)?;
     let (calls, outputs) = canonical_tool_state(history);
     let steps = store.list_steps(turn.id)?;
     let mut by_call = steps
@@ -724,7 +725,8 @@ fn reconcile_step_projections(
         store.finish_step(step.id, status, Some(output), TokenUsage::default(), None)?;
         if step.kind == StepKind::Tool {
             store.append_session_event(
-                turn.session_id,
+                agent.session_id,
+                Some(agent.id),
                 Some(turn.id),
                 Some(step.id),
                 SessionEventPayload::ToolCallCompleted,
@@ -752,7 +754,8 @@ fn reconcile_step_projections(
         };
         store.finish_step(step.id, status, Some(output), TokenUsage::default(), None)?;
         store.append_session_event(
-            turn.session_id,
+            agent.session_id,
+            Some(agent.id),
             Some(turn.id),
             Some(step.id),
             SessionEventPayload::ToolCallCompleted,
@@ -773,7 +776,7 @@ fn tool_step_status(output: &Value) -> StepStatus {
 }
 
 fn build_prompt_snapshot(
-    session: &Session,
+    agent: &Agent,
     project_prompt: papermachine_protocol::ProjectSystemPrompt,
     additional: Vec<PromptLayerInput>,
     skills: &ResolvedSkills,
@@ -794,12 +797,12 @@ fn build_prompt_snapshot(
         });
     }
     layers.extend(additional.iter().filter_map(prompt_layer_from_input));
-    if !session.system_prompt.trim().is_empty() {
+    if !agent.system_prompt.trim().is_empty() {
         layers.push(make_prompt_layer(
             PromptLayerKind::Agent,
             "Agent system prompt",
-            format!("session:{}", session.id),
-            &session.system_prompt,
+            format!("agent:{}", agent.id),
+            &agent.system_prompt,
         ));
     }
     if !skills.instructions.trim().is_empty() {
@@ -831,7 +834,7 @@ const fn prompt_layer_rank(kind: PromptLayerKind) -> u8 {
     match kind {
         PromptLayerKind::Runtime => 0,
         PromptLayerKind::Project => 1,
-        PromptLayerKind::Workflow => 2,
+        PromptLayerKind::Session => 2,
         PromptLayerKind::Agent => 3,
         PromptLayerKind::Skills => 4,
         PromptLayerKind::Control => 5,
@@ -882,10 +885,10 @@ fn render_prompt_layers(layers: &[PromptLayer]) -> String {
         .join("\n\n")
 }
 
-fn verify_prompt_snapshot(snapshot: &PromptSnapshot) -> Result<(), SessionRuntimeError> {
+fn verify_prompt_snapshot(snapshot: &PromptSnapshot) -> Result<(), TurnRuntimeError> {
     for layer in &snapshot.layers {
         if hash_text(&layer.content) != layer.sha256 {
-            return Err(SessionRuntimeError::InvalidPromptSnapshot(format!(
+            return Err(TurnRuntimeError::InvalidPromptSnapshot(format!(
                 "layer {:?} from {} has changed",
                 layer.kind, layer.source
             )));
@@ -893,7 +896,7 @@ fn verify_prompt_snapshot(snapshot: &PromptSnapshot) -> Result<(), SessionRuntim
     }
     let rendered = render_prompt_layers(&snapshot.layers);
     if rendered != snapshot.rendered || hash_text(&rendered) != snapshot.sha256 {
-        return Err(SessionRuntimeError::InvalidPromptSnapshot(
+        return Err(TurnRuntimeError::InvalidPromptSnapshot(
             "rendered prompt does not match its layers".to_string(),
         ));
     }
@@ -906,11 +909,11 @@ fn hash_text(content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-struct SessionAgentEventSink {
+struct TurnEventSink {
     store: StoreHandle,
     session_id: SessionId,
+    agent_id: AgentId,
     turn_id: TurnId,
-    workflow_id: Option<WorkflowId>,
     model_steps: Mutex<HashMap<u32, Value>>,
     tool_steps: Mutex<HashMap<String, StepId>>,
     compaction_steps: Mutex<Vec<StepId>>,
@@ -923,20 +926,20 @@ struct RolloutCheckpointState {
     completed_model_steps: u32,
 }
 
-impl SessionAgentEventSink {
+impl TurnEventSink {
     fn new(
         store: StoreHandle,
         session_id: SessionId,
+        agent_id: AgentId,
         turn_id: TurnId,
-        workflow_id: Option<WorkflowId>,
         context: Vec<ModelInputItem>,
         completed_model_steps: u32,
     ) -> Self {
         Self {
             store,
             session_id,
+            agent_id,
             turn_id,
-            workflow_id,
             model_steps: Mutex::new(HashMap::new()),
             tool_steps: Mutex::new(HashMap::new()),
             compaction_steps: Mutex::new(Vec::new()),
@@ -950,7 +953,7 @@ impl SessionAgentEventSink {
 }
 
 #[async_trait]
-impl AgentEventSink for SessionAgentEventSink {
+impl AgentEventSink for TurnEventSink {
     async fn emit(&self, event: AgentEvent) -> Result<(), String> {
         match event {
             AgentEvent::Started { .. } => Ok(()),
@@ -1031,20 +1034,19 @@ impl AgentEventSink for SessionAgentEventSink {
                     .await
                     .map_err(|error| error.to_string())?;
                 self.charge_action_step().await?;
-                if let Some(workflow_id) = self.workflow_id {
-                    self.store
-                        .call(move |store| {
-                            store.add_workflow_usage(
-                                workflow_id,
-                                WorkflowUsage {
-                                    tokens: usage,
-                                    ..WorkflowUsage::default()
-                                },
-                            )
-                        })
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
+                let session_id = self.session_id;
+                self.store
+                    .call(move |store| {
+                        store.add_session_usage(
+                            session_id,
+                            SessionUsage {
+                                tokens: usage,
+                                ..SessionUsage::default()
+                            },
+                        )
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
                 self.append(Some(stored.id), SessionEventPayload::ModelStepFailed)
                     .await
             }
@@ -1293,18 +1295,16 @@ impl AgentEventSink for SessionAgentEventSink {
     }
 }
 
-impl SessionAgentEventSink {
+impl TurnEventSink {
     async fn charge_action_step(&self) -> Result<(), String> {
-        let Some(workflow_id) = self.workflow_id else {
-            return Ok(());
-        };
+        let session_id = self.session_id;
         self.store
             .call(move |store| {
-                store.add_workflow_usage(
-                    workflow_id,
-                    WorkflowUsage {
+                store.add_session_usage(
+                    session_id,
+                    SessionUsage {
                         action_steps: 1,
-                        ..WorkflowUsage::default()
+                        ..SessionUsage::default()
                     },
                 )
             })
@@ -1364,10 +1364,17 @@ impl SessionAgentEventSink {
         payload: SessionEventPayload,
     ) -> Result<(), String> {
         let session_id = self.session_id;
+        let agent_id = self.agent_id;
         let turn_id = self.turn_id;
         self.store
             .call(move |store| {
-                store.append_session_event(session_id, Some(turn_id), step_id, payload)
+                store.append_session_event(
+                    session_id,
+                    Some(agent_id),
+                    Some(turn_id),
+                    step_id,
+                    payload,
+                )
             })
             .await
             .map(|_| ())
@@ -1380,10 +1387,17 @@ impl SessionAgentEventSink {
         payload: SessionEventPayload,
     ) -> Result<(), String> {
         let session_id = self.session_id;
+        let agent_id = self.agent_id;
         let turn_id = self.turn_id;
         self.store
             .call(move |store| {
-                store.publish_transient_session_event(session_id, Some(turn_id), step_id, payload)
+                store.publish_transient_session_event(
+                    session_id,
+                    Some(agent_id),
+                    Some(turn_id),
+                    step_id,
+                    payload,
+                )
             })
             .await
             .map(|_| ())
@@ -1392,7 +1406,7 @@ impl SessionAgentEventSink {
 }
 
 #[derive(Debug, Error)]
-pub enum SessionRuntimeError {
+pub enum TurnRuntimeError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]

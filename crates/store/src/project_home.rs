@@ -3,12 +3,12 @@ use crate::StoreError;
 use crate::artifact::store_artifact_file;
 use chrono::Utc;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::Artifact;
 use papermachine_protocol::ArtifactId;
 use papermachine_protocol::ArtifactKind;
 use papermachine_protocol::ProjectHome;
 use papermachine_protocol::SessionId;
-use papermachine_protocol::WorkflowId;
 use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
@@ -33,21 +33,21 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub fn publish_project_home(
         &self,
-        workflow_id: WorkflowId,
-        action_invocation_id: ActionInvocationId,
         session_id: SessionId,
+        action_invocation_id: ActionInvocationId,
+        agent_id: AgentId,
         source_artifact_id: ArtifactId,
         artifact_id: ArtifactId,
         html: String,
         metadata: Value,
     ) -> Result<PublishedProjectHome, StoreError> {
         let invocation = self.get_action_invocation(action_invocation_id)?;
-        if invocation.workflow_id != workflow_id || invocation.session_id != session_id {
+        if invocation.session_id != session_id || invocation.agent_id != agent_id {
             return Err(StoreError::Invariant(
                 "Project-home publication Action has invalid ownership".to_string(),
             ));
         }
-        let workflow = self.get_workflow(workflow_id)?;
+        let session = self.get_session(session_id)?;
         let html = html.trim();
         if html.is_empty() {
             return Err(StoreError::Invariant(
@@ -56,7 +56,7 @@ impl Store {
         }
         validate_html_fragment(html)?;
         let revision = hex::encode(Sha256::digest(html.as_bytes()));
-        let current = self.get_project_home(workflow.project_id)?;
+        let current = self.get_project_home(session.project_id)?;
         if let Some(current) = current.as_ref()
             && current.revision == revision
         {
@@ -79,17 +79,17 @@ impl Store {
         let now = Utc::now();
         let source_file = store_artifact_file(
             &self.managed_root().join("artifacts"),
-            workflow_id,
-            Some(session_id),
+            session_id,
+            Some(agent_id),
             source_artifact_id,
             "project-home.source.json",
             &source_content,
         )?;
         let source_artifact = Artifact {
             id: source_artifact_id,
-            project_id: workflow.project_id,
-            workflow_id,
-            session_id: Some(session_id),
+            project_id: session.project_id,
+            session_id,
+            agent_id: Some(agent_id),
             action_invocation_id: Some(action_invocation_id),
             kind: ArtifactKind::Other,
             name: "project-home.source.json".to_string(),
@@ -106,8 +106,8 @@ impl Store {
         let source_file_created = source_file.created;
         let page_file = match store_artifact_file(
             &self.managed_root().join("artifacts"),
-            workflow_id,
-            Some(session_id),
+            session_id,
+            Some(agent_id),
             artifact_id,
             "project-home.html",
             page.as_bytes(),
@@ -130,9 +130,9 @@ impl Store {
         );
         let artifact = Artifact {
             id: artifact_id,
-            project_id: workflow.project_id,
-            workflow_id,
-            session_id: Some(session_id),
+            project_id: session.project_id,
+            session_id,
+            agent_id: Some(agent_id),
             action_invocation_id: Some(action_invocation_id),
             kind: ArtifactKind::Report,
             name: "project-home.html".to_string(),
@@ -144,7 +144,7 @@ impl Store {
             created_at: now,
         };
         let home = ProjectHome {
-            project_id: workflow.project_id,
+            project_id: session.project_id,
             artifact_id: artifact.id,
             source_artifact_id: source_artifact.id,
             revision,

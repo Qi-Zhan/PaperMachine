@@ -3,15 +3,17 @@ import {
   applyLiveAssistantUpdate,
   applySessionStreamUpdate,
   isDurableSessionUpdate,
-  type SessionEntityUpdate,
+  type SessionStreamUpdate,
 } from './sessionEvents'
 import type { SessionView, Turn } from './types'
 
-function event(sequence: number, type: string, values: Record<string, unknown> = {}): SessionEntityUpdate {
+function event(sequence: number, type: string, values: Record<string, unknown> = {}): SessionStreamUpdate {
   return {
     id: `event-${sequence}`,
     sequence,
+    project_id: 'project-1',
     session_id: 'session-1',
+    agent_id: 'agent-1',
     turn_id: 'turn-1',
     step_id: null,
     occurred_at: '2026-08-04T00:00:00Z',
@@ -23,9 +25,7 @@ function event(sequence: number, type: string, values: Record<string, unknown> =
 function turn(status: Turn['status'], output: string | null = null): Turn {
   return {
     id: 'turn-1',
-    session_id: 'session-1',
-    action_attempt_id: 'attempt-1',
-    origin: 'workflow',
+    agent_id: 'agent-1',
     input: 'research',
     model: 'test-model',
     status,
@@ -48,12 +48,16 @@ function turn(status: Turn['status'], output: string | null = null): Turn {
 function view(): SessionView {
   return {
     session: { id: 'session-1' } as SessionView['session'],
+    agents: [],
     turns: [turn('running')],
     steps: [],
-    rollout: { version: 1, last_sequence: 2, projected_sequence: 2 },
-    workflows: [],
-    workflow_memberships: [],
+    rollouts: [{ agent_id: 'agent-1', status: { version: 1, last_sequence: 2, projected_sequence: 2 } }],
+    effects: [],
+    actions: [],
+    attempts: [],
     human_requests: [],
+    control_messages: [],
+    artifacts: [],
   }
 }
 
@@ -69,7 +73,7 @@ describe('Session stream reducer', () => {
     expect(isDurableSessionUpdate(event(3, 'sampling_retry'))).toBe(true)
   })
 
-  it('replaces authoritative Turn state and advances the rollout cursor', () => {
+  it('replaces authoritative Turn state without fabricating Agent rollout progress', () => {
     const completed = turn('completed', 'done')
     const next = applySessionStreamUpdate(
       view(),
@@ -77,18 +81,27 @@ describe('Session stream reducer', () => {
     )
 
     expect(next.turns).toEqual([completed])
-    expect(next.rollout.last_sequence).toBe(7)
-    expect(next.rollout.projected_sequence).toBe(7)
+    expect(next.rollouts[0]?.status.last_sequence).toBe(2)
+    expect(next.rollouts[0]?.status.projected_sequence).toBe(2)
   })
 
-  it('updates a Workflow without fabricating a durable Session event', () => {
-    const workflow = {
-      id: 'workflow-1',
+  it('updates the Action and Attempt attached to one Session event', () => {
+    const action = {
+      id: 'action-1',
       updated_at: '2026-08-04T00:00:01Z',
-    } as SessionView['workflows'][number]
-    const next = applySessionStreamUpdate(view(), { type: 'workflow_changed', workflow })
+      created_at: '2026-08-04T00:00:00Z',
+    } as SessionView['actions'][number]
+    const attempt = {
+      id: 'attempt-1',
+      updated_at: '2026-08-04T00:00:01Z',
+      created_at: '2026-08-04T00:00:00Z',
+    } as SessionView['attempts'][number]
+    const next = applySessionStreamUpdate(
+      view(),
+      event(4, 'action_changed', { action, attempt }),
+    )
 
-    expect(next.workflows).toEqual([workflow])
-    expect(next.rollout.last_sequence).toBe(2)
+    expect(next.actions).toEqual([action])
+    expect(next.attempts).toEqual([attempt])
   })
 })

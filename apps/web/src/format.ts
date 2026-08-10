@@ -1,16 +1,16 @@
-import type { SessionEvent, Workflow } from './types'
+import type { Session, SessionEvent } from './types'
 import { currentLocale, statusText, t } from './i18n'
 
 export function shortId(value: string): string {
   return value.slice(-8)
 }
 
-export function workflowTitle(workflow: Workflow): string {
-  return workflow.request.trim() || workflow.program.manifest.name
+export function sessionTitle(session: Session): string {
+  return session.title || session.request.trim() || session.program.manifest.name
 }
 
-export function workflowIsTerminal(workflow: Workflow): boolean {
-  return ['completed', 'failed', 'cancelled'].includes(workflow.status)
+export function sessionIsTerminal(session: Session): boolean {
+  return ['completed', 'failed', 'cancelled'].includes(session.status)
 }
 
 export function formatDate(value: string): string {
@@ -107,7 +107,7 @@ function findActivitySubject(value: unknown, depth = 0): unknown {
 export function sessionEventTitle(event: SessionEvent): string {
   const explicit: Record<string, string> = {
     session_created: t('event.sessionCreated'),
-    session_status_changed: t('event.sessionUpdated', { status: statusLabel(String(event.status ?? 'updated')) }),
+    session_changed: t('event.sessionUpdated', { status: statusLabel(String(event.status ?? 'updated')) }),
     turn_created: t('event.turnQueued'),
     turn_status_changed: t('event.turnUpdated', { status: statusLabel(String(event.status ?? 'updated')) }),
     assistant_message_completed: t('event.responseCompleted'),
@@ -119,7 +119,7 @@ export function sessionEventTitle(event: SessionEvent): string {
     context_trimmed: t('event.contextCompacted'),
     context_compacted: t('event.contextCompacted'),
     sampling_retry: t('event.modelRetry'),
-    workflow_agent_attached: t('event.workflowAgentAttached'),
+    agent_created: t('event.agentCreated'),
     human_request_opened: t('event.humanRequested'),
     human_request_resolved: t('event.humanResolved'),
     control_message_applied: t('event.guidanceApplied'),

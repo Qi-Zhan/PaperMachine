@@ -1,6 +1,6 @@
 # Python Workflow ABI
 
-PaperMachine Workflows are isolated async Python programs. Python describes
+PaperMachine WorkflowPrograms are isolated async Python programs. Python describes
 control flow; Rust owns every durable mutation, model Turn, permission check,
 and Project resource.
 
@@ -51,7 +51,8 @@ async def main(ctx):
 ```
 
 An Action body is declarative. Awaiting it asks Rust to create the
-ActionInvocation, ActionAttempt, and Turn in that Agent's persistent Session.
+ActionInvocation, ActionAttempt, and Turn for that Agent in the current
+Session.
 
 ## Manifest and context
 
@@ -70,10 +71,10 @@ The runtime supplies:
 | Value | Meaning |
 |---|---|
 | `ctx.request` | immutable launch task, or empty for `request_mode="none"` |
-| `ctx.instructions` | optional run-wide guidance; also a Workflow prompt layer |
+| `ctx.instructions` | optional Session-wide guidance; also a Session prompt layer |
 | `ctx.params` | launch parameters validated before scheduling |
-| `ctx.trigger` | `manual`, `user`, or `workflow` provenance |
-| `ctx.workflow_id` | current run ID |
+| `ctx.trigger` | `manual` or source-Session `user` provenance |
+| `ctx.session_id` | current Session ID |
 | `ctx.project` | changed-resource cursor API |
 
 Request and changed resource URIs become model data only when Workflow code
@@ -84,8 +85,8 @@ tool call.
 
 | Primitive | Meaning |
 |---|---|
-| `Agent(...)` | local declaration; first remote use creates one participant Session |
-| `await agent.set_access(...)` | change access between Turns; upgrades within the run ceiling require human approval |
+| `Agent(...)` | local declaration; first remote use creates one durable Agent under the current Session |
+| `await agent.set_access(...)` | change access between Turns; upgrades within the Session ceiling require human approval |
 | `@action(...)` | declare a model Action, prompt, options, typed result, and complete local tool list |
 | `await together(...)` | explicit concurrency; direct same-Agent duplicates are rejected |
 | `await ask_human(...)` | durable, schema-validated human input |
@@ -95,7 +96,7 @@ tool call.
 | `await publish_project_home(action=call)` | publish that exact completed Action's HTML result |
 
 The only exports are `Agent`, `ArtifactRef`, `HumanMessage`, `ProjectContext`,
-`WorkflowContext`, `action`, `ask_human`, `publish_artifact`,
+`SessionContext`, `action`, `ask_human`, `publish_artifact`,
 `publish_project_home`, `together`, `wait`, and `workflow`.
 
 Ordinary `if`, `for`, `while`, functions, collections, and exceptions are the
@@ -113,7 +114,7 @@ environment access, reflection, and dynamic code are outside the ABI.
 
 Tool names must be static, non-empty, and unique. Rust rejects unknown tools,
 filters Workspace tools by access, admits Project tools only for explicitly
-declaring Workflow Actions, then stores the exact definitions and hash in the
+declaring Actions, then stores the exact definitions and hash in the
 Turn. Hosted web search remains provider-controlled and is not a local tool
 name.
 
@@ -125,7 +126,7 @@ An Agent declares one of `model_only`, `read_only`, `workspace`, `research`, or
 also bounded by that Session. Agent class overrides cannot widen it. Each Turn
 keeps the access snapshot captured at creation.
 
-Agent `model=""` inherits the explicitly selected run profile. A non-empty
+Agent `model=""` inherits the Session's default model profile. A non-empty
 value selects another configured profile. Route resolution and all non-secret
 provider settings are frozen in `ModelRouteSnapshot` before the Turn exists.
 
@@ -134,7 +135,7 @@ provider settings are frozen in `ModelRouteSnapshot` before the Turn exists.
 The isolated runner reserves stdout for newline-delimited JSON:
 
 ```json
-{"id":"root/together:0/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_instance_id":"...","action_name":"investigate","arguments":{"question":"..."},"tools":["read_file"]}}
+{"id":"root/together:0/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_id":"...","action_name":"investigate","arguments":{"question":"..."},"tools":["read_file"]}}
 {"id":"root/together:0/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
 ```
 
@@ -156,7 +157,7 @@ publish_artifact   publish_project_home
 complete
 ```
 
-Unknown effects and malformed or cross-run IDs fail closed.
+Unknown effects and malformed or cross-Session IDs fail closed.
 
 ## Replay and suspension
 
@@ -166,7 +167,7 @@ under its deterministic, idempotent domain contract. Source or runtime ABI hash
 drift fails closed.
 
 Model tool calls are not Workflow effects. A FunctionCall enters canonical
-Session context before dispatch; output enters canonical context before another
+Agent context before dispatch; output enters canonical context before another
 sample. Recovery never executes an old call. A missing output becomes
 `"aborted"`, after which the same Agent observes reality and decides whether a
 new call is needed.
@@ -186,6 +187,6 @@ workflows/builtin/<slug>/workflow.py
 ```
 
 Both roots use the same AST validator. Saving a Project Workflow replaces that
-editable slug; existing runs retain their immutable source and ABI snapshots.
+editable slug; existing Sessions retain their immutable source and ABI snapshots.
 Validation returns only manifest, Agent/Action declarations, tool names, and
 diagnostics. It does not manufacture a second feature summary.

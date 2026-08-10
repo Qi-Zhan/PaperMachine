@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from papermachine import WorkflowContext, _Runtime, _set_runtime
+from papermachine import SessionContext, _Runtime, _set_runtime
 
 
 WORKFLOW_PATH = (
@@ -34,8 +34,7 @@ class GoalWorkflowTests(unittest.TestCase):
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent-goal",
-                    "session_id": "session-goal",
+                    "agent_id": "agent-goal",
                     "access": payload["access"],
                 }
             if kind == "invoke_action":
@@ -49,11 +48,11 @@ class GoalWorkflowTests(unittest.TestCase):
         _set_runtime(_Runtime(send))
         output = asyncio.run(
             main(
-                WorkflowContext(
+                SessionContext(
                     request="Find and fix the cache bug.",
                     instructions="",
                     params={"session_title": "Cache goal", "agent_model": "glm"},
-                    workflow_id="workflow-goal",
+                    session_id="workflow-goal",
                 )
             )
         )
@@ -81,8 +80,8 @@ class GoalWorkflowTests(unittest.TestCase):
         second = effects[2][1]
         self.assertEqual(
             {
-                first["agent_instance_id"],
-                second["agent_instance_id"],
+                first["agent_id"],
+                second["agent_id"],
             },
             {"agent-goal"},
         )
@@ -96,8 +95,7 @@ class GoalWorkflowTests(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent-goal",
-                    "session_id": "session-goal",
+                    "agent_id": "agent-goal",
                     "access": payload["access"],
                 }
             if kind == "invoke_action":
@@ -111,11 +109,11 @@ class GoalWorkflowTests(unittest.TestCase):
         _set_runtime(_Runtime(send))
         output = asyncio.run(
             main(
-                WorkflowContext(
+                SessionContext(
                     request="Verify the current result.",
                     instructions="",
                     params={},
-                    workflow_id="workflow-goal",
+                    session_id="workflow-goal",
                 )
             )
         )

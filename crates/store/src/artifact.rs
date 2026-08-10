@@ -2,10 +2,10 @@ use crate::StoreError;
 use crate::filesystem::sync_directory;
 use crate::filesystem::write_atomic;
 use hex::encode;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::Artifact;
 use papermachine_protocol::ArtifactId;
 use papermachine_protocol::SessionId;
-use papermachine_protocol::WorkflowId;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeSet;
@@ -22,18 +22,18 @@ pub(crate) struct StoredArtifactFile {
 
 pub(crate) fn store_artifact_file(
     artifact_root: &Path,
-    workflow_id: WorkflowId,
-    session_id: Option<SessionId>,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
     artifact_id: ArtifactId,
     name: &str,
     bytes: &[u8],
 ) -> Result<StoredArtifactFile, StoreError> {
-    let session_segment = session_id
+    let agent_segment = agent_id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| "workflow".to_string());
+        .unwrap_or_else(|| "session".to_string());
     let directory = artifact_root
-        .join(workflow_id.to_string())
-        .join(session_segment);
+        .join(session_id.to_string())
+        .join(agent_segment);
     std::fs::create_dir_all(&directory).map_err(|error| StoreError::Io(error.to_string()))?;
 
     let file_name = format!("{}-{}", artifact_id, sanitize_name(name));

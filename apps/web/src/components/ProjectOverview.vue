@@ -90,7 +90,7 @@ const { t } = useAppI18n()
 const defaultSummaryInstructions =
   'Keep the Project home page accurate, useful, and current. Prioritize evidence-backed conclusions, consequential decisions, unresolved contradictions, blockers, and concrete next actions.'
 const summaryInstructions = computed(
-  () => props.overview.summary_workflow?.instructions || defaultSummaryInstructions,
+  () => props.overview.summary_session?.instructions || defaultSummaryInstructions,
 )
 const latestSummaryArtifact = computed(() => props.overview.project_home_artifact ?? undefined)
 const summaryHtml = ref('')

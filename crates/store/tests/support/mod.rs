@@ -1,29 +1,31 @@
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocation;
+use papermachine_protocol::Agent;
 use papermachine_protocol::ModelRouteCapabilities;
 use papermachine_protocol::ModelRouteSnapshot;
+use papermachine_protocol::ProjectId;
 use papermachine_protocol::PromptSnapshot;
 use papermachine_protocol::Session;
+use papermachine_protocol::SessionTrigger;
+use papermachine_protocol::SessionTriggerKind;
 use papermachine_protocol::ToolSetSnapshot;
 use papermachine_protocol::Turn;
-use papermachine_protocol::TurnOrigin;
-use papermachine_protocol::Workflow;
-use papermachine_protocol::WorkflowParticipant;
 use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
-use papermachine_store::NewWorkflow;
+use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use serde_json::json;
 
 #[derive(Clone)]
 pub struct ActionHarness {
-    pub workflow: Workflow,
-    pub participant: WorkflowParticipant,
+    pub session: Session,
+    pub agent: Agent,
 }
 
+#[allow(dead_code)]
 pub struct ActionTurn {
     pub invocation: ActionInvocation,
     pub turn: Turn,
@@ -31,27 +33,10 @@ pub struct ActionTurn {
 
 impl ActionHarness {
     pub fn create(store: &Store, origin: &Session, access: AccessPreset) -> Self {
-        let workflow = store
-            .create_workflow(NewWorkflow {
-                project_id: origin.project_id,
-                started_from_session_id: Some(origin.id),
-                program: workflow_snapshot(),
-                request: "Store integration test".to_string(),
-                instructions: String::new(),
-                trigger: Default::default(),
-                params: json!({}),
-                default_model: "test-model".to_string(),
-                access,
-                enabled_skills: Vec::new(),
-                agent_access_overrides: Default::default(),
-            })
-            .expect("test Workflow should be created");
-        store
-            .start_workflow(workflow.id)
-            .expect("test Workflow should start");
-        let participant = store
-            .create_participant(
-                workflow.id,
+        let session = create_session_from(store, origin, "Store integration test", access);
+        let agent = store
+            .create_agent(
+                session.id,
                 "TestAgent",
                 "Test Agent",
                 "test",
@@ -60,35 +45,28 @@ impl ActionHarness {
                 Vec::new(),
                 access,
             )
-            .expect("test participant should be created");
-        Self {
-            workflow,
-            participant,
-        }
+            .expect("test Agent should be created");
+        Self { session, agent }
     }
 
     pub fn create_turn(
         &self,
         store: &Store,
-        origin: TurnOrigin,
         input: &str,
         expected_access: AccessPreset,
     ) -> Result<Turn, StoreError> {
-        let created = self.create_action_turn(store, origin, input, expected_access)?;
-        let _ = created.invocation.id;
-        Ok(created.turn)
+        Ok(self.create_action_turn(store, input, expected_access)?.turn)
     }
 
     pub fn create_action_turn(
         &self,
         store: &Store,
-        origin: TurnOrigin,
         input: &str,
         expected_access: AccessPreset,
     ) -> Result<ActionTurn, StoreError> {
         let invocation = store.create_action_invocation(
-            self.workflow.id,
-            self.participant.id,
+            self.session.id,
+            self.agent.id,
             "test_action",
             "Exercise the Turn store",
             json!({"input": input}),
@@ -97,8 +75,7 @@ impl ActionHarness {
         let attempt = store.start_action_attempt(invocation.id)?;
         let turn = store.create_turn_for_attempt(
             attempt.id,
-            self.participant.session_id,
-            origin,
+            self.agent.id,
             input,
             model_route("test-model"),
             PromptSnapshot::default(),
@@ -113,6 +90,61 @@ impl ActionHarness {
     }
 }
 
+pub fn create_root_session(
+    store: &Store,
+    project_id: ProjectId,
+    title: &str,
+    access: AccessPreset,
+) -> Session {
+    let session = store
+        .create_session(NewSession {
+            project_id,
+            program: workflow_snapshot(),
+            title: title.to_string(),
+            request: String::new(),
+            instructions: String::new(),
+            trigger: SessionTrigger::default(),
+            params: json!({}),
+            default_model: "test-model".to_string(),
+            access,
+            enabled_skills: Vec::new(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect("test Session should be created");
+    store
+        .start_session(session.id)
+        .expect("test Session should start")
+}
+
+fn create_session_from(
+    store: &Store,
+    origin: &Session,
+    title: &str,
+    access: AccessPreset,
+) -> Session {
+    let session = store
+        .create_session(NewSession {
+            project_id: origin.project_id,
+            program: workflow_snapshot(),
+            title: title.to_string(),
+            request: title.to_string(),
+            instructions: String::new(),
+            trigger: SessionTrigger {
+                kind: SessionTriggerKind::User,
+                source_session_id: Some(origin.id),
+            },
+            params: json!({}),
+            default_model: "test-model".to_string(),
+            access,
+            enabled_skills: Vec::new(),
+            agent_access_overrides: Default::default(),
+        })
+        .expect("test Session should be created");
+    store
+        .start_session(session.id)
+        .expect("test Session should start")
+}
+
 pub fn model_route(profile: &str) -> ModelRouteSnapshot {
     ModelRouteSnapshot {
         profile: profile.to_string(),
@@ -125,7 +157,7 @@ pub fn model_route(profile: &str) -> ModelRouteSnapshot {
     }
 }
 
-fn workflow_snapshot() -> WorkflowProgramSnapshot {
+pub fn workflow_snapshot() -> WorkflowProgramSnapshot {
     WorkflowProgramSnapshot {
         project_id: None,
         manifest: WorkflowProgramManifest {
@@ -139,8 +171,8 @@ fn workflow_snapshot() -> WorkflowProgramSnapshot {
         },
         source: WorkflowProgramSource::Builtin,
         definition_path: "builtin/store-test/workflow.py".to_string(),
-        sha256: "store-test".to_string(),
-        runtime_sha256: "store-test-runtime".to_string(),
+        sha256: "source-sha".to_string(),
+        runtime_sha256: "runtime-sha".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }

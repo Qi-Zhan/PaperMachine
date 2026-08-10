@@ -494,51 +494,26 @@ capabilities = []
         assert_eq!(status, StatusCode::CREATED, "Workflow publish: {response}");
     }
 
-    async fn launch_workflow(&self, project_id: &str, request: &str) -> String {
-        let (status, workflow) = self
+    async fn launch_session(&self, project_id: &str, request: &str) -> String {
+        let (status, session) = self
             .request(
                 Method::POST,
-                &format!("/api/projects/{project_id}/workflows"),
+                &format!("/api/projects/{project_id}/sessions"),
                 Some(json!({
                     "program_slug": "process-recovery",
                     "request": request,
+                    "instructions": "",
                     "params": {},
                     "model": MODEL_PROFILE,
                     "access": "workspace",
                 })),
             )
             .await;
-        assert_eq!(status, StatusCode::CREATED, "Workflow launch: {workflow}");
-        workflow["id"]
+        assert_eq!(status, StatusCode::CREATED, "Session launch: {session}");
+        session["id"]
             .as_str()
-            .expect("Workflow id should exist")
+            .expect("Session id should exist")
             .to_string()
-    }
-
-    async fn workflow_view(&self, project_id: &str, workflow_id: &str) -> Value {
-        let (status, view) = self
-            .request(
-                Method::GET,
-                &format!("/api/projects/{project_id}/workflows/{workflow_id}"),
-                None,
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "Workflow view: {view}");
-        view
-    }
-
-    async fn wait_workflow_terminal(&self, project_id: &str, workflow_id: &str) -> Value {
-        wait_until("terminal Workflow", || async {
-            let view = self.workflow_view(project_id, workflow_id).await;
-            match view["workflow"]["status"].as_str() {
-                Some("completed") => Some(view),
-                Some("failed" | "cancelled") => {
-                    panic!("Workflow terminated unsuccessfully: {}", view["workflow"])
-                }
-                _ => None,
-            }
-        })
-        .await
     }
 
     async fn session_view(&self, project_id: &str, session_id: &str) -> Value {
@@ -551,6 +526,20 @@ capabilities = []
             .await;
         assert_eq!(status, StatusCode::OK, "Session view: {view}");
         view
+    }
+
+    async fn wait_session_terminal(&self, project_id: &str, session_id: &str) -> Value {
+        wait_until("terminal Session", || async {
+            let view = self.session_view(project_id, session_id).await;
+            match view["session"]["status"].as_str() {
+                Some("completed") => Some(view),
+                Some("failed" | "cancelled") => {
+                    panic!("Session terminated unsuccessfully: {}", view["session"])
+                }
+                _ => None,
+            }
+        })
+        .await
     }
 }
 
@@ -618,10 +607,11 @@ where
 }
 
 fn assert_rollout_projected(view: &Value) {
-    let last = view["rollout"]["last_sequence"]
+    let rollout = &view["rollouts"][0]["status"];
+    let last = rollout["last_sequence"]
         .as_u64()
         .expect("rollout sequence should exist");
-    let projected = view["rollout"]["projected_sequence"]
+    let projected = rollout["projected_sequence"]
         .as_u64()
         .expect("projection sequence should exist");
     assert!(last > 0, "Session should have a durable rollout");
@@ -667,20 +657,16 @@ async fn function_call_before_checkpoint_is_resampled_without_dispatch() {
         .await;
     let project_id = scenario.create_project("Uncommitted tool call crash").await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Crash before committing this model call.")
+    let session_id = scenario
+        .launch_session(&project_id, "Crash before committing this model call.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
 
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     assert!(tool_steps(&view).is_empty());
     assert!(
         !scenario.workspace.join("uncommitted-call.log").exists(),
@@ -704,23 +690,20 @@ async fn rollout_ahead_of_projection_is_replayed_after_sigkill() {
         .await;
     let project_id = scenario.create_project("Rollout projection crash").await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Recover the durable rollout record.")
+    let session_id = scenario
+        .launch_session(&project_id, "Recover the durable rollout record.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
 
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    assert_eq!(workflow["sessions"].as_array().map(Vec::len), Some(1));
-    assert_eq!(workflow["actions"].as_array().map(Vec::len), Some(1));
-    assert_eq!(workflow["attempts"].as_array().map(Vec::len), Some(1));
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    assert_rollout_projected(&scenario.session_view(&project_id, session_id).await);
+    assert_eq!(view["agents"].as_array().map(Vec::len), Some(1));
+    assert_eq!(view["actions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(view["attempts"].as_array().map(Vec::len), Some(1));
+    assert_rollout_projected(&view);
     assert_eq!(scenario.mock.call_count().await, 1);
     restarted.stop().await;
 }
@@ -736,21 +719,17 @@ async fn terminal_checkpoint_commits_without_resampling_after_sigkill() {
         .start(Some(TURN_TERMINAL_CHECKPOINTED_BEFORE_COMMIT))
         .await;
     scenario.mock.enqueue_text("durable terminal answer").await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Persist this final answer.")
+    let session_id = scenario
+        .launch_session(&project_id, "Persist this final answer.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     faulted.sigkill().await;
 
     let calls_before_restart = scenario.mock.call_count().await;
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     let recovered = view["turns"]
         .as_array()
         .expect("Turns should exist")
@@ -771,24 +750,20 @@ async fn model_checkpoint_preserves_usage_before_step_projection() {
         .await;
     let project_id = scenario.create_project("Model projection crash").await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Preserve sampled usage.")
+    let session_id = scenario
+        .launch_session(&project_id, "Preserve sampled usage.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
 
     let calls_before_restart = scenario.mock.call_count().await;
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
     assert_eq!(scenario.mock.call_count().await, calls_before_restart);
-    assert_eq!(workflow["workflow"]["usage"]["tokens"]["input_tokens"], 20);
-    assert_eq!(workflow["workflow"]["usage"]["tokens"]["output_tokens"], 5);
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
+    assert_eq!(view["session"]["usage"]["tokens"]["input_tokens"], 20);
+    assert_eq!(view["session"]["usage"]["tokens"]["output_tokens"], 5);
     assert_eq!(view["turns"][0]["output"], "durable sampled answer");
     assert_rollout_projected(&view);
     restarted.stop().await;
@@ -803,8 +778,8 @@ async fn workflow_inflight_sample_resumes_automatically_after_sigkill() {
         .mock
         .enqueue_blocked_text("response from the dead server")
         .await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Interrupt this model sample.")
+    let session_id = scenario
+        .launch_session(&project_id, "Interrupt this model sample.")
         .await;
     scenario.mock.wait_for_calls(1).await;
     server.sigkill().await;
@@ -812,13 +787,9 @@ async fn workflow_inflight_sample_resumes_automatically_after_sigkill() {
 
     scenario.mock.enqueue_text("recovered model answer").await;
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     let recovered = view["turns"]
         .as_array()
         .expect("Turns should exist")
@@ -846,20 +817,16 @@ async fn canonical_tool_call_is_aborted_without_dispatch_after_sigkill() {
         .await;
     let project_id = scenario.create_project("Canonical tool call crash").await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Do not replay the interrupted command.")
+    let session_id = scenario
+        .launch_session(&project_id, "Do not replay the interrupted command.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
 
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     let tools = view["steps"]
         .as_array()
         .expect("Steps should exist")
@@ -902,8 +869,8 @@ async fn completed_effect_without_output_is_aborted_and_observed_after_sigkill()
         .await;
     let project_id = scenario.create_project("Tool effect crash").await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(
+    let session_id = scenario
+        .launch_session(
             &project_id,
             "Write one line, then recover by observing durable Workspace state.",
         )
@@ -912,13 +879,9 @@ async fn completed_effect_without_output_is_aborted_and_observed_after_sigkill()
     server.sigkill().await;
 
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     let tools = tool_steps(&view);
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0]["tool_call_id"], "effect-call");
@@ -962,20 +925,16 @@ async fn committed_tool_output_repairs_projection_without_replay() {
         .create_project("Tool output projection crash")
         .await;
     scenario.publish_workflow(&project_id).await;
-    let workflow_id = scenario
-        .launch_workflow(&project_id, "Recover the committed tool output.")
+    let session_id = scenario
+        .launch_session(&project_id, "Recover the committed tool output.")
         .await;
     wait_for_marker(marker.as_deref().expect("fault marker should exist")).await;
     server.sigkill().await;
 
     let (mut restarted, _) = scenario.start(None).await;
-    let workflow = scenario
-        .wait_workflow_terminal(&project_id, &workflow_id)
+    let view = scenario
+        .wait_session_terminal(&project_id, &session_id)
         .await;
-    let session_id = workflow["sessions"][0]["id"]
-        .as_str()
-        .expect("Session id should exist");
-    let view = scenario.session_view(&project_id, session_id).await;
     let tools = tool_steps(&view);
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["tool_call_id"], "durable-output-call");

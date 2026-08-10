@@ -284,7 +284,7 @@ class Agent:
         result = await _effect(
             "set_agent_access",
             {
-                "agent_instance_id": remote["agent_instance_id"],
+                "agent_id": remote["agent_id"],
                 "access": access,
             },
         )
@@ -446,7 +446,7 @@ class _ActionCall(Awaitable[Any]):
         return await _effect(
             "invoke_action",
             {
-                "agent_instance_id": remote["agent_instance_id"],
+                "agent_id": remote["agent_id"],
                 "action_name": action_name or self.name,
                 "prompt": prompt or self.prompt,
                 "arguments": self.arguments if arguments is None else arguments,
@@ -531,7 +531,7 @@ async def together(*actions: Awaitable[T]) -> tuple[T, ...]:
     explicit = [item for item in actions if isinstance(item, _ActionCall)]
     keys = [id(item.agent) for item in explicit]
     if len(keys) != len(set(keys)):
-        raise ValueError("together() cannot run two actions on the same Agent Session")
+        raise ValueError("together() cannot run two actions on the same Agent")
     fork_path = _reserve_effect_path("together")
     branches = [
         _run_in_effect_branch(action, (*fork_path, f"branch:{index}"))
@@ -548,13 +548,13 @@ async def ask_human(
 ) -> Any:
     agent_id = None
     if agent is not None:
-        agent_id = (await agent._ensure_remote())["agent_instance_id"]
+        agent_id = (await agent._ensure_remote())["agent_id"]
     result = await _effect(
         "ask_human",
         {
             "question": question,
             "response_schema": response_schema or {"type": "string"},
-            "agent_instance_id": agent_id,
+            "agent_id": agent_id,
         },
     )
     answer = result["answer"]
@@ -585,7 +585,7 @@ async def publish_artifact(
         raise TypeError("publish_artifact() content must be text")
     agent_id = None
     if agent is not None:
-        agent_id = (await agent._ensure_remote())["agent_instance_id"]
+        agent_id = (await agent._ensure_remote())["agent_id"]
     result = await _effect(
         "publish_artifact",
         {
@@ -594,7 +594,7 @@ async def publish_artifact(
             "kind": kind,
             "media_type": media_type,
             "metadata": metadata or {},
-            "agent_instance_id": agent_id,
+            "agent_id": agent_id,
         },
     )
     return ArtifactRef(
@@ -664,11 +664,11 @@ class ProjectContext:
 
 
 @dataclass(frozen=True)
-class WorkflowContext:
+class SessionContext:
     request: str
     instructions: str
     params: dict[str, Any]
-    workflow_id: str
+    session_id: str
     trigger: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -724,7 +724,7 @@ __all__ = [
     "ArtifactRef",
     "HumanMessage",
     "ProjectContext",
-    "WorkflowContext",
+    "SessionContext",
     "action",
     "ask_human",
     "publish_artifact",

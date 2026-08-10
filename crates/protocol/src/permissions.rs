@@ -36,7 +36,7 @@ const USER_CREDENTIAL_PATHS: [&str; 8] = [
     ".config/gh",
 ];
 
-/// Stable user-facing choices. These values order Workflow ceilings, but all
+/// Stable user-facing choices. These values order Session ceilings, but all
 /// enforcement consumes [`AuthorizationContext`] instead of this preset.
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,

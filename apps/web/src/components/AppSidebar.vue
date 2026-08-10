@@ -204,7 +204,7 @@ const filteredProjects = computed(() => {
 
 function visibleSessions(projectId: string): Session[] {
   const sessions = (props.sessionsByProject[projectId] ?? []).filter(
-    (session) => session.status !== 'archived',
+    (session) => session.archived_at === null,
   )
   if (!normalizedQuery.value) return sessions
   return sessions.filter((session) =>

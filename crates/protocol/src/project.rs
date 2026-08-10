@@ -1,15 +1,8 @@
-use crate::ActionAttemptId;
 use crate::ActionInvocationId;
-use crate::AgentInstanceId;
+use crate::AgentId;
 use crate::ArtifactId;
-use crate::ControlMessageId;
-use crate::HumanRequestId;
 use crate::ProjectId;
 use crate::SessionId;
-use crate::TokenUsage;
-use crate::TurnId;
-use crate::WorkflowId;
-use crate::WorkflowProgramSnapshot;
 use crate::WorkspaceId;
 use chrono::DateTime;
 use chrono::Utc;
@@ -17,7 +10,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -63,25 +55,6 @@ impl WorkspaceSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowStatus {
-    Created,
-    Running,
-    WaitingForUser,
-    WaitingForDeadline,
-    Paused,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl WorkflowStatus {
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct Project {
     pub id: ProjectId,
@@ -91,217 +64,6 @@ pub struct Project {
     pub workspace: WorkspaceAttachment,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowTriggerKind {
-    /// A person launched the Run from an existing Session.
-    User,
-    /// Another durable Workflow launched this Run.
-    Workflow,
-    /// A person or API client launched the Run directly from a Project.
-    #[default]
-    Manual,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowTrigger {
-    pub kind: WorkflowTriggerKind,
-    pub source_workflow_id: Option<WorkflowId>,
-    pub source_session_id: Option<SessionId>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct Workflow {
-    pub id: WorkflowId,
-    pub project_id: ProjectId,
-    /// Optional Session from which the user started this Workflow. Project-level
-    /// and long-lived built-in Workflows do not need one.
-    pub started_from_session_id: Option<SessionId>,
-    pub program: WorkflowProgramSnapshot,
-    /// Immutable per-Run request. The Workflow program decides which Agents
-    /// receive it; the runtime never promotes it into system instructions.
-    pub request: String,
-    /// Optional high-priority instructions for this Run. This is not the user
-    /// request and should remain stable across its Agent Sessions.
-    pub instructions: String,
-    /// Durable provenance for why and from where this Run was launched.
-    pub trigger: WorkflowTrigger,
-    pub default_model: String,
-    pub access: crate::AccessPreset,
-    pub enabled_skills: Vec<String>,
-    /// Per-run overrides keyed by Python Agent class name. The Workflow access
-    /// profile remains the hard upper bound.
-    pub agent_access_overrides: BTreeMap<String, crate::AccessPreset>,
-    pub status: WorkflowStatus,
-    pub params: Value,
-    pub output: Option<Value>,
-    pub error: Option<String>,
-    pub attention_required: bool,
-    pub usage: WorkflowUsage,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowEffectStatus {
-    Started,
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowEffect {
-    pub workflow_id: WorkflowId,
-    /// Deterministic logical path assigned by the Python DSL runtime.
-    pub key: String,
-    pub kind: String,
-    pub request_sha256: String,
-    pub payload: Value,
-    pub status: WorkflowEffectStatus,
-    pub result: Option<Value>,
-    pub error: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowUsage {
-    pub agents_created: u32,
-    pub actions_started: u32,
-    pub actions_completed: u32,
-    pub action_steps: u32,
-    pub hosted_search_calls: u32,
-    pub tokens: TokenUsage,
-    pub wall_time_seconds: u64,
-    pub estimated_cost_usd: Option<f64>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct WorkflowParticipant {
-    pub id: AgentInstanceId,
-    pub workflow_id: WorkflowId,
-    pub session_id: SessionId,
-    pub class_name: String,
-    pub name: String,
-    pub role: String,
-    pub system_prompt: String,
-    pub model: String,
-    pub skills: Vec<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionStatus {
-    Scheduled,
-    Running,
-    Completed,
-    Failed,
-    Interrupted,
-    Cancelled,
-}
-
-impl ActionStatus {
-    pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Interrupted | Self::Cancelled
-        )
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ActionInvocation {
-    pub id: ActionInvocationId,
-    pub workflow_id: WorkflowId,
-    pub agent_instance_id: AgentInstanceId,
-    pub session_id: SessionId,
-    pub action_name: String,
-    /// Stable Action method contract (normally its Python docstring/prompt).
-    /// Concrete arguments remain separate and become the Workflow-origin Turn
-    /// data only when the program invokes this Action.
-    pub contract: String,
-    pub arguments: Value,
-    /// Local tools requested by this Action declaration. The Turn stores the
-    /// exact host-materialized subset after applying its access ceiling.
-    pub requested_tools: Vec<String>,
-    /// Direct HumanRequest whose answered string became this Action Turn's
-    /// user message. `None` means the Turn was dispatched as workflow work.
-    pub source_human_request_id: Option<HumanRequestId>,
-    pub status: ActionStatus,
-    pub output: Option<Value>,
-    pub error: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ActionAttempt {
-    pub id: ActionAttemptId,
-    pub workflow_id: WorkflowId,
-    pub invocation_id: ActionInvocationId,
-    pub number: u32,
-    pub turn_id: Option<TurnId>,
-    pub status: ActionStatus,
-    pub guidance: Option<String>,
-    pub error: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HumanRequestStatus {
-    Open,
-    Answered,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct HumanRequest {
-    pub id: HumanRequestId,
-    pub workflow_id: WorkflowId,
-    pub session_id: SessionId,
-    pub question: String,
-    pub response_schema: Value,
-    pub status: HumanRequestStatus,
-    pub answer: Option<Value>,
-    pub created_at: DateTime<Utc>,
-    pub resolved_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ControlMessageKind {
-    Guide,
-    Interrupt,
-    Finish,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ControlMessageStatus {
-    Pending,
-    Claimed,
-    Applied,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct ControlMessage {
-    pub id: ControlMessageId,
-    pub workflow_id: WorkflowId,
-    pub session_id: SessionId,
-    pub action_invocation_id: Option<ActionInvocationId>,
-    pub kind: ControlMessageKind,
-    pub content: String,
-    pub status: ControlMessageStatus,
-    pub created_at: DateTime<Utc>,
-    pub claimed_turn_id: Option<TurnId>,
-    pub claimed_at: Option<DateTime<Utc>>,
-    pub applied_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -323,8 +85,8 @@ pub enum ArtifactKind {
 pub struct Artifact {
     pub id: ArtifactId,
     pub project_id: ProjectId,
-    pub workflow_id: WorkflowId,
-    pub session_id: Option<SessionId>,
+    pub session_id: SessionId,
+    pub agent_id: Option<AgentId>,
     pub action_invocation_id: Option<ActionInvocationId>,
     pub kind: ArtifactKind,
     pub name: String,

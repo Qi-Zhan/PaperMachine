@@ -2,16 +2,15 @@
 
 use papermachine_model::{ModelClient, ScriptedModelClient};
 use papermachine_protocol::{
-    AccessPreset, HumanRequestStatus, ModelEvent, TokenUsage, WorkflowEffectStatus,
+    AccessPreset, HumanRequestStatus, ModelEvent, SessionEffectStatus, SessionStatus, TokenUsage,
     WorkflowProgramId, WorkflowProgramManifest, WorkflowProgramSnapshot, WorkflowProgramSource,
-    WorkflowStatus,
 };
-use papermachine_session::{SessionRuntime, SessionRuntimeConfig};
+use papermachine_session::{TurnRuntime, TurnRuntimeConfig};
 use papermachine_skills::ProjectSkillCatalog;
-use papermachine_store::{NewWorkflow, Store, StoreHandle};
+use papermachine_store::{NewSession, Store, StoreHandle};
 use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
-    PythonWorkflowRuntime, WorkflowExecution, WorkflowRuntime, python_runtime_sha256,
+    PythonSessionExecutor, SessionExecution, SessionExecutor, python_runtime_sha256,
     resolve_python_executable,
 };
 use serde_json::json;
@@ -86,7 +85,7 @@ class Clamped(Agent):
 
     @action
     async def verify(self, question: str) -> str:
-        """Verify that the Workflow ceiling remains authoritative."""
+        """Verify that the Session ceiling remains authoritative."""
 
 
 @workflow(
@@ -135,7 +134,7 @@ fn runtime_with(
     work_root: &Path,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
-) -> PythonWorkflowRuntime {
+) -> PythonSessionExecutor {
     let store = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
     runtime_on_handle(store, work_root, model, tools)
 }
@@ -145,29 +144,29 @@ fn runtime_on_handle(
     work_root: &Path,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
-) -> PythonWorkflowRuntime {
+) -> PythonSessionExecutor {
     let skills = Arc::new(ProjectSkillCatalog::new(store.clone()));
-    let sessions = SessionRuntime::new(
+    let turns = TurnRuntime::new(
         store.clone(),
         model,
         tools,
         skills,
-        SessionRuntimeConfig {
+        TurnRuntimeConfig {
             default_model: "scripted".to_string(),
             model_context_window: 128_000,
             max_concurrent_turns: 2,
         },
     );
-    PythonWorkflowRuntime::new(
+    PythonSessionExecutor::new(
         store,
-        sessions,
+        turns,
         resolve_python_executable().expect("Python 3.11 or newer should be available"),
         python_runtime_root(),
         work_root,
     )
 }
 
-fn runtime(store: Arc<Store>, work_root: &Path) -> PythonWorkflowRuntime {
+fn runtime(store: Arc<Store>, work_root: &Path) -> PythonSessionExecutor {
     runtime_with(
         store,
         work_root,
@@ -204,11 +203,11 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
         .expect("Project should be created");
     let mut program = program_with_source("abi-mismatch", WAIT_SOURCE);
     program.runtime_sha256 = "0".repeat(64);
-    let workflow = store
-        .create_workflow(NewWorkflow {
+    let session = store
+        .create_session(NewSession {
             project_id: project.id,
-            started_from_session_id: None,
             program,
+            title: "ABI mismatch".to_string(),
             request: "Do not run with a different ABI.".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
@@ -218,19 +217,19 @@ async fn workflow_runtime_fails_closed_when_the_python_abi_snapshot_differs() {
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })
-        .expect("Workflow should be created");
+        .expect("Session should be created");
     store
-        .start_workflow(workflow.id)
-        .expect("Workflow should be runnable");
+        .start_session(session.id)
+        .expect("Session should be runnable");
 
     let error = runtime(Arc::clone(&store), &directory.path().join("runtime"))
-        .execute(workflow.id, CancellationToken::new())
+        .execute(session.id, CancellationToken::new())
         .await
         .expect_err("ABI mismatch must fail before Python starts");
     assert!(error.contains("Python Workflow ABI differs"));
     assert!(
         store
-            .list_workflow_effects(workflow.id)
+            .list_session_effects(session.id)
             .expect("effects should load")
             .is_empty()
     );
@@ -246,11 +245,11 @@ async fn agent_access_respects_run_configuration() {
     let project = store
         .create_project("Configured run", directory.path().join("project"))
         .expect("Project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
+    let session = store
+        .create_session(NewSession {
             project_id: project.id,
-            started_from_session_id: None,
             program: program_with_source("run-access", RUN_ACCESS_SOURCE),
+            title: "Configured run".to_string(),
             request: "Inspect the configured run.".to_string(),
             instructions: "Keep provenance visible.".to_string(),
             trigger: Default::default(),
@@ -263,10 +262,10 @@ async fn agent_access_respects_run_configuration() {
                 ("Elevated".to_string(), AccessPreset::Workspace),
             ]),
         })
-        .expect("Workflow should be created");
+        .expect("Session should be created");
     store
-        .start_workflow(workflow.id)
-        .expect("Workflow should be runnable");
+        .start_session(session.id)
+        .expect("Session should be runnable");
     let model = ScriptedModelClient::new([
         completed_response("conservative answer", 20, 4),
         completed_response("elevated answer", 20, 4),
@@ -280,11 +279,11 @@ async fn agent_access_respects_run_configuration() {
         Arc::new(model),
         ToolCatalog::default(),
     )
-    .execute(workflow.id, CancellationToken::new())
+    .execute(session.id, CancellationToken::new())
     .await
-    .expect("Workflow should execute");
-    let WorkflowExecution::Completed(output) = execution else {
-        panic!("Workflow should complete without suspension")
+    .expect("Session should execute");
+    let SessionExecution::Completed(output) = execution else {
+        panic!("Session should complete without suspension")
     };
     assert_eq!(
         output["answers"],
@@ -292,12 +291,12 @@ async fn agent_access_respects_run_configuration() {
     );
     assert!(
         store
-            .list_human_requests(workflow.id)
+            .list_human_requests(session.id)
             .expect("human requests should load")
             .is_empty(),
         "launch-time access choices at or below the ceiling are already authorized"
     );
-    assert!(!work_root.join(workflow.id.to_string()).exists());
+    assert!(!work_root.join(session.id.to_string()).exists());
     assert!(
         std::fs::read_dir(store.managed_root().join("runtime/sandboxes"))
             .expect("sandbox root should list")
@@ -305,21 +304,16 @@ async fn agent_access_respects_run_configuration() {
             .is_none()
     );
 
-    let participants = store
-        .list_participants(workflow.id)
-        .expect("participants should load");
-    for participant in participants {
-        let session = store
-            .get_session(participant.session_id)
-            .expect("participant Session should load");
-        let expected = match participant.class_name.as_str() {
+    let agents = store.list_agents(session.id).expect("Agents should load");
+    for agent in agents {
+        let expected = match agent.class_name.as_str() {
             "Conservative" => AccessPreset::ReadOnly,
             "Elevated" | "Clamped" => AccessPreset::Workspace,
             class_name => panic!("unexpected Agent class {class_name}"),
         };
-        assert_eq!(session.access, expected);
+        assert_eq!(agent.access, expected);
         let turn = store
-            .list_turns(session.id)
+            .list_turns(agent.id)
             .expect("Agent Turns should load")
             .into_iter()
             .next()
@@ -338,11 +332,11 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
     let project = store
         .create_project("Durable replay", directory.path().join("project"))
         .expect("project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
+    let session = store
+        .create_session(NewSession {
             project_id: project.id,
-            started_from_session_id: None,
             program: program_with_source("durable-replay", SOURCE),
+            title: "Durable replay".to_string(),
             request: "Prove replay semantics.".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
@@ -352,32 +346,32 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })
-        .expect("Workflow should be created");
+        .expect("Session should be created");
     store
-        .start_workflow(workflow.id)
-        .expect("Workflow should be running");
+        .start_session(session.id)
+        .expect("Session should be running");
 
     let first_runtime = runtime(Arc::clone(&store), &directory.path().join("runtime"));
-    let workflow_id = workflow.id;
+    let session_id = session.id;
     let first_execution = tokio::spawn(async move {
         first_runtime
-            .execute(workflow_id, CancellationToken::new())
+            .execute(session_id, CancellationToken::new())
             .await
     });
 
     let request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(request) = store
-                .list_human_requests(workflow.id)
+                .list_human_requests(session.id)
                 .expect("human requests should load")
                 .into_iter()
                 .find(|request| request.status == HumanRequestStatus::Open)
                 && store
-                    .list_workflow_effects(workflow.id)
+                    .list_session_effects(session.id)
                     .expect("effects should load")
                     .iter()
                     .any(|effect| {
-                        effect.kind == "ask_human" && effect.status == WorkflowEffectStatus::Started
+                        effect.kind == "ask_human" && effect.status == SessionEffectStatus::Started
                     })
             {
                 break request;
@@ -386,7 +380,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
         }
     })
     .await
-    .expect("Workflow should reach its human wait");
+    .expect("Session should reach its human wait");
 
     let first_output = first_execution
         .await
@@ -394,37 +388,37 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
         .expect("durable human wait should suspend cleanly");
     assert!(matches!(
         first_output,
-        WorkflowExecution::Suspended(ref suspension)
-            if suspension.status == WorkflowStatus::WaitingForUser
+        SessionExecution::Suspended(ref suspension)
+            if suspension.status == SessionStatus::WaitingForInput
     ));
     store
         .answer_human_request(request.id, json!("yes"))
         .expect("the durable request should remain answerable");
 
     let output = runtime(Arc::clone(&store), &directory.path().join("runtime"))
-        .execute(workflow.id, CancellationToken::new())
+        .execute(session.id, CancellationToken::new())
         .await
-        .expect("replayed Workflow should complete");
+        .expect("replayed Session should complete");
     assert_eq!(
         output,
-        WorkflowExecution::Completed(json!({"decision": "yes"}))
+        SessionExecution::Completed(json!({"decision": "yes"}))
     );
     assert_eq!(
         store
-            .list_participants(workflow.id)
-            .expect("participants should load")
+            .list_agents(session.id)
+            .expect("Agents should load")
             .len(),
         1
     );
     assert_eq!(
         store
-            .list_human_requests(workflow.id)
+            .list_human_requests(session.id)
             .expect("human requests should load")
             .len(),
         1
     );
     let effects = store
-        .list_workflow_effects(workflow.id)
+        .list_session_effects(session.id)
         .expect("effects should load");
     assert_eq!(effects.len(), 3);
     assert_eq!(
@@ -437,7 +431,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
     assert!(
         effects
             .iter()
-            .all(|effect| effect.status == WorkflowEffectStatus::Completed)
+            .all(|effect| effect.status == SessionEffectStatus::Completed)
     );
 }
 
@@ -451,11 +445,11 @@ async fn durable_wait_suspends_the_python_process_and_replays_when_due() {
     let project = store
         .create_project("Durable wait", directory.path().join("project"))
         .expect("project should be created");
-    let workflow = store
-        .create_workflow(NewWorkflow {
+    let session = store
+        .create_session(NewSession {
             project_id: project.id,
-            started_from_session_id: None,
             program: program_with_source("durable-wait-replay", WAIT_SOURCE),
+            title: "Durable wait".to_string(),
             request: "Wait without retaining a Python process.".to_string(),
             instructions: String::new(),
             trigger: Default::default(),
@@ -465,45 +459,45 @@ async fn durable_wait_suspends_the_python_process_and_replays_when_due() {
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })
-        .expect("Workflow should be created");
+        .expect("Session should be created");
     store
-        .start_workflow(workflow.id)
-        .expect("Workflow should be running");
+        .start_session(session.id)
+        .expect("Session should be running");
 
     let first = runtime(Arc::clone(&store), &directory.path().join("runtime"))
-        .execute(workflow.id, CancellationToken::new())
+        .execute(session.id, CancellationToken::new())
         .await
         .expect("durable wait should suspend cleanly");
     let wake_at = match first {
-        WorkflowExecution::Suspended(suspension) => {
-            assert_eq!(suspension.status, WorkflowStatus::WaitingForDeadline);
+        SessionExecution::Suspended(suspension) => {
+            assert_eq!(suspension.status, SessionStatus::WaitingForDeadline);
             suspension
                 .wake_at
                 .expect("deadline suspension should have a wake time")
         }
-        WorkflowExecution::Completed(output) => {
+        SessionExecution::Completed(output) => {
             panic!("wait completed before suspension: {output}")
         }
     };
     assert!(
         store
-            .list_workflow_effects(workflow.id)
+            .list_session_effects(session.id)
             .expect("effects should load")
             .iter()
-            .any(|effect| effect.kind == "wait" && effect.status == WorkflowEffectStatus::Started)
+            .any(|effect| effect.kind == "wait" && effect.status == SessionEffectStatus::Started)
     );
 
     let delay = (wake_at - chrono::Utc::now()).to_std().unwrap_or_default();
     tokio::time::sleep(delay + Duration::from_millis(10)).await;
     store
-        .start_workflow(workflow.id)
-        .expect("waiting Workflow should be runnable");
+        .resume_session(session.id)
+        .expect("waiting Session should be runnable");
     let output = runtime(Arc::clone(&store), &directory.path().join("runtime"))
-        .execute(workflow.id, CancellationToken::new())
+        .execute(session.id, CancellationToken::new())
         .await
         .expect("due wait should replay");
     assert_eq!(
         output,
-        WorkflowExecution::Completed(json!({"completed": true}))
+        SessionExecution::Completed(json!({"completed": true}))
     );
 }

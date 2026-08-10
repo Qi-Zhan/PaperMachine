@@ -52,7 +52,7 @@
             </label>
           </div>
           <label class="workflow-prompt-field">
-            <span>{{ t('workflow.describeSessions') }}</span>
+            <span>{{ t('workflow.describeAgents') }}</span>
             <textarea v-model="generation.description" class="text-area" maxlength="12000" />
           </label>
           <div class="workflow-generator-actions">
@@ -103,7 +103,7 @@
 
               <div v-if="validation" class="workflow-structure-grid">
                 <section class="workflow-structure-section">
-                  <header><Users :size="15" /><h3>{{ t('workflow.agentSessions') }}</h3><span>{{ validation.agents.length }}</span></header>
+                  <header><Users :size="15" /><h3>{{ t('workflow.agents') }}</h3><span>{{ validation.agents.length }}</span></header>
                   <div v-if="validation.agents.length" class="workflow-agent-declarations">
                     <div v-for="agent in validation.agents" :key="agent.class_name" class="workflow-agent-declaration">
                       <strong>{{ agent.class_name }}</strong>

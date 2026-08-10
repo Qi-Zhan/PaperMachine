@@ -1,6 +1,8 @@
 import type {
   Artifact,
-  CreateWorkflowInput,
+  ControlMessage,
+  ControlMessageKind,
+  CreateSessionRequest,
   GeneratedWorkflow,
   Health,
   HumanRequest,
@@ -13,8 +15,6 @@ import type {
   SessionView,
   WorkflowGenerationInput,
   WorkflowProgram,
-  Workflow,
-  WorkflowView,
   WorkflowProgramSource,
   WorkflowValidation,
 } from './types'
@@ -79,14 +79,23 @@ export const api = {
     request<void>(`/projects/${projectId}/turns/${turnId}/cancel`, { method: 'POST' }),
   listSessionEvents: (projectId: string, sessionId: string, after = 0) =>
     request<SessionEvent[]>(`/projects/${projectId}/sessions/${sessionId}/events?after=${after}`),
-  createWorkflow: (projectId: string, input: CreateWorkflowInput) =>
-    request<Workflow>(`/projects/${projectId}/workflows`, { method: 'POST', body: JSON.stringify(input) }),
-  getWorkflow: (projectId: string, workflowId: string) =>
-    request<WorkflowView>(`/projects/${projectId}/workflows/${workflowId}`),
-  getWorkflowState: (projectId: string, workflowId: string) =>
-    request<Workflow>(`/projects/${projectId}/workflows/${workflowId}/state`),
-  cancelWorkflow: (projectId: string, workflowId: string) =>
-    request<void>(`/projects/${projectId}/workflows/${workflowId}/cancel`, { method: 'POST' }),
+  createSession: (projectId: string, input: CreateSessionRequest) =>
+    request<Session>(`/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify(input) }),
+  pauseSession: (projectId: string, sessionId: string) =>
+    request<void>(`/projects/${projectId}/sessions/${sessionId}/pause`, { method: 'POST' }),
+  resumeSession: (projectId: string, sessionId: string) =>
+    request<void>(`/projects/${projectId}/sessions/${sessionId}/resume`, { method: 'POST' }),
+  cancelSession: (projectId: string, sessionId: string) =>
+    request<void>(`/projects/${projectId}/sessions/${sessionId}/cancel`, { method: 'POST' }),
+  createControlMessage: (
+    projectId: string,
+    sessionId: string,
+    agentId: string,
+    input: { kind: ControlMessageKind; content: string; action_invocation_id?: string },
+  ) => request<ControlMessage>(`/projects/${projectId}/sessions/${sessionId}/agents/${agentId}/control`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }),
   answerHumanRequest: (projectId: string, requestId: string, answer: unknown) =>
     request<HumanRequest>(`/projects/${projectId}/human-requests/${requestId}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   listWorkflowPrograms: (projectId: string) => request<WorkflowProgram[]>(`/projects/${projectId}/workflow-programs`),
@@ -108,7 +117,9 @@ export const api = {
 
 export const sessionEventTypes = [
   'session_created',
-  'session_status_changed',
+  'session_changed',
+  'agent_created',
+  'action_changed',
   'turn_created',
   'turn_status_changed',
   'assistant_message_delta',
@@ -123,11 +134,11 @@ export const sessionEventTypes = [
   'context_trimmed',
   'context_compacted',
   'sampling_retry',
-  'workflow_agent_attached',
   'human_request_opened',
   'human_request_resolved',
+  'control_message_queued',
   'control_message_applied',
-  'workflow_changed',
+  'usage_updated',
   'session_resync',
   'warning',
 ] as const

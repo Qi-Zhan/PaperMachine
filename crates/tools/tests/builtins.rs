@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
 use papermachine_protocol::TurnId;
-use papermachine_protocol::WorkflowId;
 use papermachine_tools::ExecCommandTool;
 use papermachine_tools::FetchUrlTool;
 use papermachine_tools::ReadFileTool;
@@ -71,8 +71,8 @@ fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolCont
     ToolContext {
         project_id: ProjectId::new(),
         session_id: SessionId::new(),
+        agent_id: AgentId::new(),
         turn_id: TurnId::new(),
-        workflow_id: Some(WorkflowId::new()),
         action_invocation_id: None,
         action_attempt_id: None,
         sandbox_root,
@@ -132,7 +132,7 @@ fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
 }
 
 #[tokio::test]
-async fn project_tools_are_admitted_only_for_declared_workflow_actions() {
+async fn project_tools_are_admitted_only_for_declared_actions() {
     let directory = tempdir().expect("temporary directory should be created");
     let context = context_with_access(directory.path(), AccessPreset::ModelOnly);
     let catalog = ToolCatalog::builder()
@@ -484,7 +484,7 @@ async fn command_output_is_structured() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn command_heredoc_uses_the_session_temp_directory() {
+async fn command_heredoc_uses_the_turn_temp_directory() {
     let directory = tempdir().expect("temporary directory should be created");
     let output = ExecCommandTool
         .execute(

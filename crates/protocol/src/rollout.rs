@@ -1,7 +1,7 @@
 use crate::ActionAttempt;
+use crate::AgentId;
 use crate::ControlMessageId;
 use crate::ModelInputItem;
-use crate::SessionId;
 use crate::TokenUsage;
 use crate::Turn;
 use crate::TurnId;
@@ -11,28 +11,23 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub const SESSION_ROLLOUT_VERSION: u32 = 3;
+pub const AGENT_ROLLOUT_VERSION: u32 = 1;
 
-/// Observable relationship between the canonical JSONL rollout and its
-/// SQLite query projection.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct SessionRolloutStatus {
+pub struct AgentRolloutStatus {
     pub version: u32,
     pub last_sequence: u64,
     pub projected_sequence: u64,
 }
 
-/// One durable, monotonically sequenced fact in a Session rollout.
-///
-/// Rollouts are the canonical source for model context. SQLite stores the
-/// query projection and the last applied rollout sequence.
+/// One durable, monotonically sequenced fact in an Agent rollout.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-pub struct SessionRolloutRecord {
+pub struct AgentRolloutRecord {
     pub version: u32,
-    pub session_id: SessionId,
+    pub agent_id: AgentId,
     pub sequence: u64,
     pub occurred_at: DateTime<Utc>,
-    pub item: SessionRolloutItem,
+    pub item: AgentRolloutItem,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -42,9 +37,6 @@ pub enum ContextReplacementReason {
     Trim,
 }
 
-/// A checkpoint either extends the prior context or explicitly replaces it.
-/// Replacement is reserved for bounded-history operations such as compaction
-/// and trimming; prior rollout records remain immutable.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelContextMutation {
@@ -60,7 +52,7 @@ pub enum ModelContextMutation {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionRolloutItem {
+pub enum AgentRolloutItem {
     TurnCreated {
         turn: Turn,
         action_attempt: ActionAttempt,
@@ -81,7 +73,7 @@ pub enum SessionRolloutItem {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SessionRolloutState {
+pub struct AgentRolloutState {
     pub committed_context: Vec<ModelInputItem>,
     pub active_turn: Option<ActiveTurnRolloutState>,
 }

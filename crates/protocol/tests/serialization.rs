@@ -1,23 +1,24 @@
 use chrono::Utc;
+use papermachine_protocol::AgentId;
 use papermachine_protocol::EventId;
 use papermachine_protocol::ProjectId;
 use papermachine_protocol::SessionEvent;
 use papermachine_protocol::SessionEventPayload;
 use papermachine_protocol::SessionId;
 use papermachine_protocol::ToolDefinition;
-use papermachine_protocol::WorkflowEvent;
-use papermachine_protocol::WorkflowEventPayload;
-use papermachine_protocol::WorkflowId;
 
 #[test]
-fn run_event_uses_a_flat_stable_tag() {
-    let event = WorkflowEvent {
+fn session_event_uses_a_flat_stable_tag() {
+    let event = SessionEvent {
         id: EventId::new(),
         sequence: 7,
         project_id: ProjectId::new(),
-        workflow_id: WorkflowId::new(),
+        session_id: SessionId::new(),
+        agent_id: Some(AgentId::new()),
+        turn_id: None,
+        step_id: None,
         occurred_at: Utc::now(),
-        payload: WorkflowEventPayload::Warning {
+        payload: SessionEventPayload::Warning {
             message: "check evidence".to_string(),
         },
     };
@@ -33,7 +34,9 @@ fn session_message_reset_has_a_stable_sse_tag() {
     let event = SessionEvent {
         id: EventId::new(),
         sequence: 3,
+        project_id: ProjectId::new(),
         session_id: SessionId::new(),
+        agent_id: None,
         turn_id: None,
         step_id: None,
         occurred_at: Utc::now(),
@@ -49,7 +52,9 @@ fn model_step_event_is_only_a_durable_reference() {
     let event = SessionEvent {
         id: EventId::new(),
         sequence: 4,
+        project_id: ProjectId::new(),
         session_id: SessionId::new(),
+        agent_id: Some(AgentId::new()),
         turn_id: None,
         step_id: None,
         occurred_at: Utc::now(),
@@ -67,7 +72,9 @@ fn turn_created_event_does_not_duplicate_turn_fields() {
     let event = SessionEvent {
         id: EventId::new(),
         sequence: 5,
+        project_id: ProjectId::new(),
         session_id: SessionId::new(),
+        agent_id: Some(AgentId::new()),
         turn_id: None,
         step_id: None,
         occurred_at: Utc::now(),
@@ -76,7 +83,6 @@ fn turn_created_event_does_not_duplicate_turn_fields() {
 
     let value = serde_json::to_value(event).expect("event should serialize");
     assert_eq!(value["type"], "turn_created");
-    assert!(value.get("origin").is_none());
     assert!(value.get("input").is_none());
     assert!(value.get("model").is_none());
 }

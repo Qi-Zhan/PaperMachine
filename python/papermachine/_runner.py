@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from papermachine import WorkflowContext, _Runtime, _effect, _set_runtime
+from papermachine import SessionContext, _Runtime, _effect, _set_runtime
 
 _protocol_stdout = sys.stdout
 sys.stdout = sys.stderr
@@ -168,11 +168,11 @@ async def run() -> None:
     reader = asyncio.create_task(client.read_responses())
     try:
         function = load_workflow(Path(sys.argv[1]), sys.argv[2])
-        context = WorkflowContext(
+        context = SessionContext(
             request=str(initialization["request"]),
             instructions=str(initialization.get("instructions") or ""),
             params=dict(initialization.get("params") or {}),
-            workflow_id=str(initialization["workflow_id"]),
+            session_id=str(initialization["session_id"]),
             trigger=dict(initialization.get("trigger") or {}),
         )
         result = await function(context)

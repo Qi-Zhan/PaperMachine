@@ -22,12 +22,12 @@
           :placeholder="t('dialog.newSessionPlaceholder')"
         />
 
-        <label class="field-label" for="session-system-prompt">{{ t('dialog.sessionSystemPrompt') }}</label>
+        <label class="field-label" for="agent-system-prompt">{{ t('dialog.agentSystemPrompt') }}</label>
         <textarea
-          id="session-system-prompt"
+          id="agent-system-prompt"
           v-model="systemPrompt"
           class="text-area text-area--small"
-          :placeholder="t('dialog.sessionSystemPromptPlaceholder')"
+          :placeholder="t('dialog.agentSystemPromptPlaceholder')"
         />
 
         <label class="field-label" for="session-model">{{ t('common.model') }}</label>
@@ -88,7 +88,7 @@ import { LoaderCircle, MessageSquarePlus, X } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAppI18n } from '../i18n'
 import { ACCESS_PRESETS } from '../types'
-import type { AccessPreset, CreateSessionInput, ModelProfile, Project, ProjectSkill } from '../types'
+import type { AccessPreset, CreateInteractiveSessionInput, ModelProfile, Project, ProjectSkill } from '../types'
 
 const props = defineProps<{
   open: boolean
@@ -99,7 +99,7 @@ const props = defineProps<{
   modelProfiles: ModelProfile[]
   defaultModel: string
 }>()
-const emit = defineEmits<{ close: []; submit: [input: CreateSessionInput] }>()
+const emit = defineEmits<{ close: []; submit: [input: CreateInteractiveSessionInput] }>()
 
 const title = ref('')
 const { t } = useAppI18n()

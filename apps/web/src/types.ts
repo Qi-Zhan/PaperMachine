@@ -2,9 +2,16 @@ export type Id = string
 
 export const ACCESS_PRESETS = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
 export type AccessPreset = (typeof ACCESS_PRESETS)[number]
-export type SessionStatus = 'ready' | 'running' | 'paused' | 'failed' | 'archived'
-export type TurnOrigin = 'user' | 'workflow'
-export type PromptLayerKind = 'runtime' | 'project' | 'workflow' | 'agent' | 'skills' | 'control'
+export type SessionStatus =
+  | 'created'
+  | 'running'
+  | 'waiting_for_input'
+  | 'waiting_for_deadline'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+export type PromptLayerKind = 'runtime' | 'project' | 'session' | 'agent' | 'skills' | 'control'
 export type TurnStatus =
   | 'queued'
   | 'running'
@@ -15,15 +22,6 @@ export type TurnStatus =
   | 'cancelled'
 export type StepKind = 'model' | 'tool' | 'workflow' | 'system'
 export type StepStatus = 'running' | 'completed' | 'failed' | 'aborted' | 'cancelled'
-export type WorkflowStatus =
-  | 'created'
-  | 'running'
-  | 'waiting_for_user'
-  | 'waiting_for_deadline'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
 export type ActionStatus = 'scheduled' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 export type HumanRequestStatus = 'open' | 'answered' | 'cancelled'
 export type ControlMessageKind = 'guide' | 'interrupt' | 'finish'
@@ -44,19 +42,6 @@ export interface WorkspaceAttachment {
 
 export interface ProjectCatalogEntry extends Project {
   workspace_available: boolean
-}
-
-export interface Session {
-  id: Id
-  project_id: Id
-  title: string
-  system_prompt: string
-  model: string
-  access: AccessPreset
-  status: SessionStatus
-  enabled_skills: string[]
-  created_at: string
-  updated_at: string
 }
 
 export interface SkillSnapshot { slug: string; sha256: string }
@@ -83,38 +68,12 @@ export interface TokenUsage {
   cache_write_input_tokens: number
 }
 
-export interface Turn {
-  id: Id
-  session_id: Id
-  status: TurnStatus
-  origin: TurnOrigin
-  input: string
-  output: string | null
-  model_route: ModelRouteSnapshot
-  prompt: PromptSnapshot
-  environment: TurnEnvironmentSnapshot
-  tool_set: ToolSetSnapshot
-  tools_enabled: boolean
-  web_search_context_size: 'low' | 'medium' | 'high' | null
-  response_format: unknown | null
-  skill_snapshots: SkillSnapshot[]
-  usage: TokenUsage
-  completed_model_steps: number
-  hosted_search_calls_used: number
-  checkpoint_message: string | null
-  error: string | null
-  created_at: string
-  updated_at: string
-}
-
 export interface ModelRouteSnapshot {
   profile: string
   provider: string
   upstream_model: string
   context_window: number
-  capabilities: {
-    hosted_web_search: boolean
-  }
+  capabilities: { hosted_web_search: boolean }
   reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   config_sha256: string
 }
@@ -134,6 +93,29 @@ export interface TurnEnvironmentSnapshot {
   authorization_sha256: string
 }
 
+export interface Turn {
+  id: Id
+  agent_id: Id
+  status: TurnStatus
+  input: string
+  output: string | null
+  model_route: ModelRouteSnapshot
+  prompt: PromptSnapshot
+  environment: TurnEnvironmentSnapshot
+  tool_set: ToolSetSnapshot
+  tools_enabled: boolean
+  web_search_context_size: 'low' | 'medium' | 'high' | null
+  response_format: unknown | null
+  skill_snapshots: SkillSnapshot[]
+  usage: TokenUsage
+  completed_model_steps: number
+  hosted_search_calls_used: number
+  checkpoint_message: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface AgentStep {
   id: Id
   turn_id: Id
@@ -150,7 +132,7 @@ export interface AgentStep {
   updated_at: string
 }
 
-export interface WorkflowUsage {
+export interface SessionUsage {
   agents_created: number
   actions_started: number
   actions_completed: number
@@ -185,38 +167,50 @@ export interface WorkflowProgramSnapshot extends WorkflowProgram {
   source_code: string
 }
 
-export type WorkflowTriggerKind = 'user' | 'workflow' | 'manual'
-
-export interface WorkflowTrigger {
-  kind: WorkflowTriggerKind
-  source_workflow_id: Id | null
+export interface SessionTrigger {
+  kind: 'user' | 'manual'
   source_session_id: Id | null
 }
 
-export interface Workflow {
+/** One durable runtime instance of a WorkflowProgram. */
+export interface Session {
   id: Id
   project_id: Id
-  started_from_session_id: Id | null
   program: WorkflowProgramSnapshot
+  title: string
   request: string
   instructions: string
-  trigger: WorkflowTrigger
+  trigger: SessionTrigger
   default_model: string
   access: AccessPreset
   enabled_skills: string[]
   agent_access_overrides: Record<string, AccessPreset>
-  status: WorkflowStatus
+  status: SessionStatus
   params: Record<string, unknown>
   output: unknown | null
   error: string | null
   attention_required: boolean
-  usage: WorkflowUsage
+  usage: SessionUsage
+  archived_at: string | null
   created_at: string
   updated_at: string
 }
 
-export interface WorkflowEffect {
-  workflow_id: Id
+export interface Agent {
+  id: Id
+  session_id: Id
+  class_name: string
+  name: string
+  role: string
+  system_prompt: string
+  model: string
+  access: AccessPreset
+  skills: string[]
+  created_at: string
+}
+
+export interface SessionEffect {
+  session_id: Id
   key: string
   kind: string
   request_sha256: string
@@ -228,24 +222,10 @@ export interface WorkflowEffect {
   completed_at: string | null
 }
 
-export interface WorkflowParticipant {
-  id: Id
-  workflow_id: Id
-  session_id: Id
-  class_name: string
-  name: string
-  role: string
-  system_prompt: string
-  model: string
-  skills: string[]
-  created_at: string
-}
-
 export interface ActionInvocation {
   id: Id
-  workflow_id: Id
-  agent_instance_id: Id
   session_id: Id
+  agent_id: Id
   action_name: string
   contract: string
   arguments: unknown
@@ -260,7 +240,6 @@ export interface ActionInvocation {
 
 export interface ActionAttempt {
   id: Id
-  workflow_id: Id
   invocation_id: Id
   number: number
   turn_id: Id | null
@@ -273,8 +252,8 @@ export interface ActionAttempt {
 
 export interface HumanRequest {
   id: Id
-  workflow_id: Id
   session_id: Id
+  agent_id: Id
   question: string
   response_schema: Record<string, unknown>
   status: HumanRequestStatus
@@ -285,8 +264,8 @@ export interface HumanRequest {
 
 export interface ControlMessage {
   id: Id
-  workflow_id: Id
   session_id: Id
+  agent_id: Id
   action_invocation_id: Id | null
   kind: ControlMessageKind
   content: string
@@ -300,8 +279,8 @@ export interface ControlMessage {
 export interface Artifact {
   id: Id
   project_id: Id
-  workflow_id: Id
-  session_id: Id | null
+  session_id: Id
+  agent_id: Id | null
   action_invocation_id: Id | null
   kind: string
   name: string
@@ -334,30 +313,27 @@ export interface ProjectOverview {
   project: Project
   project_home: ProjectHome | null
   project_home_artifact: Artifact | null
-  summary_workflow: Workflow | null
+  summary_session: Session | null
 }
 
-export interface SessionView {
-  session: Session
-  turns: Turn[]
-  steps: AgentStep[]
-  rollout: SessionRolloutStatus
-  workflows: Workflow[]
-  workflow_memberships: WorkflowParticipant[]
-  human_requests: HumanRequest[]
-}
-
-export interface SessionRolloutStatus {
+export interface AgentRolloutStatus {
   version: number
   last_sequence: number
   projected_sequence: number
 }
 
-export interface WorkflowView {
-  workflow: Workflow
-  effects: WorkflowEffect[]
-  participants: WorkflowParticipant[]
-  sessions: Session[]
+export interface AgentRolloutView {
+  agent_id: Id
+  status: AgentRolloutStatus
+}
+
+export interface SessionView {
+  session: Session
+  agents: Agent[]
+  turns: Turn[]
+  steps: AgentStep[]
+  rollouts: AgentRolloutView[]
+  effects: SessionEffect[]
   actions: ActionInvocation[]
   attempts: ActionAttempt[]
   human_requests: HumanRequest[]
@@ -368,7 +344,9 @@ export interface WorkflowView {
 export interface SessionEvent {
   id: Id
   sequence: number
+  project_id: Id
   session_id: Id
+  agent_id: Id | null
   turn_id: Id | null
   step_id: Id | null
   occurred_at: string
@@ -427,21 +405,24 @@ export interface WorkflowValidation {
 }
 export interface GeneratedWorkflow { source: string; validation: WorkflowValidation }
 export interface WorkflowGenerationInput { description: string; name?: string; slug?: string; model?: string }
-export interface CreateSessionInput {
+
+export interface CreateSessionRequest {
+  program_slug: string
+  title?: string
+  request?: string
+  instructions: string
+  params: Record<string, unknown>
+  source_session_id?: Id
+  model: string
+  access: AccessPreset
+  enabled_skills: string[]
+  agent_access_overrides?: Record<string, AccessPreset>
+}
+
+export interface CreateInteractiveSessionInput {
   title: string
   system_prompt: string
   model: string
   enabled_skills: string[]
   access: AccessPreset
-}
-export interface CreateWorkflowInput {
-  program_slug: string
-  request?: string
-  instructions: string
-  params: Record<string, unknown>
-  started_from_session_id?: Id
-  model: string
-  access: AccessPreset
-  enabled_skills: string[]
-  agent_access_overrides?: Record<string, AccessPreset>
 }

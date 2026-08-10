@@ -1,54 +1,51 @@
 # Workflow 语言语义
 
-本文只描述当前 clean-break runtime 已实现的 Python DSL，不记录已删除的
-兼容接口或未来设想。
+本文描述当前 clean-break Python DSL。
 
-## 领域模型
+## 运行时模型
 
-> Project 是 PaperMachine 持久管理的研究世界；Workspace 是 Agent 获准操作的
-> 用户文件系统；两者通过结构化 runtime API 相连，永远不共享存储和安全边界。
+~~~text
+WorkflowProgram 定义
+  -> Session 执行
+       -> 一个或多个 Agent
+            -> ActionInvocation
+                 -> ActionAttempt
+                      -> Turn
+~~~
 
-- `Project` 拥有 Session、Workflow run、prompt、Skill、Artifact 与 journal；这些
-  状态全部位于 PaperMachine managed data root。
-- `Workspace` 是挂到 Project 上的一个用户绝对目录，只作为 Agent cwd 与写入边界，
-  从来不是 Project 存储。
-- `Session` 是 Project 直属的、持久多轮模型会话。
-- `Workflow` 是某份不可变 Python source snapshot 的一次执行。
-- 一个 `Agent` instance 对应一个普通 Project Session，生命周期等于所属 Workflow。
-- `ActionInvocation` 是一次逻辑 Action 调用；它的 `ActionAttempt` 恰好拥有一个
-  Turn。interrupt 可以为同一 Invocation 新建 Attempt。
-- `Turn` 是一次用户请求或 Workflow Action 的模型执行边界。普通聊天由 built-in
-  `interactive-agent` Workflow 实现，因此两者走同一条内核路径。
-- `WorkflowEffect` 在确定性逻辑路径上记录一次精确 host operation。
+Project 同时拥有 WorkflowProgram 定义与 Session 执行。Session 是一次不可变 program
+snapshot，加上输入、配置、状态、effect journal、Agent、event、human request、
+control、usage、output 与 Artifact。Agent 是 Session 内模型身份的公开名称。没有
+Participant entity，也没有每个 Agent 再套一层 Session。
 
-所有请求都通过 Project-scoped route 访问实体；不存在全局 entity lookup 或 ownership
-index。
+每个 Turn 都由 ActionAttempt 创建。交互聊天也遵循同一规则：
+**interactive-agent** 先获得持久 HumanRequest 的回答，再把经过验证的回答传给普通
+Action。来源记录在 trigger、HumanRequest 与 ActionInvocation 上，不再维护
+Turn-origin enum。
 
-## Program 与 launch
+## Program 与启动
 
-一个 source 必须且只能有一个 async `@workflow(...)` entrypoint。literal manifest
-包含 `slug`、`name`、`description`、`request_mode` 与 `params_schema`。validator 还会
-记录 Agent class 及每个 Action 的静态工具声明；有 error diagnostic 的 source 不可运行。
+source 必须且只能有一个 async **@workflow** entrypoint。literal manifest 包含 slug、
+name、description、request_mode 与 params_schema。validator 同时记录 Agent class 和
+Action 的静态工具声明；存在 error diagnostic 的 source 不可启动。
 
-launch 时一次性冻结：
+启动时一次性冻结：
 
 - source、manifest、source SHA-256 与 Python runtime ABI SHA-256；
 - `request_mode="required"` 下的一条具体 `request`；
-- 通过校验的 `params`、可选 run `instructions` 与 launch provenance；
+- 通过校验的 `params`、可选 Session `instructions` 与 launch provenance；
 - 显式选择的 model profile、skills、access ceiling 与 Agent overrides。
 
-runner 暴露 `ctx.request`、`ctx.params`、`ctx.instructions` 与 `ctx.trigger`。Workflow
+runner 暴露 `ctx.session_id`、`ctx.request`、`ctx.params`、`ctx.instructions` 与 `ctx.trigger`。Workflow
 必须把 Action 真正需要的数据显式传入；runtime 不会把 request 或 Project data 偷偷
 升级成 system instructions。
 
-`request_mode="none"` 用于通过 `ask_human` 取得消息的持久交互。New Session 就是这条
-路径；内核没有另一套直接 submit Session 的接口。
+**request_mode="required"** 要求启动任务；**request_mode="none"** 可以无任务启动，
+交互程序之后通过 **ask_human** 取得消息。
 
 ## 公共 DSL
 
-完整公共表面有意保持很小：
-
-```python
+~~~python
 Agent
 @action(...)
 @workflow(...)
@@ -58,89 +55,76 @@ await wait(seconds=... | minutes=..., name=...)
 await ctx.project.changes(...)
 await publish_artifact(...)
 await publish_project_home(action=...)
-```
+~~~
 
-其他控制流直接使用 Python `if`、`for`、`while`。周期执行就是普通 loop 加 durable
-`wait`。
+控制流直接使用 Python **if**、**for**、**while**。周期 Session 就是普通 loop 加一次
+durable wait。
 
-构造 `Agent(...)` 只产生本地对象。第一次 remote operation 才创建 participant Session。
-`await agent.set_access(profile)` 也会先 materialize Session，因此升级不能伪装成构造
-参数修改。Participant 是不可变 membership record，没有独立 lifecycle 状态。
+构造 Agent 只创建本地 descriptor。第一次 remote operation 才在当前 Session 下创建
+持久 Agent row。它的 class、name、role、system prompt、model、access、skills 与
+rollout 在该 Session 生命周期内保持同一身份。
 
 ## Action 与 Turn
 
-`@action` method 是声明：prompt/docstring、bound arguments、model options 与 tool list
-共同描述一个模型 Turn；method body 不作为 Agent logic 执行。
+**@action** method 是声明。prompt/docstring、bound arguments、model options、return
+type 与 tool list 共同描述一次模型 Turn；Python method body 不承载模型逻辑。
 
-await Action 后运行统一 sample/tool/follow-up loop：
+await Action 后运行一次统一 sample/tool/follow-up loop：
 
-1. 创建不可变 Turn；
-2. 采样模型；
-3. 执行该 Turn Registry 中、模型实际请求的本地工具；
-4. 追加 tool output 并继续采样；
-5. 模型给出 terminal assistant message 或 runtime control 时结束。
+1. 创建 ActionInvocation、ActionAttempt 与不可变 Turn；
+2. 对 Agent model 采样；
+3. 只执行 Turn ToolRegistry 中模型实际发出的调用；
+4. checkpoint output，需要时继续采样；
+5. 在 terminal assistant result 或 runtime control 时结束。
 
-`dict`、`list`、`bool`、`int`、`float` typed return 请求 JSON parsing。JSON repair 与
-`finalize="after_search"` 使用独立 no-tool Action Turn，不会获得隐藏工具。
+interrupt 结束当前 Attempt，程序可以为同一个 Invocation 开始新的 Attempt。retry 不会
+伪装成第二个逻辑 ActionInvocation。
 
-`ask_human` 返回的字符串带有 `HumanRequestId`，类型为 `HumanMessage`。只有把它传给
-标注为 `HumanMessage` 的参数，Workflow 才能创建 user-origin Turn。Rust 会验证 request、
-answer、Session 与 exact text。
+dict、list、bool、int、float typed return 请求 JSON parsing。JSON repair 与
+**finalize="after_search"** 使用无工具模型工作，不会获得隐藏 Registry。
 
-每个 Turn 冻结四份互相独立的 snapshot：
-
-| Snapshot | 含义 |
-|---|---|
-| `ModelRouteSnapshot` | provider、upstream model、capabilities、context window、reasoning effort、非秘密配置 hash |
-| `TurnEnvironmentSnapshot` | Workspace revision 与 materialized authorization |
-| `ToolSetSnapshot` | 精确排序后的本地工具定义与 SHA-256 |
-| `PromptSnapshot` | 有序 resolved prompt layers 与 SHA-256 |
-
-恢复时任何 snapshot 无法精确重建都会 fail closed。
+**ask_human** 返回带 HumanRequest provenance 的 HumanMessage。只有 HumanMessage
+类型的 Action 参数能把这份已验证字符串作为直接用户输入；Rust 会验证 Session、
+Agent、request status 与 exact text。
 
 ## Tool 与权限
 
-`@action(tools=[...])` 声明该 Action 请求的全部本地工具；bare `@action` 等于
-`tools=[]`。host 拒绝未知名字，并为 Turn 构造精确、不可变 Registry。
+**@action(tools=[...])** 声明完整的本地工具请求；bare **@action** 等于没有本地工具。
+host 拒绝未知或重复名称。
 
-- Workspace tools 按 Agent 的 materialized access 过滤；
-- Project tools 只有被当前 Workflow Action 明确声明才会进入；
-- hosted web search 不在该列表中，由 provider capability、access 与
-  `search_context_size` 共同决定；
-- 普通 interactive Session 获得 access 允许的 Workspace tools，但永远不自动获得
-  Project tools。
+- Workspace tool 按 Agent 的 materialized access 过滤；
+- Project tool 只有当前 Action 明确声明时才进入；
+- hosted web search 独立由 provider capability、access 与 search_context_size 控制。
 
-Registry membership 与权限是两层独立检查。Registry 决定模型能看到和调用什么；
-filesystem、command、network、managed-root 与 credential rule 仍由工具和 sandbox
-强制执行。
+tool membership 决定模型可见性与 dispatch。filesystem、command、network、
+managed-root 与 credential rule 仍是独立硬约束。
 
-`model_only`、`read_only`、`workspace`、`research`、`full_access` 构成有序 ceiling。
-Workflow launch 固定 run ceiling；Agent override 不可超过它。降级在 Turn 之间直接生效，
-ceiling 内的升级会打开 typed HumanRequest。已创建 Turn 保留自己的 access snapshot。
+Session access 是硬 ceiling，Agent override 不可超过它。降级在 Turn 之间生效；ceiling
+内的升级需要 typed human grant。已有 Turn 保留自己的 authorization snapshot。
 
-## 并发、人工输入与 durable wait
+## 并发
 
-`await together(a(), b(), ...)` 使用 `asyncio.gather`，按参数顺序返回。同一 Agent 的
-两个直接 Action 会被拒绝，因为一个 Session 同时只能有一个 active Turn。不同 Agent
-Session 可在 server-wide permit 内并发。
+**await together(a(), b(), ...)** 使用普通 asyncio gather，并保持参数顺序。同一个
+Session 内的不同 Agent 可以并发；同一 Agent 的两个 active Action 会被拒绝，因为该
+Agent 只有一个 canonical rollout 与一个 active Turn。
 
-`ask_human` 与 `wait` 是 replayable suspension effects。`wait` 只有一条 journal record；
-deadline 由 `WorkflowEffect.started_at + interval` 得出；effect journal 是这次等待唯一的
-持久状态。
+这是唯一必要的串行规则；Session 并不是全局单线程。
 
-当所有 live effect future 都停在 replayable wait 时，Rust 结束空闲 Python process 并
-释放 permit。合法 human answer 或到期 deadline 会重新执行不可变 source；已完成 effect
-直接返回保存结果，因此不会重复已完成的 domain mutation。
+## 人工输入、等待与控制
 
-Control message 状态为 `pending -> claimed -> applied`：
+**ask_human** 与 **wait** 是 replayable suspension effect。wait 只保存一条 journal，
+deadline 由 started_at 加 interval 得出。当所有 live future 都停在可 replay 的等待上，
+Rust 会结束空闲 Python process 并释放 permit。合法回答或到期 deadline 会让同一
+Session 再次 runnable；重放不可变 source 后会到达已存 effect result。
 
-- `guide` 在下一次 sample 前进入 canonical context；
-- `finish` 强制下一次 sample 无工具并给出最终回答；
-- `interrupt` 结束当前 Attempt，并允许同一 Invocation 以新 Attempt 继续；
-- pause 在 checkpoint 等待，resume 继续，cancel 终止 run。
+Control 状态为 **pending -> claimed -> applied**：
 
-只有真正消费 control 的 canonical checkpoint 或 terminal transaction 才会把 claim
-变为 applied；checkpoint 前崩溃时，同一个 Turn 可以重新领取。
+- guide 在下一次 sample 前进入 canonical context；
+- finish 强制下一次 sample 不使用本地工具；
+- interrupt 结束 active Attempt；
+- pause 在 checkpoint 停止，resume 继续，cancel 终止 Session。
+
+只有消费 control 的 checkpoint 或 terminal transaction 才会把 claim 变成 applied。
 
 ## Project API
 
@@ -156,44 +140,29 @@ slug，也没有特殊 Summary Agent 分支。
 
 ## 持久化与恢复
 
-Python host effect 与 model tool call 刻意采用不同恢复契约。
+Session host effect 使用确定性 path 与 request hash。completed effect replay 保存的
+result；同一路径换 input 会 fail closed。effect 之间的纯 Python 可能在 restart 后重跑，
+因此相同 source 与 input 必须产生确定的 effect 顺序和 payload。
 
-Workflow effect 使用确定性 logical path 与 request hash。completed effect replay 保存的
-result；同一路径换 payload 会 fail closed。started host effect 只有在其 domain contract
-幂等时才重新 dispatch。
+每个 Agent JSONL 是 canonical model history：
 
-每个 Session JSONL 是 canonical model history，并且只包含：
-
-```text
+~~~text
 TurnCreated
 ContextCheckpoint
 TurnUpdated
-```
+~~~
 
-SQLite Step 与 Session event 是 query/UI projection，不是 canonical rollout item；
-streaming delta 只存在于实时事件流。
-
-已验证的 `FunctionCall` 必须先进入 `ContextCheckpoint`，之后才允许 dispatch。
-`FunctionCallOutput` 必须先 checkpoint，之后才完成 Step 或继续下一次 sample。恢复时：
-
-- call/output pair 修复缺失的 Tool Step projection；
-- 没有 output 的 call 恰好补一次 JSON string `"aborted"`；
-- 旧 call 永不重新 dispatch；
-- 同一个 Agent 继续，并先观察 durable reality，再决定是否发出新 call。
-
-没有 `ModelSampleCommitted` aggregate、effect-disposition enum 或 model-tool
-reconciliation API。
+model FunctionCall 必须先 sync 再 dispatch；FunctionCallOutput 必须先 sync 再继续采样。
+恢复时，没有 output 的 call 会得到一次稳定 **"aborted"**，旧 call 永不再次 dispatch。
+同一个 Agent 会观察 durable reality，再决定是否发出新 call。host-effect replay 与
+model-tool recovery 刻意分层。
 
 ## 状态与完成
 
-Workflow status 为 `created`、`running`、`waiting_for_user`、
-`waiting_for_deadline`、`paused`、`completed`、`failed`、`cancelled`。
-`waiting_for_deadline` 表示 durable `wait` effect 尚未到期。
+Session status 为 **created**、**running**、**waiting_for_input**、
+**waiting_for_deadline**、**paused**、**completed**、**failed** 或 **cancelled**。
+archive 是独立 metadata，不是另一种执行状态。
 
-entrypoint return 通过 `complete` effect 提交。只有 Python process 正常退出且 final usage
-已记录，scheduler 才 commit `completed`。未捕获 Python、model、tool、protocol 或 sandbox
-错误会 fail run。关闭 Session 会 archive 它并取消拥有它的 active Workflow，但不删除
-历史。
-
-effect 之间的纯 Python 代码可能在 restart 后重跑，因此相同 source snapshot 与 inputs
-必须产生相同 effect 顺序和 payload。
+entrypoint return 通过 completion effect 提交。只有 Python process 正常退出且 final
+usage 已记录，scheduler 才 commit completed。未捕获 Python、model、tool、protocol 或
+sandbox error 会使 Session 失败。archive 会取消 active Session，同时保留历史。

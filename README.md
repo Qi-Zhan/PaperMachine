@@ -1,45 +1,43 @@
 # PaperMachine
 
-PaperMachine is a local-first auto-research workbench. A **Project** owns all
-of its durable, Codex-like **Sessions** and **Workflows**. A Session is the
-main workbench: every Workflow Action creates a Turn, and an interactive Action
-uses the verified user message as that Turn's input. Model samples, tool calls,
-retries, context trims, usage, and output remain inspectable under the Turn.
+PaperMachine is a local-first research workbench. Its runtime model is small:
+
+~~~text
+Project
+  Session                         one durable WorkflowProgram execution
+    Agents                        independent model identities and rollouts
+      ActionInvocation
+        ActionAttempt -> Turn -> model/tool Steps
+    effects, events, human requests, controls, artifacts
+~~~
+
+A WorkflowProgram is immutable Python source plus a manifest. Starting one
+creates a Session that owns its complete lifecycle. The Session may create one
+or many Agents; every Agent keeps its own prompt, model, access, skills, and
+canonical rollout. Session is the only runtime lifecycle.
 
 > A Project is a research world persistently managed by PaperMachine; a
 > Workspace is the user filesystem an Agent is authorized to operate;
 > structured runtime APIs connect them, and they never share storage or a
 > security boundary.
 
-A WorkflowProgram is a Python collaboration protocol. Starting it creates a
-durable Workflow that snapshots the exact program source. It creates Agent
-instances, and every Agent instance is backed by an ordinary Project-owned
-Session. The workflow combines those Sessions; it does not create a separate
-Session hierarchy.
+Every model Turn belongs to an ActionAttempt. A user message is not a separate
+execution primitive: the built-in **interactive-agent** program obtains a
+durable HumanRequest answer and passes it to an ordinary Action. **goal** and
+**project-summary** are ordinary built-in programs as well; the Rust kernel has
+no slug-specific execution path.
 
-Both the Project page and a Session header use the same **Run Workflow**
-launcher. A Project-level launch starts new work from the Project as a whole;
-a Session-origin launch records that Session as provenance and can prioritize
-its recent Turns in the captured context. The Workflow's concrete request,
-reusable params, optional run instructions, explicitly selected model profile, skills, permission
-ceiling, per-Agent access overrides, trigger, and launch context are explicit
-run configuration rather than hidden global state. Workflow code decides which
-Agents receive the request or captured context; the runtime never promotes
-either into system instructions.
+One Session may run several Agents concurrently, while each Agent admits one
+active Turn at a time. A Session-origin launch records provenance but still
+creates an independent Session with one immutable program snapshot.
 
-The ordinary **New Session** command starts the reviewed `interactive-agent`
-Workflow. That program creates one persistent Agent Session, waits for a human
-message before every Turn, and normally remains `waiting_for_user` for the
-Session's lifetime. Closing the Session archives its history and cancels that
-interactive Workflow. There is no separate standalone-Session creation path.
+Project Home is the output of the ordinary **project-summary** Session. Its
+Agent discovers changed `pm://` resources, reads what matters with the generic
+`read_resource` tool, and returns one complete HTML fragment. The host validates
+and publishes that exact Action result as immutable source and HTML Artifacts.
+The page is Project-managed state, not a Workspace file or embedded dashboard.
 
-The reviewed `goal` Workflow is the minimal autonomous loop: one persistent
-Agent performs a normal tool-capable Turn and leaves the Goal `active`, or marks
-that same Turn `complete` or genuinely `blocked`. Only `active` starts another
-Turn; it never waits for a user message between Turns. Model, access, persistent
-Agent prompt, Project context, and user guidance all use the ordinary Workflow
-and Session mechanisms; pause, cancellation, provider failure, and completion
-all stop the loop without a separate evaluator Agent.
+## Storage
 
 The **Project Page** can run the reviewed `project-summary` Workflow once or in
 a normal loop separated by durable waits. Its ordinary Agent receives only
@@ -51,209 +49,137 @@ itself; there is no fixed dashboard or embedded frame. The summary policy is
 the run's ordinary `instructions` field; there is no review Action, hidden
 summary daemon, or extra instance model.
 
-```text
-Project
-  Sessions
-    Turn -> model/tool Steps
-  Workflows
-    optional starting Session
-    Agent instance <-> Session
-      Action -> Attempt -> Turn -> Steps
-    Human requests, controls, effects, and artifacts
-```
+**resource_root** contains read-only application resources: web assets, the
+Python DSL runtime, and built-in WorkflowPrograms. The server requires it via
+**--resource-root** or **PAPERMACHINE_RESOURCE_ROOT**; it never treats the
+current repository as an implicit data store.
 
-PaperMachine separates shipped resources, PaperMachine-managed Project worlds,
-and user-owned Workspace directories. The repository is never used as an
-implicit data store.
+**data_dir** defaults to:
 
-## Storage model
-
-`resource_root` is read-only application material: web assets, the Python DSL
-runtime, and built-in Workflows. The server requires it explicitly through
-`--resource-root` or `PAPERMACHINE_RESOURCE_ROOT`; it never infers resources
-from the current working directory. `data_dir` contains only application-global state:
-
-| Platform | Default `data_dir` |
+| Platform | Default |
 | --- | --- |
-| macOS | `~/Library/Application Support/PaperMachine` |
-| Linux | `$XDG_DATA_HOME/papermachine`, or `~/.local/share/papermachine` |
-| Windows | `%LOCALAPPDATA%\PaperMachine` |
+| macOS | ~/Library/Application Support/PaperMachine |
+| Linux | $XDG_DATA_HOME/papermachine, or ~/.local/share/papermachine |
+| Windows | %LOCALAPPDATA%\\PaperMachine |
 
-The default provider configuration is `<data_dir>/config.toml`; `--config`
-selects another file without changing Project storage. There is no global
-Project database. PaperMachine owns all Project state below `data_dir`:
+PaperMachine-managed state is isolated by Project:
 
-```text
+~~~text
 <data_dir>/
+  config.toml
   projects/<project-id>/
     state/project.db
-    rollouts/<session-id>.jsonl
+    rollouts/<agent-id>.jsonl
     artifacts/
-    workflow-runtime/           disposable Python process scratch
-    runtime/sandboxes/          disposable per-Turn process scratch
     prompts/
     workflows/
     skills/
+    workflow-runtime/           disposable Python process scratch
+    runtime/sandboxes/          disposable Turn scratch
   staging/
   trash/
-```
+~~~
 
-At startup, PaperMachine scans `projects/<project-id>/state/project.db`; the
-directory ID and that database's single Project row must agree. Creation builds
-fresh state in `staging/` and atomically publishes it into `projects/`. Removal
-atomically moves managed state into `trash/` before asynchronous deletion.
+There is no global Project database. Startup scans each Project independently;
+one damaged entry produces a diagnostic without hiding healthy Projects.
+Creation publishes a staged directory atomically. Removal stops that Project's
+runtime and Store, moves only managed state to trash, and never deletes its
+Workspace.
 
-Each Project references one user-selected absolute Workspace. Agents start in
-that Workspace, but PaperMachine never writes application metadata there and
-rejects a Workspace that overlaps any managed state. Relocating a Project only
-changes this attachment. Removing a Project leaves the Workspace untouched. A
-missing Workspace remains visible and can be reattached. The web client loads
-the small Project overview separately from its bounded Session list.
+Each Project attaches one canonical absolute Workspace. It may be selected by
+the user or created under **~/Documents/PaperMachine/**. PaperMachine writes no
+database, prompt, Skill, rollout, or hidden metadata there. A missing Workspace
+leaves Project history inspectable and can be reattached.
 
-Before a Project runtime accepts work, Artifact files are reconciled with the
-database: uncommitted orphan files are removed, while missing or modified
-durable Artifacts fail closed. Workflow process directories and Turn sandboxes
-are reconstructed scratch and are removed after use.
+## Runtime
+
+Before every Turn the host freezes four independent snapshots:
+
+- **ModelRouteSnapshot**: exact provider/model route and non-secret config hash;
+- **TurnEnvironmentSnapshot**: Workspace revision and materialized access;
+- **ToolSetSnapshot**: exact sorted local tool definitions and hash;
+- **PromptSnapshot**: rendered runtime, Project, Session, Agent, Skill, Action,
+  and control instructions.
+
+**@action(tools=[...])** requests local tools. The host validates names, filters
+Workspace tools by Agent access, and admits Project tools only through an
+explicit Action declaration. Hosted web search remains a provider capability.
+Registry membership controls model visibility and dispatch; filesystem,
+network, managed-root, credential, and sandbox checks remain independent hard
+enforcement.
+
+Each Agent JSONL is canonical model history. A validated model FunctionCall is
+synced before dispatch, and its FunctionCallOutput is synced before another
+sample. SQLite Steps and events are projections. After a crash, a canonical
+call without output receives one stable **"aborted"** output and is never
+automatically replayed; the same Agent continues from persisted context and
+observes durable reality.
+
+Python host effects use a separate deterministic journal. Replaying immutable
+program source returns completed results and suspends again at durable human or
+deadline waits. Model tool calls never use that replay contract.
 
 ## Codex relationship
 
-PaperMachine follows selected Codex implementation patterns and carries adapted
-code for:
+PaperMachine adapts selected Codex implementation patterns:
 
-- Responses API request construction, WebSocket continuation, and SSE fallback;
-- the sample/tool/follow-up agent loop and parallel tool calls;
-- cancellation, retry visibility, and context-window accounting;
+- Responses request construction, streaming, and WebSocket/SSE fallback;
+- the sample/tool/follow-up loop and parallel tool calls;
+- cancellation, retry visibility, context accounting, and compaction;
 - process-group lifecycle and fail-closed sandbox execution;
-- one-live-writer Session rollouts with durable-write-before-projection ordering;
-- a conversation-first UI with execution details folded under each Turn.
+- durable-write-before-projection rollout ordering;
+- missing tool-output normalization to **"aborted"**;
+- a conversation-first UI with execution details beneath each Turn.
 
-Codex is source material, not PaperMachine's runtime dependency. Skills are
-Project-owned instruction files. Their resolved instructions are frozen into
-each Turn's PromptSnapshot; scripts and assets are not a runtime capability.
+PaperMachine owns its Project, Workspace, WorkflowProgram, Session, Agent,
+provider, Skill, Artifact, and HTTP model. Codex is source material, not a
+runtime dependency.
 
 ## Repository layout
 
-- `crates/protocol`: canonical IDs, entities, events, and API data types.
-- `crates/model`: provider profiles, model routing, Responses API streaming,
-  and deterministic model clients.
-- `crates/tools`: host ToolCatalog, exact per-Turn ToolRegistry, and local tools.
-- `crates/execution`: process lifecycle and OS sandbox enforcement.
-- `crates/agent`: sampling, tool execution, retry, control checkpoints, context.
-- `crates/session`: durable multi-turn Session and workflow-action runtime.
-- `crates/store`: SQLite documents/events and content-addressed artifacts.
-- `crates/workflow`: Python DSL validation, effect interpretation, scheduling.
-- `crates/server`: HTTP/SSE API and static web serving.
-- `apps/web`: Project overview, Session workbench, and Workflow page.
-- `python/papermachine`: user-facing DSL and the isolated effect client.
-- `workflows/builtin`: reviewed workflows shipped with PaperMachine.
-- `<data_dir>/projects/<project-id>/workflows`: Project-owned user WorkflowPrograms.
-
-## Current capabilities
-
-- Run multiple Projects, Sessions, Turns, and Workflows concurrently.
-- Configure multiple AI providers in PaperMachine's own TOML file and select a
-  model profile per Session or workflow Agent. Provider model IDs, credentials,
-  transport policy, and context windows do not come from Codex.
-- Preserve multi-turn model history without provider-side response storage,
-  reuse provider-managed prompt caches with stable prompt-prefix keys shared by
-  matching Agents, continue local tool loops and later Turns with per-Session
-  WebSocket state, distinguish cache writes from cache reads, and compact long
-  histories at 90% of the available context capacity.
-- Inspect live text, model steps, tool calls, retries, trims, errors, and usage.
-- Enable Project-local skills per Session and freeze their complete resolved
-  instructions into each Turn's PromptSnapshot.
-- Assign each Session/Workflow Agent one of five access presets. A Workflow
-  launch establishes a hard run ceiling, a Session-origin launch cannot exceed
-  the source Session, and per-Agent class overrides cannot exceed the run.
-  Profiles are snapshotted per Turn and enforced while the host constructs its
-  exact ToolRegistry, inside built-in tools, path resolution, and command sandboxing;
-  later in-run upgrades within the established ceiling require a typed human
-  grant.
-- Define Agents and actions in Python; use ordinary `if`, `for`, and `while`.
-- Preserve exact human-message provenance in interactive actions: a string
-  HumanRequest answer becomes the visible/model-facing user Turn, while its
-  action contract remains an inspectable prompt layer.
-- Compose explicit concurrency with `together(...)` and serialize each Agent's
-  own Session Turns.
-- Add Agents dynamically and express orchestration with ordinary Python control
-  flow plus explicit `together(...)` concurrency.
-- Suspend quiescent human/deadline waits without retaining an idle Python
-  process or global execution permit; `wait(...)` is one journaled effect whose
-  persisted start time defines its deadline.
-- Observe Project changes with `ctx.project.changes()` and let Actions inspect
-  selected `pm://` resources through the generic `read_resource` tool. Publish
-  deterministic text/HTML Artifacts with `publish_artifact(...)`.
-- Declare every Action's local tools with `@action(tools=[...])`. Rust validates
-  names, filters Workspace tools against the Turn access ceiling, and atomically
-  stores the resulting sorted definitions and SHA-256 with the Turn. Project
-  tools are admitted only through a Workflow Action declaration.
-  `project-summary` declares only `read_resource`, returns ordinary HTML, then
-  calls `publish_project_home(...)` with that exact completed Action.
-- Generate a Project progress webpage manually or with the built-in scheduled
-  `project-summary` Workflow, with an explicit user-editable Workflow prompt.
-- Pause, resume, or cancel a Workflow; guide an Agent at the next safe boundary;
-  interrupt an attempt; or let explicit Workflow code request typed human input.
-- Recover every non-terminal Workflow after a server restart by replaying its
-  immutable Python source against deterministic effect IDs and a durable result
-  journal; unfinished Agent actions resume the same checkpointed Turn. A model
-  function call must enter canonical Session history before dispatch. If a
-  restart finds a call without its output, recovery appends the stable output
-  `"aborted"`, never invokes that old call, and lets the same Agent observe
-  durable reality before deciding what to do next. Every Turn belongs to a
-  Workflow Action and resumes only through that ActionAttempt and immutable
-  Workflow program.
-- Generate, inspect, validate, and save workflow source from the Workflow
-  page. Advanced source editing is available but is not the primary UI.
-- Use Responses API hosted web search for normal research and retain every
-  hosted call as an inspectable Tool Step. `fetch_url` remains available for
-  bounded, readable extraction of a known HTTPS source.
+- **crates/protocol**: canonical IDs, entities, events, and API types.
+- **crates/model**: provider profiles, routing, and Responses transports.
+- **crates/tools**: host ToolCatalog, per-Turn ToolRegistry, and local tools.
+- **crates/execution**: process lifecycle and OS sandbox enforcement.
+- **crates/agent**: sampling, tool execution, controls, and context.
+- **crates/session**: ActionAttempt and Turn execution for durable Agents.
+- **crates/store**: Project SQLite, Agent rollouts, managed files, and Artifacts.
+- **crates/workflow**: Python validation, effect interpretation, and scheduling.
+- **crates/server**: Project-scoped HTTP/SSE API and static web serving.
+- **apps/web**: Project overview, unified Session workbench, and program editor.
+- **python/papermachine**: public DSL and isolated effect client.
+- **workflows/builtin**: reviewed WorkflowPrograms shipped with PaperMachine.
 
 ## Quick start
 
-Rust is pinned by `rust-toolchain.toml`; Node.js and pnpm are required.
+Rust is pinned by **rust-toolchain.toml**; Node.js and pnpm are required.
 
-```sh
+~~~sh
 pnpm install
 pnpm --dir apps/web build
 pnpm server:demo
-```
+~~~
 
-Open <http://127.0.0.1:4310>. Demo mode exercises the full runtime and UI but
-does not perform substantive research. The development launcher uses the
-platform `data_dir` above with a dedicated `dev` suffix, so it cannot populate
-the normal Project catalog. It uses `CARGO` when explicitly set, otherwise
-`cargo` from `PATH`; it does not guess a Rust installation directory.
+Open http://127.0.0.1:4310. Demo mode exercises the runtime and UI without
+substantive research. The loopback-only server rejects non-loopback Host
+headers.
 
-The server is loopback-only and rejects non-loopback Host headers. It is a local
-desktop service, not an authenticated network deployment.
+Real models use **<data_dir>/config.toml** or **--config**. Credentials are
+resolved only from the environment variable named by each provider:
 
-For real models, PaperMachine loads `config.toml` from its platform user-data
-directory by default, or the file passed to `--config`. The committed
-development config contains ordinary Responses-compatible profiles for GLM 5.2
-and DeepSeek V4 Flash. It currently selects GLM and resolves credentials only
-from the environment:
-
-```sh
+~~~sh
 AEROIDES_API_KEY=... DEEPSEEK_API_KEY=... pnpm server:dev
-```
+~~~
 
-`pnpm server:dev --config /absolute/path/config.toml` selects a different
-development provider file. A packaged or direct server invocation may omit
-`--data-dir` to use the normal platform location; development commands provide
-an isolated directory explicitly.
+A minimal multi-provider configuration looks like:
 
-The configuration shape supports several providers and model profiles in one
-server process:
-
-```toml
+~~~toml
 default_model = "glm-5-2"
 
 [providers.aeroides]
 kind = "open_ai_responses"
 base_url = "https://private.aeroides.dev/v1"
 api_key_env = "AEROIDES_API_KEY"
-request_timeout_seconds = 900
-stream_idle_timeout_seconds = 300
 responses_websockets = false
 prompt_cache_mode = "implicit"
 
@@ -262,21 +188,8 @@ kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 optional = true
-request_timeout_seconds = 900
-stream_idle_timeout_seconds = 300
 responses_websockets = false
 prompt_cache_mode = "implicit"
-
-[providers.openai]
-kind = "open_ai_responses"
-base_url = "https://api.openai.com/v1"
-api_key_env = "PAPERMACHINE_OPENAI_API_KEY"
-
-[models.deepseek-flash]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-context_window = 1000000
-capabilities = ["hosted_web_search"]
 
 [models.glm-5-2]
 provider = "aeroides"
@@ -284,44 +197,22 @@ model = "glm-5.2"
 context_window = 1048576
 capabilities = []
 
-[models.openai-main]
-provider = "openai"
-model = "gpt-5.6-sol"
+[models.deepseek-flash]
+provider = "deepseek"
+model = "deepseek-v4-flash"
 context_window = 1000000
 capabilities = ["hosted_web_search"]
-```
+~~~
 
-The Session `model` field and `Agent.model` select profile IDs such as
-`deepseek-flash`, not raw provider model names. Model-step metadata records the
-selected profile, provider, and concrete upstream model. The current transport
-adapter supports providers that implement the OpenAI Responses shape; additional
-wire protocols can be added behind the same router.
-
-Real-model mode requires a PaperMachine provider file; demo mode must be
-selected explicitly. Only the credential variable named by each provider's
-`api_key_env` is read from the environment.
-
-Provider request deadlines, stream-idle deadlines, cache mode, response
-storage, reasoning defaults, and transport policy belong in the provider table.
-Hosted tools are declared per model profile with an explicit `capabilities`
-array. Add `hosted_web_search` only when that concrete model returns auditable
-Responses `web_search_call` items, rather than merely accepting the tool schema.
-An `optional = true` provider and its profiles are skipped when its credential
-is absent; the provider of `default_model` is always required.
-`prompt_cache_mode` accepts `auto` (default), `implicit`, or
-`explicit`. Auto mode probes explicit-breakpoint support once per model and
-uses provider-managed implicit caching when an OpenAI-compatible endpoint
-rejects the breakpoint field.
-PaperMachine first attempts Responses WebSocket mode for each model-backed
-Session. If
-the configured provider rejects the handshake, that server process falls back
-to ordinary HTTP SSE for that Session while prompt caching remains enabled.
-Set `responses_websockets = false` in the provider table when a compatible
-provider is known not to implement Responses WebSocket mode.
+Session **default_model** and **Agent.model** name model profile IDs, not
+upstream model strings. Provider transport, timeouts, caching, reasoning
+defaults, and capabilities remain provider/model configuration. A capability
+such as **hosted_web_search** should be declared only when the concrete
+endpoint returns auditable Responses tool items.
 
 ## Verification
 
-```sh
+~~~sh
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
@@ -329,15 +220,14 @@ PYTHONPATH=python python3 -m unittest discover -s python/tests -p 'test_*.py'
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 git diff --check
-```
+~~~
 
-On macOS and Linux, the Rust workspace run includes the real-process `SIGKILL`
-matrix in `crates/server/tests/process_recovery.rs`. Native Windows is not in
-the current release test scope.
+Native Windows is outside the current release test scope.
 
-See the accepted [runtime kernel target](docs/runtime-kernel.md),
-[architecture](docs/architecture.md), [Project/Workspace semantics](docs/project-workspace.md),
-[prompt model](docs/prompt-model.md),
-[workflow ABI](docs/workflow-abi.md),
-[workflow semantics](docs/workflow-language-semantics.md), and
-[security boundaries](docs/security.md).
+See [architecture](docs/architecture.md),
+[runtime kernel](docs/runtime-kernel.md),
+[Project and Workspace](docs/project-workspace.md),
+[prompt and model snapshots](docs/prompt-model.md),
+[Workflow ABI](docs/workflow-abi.md),
+[Workflow semantics](docs/workflow-language-semantics.md), and
+[security](docs/security.md).

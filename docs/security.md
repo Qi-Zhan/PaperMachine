@@ -28,25 +28,25 @@ The Python process cannot create authoritative domain state directly. It can
 only request typed effects over JSONL. Rust validates IDs, ownership, schemas,
 statuses, permissions, and Session serialization before applying them.
 
-`ctx.project.changes()` is a Rust-owned effect fixed to the current Workflow's
+`ctx.project.changes()` is a Rust-owned effect fixed to the current Session's
 Project. It returns only a durable cursor and changed `pm://` resource URIs,
-excluding the calling Workflow's own Sessions and outputs. Project contents are
+excluding the calling Session's own records and outputs. Project contents are
 never injected into a Workflow or model prompt. An Action must explicitly
 declare `read_resource` and choose which current-Project resource to read;
 ownership and response-size bounds are enforced by Rust.
 
 `publish_artifact(...)` accepts bounded text only, derives a deterministic
-Artifact ID from the Workflow/effect path, and verifies optional Agent
+Artifact ID from the Session/effect path, and verifies optional Agent
 ownership.
 
 Python also cannot label arbitrary action text as a human message. A
-user-origin workflow Action must name an answered direct HumanRequest and its
-annotated `HumanMessage` argument. Rust verifies Workflow/Session ownership,
+direct-user Action must name an answered HumanRequest and its annotated
+`HumanMessage` argument. Rust verifies Session/Agent ownership,
 request status, response type, and exact text before the Store accepts the
 Turn; the ActionInvocation retains the source HumanRequest ID for inspection.
 
 Saving the same Project-local slug replaces the editable program source. Every
-Workflow stores an immutable snapshot of the exact source and SHA-256 it started
+Session stores an immutable snapshot of the exact source and SHA-256 it started
 with, together with the SHA-256 of the Python DSL runtime used to validate it.
 Before every initial execution or recovery, Rust re-hashes both source and DSL
 runtime; a mismatch fails before Python starts or any effect is dispatched.
@@ -84,19 +84,19 @@ writes and child-process network after explicit confirmation. Every profile,
 including `full_access`, is denied PaperMachine managed state. `ask_human` is
 not model-visible and exists only as an explicit Workflow DSL effect.
 
-Run creation applies access bounds before Python starts. The Workflow profile
-is a hard ceiling; a Session-origin Workflow cannot choose a profile above the
-source Session, and an Agent class override cannot exceed the Workflow. Agent
-class declarations above the run ceiling are clamped. The Python
+Session creation applies access bounds before Python starts. Session access is
+the hard ceiling; a Session-origin launch cannot choose a profile above its
+source Session, and an Agent class override cannot exceed the new Session.
+Agent class declarations above the ceiling are clamped. The Python
 `set_access(...)` effect cannot cross that ceiling, and any upgrade within it
 still requires a typed boolean HumanRequest. The Store and Workflow runtime
 both enforce these rules; hiding unavailable choices in the web UI is not the
 security boundary.
 
-Turn creation materializes the Session preset with the exact Workspace
+Turn creation materializes the Agent preset, bounded by Session access, with the exact Workspace
 attachment and revision, cwd, managed-state deny, filesystem scopes, tool
 capabilities, and network capabilities. Independently, the host ToolCatalog
-constructs one exact ToolRegistry. A Workflow Action starts from its static
+constructs one exact ToolRegistry. An Action starts from its static
 `@action(tools=[...])` declaration and filters Workspace tools through that
 materialized access policy. Project tools also require explicit Action
 declaration. The Turn atomically persists the sorted tool definitions and their
@@ -107,7 +107,7 @@ that ToolSet. An absent executor, changed definition, invalid hash, or forged
 call fails closed. The registry has no permission bypass and cannot execute a
 tool outside its membership. File, network, managed-state, and sandbox checks
 remain inside each implementation as defense in depth. Thus declaring a
-Workspace tool never expands the Session's filesystem or network policy, while
+Workspace tool never expands the Agent's filesystem or network policy, while
 declaring a Project tool never grants access to its managed files.
 
 Provider tool-call IDs are opaque call identities, but they must be non-empty,
@@ -130,7 +130,7 @@ unreadable; Workspace-root `.git`, `.agents`, and `.codex` metadata is
 read-only. `exec_command` consumes the
 same materialized filesystem, metadata, credential, managed-root, environment,
 and child-network policy. It starts with an empty environment, redirects
-home/temp paths into a Session sandbox, denies writes outside the Workspace,
+home/temp paths into a Turn sandbox, denies writes outside the Workspace,
 and denies child-process network below `full_access`.
 
 One manager performs request validation, policy resolution, environment
@@ -193,9 +193,9 @@ not silently rewrite the endpoint.
   even if its external effect may already exist. The next model sample must
   inspect durable reality. This avoids duplicate writes but deliberately cannot
   prove whether an interrupted external effect happened.
-- Every Turn is owned by one ActionAttempt and is recovered only by its
-  Workflow runtime. There is no separate Session submit or manual Turn-resume
-  capability.
+- Every Turn is owned by one Agent and ActionAttempt and is recovered only
+  through its Session. There is no direct Turn-submit or manual Turn-resume
+  path.
 - An Action continues until the model returns a terminal answer, the user
   finishes/interrupts/cancels it, or an infrastructure/provider error occurs.
   Provider request and stream-idle timeouts protect broken connections, and

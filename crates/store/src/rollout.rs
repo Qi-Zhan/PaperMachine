@@ -1,4 +1,4 @@
-//! Session rollout persistence, adapted from OpenAI Codex's one-live-writer
+//! Agent rollout persistence, adapted from OpenAI Codex's one-live-writer
 //! and durable-write-before-SQLite-projection design at commit
 //! `b2dc8b3e4be4fe3a453d50e13835f707b258f15b`.
 //!
@@ -6,13 +6,13 @@
 //! schema with PaperMachine-owned entity and durability semantics.
 
 use crate::StoreError;
+use papermachine_protocol::AGENT_ROLLOUT_VERSION;
 use papermachine_protocol::ActiveTurnRolloutState;
+use papermachine_protocol::AgentId;
+use papermachine_protocol::AgentRolloutItem;
+use papermachine_protocol::AgentRolloutRecord;
+use papermachine_protocol::AgentRolloutState;
 use papermachine_protocol::ModelContextMutation;
-use papermachine_protocol::SESSION_ROLLOUT_VERSION;
-use papermachine_protocol::SessionId;
-use papermachine_protocol::SessionRolloutItem;
-use papermachine_protocol::SessionRolloutRecord;
-use papermachine_protocol::SessionRolloutState;
 use papermachine_protocol::TurnStatus;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -25,16 +25,13 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub(crate) fn path(root: &Path, session_id: SessionId) -> PathBuf {
-    root.join(format!("{session_id}.jsonl"))
+pub(crate) fn path(root: &Path, agent_id: AgentId) -> PathBuf {
+    root.join(format!("{agent_id}.jsonl"))
 }
 
-pub(crate) fn read(
-    root: &Path,
-    session_id: SessionId,
-) -> Result<Vec<SessionRolloutRecord>, StoreError> {
+pub(crate) fn read(root: &Path, agent_id: AgentId) -> Result<Vec<AgentRolloutRecord>, StoreError> {
     let mut records = Vec::new();
-    scan(root, session_id, |record| {
+    scan(root, agent_id, |record| {
         records.push(record);
         Ok(())
     })?;
@@ -43,11 +40,11 @@ pub(crate) fn read(
 
 pub(crate) fn read_after(
     root: &Path,
-    session_id: SessionId,
+    agent_id: AgentId,
     sequence: u64,
-) -> Result<(u64, Vec<SessionRolloutRecord>), StoreError> {
+) -> Result<(u64, Vec<AgentRolloutRecord>), StoreError> {
     let mut records = Vec::new();
-    let last_sequence = scan(root, session_id, |record| {
+    let last_sequence = scan(root, agent_id, |record| {
         if record.sequence > sequence {
             records.push(record);
         }
@@ -56,25 +53,25 @@ pub(crate) fn read_after(
     Ok((last_sequence, records))
 }
 
-pub(crate) fn last_sequence(root: &Path, session_id: SessionId) -> Result<u64, StoreError> {
-    scan(root, session_id, |_| Ok(()))
+pub(crate) fn last_sequence(root: &Path, agent_id: AgentId) -> Result<u64, StoreError> {
+    scan(root, agent_id, |_| Ok(()))
 }
 
 pub(crate) fn reconstruct_file(
     root: &Path,
-    session_id: SessionId,
-) -> Result<SessionRolloutState, StoreError> {
-    let mut state = SessionRolloutState::default();
-    scan(root, session_id, |record| apply_record(&mut state, &record))?;
+    agent_id: AgentId,
+) -> Result<AgentRolloutState, StoreError> {
+    let mut state = AgentRolloutState::default();
+    scan(root, agent_id, |record| apply_record(&mut state, &record))?;
     Ok(state)
 }
 
 fn scan(
     root: &Path,
-    session_id: SessionId,
-    mut visit: impl FnMut(SessionRolloutRecord) -> Result<(), StoreError>,
+    agent_id: AgentId,
+    mut visit: impl FnMut(AgentRolloutRecord) -> Result<(), StoreError>,
 ) -> Result<u64, StoreError> {
-    let path = path(root, session_id);
+    let path = path(root, agent_id);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
@@ -82,7 +79,7 @@ fn scan(
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(StoreError::Invariant(format!(
-            "Session rollout is not a real file: {}",
+            "Agent rollout is not a real file: {}",
             path.display()
         )));
     }
@@ -113,12 +110,12 @@ fn scan(
         };
         if document.is_empty() {
             return Err(StoreError::Invariant(format!(
-                "empty interior Session rollout record {} in {}",
+                "empty interior Agent rollout record {} in {}",
                 expected_sequence,
                 path.display()
             )));
         }
-        let record = match serde_json::from_slice::<SessionRolloutRecord>(document) {
+        let record = match serde_json::from_slice::<AgentRolloutRecord>(document) {
             Ok(record) => record,
             Err(_) if !complete => {
                 let file = reader.into_inner();
@@ -130,16 +127,16 @@ fn scan(
             }
             Err(error) => {
                 return Err(StoreError::Invariant(format!(
-                    "invalid Session rollout record {expected_sequence} in {}: {error}",
+                    "invalid Agent rollout record {expected_sequence} in {}: {error}",
                     path.display()
                 )));
             }
         };
-        validate_record(&record, session_id, expected_sequence, &path)?;
+        validate_record(&record, agent_id, expected_sequence, &path)?;
         visit(record)?;
-        expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
-            StoreError::Invariant("Session rollout sequence overflow".to_string())
-        })?;
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Invariant("Agent rollout sequence overflow".to_string()))?;
         if complete {
             complete_len = complete_len.saturating_add(read as u64);
         } else {
@@ -161,14 +158,14 @@ fn scan(
     Ok(expected_sequence - 1)
 }
 
-pub(crate) fn append(root: &Path, record: &SessionRolloutRecord) -> Result<(), StoreError> {
-    let path = path(root, record.session_id);
+pub(crate) fn append(root: &Path, record: &AgentRolloutRecord) -> Result<(), StoreError> {
+    let path = path(root, record.agent_id);
     if std::fs::symlink_metadata(&path)
         .map(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
         .unwrap_or(false)
     {
         return Err(StoreError::Invariant(format!(
-            "Session rollout is not a real file: {}",
+            "Agent rollout is not a real file: {}",
             path.display()
         )));
     }
@@ -196,14 +193,14 @@ pub(crate) fn append(root: &Path, record: &SessionRolloutRecord) -> Result<(), S
 }
 
 fn apply_record(
-    state: &mut SessionRolloutState,
-    record: &SessionRolloutRecord,
+    state: &mut AgentRolloutState,
+    record: &AgentRolloutRecord,
 ) -> Result<(), StoreError> {
     match &record.item {
-        SessionRolloutItem::TurnCreated { turn, .. } => {
+        AgentRolloutItem::TurnCreated { turn, .. } => {
             if state.active_turn.is_some() {
                 return Err(StoreError::Invariant(format!(
-                    "Session rollout created Turn {} while another Turn was active",
+                    "Agent rollout created Turn {} while another Turn was active",
                     turn.id
                 )));
             }
@@ -217,7 +214,7 @@ fn apply_record(
                 checkpoint_message: None,
             });
         }
-        SessionRolloutItem::ContextCheckpoint {
+        AgentRolloutItem::ContextCheckpoint {
             turn_id,
             mutation,
             usage,
@@ -228,12 +225,12 @@ fn apply_record(
         } => {
             let active = state.active_turn.as_mut().ok_or_else(|| {
                 StoreError::Invariant(format!(
-                    "Session rollout checkpoint for inactive Turn {turn_id}"
+                    "Agent rollout checkpoint for inactive Turn {turn_id}"
                 ))
             })?;
             if active.turn_id != *turn_id {
                 return Err(StoreError::Invariant(format!(
-                    "Session rollout checkpoint belongs to Turn {turn_id}, not active Turn {}",
+                    "Agent rollout checkpoint belongs to Turn {turn_id}, not active Turn {}",
                     active.turn_id
                 )));
             }
@@ -252,13 +249,13 @@ fn apply_record(
             active.hosted_search_calls_used = *hosted_search_calls_used;
             active.checkpoint_message.clone_from(checkpoint_message);
         }
-        SessionRolloutItem::TurnUpdated { turn, .. } => {
+        AgentRolloutItem::TurnUpdated { turn, .. } => {
             let active = state.active_turn.as_ref().ok_or_else(|| {
-                StoreError::Invariant(format!("Session rollout updated inactive Turn {}", turn.id))
+                StoreError::Invariant(format!("Agent rollout updated inactive Turn {}", turn.id))
             })?;
             if active.turn_id != turn.id {
                 return Err(StoreError::Invariant(format!(
-                    "Session rollout updated Turn {}, not active Turn {}",
+                    "Agent rollout updated Turn {}, not active Turn {}",
                     turn.id, active.turn_id
                 )));
             }
@@ -278,28 +275,28 @@ fn apply_record(
 }
 
 fn validate_record(
-    record: &SessionRolloutRecord,
-    session_id: SessionId,
+    record: &AgentRolloutRecord,
+    agent_id: AgentId,
     expected: u64,
     path: &Path,
 ) -> Result<(), StoreError> {
-    if record.version != SESSION_ROLLOUT_VERSION {
+    if record.version != AGENT_ROLLOUT_VERSION {
         return Err(StoreError::Invariant(format!(
-            "unsupported Session rollout version {} in {}",
+            "unsupported Agent rollout version {} in {}",
             record.version,
             path.display()
         )));
     }
-    if record.session_id != session_id {
+    if record.agent_id != agent_id {
         return Err(StoreError::Invariant(format!(
-            "Session rollout {} contains record for {}",
+            "Agent rollout {} contains record for {}",
             path.display(),
-            record.session_id
+            record.agent_id
         )));
     }
     if record.sequence != expected {
         return Err(StoreError::Invariant(format!(
-            "Session rollout {} expected sequence {expected}, found {}",
+            "Agent rollout {} expected sequence {expected}, found {}",
             path.display(),
             record.sequence
         )));

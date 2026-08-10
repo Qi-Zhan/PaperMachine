@@ -150,6 +150,13 @@ impl StoreHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NewSession;
+    use papermachine_protocol::AccessPreset;
+    use papermachine_protocol::WorkflowProgramId;
+    use papermachine_protocol::WorkflowProgramManifest;
+    use papermachine_protocol::WorkflowProgramSnapshot;
+    use papermachine_protocol::WorkflowProgramSource;
+    use serde_json::json;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -171,7 +178,37 @@ mod tests {
 
         let project_id = project.id;
         handle
-            .call(move |store| store.create_session(project_id, "Session", "", "model", Vec::new()))
+            .call(move |store| {
+                store.create_session(NewSession {
+                    project_id,
+                    program: WorkflowProgramSnapshot {
+                        project_id: None,
+                        manifest: WorkflowProgramManifest {
+                            id: WorkflowProgramId::new(),
+                            slug: "handle-test".to_string(),
+                            name: "Handle test".to_string(),
+                            description: String::new(),
+                            entrypoint: "main".to_string(),
+                            request_mode: Default::default(),
+                            params_schema: json!({"type": "object"}),
+                        },
+                        source: WorkflowProgramSource::Builtin,
+                        definition_path: "builtin/handle-test/workflow.py".to_string(),
+                        sha256: "source".to_string(),
+                        runtime_sha256: "runtime".to_string(),
+                        source_code: String::new(),
+                    },
+                    title: "Session".to_string(),
+                    request: String::new(),
+                    instructions: String::new(),
+                    trigger: Default::default(),
+                    params: json!({}),
+                    default_model: "model".to_string(),
+                    access: AccessPreset::ModelOnly,
+                    enabled_skills: Vec::new(),
+                    agent_access_overrides: Default::default(),
+                })
+            })
             .await
             .expect("Session should be created");
 

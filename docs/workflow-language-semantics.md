@@ -1,62 +1,54 @@
 # Workflow language semantics
 
-This document describes the executable Python DSL in the current clean-break
-runtime. It intentionally documents only implemented semantics.
+This document describes the current clean-break Python DSL.
 
-## Domain model
+## Runtime model
 
-> A Project is a research world persistently managed by PaperMachine; a
-> Workspace is the user filesystem an Agent is authorized to operate;
-> structured runtime APIs connect them, and they never share storage or a
-> security boundary.
+~~~text
+WorkflowProgram definition
+  -> Session execution
+       -> one or more Agents
+            -> ActionInvocation
+                 -> ActionAttempt
+                      -> Turn
+~~~
 
-- A `Project` owns Sessions, Workflow runs, prompts, Skills, Artifacts, and
-  journals. All of that state is under PaperMachine's managed data root.
-- A `Workspace` is one user-owned absolute directory attached to a Project. It
-  is an Agent cwd and write boundary, never Project storage.
-- A `Session` is a durable multi-turn model conversation owned directly by a
-  Project.
-- A `Workflow` is one run of an immutable Python source snapshot.
-- An `Agent` instance is a Workflow participant backed by one ordinary
-  Project-owned Session. Its lifetime is the Workflow's lifetime.
-- An `ActionInvocation` is one logical Action call. Its `ActionAttempt` owns
-  exactly one Turn; interruption may create another Attempt for the same call.
-- A `Turn` is one user request or Workflow Action model boundary. PaperMachine
-  models normal chat through the built-in `interactive-agent` Workflow, so the
-  two cases use the same runtime path.
-- A `WorkflowEffect` journals one exact host operation at a deterministic
-  logical path.
+Project owns WorkflowProgram definitions and Session executions. A Session is
+one immutable program snapshot plus its input, configuration, status, effect
+journal, Agents, events, human requests, controls, usage, output, and
+Artifacts. Agent is the public name for a model identity inside that Session.
+Session directly owns its Agents.
 
-Every ID referenced by a run must belong to that run's Project. HTTP routes are
-Project-scoped; there is no global entity lookup or ownership index.
+Every Turn is created by an ActionAttempt. Interactive chat uses the same rule:
+the **interactive-agent** program asks for a durable HumanRequest and passes
+its verified answer to an Action. Provenance lives on the trigger,
+HumanRequest, and ActionInvocation rather than a Turn-origin enum.
 
-## Program and launch contract
+## Program and launch
 
-A source file contains exactly one async `@workflow(...)` entrypoint. Its
-literal manifest supplies `slug`, `name`, `description`, `request_mode`, and
-`params_schema`. Validation also records Agent classes and each Action's static
-tool declaration. A source is runnable only when validation has no errors.
+Source contains exactly one async entrypoint decorated with **@workflow**. Its
+literal manifest defines slug, name, description, request_mode, and
+params_schema. Validation also records Agent classes and static Action tool
+declarations. A source with error diagnostics cannot launch.
 
-Launching a Workflow freezes:
+Launching freezes:
 
 - source, manifest, source SHA-256, and Python runtime ABI SHA-256;
 - one concrete `request` when `request_mode="required"`;
-- validated `params`, optional run `instructions`, and launch provenance;
+- validated `params`, optional Session `instructions`, and launch provenance;
 - the selected model profile, skills, access ceiling, and Agent overrides.
 
-The runner exposes `ctx.request`, `ctx.params`, `ctx.instructions`, and
+The runner exposes `ctx.session_id`, `ctx.request`, `ctx.params`, `ctx.instructions`, and
 `ctx.trigger`. Workflow code must pass the data an Action needs; the runtime
 never silently promotes request or Project data into system instructions.
 
-`request_mode="none"` is for persistent interaction that obtains messages with
-`ask_human`. New Session uses this path; there is no independent submit-to-
-Session kernel.
+**request_mode="required"** requires a concrete launch task.
+**request_mode="none"** starts without one; interactive programs can obtain
+later messages through **ask_human**.
 
 ## Public DSL
 
-The complete public surface is deliberately small:
-
-```python
+~~~python
 Agent
 @action(...)
 @workflow(...)
@@ -66,102 +58,87 @@ await wait(seconds=... | minutes=..., name=...)
 await ctx.project.changes(...)
 await publish_artifact(...)
 await publish_project_home(action=...)
-```
+~~~
 
-Ordinary Python `if`, `for`, and `while` provide all other control flow.
-Repetition is a normal loop containing a durable `wait`.
+Use ordinary Python **if**, **for**, and **while** for control flow. A periodic
+Session is a loop containing a durable wait.
 
-Constructing `Agent(...)` is local. Its first remote operation creates one
-participant Session. `await agent.set_access(profile)` also materializes the
-Session first, so an upgrade cannot be hidden as a constructor mutation.
-Participants are immutable membership records with no separate lifecycle state.
+Constructing Agent creates only a local descriptor. Its first remote operation
+creates one durable Agent row under the current Session. The Agent keeps its
+class, name, role, system prompt, model, access, skills, and rollout for the
+rest of that Session.
 
-## Actions and Turns
+## Action and Turn
 
-An `@action` method is declarative: its prompt/docstring, bound arguments, model
-options, and tool list describe a model Turn. The Python method body is not
-executed as Agent logic.
+An **@action** method is a declaration. Its prompt/docstring, bound arguments,
+model options, return type, and tool list describe one model Turn; the Python
+method body is not model logic.
 
-Awaiting an Action creates an invocation and runs the same sample/tool/follow-up
-loop used everywhere else:
+Awaiting an Action runs one sample/tool/follow-up loop:
 
-1. build one immutable Turn;
-2. sample the model;
-3. execute model-requested local tools that are in the Turn Registry;
-4. append tool outputs and sample again;
-5. finish on a terminal assistant message or explicit runtime control.
+1. create ActionInvocation, ActionAttempt, and immutable Turn;
+2. sample the Agent model;
+3. execute only model calls present in the Turn ToolRegistry;
+4. checkpoint outputs and sample again when needed;
+5. finish on a terminal assistant result or runtime control.
 
-Typed returns (`dict`, `list`, `bool`, `int`, or `float`) request JSON parsing.
-JSON repair and `finalize="after_search"` use a separate no-tool Action Turn;
-they do not gain hidden tools.
+An interrupt ends the current attempt and may let program code start a new
+attempt for the same invocation. A retry is never represented as a second
+logical ActionInvocation.
 
-A string returned by `ask_human` carries its `HumanRequestId` as
-`HumanMessage`. Passing it to a parameter annotated `HumanMessage` is the only
-Workflow path that creates a user-origin Turn. Rust verifies the request,
-answer, Session, and exact text before accepting it.
+Typed dict, list, bool, int, and float returns request JSON parsing. JSON repair
+and **finalize="after_search"** use no-tool model work; they never receive a
+hidden Registry.
 
-Every Turn freezes four independent snapshots:
-
-| Snapshot | Meaning |
-|---|---|
-| `ModelRouteSnapshot` | provider, upstream model, capabilities, context window, reasoning effort, and non-secret configuration hash |
-| `TurnEnvironmentSnapshot` | Workspace revision and materialized authorization |
-| `ToolSetSnapshot` | exact sorted local tool definitions and SHA-256 |
-| `PromptSnapshot` | ordered resolved prompt layers and SHA-256 |
-
-Recovery fails closed when any snapshot cannot be reproduced.
+**ask_human** returns a HumanMessage carrying HumanRequest provenance. Only an
+Action parameter typed as HumanMessage may turn that verified string answer
+into direct user input. Rust verifies Session, Agent, request status, and exact
+text.
 
 ## Tools and access
 
-`@action(tools=[...])` declares the complete local tool request. Bare
-`@action` means `tools=[]`. The host rejects unknown names and builds an exact,
-immutable Registry for that Turn.
+**@action(tools=[...])** declares the complete local tool request. Bare
+**@action** means no local tools. The host rejects unknown or duplicate names.
 
-- Workspace tools are filtered by the Agent's materialized access profile.
-- Project tools are admitted only when that Workflow Action names them.
-- Hosted web search is separate: provider capability, access, and
-  `search_context_size` jointly control it.
-- A normal interactive Session receives all Workspace tools allowed by access,
-  but never Project tools.
+- Workspace tools are filtered by the Agent's materialized access.
+- Project tools are admitted only when the current Action declares them.
+- Hosted web search is separate and requires provider capability, access, and
+  search_context_size.
 
-Access and tool membership are separate checks. The Registry controls what the
-model can see and call; filesystem, command, network, managed-root, and
-credential rules remain hard enforcement inside the tools and sandbox.
+Tool membership decides visibility and dispatch. Filesystem, command, network,
+managed-root, and credential rules remain independent enforcement.
 
-`model_only`, `read_only`, `workspace`, `research`, and `full_access` form an
-ordered ceiling. A Workflow launch fixes the run ceiling. Per-Agent overrides
-cannot exceed it. Downgrades apply between Turns; upgrades within the ceiling
-open a typed HumanRequest. Every Turn retains the access snapshot it began
-with.
+Session access is the hard ceiling. Per-Agent overrides cannot exceed it.
+Downgrades apply between Turns; an upgrade within the ceiling requires a typed
+human grant. Each existing Turn retains its own authorization snapshot.
 
-## Concurrency, human input, and durable wait
+## Concurrency
 
-`await together(a(), b(), ...)` uses `asyncio.gather` and returns results in
-argument order. Two direct calls on the same Agent are rejected because one
-Session admits only one active Turn. Different Agent Sessions may run in
-parallel subject to the server-wide permit limit.
+**await together(a(), b(), ...)** is ordinary asyncio gathering and preserves
+argument order. Different Agents in one Session may run concurrently. Two
+active Actions on the same Agent are rejected because that Agent owns one
+canonical rollout and one active Turn.
 
-`ask_human` and `wait` are replayable suspension effects. `wait` stores only
-its journal entry; its deadline is `WorkflowEffect.started_at + interval`.
-The effect journal is the only durable state for that wait.
+This is the only required serialization rule; a Session is not globally
+single-threaded.
 
-When all live effect futures are at replayable waits, Rust terminates the idle
-Python process and releases its execution permit. A validated human answer or
-due wait restarts the immutable source. Completed effects return their stored
-results, so execution reaches the suspended point without repeating completed
-domain mutations.
+## Human input, waits, and controls
 
-Control messages use `pending -> claimed -> applied`:
+**ask_human** and **wait** are replayable suspension effects. Wait stores one
+journal record, whose started_at plus interval defines its deadline. When all
+live futures are at replayable waits, Rust terminates the idle Python process
+and releases its permit. An answer or due deadline makes the same Session
+runnable; immutable source replay reaches the stored effect result.
 
-- `guide` enters canonical context before the next sample;
-- `finish` forces the next sample to be a no-tool final answer;
-- `interrupt` ends the current Attempt and lets the Workflow continue it with
-  a new Attempt;
-- pause waits at checkpoints; resume continues; cancel terminates the run.
+Controls transition **pending -> claimed -> applied**:
 
-A claim becomes applied only in the canonical checkpoint or terminal
-transaction that consumes it. A pre-checkpoint crash lets the same Turn reclaim
-the message.
+- guide enters canonical context before the next sample;
+- finish forces the next sample to return without local tools;
+- interrupt ends the active attempt;
+- pause stops at checkpoints; resume continues; cancel terminates the Session.
+
+A claim becomes applied only in the checkpoint or terminal transaction that
+consumes it.
 
 ## Project APIs
 
@@ -179,50 +156,32 @@ Summary Agent is trusted by the kernel.
 
 ## Persistence and recovery
 
-Python host effects and model tool calls intentionally have different recovery
-contracts.
+Session host effects use deterministic paths and request hashes. Completed
+effects replay their stored results. Reusing a path with different input fails
+closed. Pure Python between effects may execute again after restart, so effect
+order and payloads must be deterministic for the same source and inputs.
 
-Workflow effects use deterministic logical paths plus a request hash. A
-completed effect replays its stored result. A path reused with another request
-fails closed. Started host effects redispatch only according to their
-idempotent domain contract.
+Each Agent JSONL is canonical model history:
 
-Each Session JSONL is canonical model history and contains only:
-
-```text
+~~~text
 TurnCreated
 ContextCheckpoint
 TurnUpdated
-```
+~~~
 
-SQLite Steps and Session events are query/UI projections, not canonical
-rollout items. Streaming deltas are transient.
+A model FunctionCall is synced before dispatch; FunctionCallOutput is synced
+before a later sample. On recovery, a call without output gets one stable
+**"aborted"** output and is never dispatched again. The same Agent observes
+durable reality and decides whether to make a new call. Host-effect replay and
+model-tool recovery are deliberately separate.
 
-A validated model `FunctionCall` must enter a `ContextCheckpoint` before tool
-dispatch. Its `FunctionCallOutput` must be checkpointed before Step completion
-or another sample. On recovery:
+## Status and completion
 
-- a call/output pair repairs a missing Tool Step projection;
-- a call without output receives one stable JSON string `"aborted"`;
-- the old call is never dispatched again;
-- the same Agent continues and observes durable reality before deciding
-  whether to issue a new call.
+Session status is one of **created**, **running**, **waiting_for_input**,
+**waiting_for_deadline**, **paused**, **completed**, **failed**, or
+**cancelled**. Archival is separate metadata, not another execution status.
 
-There is no aggregate `ModelSampleCommitted`, effect-disposition enum, or model
-tool reconciliation API.
-
-## Statuses and completion
-
-Workflow statuses are `created`, `running`, `waiting_for_user`,
-`waiting_for_deadline`, `paused`, `completed`, `failed`, and `cancelled`.
-`waiting_for_deadline` means a durable `wait` effect is not yet due.
-
-An entrypoint return is submitted through the `complete` effect. The scheduler
-commits `completed` only after the Python process exits successfully and final
+The entrypoint return is submitted through the completion effect. The scheduler
+commits completed only after the Python process exits successfully and final
 usage is recorded. Uncaught Python, model, tool, protocol, or sandbox errors
-fail the run. Closing a Session archives it and cancels active Workflows that
-own it, without deleting history.
-
-Pure Python between effects may execute again after restart. Workflow authors
-must therefore keep effect ordering and payloads deterministic for the same
-source snapshot and inputs.
+fail the Session. Archiving cancels an active Session and preserves its history.

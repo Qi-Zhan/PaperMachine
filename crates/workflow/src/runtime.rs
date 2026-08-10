@@ -5,10 +5,10 @@ use papermachine_execution::SandboxPolicy;
 use papermachine_execution::SandboxRequest;
 use papermachine_execution::terminate_process_tree;
 use papermachine_protocol::*;
+use papermachine_session::ActionTurnContext;
 use papermachine_session::PromptLayerInput;
-use papermachine_session::SessionRuntime;
-use papermachine_session::SessionRuntimeError;
-use papermachine_session::WorkflowTurnContext;
+use papermachine_session::TurnRuntime;
+use papermachine_session::TurnRuntimeError;
 use papermachine_store::PROJECT_HOME_ROLE;
 use papermachine_store::PROJECT_HOME_SOURCE_ROLE;
 use papermachine_store::Store;
@@ -39,9 +39,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::WorkflowExecution;
-use crate::WorkflowRuntime;
-use crate::WorkflowSuspension;
+use crate::SessionExecution;
+use crate::SessionExecutor;
+use crate::SessionSuspension;
 use crate::python_runtime_sha256;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
@@ -50,25 +50,25 @@ const MAX_IN_FLIGHT_EFFECTS: usize = 64;
 const RESPONSE_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Clone)]
-pub struct PythonWorkflowRuntime {
+pub struct PythonSessionExecutor {
     store: StoreHandle,
-    sessions: SessionRuntime,
+    turns: TurnRuntime,
     python: PathBuf,
     python_runtime_root: PathBuf,
     work_root: PathBuf,
 }
 
-impl PythonWorkflowRuntime {
+impl PythonSessionExecutor {
     pub fn new(
         store: StoreHandle,
-        sessions: SessionRuntime,
+        turns: TurnRuntime,
         python: impl Into<PathBuf>,
         python_runtime_root: impl Into<PathBuf>,
         work_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             store,
-            sessions,
+            turns,
             python: python.into(),
             python_runtime_root: python_runtime_root.into(),
             work_root: work_root.into(),
@@ -77,34 +77,34 @@ impl PythonWorkflowRuntime {
 
     async fn execute_inner(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         cancellation: CancellationToken,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        let run = self
+    ) -> Result<Value, SessionExecutionError> {
+        let session = self
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        let source_sha256 = hex::encode(Sha256::digest(run.program.source_code.as_bytes()));
-        if source_sha256 != run.program.sha256 {
-            return Err(WorkflowRuntimeError::Snapshot(
+        let source_sha256 = hex::encode(Sha256::digest(session.program.source_code.as_bytes()));
+        if source_sha256 != session.program.sha256 {
+            return Err(SessionExecutionError::Snapshot(
                 "Workflow source hash does not match its durable snapshot".to_string(),
             ));
         }
         let runtime_sha256 = python_runtime_sha256(&self.python_runtime_root)?;
-        if runtime_sha256 != run.program.runtime_sha256 {
-            return Err(WorkflowRuntimeError::Snapshot(
-                "Python Workflow ABI differs from the durable Run snapshot".to_string(),
+        if runtime_sha256 != session.program.runtime_sha256 {
+            return Err(SessionExecutionError::Snapshot(
+                "Python Workflow ABI differs from the durable Session snapshot".to_string(),
             ));
         }
-        let workspace = self.work_root.join(run.id.to_string());
+        let workspace = self.work_root.join(session.id.to_string());
         materialize_runtime(
             &workspace,
             &self.python_runtime_root,
-            &run.program.source_code,
+            &session.program.source_code,
         )
         .await?;
         let policy = SandboxPolicy::workflow_runtime(&workspace)
-            .map_err(|error| WorkflowRuntimeError::Sandbox(error.to_string()))?;
+            .map_err(|error| SessionExecutionError::Sandbox(error.to_string()))?;
         let prepared = SandboxManager
             .prepare(
                 SandboxRequest::new(
@@ -123,7 +123,7 @@ impl PythonWorkflowRuntime {
                 .with_environment_override("PYTHONDONTWRITEBYTECODE", "1"),
             )
             .await
-            .map_err(|error| WorkflowRuntimeError::Sandbox(error.to_string()))?;
+            .map_err(|error| SessionExecutionError::Sandbox(error.to_string()))?;
         let mut command = prepared.into_command();
         let mut child = command
             .stdin(std::process::Stdio::piped())
@@ -131,25 +131,25 @@ impl PythonWorkflowRuntime {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| WorkflowRuntimeError::Spawn(error.to_string()))?;
+            .map_err(|error| SessionExecutionError::Spawn(error.to_string()))?;
         let mut stdin = child
             .stdin
             .take()
-            .ok_or(WorkflowRuntimeError::MissingPipe("stdin"))?;
+            .ok_or(SessionExecutionError::MissingPipe("stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or(WorkflowRuntimeError::MissingPipe("stdout"))?;
+            .ok_or(SessionExecutionError::MissingPipe("stdout"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or(WorkflowRuntimeError::MissingPipe("stderr"))?;
+            .ok_or(SessionExecutionError::MissingPipe("stderr"))?;
         let initialization = json!({
-            "workflow_id": run.id,
-            "request": run.request,
-            "instructions": run.instructions,
-            "params": run.params,
-            "trigger": run.trigger,
+            "session_id": session.id,
+            "request": session.request,
+            "instructions": session.instructions,
+            "params": session.params,
+            "trigger": session.trigger,
         });
         stdin
             .write_all(&encode_protocol_frame(&initialization)?)
@@ -157,10 +157,10 @@ impl PythonWorkflowRuntime {
         stdin.flush().await?;
 
         let effect_cancellation = cancellation.child_token();
-        let context = Arc::new(RunEffectContext {
+        let context = Arc::new(SessionEffectContext {
             store: self.store.clone(),
-            sessions: self.sessions.clone(),
-            workflow_id,
+            turns: self.turns.clone(),
+            session_id,
             cancellation: effect_cancellation.clone(),
             agent_gates: Mutex::new(HashMap::new()),
             effect_gates: Mutex::new(HashMap::new()),
@@ -193,10 +193,10 @@ impl PythonWorkflowRuntime {
                     match joined {
                         Some(Ok(Ok(()))) => continue,
                         Some(Ok(Err(error))) => {
-                            protocol_error = Some(WorkflowRuntimeError::Protocol(error));
+                            protocol_error = Some(SessionExecutionError::Protocol(error));
                         }
                         Some(Err(error)) => {
-                            protocol_error = Some(WorkflowRuntimeError::Protocol(error.to_string()));
+                            protocol_error = Some(SessionExecutionError::Protocol(error.to_string()));
                         }
                         None => continue,
                     }
@@ -205,13 +205,13 @@ impl PythonWorkflowRuntime {
                 }
                 result = &mut writer => {
                     let result = result
-                        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-                        .map_err(WorkflowRuntimeError::Protocol);
+                        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
+                        .map_err(SessionExecutionError::Protocol);
                     protocol_error = Some(match &result {
-                        Ok(()) => WorkflowRuntimeError::Protocol(
+                        Ok(()) => SessionExecutionError::Protocol(
                             "workflow protocol writer ended before stdout closed".to_string(),
                         ),
-                        Err(error) => WorkflowRuntimeError::Protocol(error.to_string()),
+                        Err(error) => SessionExecutionError::Protocol(error.to_string()),
                     });
                     writer_result = Some(result);
                     terminate_process_tree(&mut child).await;
@@ -219,7 +219,7 @@ impl PythonWorkflowRuntime {
                 }
                 _ = cancellation.cancelled() => {
                     terminate_process_tree(&mut child).await;
-                    protocol_error = Some(WorkflowRuntimeError::Cancelled);
+                    protocol_error = Some(SessionExecutionError::Cancelled);
                     break;
                 }
             };
@@ -227,7 +227,7 @@ impl PythonWorkflowRuntime {
             let request: EffectRequest = match serde_json::from_slice(&frame) {
                 Ok(request) => request,
                 Err(error) => {
-                    protocol_error = Some(WorkflowRuntimeError::Protocol(format!(
+                    protocol_error = Some(SessionExecutionError::Protocol(format!(
                         "invalid effect request: {error}; frame={}",
                         protocol_frame_preview(&frame)
                     )));
@@ -239,7 +239,7 @@ impl PythonWorkflowRuntime {
                 match context.aggregate_suspension().await {
                     Ok(suspension) => {
                         terminate_process_tree(&mut child).await;
-                        protocol_error = Some(WorkflowRuntimeError::Suspended(suspension));
+                        protocol_error = Some(SessionExecutionError::Suspended(suspension));
                     }
                     Err(error) => {
                         terminate_process_tree(&mut child).await;
@@ -250,19 +250,19 @@ impl PythonWorkflowRuntime {
             }
             let permit = tokio::select! {
                 permit = Arc::clone(&effect_permits).acquire_owned() => {
-                    permit.map_err(|_| WorkflowRuntimeError::Protocol(
+                    permit.map_err(|_| SessionExecutionError::Protocol(
                         "workflow effect semaphore closed".to_string(),
                     ))?
                 }
                 result = &mut writer => {
                     let result = result
-                        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-                        .map_err(WorkflowRuntimeError::Protocol);
+                        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
+                        .map_err(SessionExecutionError::Protocol);
                     protocol_error = Some(match &result {
-                        Ok(()) => WorkflowRuntimeError::Protocol(
+                        Ok(()) => SessionExecutionError::Protocol(
                             "workflow protocol writer ended while applying backpressure".to_string(),
                         ),
-                        Err(error) => WorkflowRuntimeError::Protocol(error.to_string()),
+                        Err(error) => SessionExecutionError::Protocol(error.to_string()),
                     });
                     writer_result = Some(result);
                     terminate_process_tree(&mut child).await;
@@ -270,7 +270,7 @@ impl PythonWorkflowRuntime {
                 }
                 _ = cancellation.cancelled() => {
                     terminate_process_tree(&mut child).await;
-                    protocol_error = Some(WorkflowRuntimeError::Cancelled);
+                    protocol_error = Some(SessionExecutionError::Cancelled);
                     break;
                 }
             };
@@ -286,7 +286,7 @@ impl PythonWorkflowRuntime {
                         error: None,
                         suspended: None,
                     },
-                    Err(WorkflowRuntimeError::Suspended(suspension)) => EffectResponse {
+                    Err(SessionExecutionError::Suspended(suspension)) => EffectResponse {
                         id,
                         ok: false,
                         result: None,
@@ -319,7 +319,7 @@ impl PythonWorkflowRuntime {
             if protocol_error.is_none()
                 && let Some(error) = error
             {
-                protocol_error = Some(WorkflowRuntimeError::Protocol(error));
+                protocol_error = Some(SessionExecutionError::Protocol(error));
             }
         }
         drop(responses_tx);
@@ -327,21 +327,21 @@ impl PythonWorkflowRuntime {
             Some(result) => result,
             None => writer
                 .await
-                .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-                .map_err(WorkflowRuntimeError::Protocol),
+                .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
+                .map_err(SessionExecutionError::Protocol),
         };
-        let status_result = child.wait().await.map_err(WorkflowRuntimeError::Io);
+        let status_result = child.wait().await.map_err(SessionExecutionError::Io);
         let stderr_result = stderr_task
             .await
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?
-            .map_err(WorkflowRuntimeError::Io);
+            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
+            .map_err(SessionExecutionError::Io);
         if let Some(error) = protocol_error {
             return Err(error);
         }
         let status = status_result?;
         let stderr = stderr_result?;
         if !status.success() {
-            return Err(WorkflowRuntimeError::Python {
+            return Err(SessionExecutionError::Python {
                 code: status.code(),
                 stderr: stderr.text.trim().to_string(),
                 truncated: stderr.truncated,
@@ -349,7 +349,7 @@ impl PythonWorkflowRuntime {
         }
         writer_result?;
         context.completion.lock().await.take().ok_or_else(|| {
-            WorkflowRuntimeError::Protocol(
+            SessionExecutionError::Protocol(
                 "workflow.py exited without submitting a completion output".to_string(),
             )
         })
@@ -357,40 +357,40 @@ impl PythonWorkflowRuntime {
 }
 
 #[async_trait]
-impl WorkflowRuntime for PythonWorkflowRuntime {
+impl SessionExecutor for PythonSessionExecutor {
     async fn execute(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         cancellation: CancellationToken,
-    ) -> Result<WorkflowExecution, String> {
-        let result = self.execute_inner(workflow_id, cancellation).await;
-        let workspace = self.work_root.join(workflow_id.to_string());
+    ) -> Result<SessionExecution, String> {
+        let result = self.execute_inner(session_id, cancellation).await;
+        let workspace = self.work_root.join(session_id.to_string());
         if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
             let _ = tokio::fs::remove_dir_all(workspace).await;
         }
         match result {
-            Ok(output) => Ok(WorkflowExecution::Completed(output)),
-            Err(WorkflowRuntimeError::Suspended(suspension)) => {
-                Ok(WorkflowExecution::Suspended(suspension))
+            Ok(output) => Ok(SessionExecution::Completed(output)),
+            Err(SessionExecutionError::Suspended(suspension)) => {
+                Ok(SessionExecution::Suspended(suspension))
             }
             Err(error) => Err(error.to_string()),
         }
     }
 }
 
-struct RunEffectContext {
+struct SessionEffectContext {
     store: StoreHandle,
-    sessions: SessionRuntime,
-    workflow_id: WorkflowId,
+    turns: TurnRuntime,
+    session_id: SessionId,
     cancellation: CancellationToken,
-    agent_gates: Mutex<HashMap<AgentInstanceId, Arc<Mutex<()>>>>,
+    agent_gates: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
     effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    suspensions: Mutex<HashMap<String, WorkflowSuspension>>,
+    suspensions: Mutex<HashMap<String, SessionSuspension>>,
     completion: Mutex<Option<Value>>,
 }
 
-impl RunEffectContext {
-    async fn handle(&self, request: EffectRequest) -> Result<Value, WorkflowRuntimeError> {
+impl SessionEffectContext {
+    async fn handle(&self, request: EffectRequest) -> Result<Value, SessionExecutionError> {
         validate_effect_key(&request.id)?;
         let gate = {
             let mut gates = self.effect_gates.lock().await;
@@ -401,32 +401,32 @@ impl RunEffectContext {
             )
         };
         let _guard = gate.lock().await;
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         let effect_id = request.id.clone();
         let effect_kind = request.kind.clone();
         let effect_payload = request.payload.clone();
         let effect = self
             .store
             .call::<_, StoreError, _>(move |store| {
-                store.begin_workflow_effect(workflow_id, &effect_id, &effect_kind, effect_payload)
+                store.begin_session_effect(session_id, &effect_id, &effect_kind, effect_payload)
             })
             .await?;
         match effect.status {
-            WorkflowEffectStatus::Completed => {
+            SessionEffectStatus::Completed => {
                 self.suspensions.lock().await.remove(&request.id);
                 if request.kind == "complete" {
                     self.remember_completion(&request.payload).await?;
                 }
                 return Ok(effect.result.unwrap_or(Value::Null));
             }
-            WorkflowEffectStatus::Failed => {
+            SessionEffectStatus::Failed => {
                 self.suspensions.lock().await.remove(&request.id);
-                return Err(WorkflowRuntimeError::ReplayedEffect {
+                return Err(SessionExecutionError::ReplayedEffect {
                     key: request.id,
                     error: effect.error.unwrap_or_else(|| "effect failed".to_string()),
                 });
             }
-            WorkflowEffectStatus::Started => {}
+            SessionEffectStatus::Started => {}
         }
         let key = request.id;
         let result = async {
@@ -434,7 +434,7 @@ impl RunEffectContext {
             self.dispatch(&key, &request.kind, request.payload).await
         }
         .await;
-        if let Err(WorkflowRuntimeError::Suspended(suspension)) = &result {
+        if let Err(SessionExecutionError::Suspended(suspension)) = &result {
             self.suspensions
                 .lock()
                 .await
@@ -444,11 +444,11 @@ impl RunEffectContext {
         }
         if !matches!(
             result,
-            Err(WorkflowRuntimeError::Suspended(_)
-                | WorkflowRuntimeError::Cancelled
-                | WorkflowRuntimeError::WorkflowTerminal(_))
+            Err(SessionExecutionError::Suspended(_)
+                | SessionExecutionError::Cancelled
+                | SessionExecutionError::SessionTerminal(_))
         ) {
-            let workflow_id = self.workflow_id;
+            let session_id = self.session_id;
             let effect_key = key.clone();
             let effect_result = result
                 .as_ref()
@@ -456,40 +456,40 @@ impl RunEffectContext {
                 .map_err(ToString::to_string);
             self.store
                 .call(move |store| {
-                    store.finish_workflow_effect(workflow_id, &effect_key, effect_result)
+                    store.finish_session_effect(session_id, &effect_key, effect_result)
                 })
                 .await?;
         }
         result
     }
 
-    async fn aggregate_suspension(&self) -> Result<WorkflowSuspension, WorkflowRuntimeError> {
+    async fn aggregate_suspension(&self) -> Result<SessionSuspension, SessionExecutionError> {
         let suspensions = self.suspensions.lock().await;
         if suspensions.is_empty() {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "Python runtime requested suspension without a pending durable wait".to_string(),
             ));
         }
-        let workflow_id = self.workflow_id;
-        let run = self
+        let session_id = self.session_id;
+        let session = self
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        let status = if run.status == WorkflowStatus::Paused {
-            WorkflowStatus::Paused
+        let status = if session.status == SessionStatus::Paused {
+            SessionStatus::Paused
         } else if suspensions
             .values()
-            .any(|suspension| suspension.status == WorkflowStatus::WaitingForUser)
+            .any(|suspension| suspension.status == SessionStatus::WaitingForInput)
         {
-            WorkflowStatus::WaitingForUser
+            SessionStatus::WaitingForInput
         } else {
-            WorkflowStatus::WaitingForDeadline
+            SessionStatus::WaitingForDeadline
         };
         let wake_at = suspensions
             .values()
             .filter_map(|suspension| suspension.wake_at)
             .min();
-        Ok(WorkflowSuspension::new(status, wake_at))
+        Ok(SessionSuspension::new(status, wake_at))
     }
 
     async fn dispatch(
@@ -497,7 +497,7 @@ impl RunEffectContext {
         effect_key: &str,
         kind: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         match kind {
             "create_agent" => self.create_agent(effect_key, payload).await,
             "set_agent_access" => self.set_agent_access(effect_key, payload).await,
@@ -508,30 +508,30 @@ impl RunEffectContext {
             "publish_artifact" => self.publish_artifact(effect_key, payload).await,
             "publish_project_home" => self.publish_project_home(effect_key, payload).await,
             "complete" => self.complete(payload).await,
-            other => Err(WorkflowRuntimeError::Protocol(format!(
+            other => Err(SessionExecutionError::Protocol(format!(
                 "unknown effect kind: {other}"
             ))),
         }
     }
 
-    async fn checkpoint(&self) -> Result<(), WorkflowRuntimeError> {
+    async fn checkpoint(&self) -> Result<(), SessionExecutionError> {
         if self.cancellation.is_cancelled() {
-            return Err(WorkflowRuntimeError::Cancelled);
+            return Err(SessionExecutionError::Cancelled);
         }
-        let workflow_id = self.workflow_id;
-        let run = self
+        let session_id = self.session_id;
+        let session = self
             .store
-            .call(move |store| store.get_workflow(workflow_id))
+            .call(move |store| store.get_session(session_id))
             .await?;
-        match run.status {
-            WorkflowStatus::Created | WorkflowStatus::Running => Ok(()),
-            WorkflowStatus::Paused
-            | WorkflowStatus::WaitingForUser
-            | WorkflowStatus::WaitingForDeadline => Err(WorkflowRuntimeError::Suspended(
-                WorkflowSuspension::new(run.status, None),
+        match session.status {
+            SessionStatus::Created | SessionStatus::Running => Ok(()),
+            SessionStatus::Paused
+            | SessionStatus::WaitingForInput
+            | SessionStatus::WaitingForDeadline => Err(SessionExecutionError::Suspended(
+                SessionSuspension::new(session.status, None),
             )),
-            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
-                Err(WorkflowRuntimeError::WorkflowTerminal(run.status))
+            SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+                Err(SessionExecutionError::SessionTerminal(session.status))
             }
         }
     }
@@ -540,35 +540,26 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: CreateAgentEffect = serde_json::from_value(payload)?;
-        let participant_id = AgentInstanceId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "participant",
-        ));
-        let session_id = SessionId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
-            effect_key,
-            "session",
-        ));
-        let workflow_id = self.workflow_id;
-        let (participant, current_access, effective_access) = self
+        let agent_id =
+            AgentId::from_uuid(effect_resource_uuid(self.session_id, effect_key, "agent"));
+        let session_id = self.session_id;
+        let (agent, current_access, effective_access) = self
             .store
             .call(move |store| {
-                let workflow = store.get_workflow(workflow_id)?;
-                let requested_access = workflow
+                let session = store.get_session(session_id)?;
+                let requested_access = session
                     .agent_access_overrides
                     .get(&payload.class_name)
                     .copied()
                     .unwrap_or(payload.access);
-                let effective_access = std::cmp::min(requested_access, workflow.access);
-                let participant = match store.get_participant(participant_id) {
-                    Ok(participant) => participant,
-                    Err(StoreError::NotFound { .. }) => store.create_participant_with_ids(
-                        workflow_id,
-                        participant_id,
+                let effective_access = std::cmp::min(requested_access, session.access);
+                let agent = match store.get_agent(agent_id) {
+                    Ok(agent) => agent,
+                    Err(StoreError::NotFound { .. }) => store.create_agent_with_id(
                         session_id,
+                        agent_id,
                         payload.class_name,
                         payload.name,
                         payload.role,
@@ -579,29 +570,26 @@ impl RunEffectContext {
                     )?,
                     Err(error) => return Err(error.into()),
                 };
-                let current_access = store.get_session(participant.session_id)?.access;
-                Ok::<_, WorkflowRuntimeError>((participant, current_access, effective_access))
+                let current_access = agent.access;
+                Ok::<_, SessionExecutionError>((agent, current_access, effective_access))
             })
             .await?;
-        if participant.workflow_id != self.workflow_id {
-            return Err(WorkflowRuntimeError::Protocol(
-                "replayed Agent belongs to another Workflow".to_string(),
+        if agent.session_id != self.session_id {
+            return Err(SessionExecutionError::Protocol(
+                "replayed Agent belongs to another Session".to_string(),
             ));
         }
         if current_access < effective_access {
-            self.request_access_grant(effect_key, &participant, current_access, effective_access)
+            self.request_access_grant(effect_key, &agent, current_access, effective_access)
                 .await?;
         }
-        let participant_session_id = participant.session_id;
+        let stored_agent_id = agent.id;
         let access = self
             .store
-            .call(move |store| {
-                Ok::<_, StoreError>(store.get_session(participant_session_id)?.access)
-            })
+            .call(move |store| Ok::<_, StoreError>(store.get_agent(stored_agent_id)?.access))
             .await?;
         Ok(json!({
-            "agent_instance_id": participant.id,
-            "session_id": participant.session_id,
+            "agent_id": agent.id,
             "access": access,
         }))
     }
@@ -610,39 +598,39 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: SetAgentAccessEffect = serde_json::from_value(payload)?;
-        let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
-        let workflow_id = self.workflow_id;
-        let (participant, workflow, current) = self
+        let agent_id = AgentId::from_str(&payload.agent_id)
+            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?;
+        let session_id = self.session_id;
+        let (agent, session, current) = self
             .store
             .call(move |store| {
-                let participant = store.get_participant(agent_id)?;
-                let workflow = store.get_workflow(workflow_id)?;
-                let current = store.get_session(participant.session_id)?.access;
-                Ok::<_, StoreError>((participant, workflow, current))
+                let agent = store.get_agent(agent_id)?;
+                let session = store.get_session(session_id)?;
+                let current = agent.access;
+                Ok::<_, StoreError>((agent, session, current))
             })
             .await?;
-        if participant.workflow_id != self.workflow_id {
-            return Err(WorkflowRuntimeError::Protocol(
-                "cannot change access for an Agent in another Workflow".to_string(),
+        if agent.session_id != self.session_id {
+            return Err(SessionExecutionError::Protocol(
+                "cannot change access for an Agent in another Session".to_string(),
             ));
         }
-        if payload.access > workflow.access {
-            return Err(WorkflowRuntimeError::Protocol(format!(
-                "Agent access {} exceeds Workflow ceiling {}",
-                payload.access, workflow.access
+        if payload.access > session.access {
+            return Err(SessionExecutionError::Protocol(format!(
+                "Agent access {} exceeds Session ceiling {}",
+                payload.access, session.access
             )));
         }
         if payload.access > current {
-            self.request_access_grant(effect_key, &participant, current, payload.access)
+            self.request_access_grant(effect_key, &agent, current, payload.access)
                 .await?;
         } else if payload.access < current {
-            let session_id = participant.session_id;
+            let agent_id = agent.id;
             let access = payload.access;
             self.store
-                .call(move |store| store.set_session_access(session_id, access))
+                .call(move |store| store.set_agent_access(agent_id, access))
                 .await?;
         }
         Ok(json!({"access": payload.access}))
@@ -651,36 +639,36 @@ impl RunEffectContext {
     async fn request_access_grant(
         &self,
         effect_key: &str,
-        participant: &WorkflowParticipant,
+        agent: &Agent,
         current: AccessPreset,
         requested: AccessPreset,
-    ) -> Result<(), WorkflowRuntimeError> {
+    ) -> Result<(), SessionExecutionError> {
         let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "access-grant",
         ));
-        let workflow_id = self.workflow_id;
-        let participant_session_id = participant.session_id;
-        let participant_name = participant.name.clone();
+        let session_id = self.session_id;
+        let agent_id = agent.id;
+        let agent_name = agent.name.clone();
         let answer = self
             .store
             .call(move |store| {
-                let workflow = store.get_workflow(workflow_id)?;
-                if requested > workflow.access {
-                    return Err(WorkflowRuntimeError::Protocol(format!(
-                        "Agent access {requested} exceeds Workflow ceiling {}",
-                        workflow.access
+                let session = store.get_session(session_id)?;
+                if requested > session.access {
+                    return Err(SessionExecutionError::Protocol(format!(
+                        "Agent access {requested} exceeds Session ceiling {}",
+                        session.access
                     )));
                 }
                 let request = match store.get_human_request(request_id) {
                     Ok(request) => request,
                     Err(StoreError::NotFound { .. }) => store.create_human_request_with_id(
                         request_id,
-                        workflow_id,
-                        participant_session_id,
+                        session_id,
+                        agent_id,
                         format!(
-                            "Workflow Agent {participant_name} requests an access change from {current} to {requested}. Grant this access?"
+                            "Agent {agent_name} requests an access change from {current} to {requested}. Grant this access?"
                         ),
                         json!({
                             "type": "boolean",
@@ -694,13 +682,13 @@ impl RunEffectContext {
             })
             .await?;
         if answer.as_bool() != Some(true) {
-            return Err(WorkflowRuntimeError::Protocol(format!(
+            return Err(SessionExecutionError::Protocol(format!(
                 "human denied {requested} access for Agent {}",
-                participant.name
+                agent.name
             )));
         }
         self.store
-            .call(move |store| store.set_session_access(participant_session_id, requested))
+            .call(move |store| store.set_agent_access(agent_id, requested))
             .await?;
         Ok(())
     }
@@ -709,33 +697,29 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: InvokeActionEffect = serde_json::from_value(payload)?;
-        let agent_id = AgentInstanceId::from_str(&payload.agent_instance_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+        let agent_id = AgentId::from_str(&payload.agent_id)
+            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?;
         let invocation_id = ActionInvocationId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "action-invocation",
         ));
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         let stored_payload = payload.clone();
-        let (participant, human_source, invocation) = self
+        let (agent, human_source, invocation) = self
             .store
             .call(move |store| {
-                let participant = store.get_participant(agent_id)?;
-                let human_source = resolve_human_turn_source(
-                    store,
-                    workflow_id,
-                    participant.session_id,
-                    &stored_payload,
-                )?;
+                let agent = store.get_agent(agent_id)?;
+                let human_source =
+                    resolve_human_turn_source(store, session_id, agent.id, &stored_payload)?;
                 let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
                 let invocation = match store.get_action_invocation(invocation_id) {
                     Ok(invocation) => invocation,
                     Err(StoreError::NotFound { .. }) => store.create_action_invocation_with_id(
                         invocation_id,
-                        workflow_id,
+                        session_id,
                         agent_id,
                         stored_payload.action_name.clone(),
                         stored_payload.prompt.clone(),
@@ -745,15 +729,10 @@ impl RunEffectContext {
                     )?,
                     Err(error) => return Err(error.into()),
                 };
-                Ok::<_, WorkflowRuntimeError>((participant, human_source, invocation))
+                Ok::<_, SessionExecutionError>((agent, human_source, invocation))
             })
             .await?;
         let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
-        let turn_origin = if human_source.is_some() {
-            TurnOrigin::User
-        } else {
-            TurnOrigin::Workflow
-        };
         let turn_input = human_source.as_ref().map_or_else(
             || format_action_turn_input(&payload.arguments),
             |source| source.input.clone(),
@@ -768,20 +747,20 @@ impl RunEffectContext {
                 )
             },
         );
-        if invocation.workflow_id != self.workflow_id
-            || invocation.agent_instance_id != agent_id
+        if invocation.session_id != self.session_id
+            || invocation.agent_id != agent_id
             || invocation.source_human_request_id != source_human_request_id
             || invocation.requested_tools != payload.requested_tools
         {
-            return Err(WorkflowRuntimeError::Protocol(
-                "replayed ActionInvocation has different Workflow, Agent, requested tools, or human-message provenance"
+            return Err(SessionExecutionError::Protocol(
+                "replayed ActionInvocation has different Session, Agent, requested tools, or human-message provenance"
                     .to_string(),
             ));
         }
         match invocation.status {
             ActionStatus::Completed => return completed_action_result(&invocation),
             ActionStatus::Failed | ActionStatus::Cancelled => {
-                return Err(WorkflowRuntimeError::Action(
+                return Err(SessionExecutionError::Action(
                     invocation
                         .error
                         .unwrap_or_else(|| "previous Action attempt failed".to_string()),
@@ -799,17 +778,17 @@ impl RunEffectContext {
         };
         let _agent_guard = gate.lock().await;
         let invocation_id = invocation.id;
-        let workflow_id = self.workflow_id;
-        let (run, mut recovered_attempt) = self
+        let session_id = self.session_id;
+        let (session, mut recovered_attempt) = self
             .store
             .call(move |store| {
-                let run = store.get_workflow(workflow_id)?;
+                let session = store.get_session(session_id)?;
                 let recovered_attempt = store
                     .list_action_attempts(invocation_id)?
                     .into_iter()
                     .rev()
                     .find(|attempt| !attempt.status.is_terminal());
-                Ok::<_, WorkflowRuntimeError>((run, recovered_attempt))
+                Ok::<_, SessionExecutionError>((session, recovered_attempt))
             })
             .await?;
         let mut interruption_guidance = None;
@@ -824,8 +803,7 @@ impl RunEffectContext {
                 }
             };
             let guidance = interruption_guidance.take();
-            let context = WorkflowTurnContext {
-                workflow_id: self.workflow_id,
+            let context = ActionTurnContext {
                 action_invocation_id: invocation.id,
                 action_attempt_id: attempt.id,
             };
@@ -837,19 +815,19 @@ impl RunEffectContext {
                 match turn.status {
                     TurnStatus::Completed => Ok(turn),
                     TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {
-                        self.sessions
-                            .resume_workflow_action(
+                        self.turns
+                            .resume_action_attempt(
                                 turn.id,
                                 context,
                                 self.cancellation.child_token(),
                             )
                             .await
                     }
-                    TurnStatus::Interrupted => Err(SessionRuntimeError::Interrupted(
+                    TurnStatus::Interrupted => Err(TurnRuntimeError::Interrupted(
                         turn.error
                             .unwrap_or_else(|| "Action Turn was interrupted".to_string()),
                     )),
-                    TurnStatus::Cancelled => Err(SessionRuntimeError::Cancelled),
+                    TurnStatus::Cancelled => Err(TurnRuntimeError::Cancelled),
                     TurnStatus::Failed => {
                         let error = turn
                             .error
@@ -867,26 +845,26 @@ impl RunEffectContext {
                                 )
                             })
                             .await?;
-                        return Err(WorkflowRuntimeError::Action(error));
+                        return Err(SessionExecutionError::Action(error));
                     }
                 }
             } else {
                 let mut prompt_layers = Vec::new();
-                if !run.instructions.trim().is_empty() {
+                if !session.instructions.trim().is_empty() {
                     prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Workflow,
-                        "Workflow run instructions",
-                        format!("workflow:{}:instructions", run.id),
-                        &run.instructions,
+                        PromptLayerKind::Session,
+                        "Session instructions",
+                        format!("session:{}:instructions", session.id),
+                        &session.instructions,
                     ));
                 }
                 if !action_contract.trim().is_empty() {
                     prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Workflow,
+                        PromptLayerKind::Session,
                         "Action contract",
                         format!(
-                            "workflow:{}:action-contract:{}",
-                            run.id, payload.action_name
+                            "session:{}:action-contract:{}",
+                            session.id, payload.action_name
                         ),
                         &action_contract,
                     ));
@@ -899,16 +877,11 @@ impl RunEffectContext {
                         value,
                     ));
                 }
-                self.sessions
-                    .execute_workflow_action(
-                        participant.session_id,
-                        turn_origin,
+                self.turns
+                    .execute_action_attempt(
+                        agent.id,
                         turn_input.clone(),
-                        if participant.model.trim().is_empty() {
-                            None
-                        } else {
-                            Some(participant.model.as_str())
-                        },
+                        None,
                         prompt_layers,
                         payload.reasoning_effort,
                         payload.requested_tools.clone(),
@@ -946,7 +919,7 @@ impl RunEffectContext {
                         "hosted_search_calls_used": turn.hosted_search_calls_used,
                     }));
                 }
-                Err(SessionRuntimeError::Interrupted(reason)) => {
+                Err(TurnRuntimeError::Interrupted(reason)) => {
                     let attempt_id = attempt.id;
                     let stored_reason = reason.clone();
                     self.store
@@ -962,7 +935,7 @@ impl RunEffectContext {
                         .await?;
                     interruption_guidance = Some(reason);
                 }
-                Err(SessionRuntimeError::Cancelled) if self.cancellation.is_cancelled() => {
+                Err(TurnRuntimeError::Cancelled) if self.cancellation.is_cancelled() => {
                     let attempt_id = attempt.id;
                     self.store
                         .call(move |store| {
@@ -971,11 +944,11 @@ impl RunEffectContext {
                                 attempt_id,
                                 ActionStatus::Cancelled,
                                 None,
-                                Some("Workflow cancelled".to_string()),
+                                Some("Session cancelled".to_string()),
                             )
                         })
                         .await?;
-                    return Err(WorkflowRuntimeError::Cancelled);
+                    return Err(SessionExecutionError::Cancelled);
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -992,28 +965,28 @@ impl RunEffectContext {
                             )
                         })
                         .await?;
-                    return Err(WorkflowRuntimeError::Action(message));
+                    return Err(SessionExecutionError::Action(message));
                 }
             }
         }
     }
 
-    async fn wait(&self, effect_key: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn wait(&self, effect_key: &str, payload: Value) -> Result<Value, SessionExecutionError> {
         let payload: WaitEffect = serde_json::from_value(payload)?;
         if payload.interval_ms == 0 {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "wait interval must be positive".to_string(),
             ));
         }
         self.checkpoint().await?;
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         let effect_key = effect_key.to_string();
         let started_at = self
             .store
             .call(move |store| {
                 Ok::<_, StoreError>(
                     store
-                        .get_workflow_effect(workflow_id, &effect_key)?
+                        .get_session_effect(session_id, &effect_key)?
                         .started_at,
                 )
             })
@@ -1025,8 +998,8 @@ impl RunEffectContext {
         if wake_at <= Utc::now() {
             return Ok(json!({"fired_at": wake_at}));
         }
-        Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
-            WorkflowStatus::WaitingForDeadline,
+        Err(SessionExecutionError::Suspended(SessionSuspension::new(
+            SessionStatus::WaitingForDeadline,
             Some(wake_at),
         )))
     }
@@ -1035,64 +1008,64 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: AskHumanEffect = serde_json::from_value(payload)?;
         let request_id = HumanRequestId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "human-request",
         ));
-        let workflow_id = self.workflow_id;
-        let (request, answer) =
-            self.store
-                .call(move |store| {
-                    let run = store.get_workflow(workflow_id)?;
-                    let session_id = if let Some(agent_id) = payload.agent_instance_id {
-                        store
-                            .get_participant(AgentInstanceId::from_str(&agent_id).map_err(
-                                |error| WorkflowRuntimeError::Protocol(error.to_string()),
-                            )?)?
-                            .session_id
-                    } else if let Some(session_id) = run.started_from_session_id {
-                        session_id
-                    } else {
-                        store
-                            .list_participants(workflow_id)?
-                            .first()
-                            .map(|participant| participant.session_id)
-                            .ok_or_else(|| {
-                                WorkflowRuntimeError::Protocol(
-                                    "workflow-level ask_human requires a participant Session"
-                                        .to_string(),
-                                )
-                            })?
-                    };
-                    let request = match store.get_human_request(request_id) {
-                        Ok(request) => request,
-                        Err(StoreError::NotFound { .. }) => store.create_human_request_with_id(
-                            request_id,
-                            workflow_id,
-                            session_id,
-                            payload.question,
-                            payload.response_schema,
-                        )?,
-                        Err(error) => return Err(error.into()),
-                    };
-                    let answer = human_answer_or_suspend(store, request.id)?;
-                    Ok::<_, WorkflowRuntimeError>((request, answer))
-                })
-                .await?;
+        let session_id = self.session_id;
+        let (request, answer) = self
+            .store
+            .call(move |store| {
+                let agent_id = if let Some(agent_id) = payload.agent_id {
+                    AgentId::from_str(&agent_id)
+                        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
+                } else {
+                    store
+                        .list_agents(session_id)?
+                        .first()
+                        .map(|agent| agent.id)
+                        .ok_or_else(|| {
+                            SessionExecutionError::Protocol(
+                                "ask_human requires at least one Agent".to_string(),
+                            )
+                        })?
+                };
+                let agent = store.get_agent(agent_id)?;
+                if agent.session_id != session_id {
+                    return Err(SessionExecutionError::Protocol(
+                        "ask_human Agent belongs to another Session".to_string(),
+                    ));
+                }
+                let request = match store.get_human_request(request_id) {
+                    Ok(request) => request,
+                    Err(StoreError::NotFound { .. }) => store.create_human_request_with_id(
+                        request_id,
+                        session_id,
+                        agent_id,
+                        payload.question,
+                        payload.response_schema,
+                    )?,
+                    Err(error) => return Err(error.into()),
+                };
+                let answer = human_answer_or_suspend(store, request.id)?;
+                Ok::<_, SessionExecutionError>((request, answer))
+            })
+            .await?;
         Ok(json!({"human_request_id": request.id, "answer": answer}))
     }
 
-    async fn project_changes(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn project_changes(&self, payload: Value) -> Result<Value, SessionExecutionError> {
         const MAX_CHANGED_RESOURCES: usize = 256;
         let payload: ProjectChangesEffect = serde_json::from_value(payload)?;
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         self.store
             .call(move |store| {
-                let run = store.get_workflow(workflow_id)?;
-                let batch = store.project_changes_after(run.project_id, payload.after_cursor)?;
+                let session = store.get_session(session_id)?;
+                let batch =
+                    store.project_changes_after(session.project_id, payload.after_cursor)?;
                 let Some(after_cursor) = payload.after_cursor else {
                     return Ok(json!({
                         "cursor": batch.captured_cursor,
@@ -1101,18 +1074,11 @@ impl RunEffectContext {
                         "resources": [{"kind": "project", "uri": "pm://project"}],
                     }));
                 };
-                let own_sessions = store
-                    .list_participants(workflow_id)?
-                    .into_iter()
-                    .map(|participant| participant.session_id.to_string())
-                    .collect::<HashSet<_>>();
                 let mut cursor = after_cursor;
                 let mut seen = HashSet::new();
                 let mut resources = Vec::new();
                 for change in batch.changes {
-                    if change.workflow_id == Some(workflow_id)
-                        || change.kind == "session" && own_sessions.contains(&change.entity_id)
-                    {
+                    if change.session_id == Some(session_id) {
                         cursor = change.sequence;
                         continue;
                     }
@@ -1120,7 +1086,8 @@ impl RunEffectContext {
                         "project" => "pm://project".to_string(),
                         "project_home" => "pm://project-home".to_string(),
                         "session" => format!("pm://session/{}", change.entity_id),
-                        "workflow" => format!("pm://workflow/{}", change.entity_id),
+                        "agent" => format!("pm://agent/{}", change.entity_id),
+                        "turn" => format!("pm://turn/{}", change.entity_id),
                         "artifact" => format!("pm://artifact/{}", change.entity_id),
                         kind => {
                             return Err(StoreError::Invariant(format!(
@@ -1151,7 +1118,7 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: PublishArtifactEffect = serde_json::from_value(payload)?;
         if payload
             .metadata
@@ -1159,54 +1126,54 @@ impl RunEffectContext {
             .and_then(Value::as_str)
             .is_some_and(|role| matches!(role, PROJECT_HOME_ROLE | PROJECT_HOME_SOURCE_ROLE))
         {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "Project-home Artifact roles are reserved for publish_project_home".to_string(),
             ));
         }
         let name = payload.name.trim().to_string();
         if name.is_empty() {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "Artifact name must not be empty".to_string(),
             ));
         }
         if payload.content.len() > 4 * 1024 * 1024 {
-            return Err(WorkflowRuntimeError::Protocol(
-                "text Artifact content exceeds the 4 MiB Workflow limit".to_string(),
+            return Err(SessionExecutionError::Protocol(
+                "text Artifact content exceeds the 4 MiB Session effect limit".to_string(),
             ));
         }
         if payload.content.contains('\0') {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "text Artifact content must not contain NUL bytes".to_string(),
             ));
         }
         let kind = parse_artifact_kind(&payload.kind)?;
         let agent_id = payload
-            .agent_instance_id
+            .agent_id
             .as_deref()
-            .map(AgentInstanceId::from_str)
+            .map(AgentId::from_str)
             .transpose()
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?;
         let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "artifact",
         ));
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         let expected_name = name.clone();
         let artifact = self
             .store
-            .call::<_, WorkflowRuntimeError, _>(move |store| {
-                let workflow = store.get_workflow(workflow_id)?;
-                let session_id = agent_id
-                    .map(|agent_id| store.get_participant(agent_id))
+            .call::<_, SessionExecutionError, _>(move |store| {
+                let session = store.get_session(session_id)?;
+                let artifact_agent_id = agent_id
+                    .map(|agent_id| store.get_agent(agent_id))
                     .transpose()?
-                    .map(|participant| {
-                        if participant.workflow_id != workflow_id {
-                            Err(WorkflowRuntimeError::Protocol(
-                                "Artifact Agent belongs to another Workflow".to_string(),
+                    .map(|agent| {
+                        if agent.session_id != session_id {
+                            Err(SessionExecutionError::Protocol(
+                                "Artifact Agent belongs to another Session".to_string(),
                             ))
                         } else {
-                            Ok(participant.session_id)
+                            Ok(agent.id)
                         }
                     })
                     .transpose()?;
@@ -1214,9 +1181,9 @@ impl RunEffectContext {
                     Ok(artifact) => Ok(artifact),
                     Err(StoreError::NotFound { .. }) => Ok(store.create_artifact_with_id(
                         artifact_id,
-                        workflow.project_id,
-                        workflow_id,
+                        session.project_id,
                         session_id,
+                        artifact_agent_id,
                         None,
                         kind,
                         name,
@@ -1228,9 +1195,9 @@ impl RunEffectContext {
                 }
             })
             .await?;
-        if artifact.workflow_id != self.workflow_id || artifact.name != expected_name {
-            return Err(WorkflowRuntimeError::Protocol(
-                "replayed Artifact has different Workflow or name".to_string(),
+        if artifact.session_id != self.session_id || artifact.name != expected_name {
+            return Err(SessionExecutionError::Protocol(
+                "replayed Artifact has different Session or name".to_string(),
             ));
         }
         Ok(json!({
@@ -1246,37 +1213,37 @@ impl RunEffectContext {
         &self,
         effect_key: &str,
         payload: Value,
-    ) -> Result<Value, WorkflowRuntimeError> {
+    ) -> Result<Value, SessionExecutionError> {
         let payload: PublishProjectHomeEffect = serde_json::from_value(payload)?;
         let invocation_id = ActionInvocationId::from_str(&payload.action_invocation_id)
-            .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?;
         let source_artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "project-home-source",
         ));
         let artifact_id = ArtifactId::from_uuid(effect_resource_uuid(
-            self.workflow_id,
+            self.session_id,
             effect_key,
             "project-home",
         ));
-        let workflow_id = self.workflow_id;
+        let session_id = self.session_id;
         let publication = self
             .store
             .call(move |store| {
                 let invocation = store.get_action_invocation(invocation_id)?;
-                if invocation.workflow_id != workflow_id {
-                    return Err(WorkflowRuntimeError::Protocol(
-                        "Project-home Action belongs to another Workflow".to_string(),
+                if invocation.session_id != session_id {
+                    return Err(SessionExecutionError::Protocol(
+                        "Project-home Action belongs to another Session".to_string(),
                     ));
                 }
                 if invocation.status != ActionStatus::Completed {
-                    return Err(WorkflowRuntimeError::Protocol(
+                    return Err(SessionExecutionError::Protocol(
                         "Project home can be published only after the exact Action completes"
                             .to_string(),
                     ));
                 }
-                let participant = store.get_participant(invocation.agent_instance_id)?;
+                let agent = store.get_agent(invocation.agent_id)?;
                 let completed_turn = store
                     .list_action_attempts(invocation.id)?
                     .into_iter()
@@ -1286,12 +1253,12 @@ impl RunEffectContext {
                     .map(|turn_id| store.get_turn(turn_id))
                     .transpose()?
                     .ok_or_else(|| {
-                        WorkflowRuntimeError::Protocol(
+                        SessionExecutionError::Protocol(
                             "completed Project-home Action has no durable Turn".to_string(),
                         )
                     })?;
                 if completed_turn.status != TurnStatus::Completed {
-                    return Err(WorkflowRuntimeError::Protocol(
+                    return Err(SessionExecutionError::Protocol(
                         "Project-home ActionAttempt does not reference a completed Turn"
                             .to_string(),
                     ));
@@ -1302,15 +1269,15 @@ impl RunEffectContext {
                     .and_then(|output| output.get("message"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        WorkflowRuntimeError::Protocol(
+                        SessionExecutionError::Protocol(
                             "completed Project-home Action has no text output".to_string(),
                         )
                     })?
                     .to_string();
                 Ok(store.publish_project_home(
-                    workflow_id,
+                    session_id,
                     invocation.id,
-                    participant.session_id,
+                    agent.id,
                     source_artifact_id,
                     artifact_id,
                     html,
@@ -1331,20 +1298,20 @@ impl RunEffectContext {
         }))
     }
 
-    async fn complete(&self, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    async fn complete(&self, payload: Value) -> Result<Value, SessionExecutionError> {
         self.remember_completion(&payload).await?;
         Ok(Value::Null)
     }
 
-    async fn remember_completion(&self, payload: &Value) -> Result<(), WorkflowRuntimeError> {
+    async fn remember_completion(&self, payload: &Value) -> Result<(), SessionExecutionError> {
         let output = payload.get("output").cloned().unwrap_or(Value::Null);
         let mut completion = self.completion.lock().await;
         if completion
             .as_ref()
             .is_some_and(|existing| existing != &output)
         {
-            return Err(WorkflowRuntimeError::Protocol(
-                "workflow submitted conflicting completion outputs".to_string(),
+            return Err(SessionExecutionError::Protocol(
+                "Session submitted conflicting completion outputs".to_string(),
             ));
         }
         *completion = Some(output);
@@ -1355,13 +1322,13 @@ impl RunEffectContext {
 fn human_answer_or_suspend(
     store: &Store,
     request_id: HumanRequestId,
-) -> Result<Value, WorkflowRuntimeError> {
+) -> Result<Value, SessionExecutionError> {
     let request = store.get_human_request(request_id)?;
     match request.status {
         HumanRequestStatus::Answered => Ok(request.answer.unwrap_or(Value::Null)),
-        HumanRequestStatus::Cancelled => Err(WorkflowRuntimeError::Cancelled),
-        HumanRequestStatus::Open => Err(WorkflowRuntimeError::Suspended(WorkflowSuspension::new(
-            WorkflowStatus::WaitingForUser,
+        HumanRequestStatus::Cancelled => Err(SessionExecutionError::Cancelled),
+        HumanRequestStatus::Open => Err(SessionExecutionError::Suspended(SessionSuspension::new(
+            SessionStatus::WaitingForInput,
             None,
         ))),
     }
@@ -1371,7 +1338,7 @@ async fn materialize_runtime(
     workspace: &Path,
     python_runtime_root: &Path,
     source: &str,
-) -> Result<(), WorkflowRuntimeError> {
+) -> Result<(), SessionExecutionError> {
     tokio::fs::create_dir_all(workspace).await?;
     tokio::fs::create_dir_all(workspace.join(".home")).await?;
     tokio::fs::create_dir_all(workspace.join(".tmp")).await?;
@@ -1383,7 +1350,7 @@ async fn materialize_runtime(
     copy_directory(&python_runtime_root.join("papermachine"), &package).await
 }
 
-async fn copy_directory(source: &Path, destination: &Path) -> Result<(), WorkflowRuntimeError> {
+async fn copy_directory(source: &Path, destination: &Path) -> Result<(), SessionExecutionError> {
     let mut stack = vec![(source.to_path_buf(), destination.to_path_buf())];
     while let Some((source, destination)) = stack.pop() {
         tokio::fs::create_dir_all(&destination).await?;
@@ -1393,7 +1360,7 @@ async fn copy_directory(source: &Path, destination: &Path) -> Result<(), Workflo
             let to = destination.join(entry.file_name());
             let file_type = entry.file_type().await?;
             if file_type.is_symlink() {
-                return Err(WorkflowRuntimeError::Snapshot(format!(
+                return Err(SessionExecutionError::Snapshot(format!(
                     "Python Workflow ABI contains a symlink: {}",
                     from.display()
                 )));
@@ -1432,10 +1399,10 @@ async fn drain_limited<R: AsyncRead + Unpin>(
     })
 }
 
-fn encode_protocol_frame(value: &impl Serialize) -> Result<Vec<u8>, WorkflowRuntimeError> {
+fn encode_protocol_frame(value: &impl Serialize) -> Result<Vec<u8>, SessionExecutionError> {
     let mut frame = serde_json::to_vec(value)?;
     if frame.len().saturating_add(1) > MAX_PROTOCOL_FRAME_BYTES {
-        return Err(WorkflowRuntimeError::Protocol(format!(
+        return Err(SessionExecutionError::Protocol(format!(
             "workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"
         )));
     }
@@ -1529,30 +1496,30 @@ struct HumanTurnSource {
 
 fn resolve_human_turn_source(
     store: &Store,
-    workflow_id: WorkflowId,
     session_id: SessionId,
+    agent_id: AgentId,
     payload: &InvokeActionEffect,
-) -> Result<Option<HumanTurnSource>, WorkflowRuntimeError> {
+) -> Result<Option<HumanTurnSource>, SessionExecutionError> {
     let (Some(request_id), Some(argument_name)) = (
         payload.human_request_id.as_deref(),
         payload.human_message_argument.as_deref(),
     ) else {
         if payload.human_request_id.is_some() || payload.human_message_argument.is_some() {
-            return Err(WorkflowRuntimeError::Protocol(
+            return Err(SessionExecutionError::Protocol(
                 "human_request_id and human_message_argument must be supplied together".to_string(),
             ));
         }
         return Ok(None);
     };
     let request_id = HumanRequestId::from_str(request_id)
-        .map_err(|error| WorkflowRuntimeError::Protocol(error.to_string()))?;
+        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?;
     let request = store.get_human_request(request_id)?;
-    if request.workflow_id != workflow_id
-        || request.session_id != session_id
+    if request.session_id != session_id
+        || request.agent_id != agent_id
         || request.status != HumanRequestStatus::Answered
     {
-        return Err(WorkflowRuntimeError::Protocol(
-            "human-message Action must reference an answered direct HumanRequest for this Workflow and Agent Session"
+        return Err(SessionExecutionError::Protocol(
+            "human-message Action must reference an answered direct HumanRequest for this Session and Agent"
                 .to_string(),
         ));
     }
@@ -1561,12 +1528,12 @@ fn resolve_human_turn_source(
         .as_ref()
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            WorkflowRuntimeError::Protocol(
+            SessionExecutionError::Protocol(
                 "human-message Action requires a string HumanRequest answer".to_string(),
             )
         })?;
     if payload.arguments.get(argument_name).and_then(Value::as_str) != Some(input) {
-        return Err(WorkflowRuntimeError::Protocol(
+        return Err(SessionExecutionError::Protocol(
             "human-message Action argument does not match its durable HumanRequest answer"
                 .to_string(),
         ));
@@ -1578,9 +1545,9 @@ fn resolve_human_turn_source(
     }))
 }
 
-fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, WorkflowRuntimeError> {
+fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, SessionExecutionError> {
     let output = invocation.output.as_ref().ok_or_else(|| {
-        WorkflowRuntimeError::Protocol(format!(
+        SessionExecutionError::Protocol(format!(
             "completed ActionInvocation {} has no output",
             invocation.id
         ))
@@ -1596,21 +1563,21 @@ fn completed_action_result(invocation: &ActionInvocation) -> Result<Value, Workf
     }))
 }
 
-fn effect_resource_uuid(workflow_id: WorkflowId, effect_key: &str, resource: &str) -> uuid::Uuid {
+fn effect_resource_uuid(session_id: SessionId, effect_key: &str, resource: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(
-        workflow_id.as_uuid(),
+        session_id.as_uuid(),
         format!("{effect_key}:{resource}").as_bytes(),
     )
 }
 
-fn validate_effect_key(key: &str) -> Result<(), WorkflowRuntimeError> {
+fn validate_effect_key(key: &str) -> Result<(), SessionExecutionError> {
     if key.is_empty()
         || key.len() > 512
         || !key.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
         })
     {
-        return Err(WorkflowRuntimeError::Protocol(
+        return Err(SessionExecutionError::Protocol(
             "effect id must be a non-empty logical path of at most 512 ASCII characters"
                 .to_string(),
         ));
@@ -1631,7 +1598,7 @@ struct EffectResponse {
     ok: bool,
     result: Option<Value>,
     error: Option<String>,
-    suspended: Option<WorkflowSuspension>,
+    suspended: Option<SessionSuspension>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1647,13 +1614,13 @@ struct CreateAgentEffect {
 
 #[derive(Debug, Deserialize)]
 struct SetAgentAccessEffect {
-    agent_instance_id: String,
+    agent_id: String,
     access: AccessPreset,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct InvokeActionEffect {
-    agent_instance_id: String,
+    agent_id: String,
     action_name: String,
     prompt: String,
     arguments: Value,
@@ -1685,7 +1652,7 @@ struct AskHumanEffect {
     question: String,
     #[serde(default)]
     response_schema: Value,
-    agent_instance_id: Option<String>,
+    agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1702,7 +1669,7 @@ struct PublishArtifactEffect {
     media_type: String,
     #[serde(default)]
     metadata: Value,
-    agent_instance_id: Option<String>,
+    agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1716,7 +1683,7 @@ fn empty_object() -> Value {
     json!({})
 }
 
-fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, WorkflowRuntimeError> {
+fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, SessionExecutionError> {
     match value {
         "paper" => Ok(ArtifactKind::Paper),
         "source" => Ok(ArtifactKind::Source),
@@ -1728,7 +1695,7 @@ fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, WorkflowRuntimeError
         "report" => Ok(ArtifactKind::Report),
         "metric" => Ok(ArtifactKind::Metric),
         "other" => Ok(ArtifactKind::Other),
-        other => Err(WorkflowRuntimeError::Protocol(format!(
+        other => Err(SessionExecutionError::Protocol(format!(
             "invalid Artifact kind: {other}"
         ))),
     }
@@ -1740,7 +1707,7 @@ struct LimitedText {
 }
 
 #[derive(Debug, Error)]
-pub enum WorkflowRuntimeError {
+pub enum SessionExecutionError {
     #[error(transparent)]
     Store(#[from] papermachine_store::StoreError),
     #[error(transparent)]
@@ -1755,7 +1722,7 @@ pub enum WorkflowRuntimeError {
     MissingPipe(&'static str),
     #[error("workflow effect protocol failed: {0}")]
     Protocol(String),
-    #[error("replayed Workflow effect {key} failed previously: {error}")]
+    #[error("replayed Session effect {key} failed previously: {error}")]
     ReplayedEffect { key: String, error: String },
     #[error("workflow Python process exited with {code:?}: {stderr}{suffix}", suffix = if *.truncated { " [truncated]" } else { "" })]
     Python {
@@ -1765,12 +1732,12 @@ pub enum WorkflowRuntimeError {
     },
     #[error("workflow sandbox unavailable: {0}")]
     Sandbox(String),
-    #[error("Workflow was cancelled")]
+    #[error("Session was cancelled")]
     Cancelled,
-    #[error("Workflow suspended as {0:?}")]
-    Suspended(WorkflowSuspension),
-    #[error("Workflow is terminal: {0:?}")]
-    WorkflowTerminal(WorkflowStatus),
+    #[error("Session suspended as {0:?}")]
+    Suspended(SessionSuspension),
+    #[error("Session is terminal: {0:?}")]
+    SessionTerminal(SessionStatus),
     #[error("Agent action failed: {0}")]
     Action(String),
 }

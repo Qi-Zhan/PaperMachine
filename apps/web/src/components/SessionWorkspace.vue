@@ -35,10 +35,10 @@
         </div>
 
         <article v-for="turn in view.turns" :key="turn.id" class="turn-block">
-          <div :class="turn.origin === 'user' ? 'user-message' : 'workflow-message'">
-            <span v-if="turn.origin === 'workflow'" class="message-origin">
+          <div :class="turnIsHumanTriggered(turn.id) ? 'user-message' : 'workflow-message'">
+            <span v-if="!turnIsHumanTriggered(turn.id)" class="message-origin">
               <GitBranch :size="12" />
-              {{ t('session.workflowTask') }}
+              {{ agentForTurn(turn)?.name ?? t('session.workflowTask') }}
               <template v-if="actionForTurn(turn.id)"> · {{ actionForTurn(turn.id)?.action_name }}</template>
             </span>
             <p>{{ turnMessage(turn) }}</p>
@@ -233,7 +233,7 @@
           />
           <div class="composer-toolbar">
             <div>
-              <span class="model-label"><Cpu :size="13" /> {{ view.session.model }}</span>
+              <span class="model-label"><Cpu :size="13" /> {{ view.session.default_model }}</span>
               <span v-if="view.session.enabled_skills.length" class="model-label">
                 <Sparkles :size="13" /> {{ view.session.enabled_skills.length }}
               </span>
@@ -309,7 +309,6 @@ import type {
   SessionEvent,
   SessionView,
   Turn,
-  WorkflowView,
 } from '../types'
 import MarkdownView from './MarkdownView.vue'
 
@@ -319,7 +318,6 @@ const props = defineProps<{
   view: SessionView
   events: SessionEvent[]
   liveOutputs: Record<string, string>
-  workflowView: WorkflowView | null
 }>()
 const emit = defineEmits<{
   'toggle-sidebar': []
@@ -344,7 +342,7 @@ const accessProfiles = computed(() => [
 const activeTurn = computed(() =>
   props.view.turns.find((turn) => ['queued', 'running', 'paused'].includes(turn.status)),
 )
-const sessionIsArchived = computed(() => props.view.session.status === 'archived')
+const sessionIsArchived = computed(() => props.view.session.archived_at !== null)
 const composerHumanRequest = computed(() =>
   props.view.human_requests.find(
     (request) =>
@@ -403,12 +401,17 @@ function activitySubject(step: AgentStep): string | null {
   return agentActivitySubject(step.input)
 }
 function actionForTurn(turnId: string) {
-  const attempt = props.workflowView?.attempts.find((candidate) => candidate.turn_id === turnId)
+  const attempt = props.view.attempts.find((candidate) => candidate.turn_id === turnId)
   if (!attempt) return null
-  return props.workflowView?.actions.find((action) => action.id === attempt.invocation_id) ?? null
+  return props.view.actions.find((action) => action.id === attempt.invocation_id) ?? null
+}
+function agentForTurn(turn: Turn) {
+  return props.view.agents.find((agent) => agent.id === turn.agent_id) ?? null
+}
+function turnIsHumanTriggered(turnId: string): boolean {
+  return actionForTurn(turnId)?.source_human_request_id != null
 }
 function turnMessage(turn: Turn): string {
-  if (turn.origin === 'user') return turn.input
   const primary = primaryActionText(actionForTurn(turn.id)?.arguments)
   if (primary) return primary
   return actionForTurn(turn.id) ? t('session.workflowStructuredInput') : turn.input

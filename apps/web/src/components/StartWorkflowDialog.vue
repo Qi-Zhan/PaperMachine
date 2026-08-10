@@ -390,7 +390,7 @@ watch(
     advancedVisible.value = false
     localError.value = ''
     programError.value = ''
-    model.value = props.session?.model ?? props.defaultModel
+    model.value = props.session?.default_model ?? props.defaultModel
     access.value = props.session?.access ?? 'research'
     enabledSkills.value = [...(props.session?.enabled_skills ?? [])]
     initializeValues()

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from papermachine import WorkflowContext, _Runtime, _set_runtime
+from papermachine import SessionContext, _Runtime, _set_runtime
 
 
 WORKFLOW = runpy.run_path(
@@ -33,8 +33,7 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
             effects.append((effect_id, kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent-1",
-                    "session_id": "session-1",
+                    "agent_id": "agent-1",
                     "access": payload["access"],
                 }
             if kind == "ask_human":
@@ -59,11 +58,11 @@ class InteractiveAgentWorkflowTests(unittest.TestCase):
             _set_runtime(_Runtime(send))
             task = asyncio.create_task(
                 main(
-                    WorkflowContext(
+                    SessionContext(
                         request="",
                         instructions="",
                         params={"session_title": "Cache investigation"},
-                        workflow_id="workflow-1",
+                        session_id="workflow-1",
                     )
                 )
             )

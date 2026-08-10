@@ -1,12 +1,11 @@
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::AgentRolloutItem;
 use papermachine_protocol::ContextReplacementReason;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::SessionEventPayload;
-use papermachine_protocol::SessionRolloutItem;
 use papermachine_protocol::TokenUsage;
-use papermachine_protocol::TurnOrigin;
 use papermachine_store::Store;
 use papermachine_store::TurnContextCheckpoint;
 use rusqlite::Connection;
@@ -18,6 +17,7 @@ use tempfile::tempdir;
 
 mod support;
 use support::ActionHarness;
+use support::create_root_session;
 
 #[test]
 fn rollout_reconstructs_completed_context_without_turn_history_copies() {
@@ -27,20 +27,10 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let project = store
         .create_project("Rollout", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
-    let session = store
-        .get_session(harness.participant.session_id)
-        .expect("participant Session should load");
     let turn = harness
-        .create_turn(
-            &store,
-            TurnOrigin::Workflow,
-            "question",
-            AccessPreset::Research,
-        )
+        .create_turn(&store, "question", AccessPreset::Research)
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
     let context = vec![
@@ -67,14 +57,14 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
         .expect("Turn should complete");
 
     let state = store
-        .reconstruct_session_rollout(session.id)
+        .reconstruct_agent_rollout(harness.agent.id)
         .expect("rollout should reconstruct");
     assert_eq!(state.committed_context, context);
     assert!(state.active_turn.is_none());
     let rollout_status = store
-        .session_rollout_status(session.id)
+        .agent_rollout_status(harness.agent.id)
         .expect("rollout status should load");
-    assert_eq!(rollout_status.version, 3);
+    assert_eq!(rollout_status.version, 1);
     assert!(rollout_status.last_sequence > 0);
     assert_eq!(
         rollout_status.projected_sequence,
@@ -103,20 +93,10 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     let project = store
         .create_project("Replay", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
-    let session = store
-        .get_session(harness.participant.session_id)
-        .expect("participant Session should load");
     let turn = harness
-        .create_turn(
-            &store,
-            TurnOrigin::Workflow,
-            "resume me",
-            AccessPreset::Research,
-        )
+        .create_turn(&store, "resume me", AccessPreset::Research)
         .expect("Turn should be created");
     let before_checkpoint = store.start_turn(turn.id).expect("Turn should start");
     let context = vec![message(MessageRole::User, "resume me")];
@@ -141,7 +121,7 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
         )
         .expect("context should checkpoint");
     let records = store
-        .list_session_rollout_records(session.id)
+        .list_agent_rollout_records(harness.agent.id)
         .expect("records should load");
     let checkpoint_sequence = records.last().expect("checkpoint record").sequence;
     drop(store);
@@ -160,8 +140,8 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
         .expect("Turn projection should rewind");
     connection
         .execute(
-            "UPDATE session_rollout_projection SET last_sequence = ?1 WHERE session_id = ?2",
-            params![checkpoint_sequence - 1, session.id.to_string()],
+            "UPDATE agent_rollout_projection SET last_sequence = ?1 WHERE agent_id = ?2",
+            params![checkpoint_sequence - 1, harness.agent.id.to_string()],
         )
         .expect("projection cursor should rewind");
     drop(connection);
@@ -172,7 +152,7 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     assert_eq!(projected.hosted_search_calls_used, 1);
     assert_eq!(projected.usage, usage);
     let active = reopened
-        .reconstruct_session_rollout(session.id)
+        .reconstruct_agent_rollout(harness.agent.id)
         .expect("rollout should reconstruct")
         .active_turn
         .expect("Turn should remain active");
@@ -188,22 +168,12 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
     let project = store
         .create_project("Tail repair", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
-    let session = store
-        .get_session(harness.participant.session_id)
-        .expect("participant Session should load");
     harness
-        .create_turn(
-            &store,
-            TurnOrigin::Workflow,
-            "durable",
-            AccessPreset::Research,
-        )
+        .create_turn(&store, "durable", AccessPreset::Research)
         .expect("Turn should create a canonical record");
-    let rollout_path = store.session_rollout_path(session.id);
+    let rollout_path = store.agent_rollout_path(harness.agent.id);
     let expected_len = std::fs::metadata(&rollout_path)
         .expect("rollout metadata should load")
         .len();
@@ -213,13 +183,13 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
         .append(true)
         .open(&rollout_path)
         .expect("rollout should open")
-        .write_all(br#"{"version":1,"session_id""#)
+        .write_all(br#"{"version":1,"agent_id""#)
         .expect("partial record should be written");
 
     let reopened = Store::open(&managed).expect("truncated tail should be repaired");
     assert_eq!(
         reopened
-            .list_session_rollout_records(session.id)
+            .list_agent_rollout_records(harness.agent.id)
             .expect("records should load")
             .len(),
         1
@@ -239,17 +209,16 @@ fn assistant_deltas_are_broadcast_without_entering_durable_history() {
     let project = store
         .create_project("Streaming", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let session = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let durable_before = store
         .list_session_events(session.id, 0)
         .expect("events should load");
-    let mut subscriber = store.subscribe_sessions();
+    let mut subscriber = store.subscribe();
 
     let delta = store
         .publish_transient_session_event(
             session.id,
+            None,
             None,
             None,
             SessionEventPayload::AssistantMessageDelta {
@@ -277,6 +246,7 @@ fn assistant_deltas_are_broadcast_without_entering_durable_history() {
                 session.id,
                 None,
                 None,
+                None,
                 SessionEventPayload::AssistantMessageReset,
             )
             .is_err()
@@ -290,20 +260,10 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
     let project = store
         .create_project("Compaction", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
-    let session = store
-        .get_session(harness.participant.session_id)
-        .expect("participant Session should load");
     let turn = harness
-        .create_turn(
-            &store,
-            TurnOrigin::Workflow,
-            "large context",
-            AccessPreset::Research,
-        )
+        .create_turn(&store, "large context", AccessPreset::Research)
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
     store
@@ -362,17 +322,17 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
         .expect("Turn should complete");
 
     let state = store
-        .reconstruct_session_rollout(session.id)
+        .reconstruct_agent_rollout(harness.agent.id)
         .expect("rollout should reconstruct");
     let mut expected = compacted;
     expected.push(final_item);
     assert_eq!(state.committed_context, expected);
     let records = store
-        .list_session_rollout_records(session.id)
+        .list_agent_rollout_records(harness.agent.id)
         .expect("records should load");
     assert!(records.iter().any(|record| matches!(
         record.item,
-        SessionRolloutItem::ContextCheckpoint {
+        AgentRolloutItem::ContextCheckpoint {
             mutation: ModelContextMutation::Replace {
                 reason: ContextReplacementReason::Compaction,
                 ..
@@ -383,7 +343,7 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
 }
 
 #[test]
-fn concurrent_session_appends_have_one_contiguous_sequence() {
+fn concurrent_agent_rollout_appends_have_one_contiguous_sequence() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
@@ -391,9 +351,7 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
     let project = store
         .create_project("Writer", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let session = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let before = store
         .list_session_events(session.id, 0)
         .expect("initial events should load")
@@ -406,6 +364,7 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
             store
                 .append_session_event(
                     session.id,
+                    None,
                     None,
                     None,
                     SessionEventPayload::Warning {
@@ -431,7 +390,7 @@ fn concurrent_session_appends_have_one_contiguous_sequence() {
 }
 
 #[test]
-fn one_session_writer_admits_only_one_concurrent_active_turn() {
+fn one_agent_writer_admits_only_one_concurrent_active_turn() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Arc::new(
         Store::open_in_memory(directory.path().join("managed")).expect("Store should open"),
@@ -439,11 +398,9 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
     let project = store
         .create_project("Turn writer", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = store
-        .create_session(project.id, "Session", "", "test-model", Vec::new())
-        .expect("Session should be created");
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
-    let session_id = harness.participant.session_id;
+    let agent_id = harness.agent.id;
     let barrier = Arc::new(Barrier::new(3));
     let mut writers = Vec::new();
     for input in ["first", "second"] {
@@ -452,7 +409,7 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
         let harness = harness.clone();
         writers.push(std::thread::spawn(move || {
             barrier.wait();
-            harness.create_turn(&store, TurnOrigin::Workflow, input, AccessPreset::Research)
+            harness.create_turn(&store, input, AccessPreset::Research)
         }));
     }
     barrier.wait();
@@ -463,10 +420,7 @@ fn one_session_writer_admits_only_one_concurrent_active_turn() {
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
     assert_eq!(
-        store
-            .list_turns(session_id)
-            .expect("Turns should load")
-            .len(),
+        store.list_turns(agent_id).expect("Turns should load").len(),
         1
     );
 }

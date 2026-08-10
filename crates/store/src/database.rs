@@ -1,4 +1,4 @@
-use crate::NewWorkflow;
+use crate::NewSession;
 use crate::StoreError;
 use crate::StoreShared;
 use crate::TurnContextCheckpoint;
@@ -39,7 +39,7 @@ pub struct ProjectChange {
     pub sequence: u64,
     pub kind: String,
     pub entity_id: String,
-    pub workflow_id: Option<WorkflowId>,
+    pub session_id: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,7 +95,7 @@ impl Store {
             managed_fs: ManagedFs::open(&managed_root)?,
             managed_root,
         };
-        store.replay_all_session_rollouts()?;
+        store.replay_all_agent_rollouts()?;
         Ok(store)
     }
 
@@ -165,11 +165,7 @@ impl Store {
         self.managed_fs.absolute_path(relative_path)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
-        self.shared.workflow_events.subscribe()
-    }
-
-    pub fn subscribe_sessions(&self) -> broadcast::Receiver<SessionEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.shared.session_events.subscribe()
     }
 
@@ -300,58 +296,6 @@ impl Store {
         self.get_project_system_prompt(id)
     }
 
-    pub fn create_session(
-        &self,
-        project_id: ProjectId,
-        title: impl Into<String>,
-        system_prompt: impl Into<String>,
-        model: impl Into<String>,
-        enabled_skills: Vec<String>,
-    ) -> Result<Session, StoreError> {
-        self.ensure_project(project_id)?;
-        let system_prompt = system_prompt.into();
-        validate_system_prompt(&system_prompt)?;
-        self.insert_session(Session {
-            id: SessionId::new(),
-            project_id,
-            title: title.into(),
-            system_prompt,
-            model: model.into(),
-            access: AccessPreset::Research,
-            status: SessionStatus::Ready,
-            enabled_skills,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
-    }
-
-    fn insert_session(&self, session: Session) -> Result<Session, StoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                session.id.to_string(),
-                session.project_id.to_string(),
-                enum_string(session.status)?,
-                session.updated_at.to_rfc3339(),
-                serde_json::to_string(&session)?,
-            ],
-        )?;
-        let event = append_session_event_tx(
-            &transaction,
-            session.id,
-            None,
-            None,
-            SessionEventPayload::SessionCreated,
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_session(event);
-        Ok(session)
-    }
-
     pub fn get_session(&self, id: SessionId) -> Result<Session, StoreError> {
         self.query_document_by_id("sessions", id.to_string(), "session")
     }
@@ -359,7 +303,7 @@ impl Store {
     pub fn list_sessions(&self, project_id: ProjectId) -> Result<Vec<Session>, StoreError> {
         self.query_documents(
             "SELECT document_json FROM sessions WHERE project_id = ?1
-             AND status != 'archived'
+             AND json_extract(document_json, '$.archived_at') IS NULL
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
         )
@@ -372,7 +316,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         self.query_documents(
             "SELECT document_json FROM sessions WHERE project_id = ?1
-             AND status != 'archived'
+             AND json_extract(document_json, '$.archived_at') IS NULL
              ORDER BY updated_at DESC, id ASC LIMIT ?2",
             params![project_id.to_string(), limit],
         )
@@ -385,6 +329,39 @@ impl Store {
              ORDER BY updated_at DESC, id ASC",
             [project_id.to_string()],
         )
+    }
+
+    pub fn archive_session(&self, id: SessionId) -> Result<Session, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &id.to_string(), "session")?;
+        if session.archived_at.is_some() {
+            return Ok(session);
+        }
+        if !session.status.is_terminal() {
+            return Err(StoreError::Invariant(format!(
+                "cannot archive active Session {id}"
+            )));
+        }
+        session.archived_at = Some(Utc::now());
+        session.updated_at = Utc::now();
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
+            &transaction,
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionChanged {
+                status: session.status,
+                reason: Some("archived".to_string()),
+            },
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(event);
+        Ok(session)
     }
 
     pub fn project_changes_after(
@@ -411,7 +388,7 @@ impl Store {
             )));
         }
         let mut statement = connection.prepare(
-            "SELECT sequence, entity_kind, entity_id, workflow_id
+            "SELECT sequence, entity_kind, entity_id, session_id
              FROM project_changes
              WHERE project_id = ?1 AND sequence > ?2 AND sequence <= ?3
              ORDER BY sequence ASC
@@ -435,13 +412,13 @@ impl Store {
         )?;
         let mut changes = Vec::new();
         for row in rows {
-            let (sequence, kind, entity_id, workflow_id) = row?;
+            let (sequence, kind, entity_id, session_id) = row?;
             changes.push(ProjectChange {
                 sequence,
                 kind,
                 entity_id,
-                workflow_id: workflow_id
-                    .map(|id| WorkflowId::from_str(&id))
+                session_id: session_id
+                    .map(|id| SessionId::from_str(&id))
                     .transpose()
                     .map_err(|error| StoreError::Invariant(error.to_string()))?,
             });
@@ -452,150 +429,11 @@ impl Store {
         })
     }
 
-    pub fn set_session_status(
-        &self,
-        session_id: SessionId,
-        status: SessionStatus,
-        reason: Option<String>,
-    ) -> Result<Session, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let mut session = self.get_session(session_id)?;
-        session.status = status;
-        session.updated_at = Utc::now();
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        update_status_document_tx(
-            &transaction,
-            "sessions",
-            &session.id.to_string(),
-            status,
-            &session,
-        )?;
-        let event = append_session_event_tx(
-            &transaction,
-            session.id,
-            None,
-            None,
-            SessionEventPayload::SessionStatusChanged { status, reason },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_session(event);
-        Ok(session)
-    }
-
-    pub fn set_session_enabled_skills(
-        &self,
-        session_id: SessionId,
-        enabled_skills: Vec<String>,
-    ) -> Result<Session, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let mut session = self.get_session(session_id)?;
-        if session.status == SessionStatus::Archived {
-            return Err(StoreError::Invariant(
-                "cannot change skills on an archived Session".to_string(),
-            ));
-        }
-        if self.session_has_active_turn(session_id)? {
-            return Err(StoreError::Invariant(
-                "cannot change skills while a Session has an active Turn".to_string(),
-            ));
-        }
-        session.enabled_skills = enabled_skills;
-        session.updated_at = Utc::now();
-        self.update_document(
-            "sessions",
-            &session.id.to_string(),
-            session.updated_at,
-            &session,
-        )?;
-        Ok(session)
-    }
-
-    pub fn set_session_system_prompt(
-        &self,
-        session_id: SessionId,
-        system_prompt: impl Into<String>,
-    ) -> Result<Session, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let mut session = self.get_session(session_id)?;
-        if session.status == SessionStatus::Archived {
-            return Err(StoreError::Invariant(
-                "cannot change the system prompt on an archived Session".to_string(),
-            ));
-        }
-        if self.session_has_active_turn(session_id)? {
-            return Err(StoreError::Invariant(
-                "cannot change the system prompt while a Session has an active Turn".to_string(),
-            ));
-        }
-        let system_prompt = system_prompt.into();
-        validate_system_prompt(&system_prompt)?;
-        session.system_prompt = system_prompt;
-        session.updated_at = Utc::now();
-        self.update_document(
-            "sessions",
-            &session.id.to_string(),
-            session.updated_at,
-            &session,
-        )?;
-        Ok(session)
-    }
-
-    pub fn set_session_access(
-        &self,
-        session_id: SessionId,
-        access: AccessPreset,
-    ) -> Result<Session, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let mut session = self.get_session(session_id)?;
-        if session.status == SessionStatus::Archived {
-            return Err(StoreError::Invariant(
-                "cannot change access on an archived Session".to_string(),
-            ));
-        }
-        if session.access == access {
-            return Ok(session);
-        }
-        if self.session_has_active_turn(session_id)? {
-            return Err(StoreError::Invariant(
-                "cannot change access while a Session has an active Turn".to_string(),
-            ));
-        }
-        session.access = access;
-        session.updated_at = Utc::now();
-        self.update_document(
-            "sessions",
-            &session.id.to_string(),
-            session.updated_at,
-            &session,
-        )?;
-        Ok(session)
-    }
-
-    fn session_has_active_turn(&self, session_id: SessionId) -> Result<bool, StoreError> {
-        Ok(self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
-             AND status IN ('queued', 'running', 'paused'))",
-            [session_id.to_string()],
-            |row| row.get::<_, bool>(0),
-        )?)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn create_turn_for_attempt(
         &self,
         attempt_id: ActionAttemptId,
-        session_id: SessionId,
-        origin: TurnOrigin,
+        agent_id: AgentId,
         input: impl Into<String>,
         model_route: ModelRouteSnapshot,
         prompt: PromptSnapshot,
@@ -607,53 +445,54 @@ impl Store {
         skill_snapshots: Vec<SkillSnapshot>,
     ) -> Result<Turn, StoreError> {
         let input = input.into();
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let session = self.get_session(session_id)?;
-        if session.access != expected_access {
+        let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(agent_id)?;
+        let agent = self.get_agent(agent_id)?;
+        let session = self.get_session(agent.session_id)?;
+        if agent.access != expected_access {
             return Err(StoreError::Invariant(
-                "Session access changed while its Turn tool set was materialized".to_string(),
+                "Agent access changed while its Turn tool set was materialized".to_string(),
             ));
         }
         tool_set.validate().map_err(StoreError::Invariant)?;
         model_route.validate().map_err(StoreError::Invariant)?;
-        if session.status == SessionStatus::Archived {
+        if session.archived_at.is_some() || session.status.is_terminal() {
             return Err(StoreError::Invariant(
-                "cannot add a Turn to an archived Session".to_string(),
+                "cannot add a Turn to an archived or terminal Session".to_string(),
             ));
         }
         let mut attempt = self.get_action_attempt(attempt_id)?;
         let invocation = self.get_action_invocation(attempt.invocation_id)?;
-        let valid_origin = match (origin, invocation.source_human_request_id) {
-            (TurnOrigin::Workflow, None) => true,
-            (TurnOrigin::User, Some(request_id)) => {
+        let valid_input = match invocation.source_human_request_id {
+            None => true,
+            Some(request_id) => {
                 let request = self.get_human_request(request_id)?;
-                request.workflow_id == invocation.workflow_id
-                    && request.session_id == session_id
+                request.session_id == invocation.session_id
+                    && request.agent_id == agent_id
                     && request.status == HumanRequestStatus::Answered
                     && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
             }
-            _ => false,
         };
-        if !valid_origin
+        if !valid_input
             || attempt.status.is_terminal()
             || attempt.turn_id.is_some()
-            || invocation.session_id != session_id
+            || invocation.session_id != session.id
+            || invocation.agent_id != agent_id
         {
             return Err(StoreError::Invariant(
                 "ActionAttempt cannot attach this Turn".to_string(),
             ));
         }
         let active = self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE agent_id = ?1
              AND status IN ('queued', 'running', 'paused'))",
-            [session_id.to_string()],
+            [agent_id.to_string()],
             |row| row.get::<_, bool>(0),
         )?;
         if active {
             return Err(StoreError::Invariant(
-                "Session already has an active Turn".to_string(),
+                "Agent already has an active Turn".to_string(),
             ));
         }
         let now = Utc::now();
@@ -662,14 +501,13 @@ impl Store {
         let environment = TurnEnvironmentSnapshot::materialize(
             project.workspace,
             self.managed_root.to_string_lossy().into_owned(),
-            session.access,
+            agent.access,
         )
         .map_err(StoreError::Invariant)?;
         let turn = Turn {
             id: TurnId::new(),
-            session_id,
+            agent_id,
             status: TurnStatus::Queued,
-            origin,
             input,
             output: None,
             model_route,
@@ -690,9 +528,9 @@ impl Store {
         };
         attempt.turn_id = Some(turn.id);
         attempt.updated_at = now;
-        self.commit_session_rollout_item_locked(
-            session_id,
-            SessionRolloutItem::TurnCreated {
+        self.commit_agent_rollout_item_locked(
+            agent_id,
+            AgentRolloutItem::TurnCreated {
                 turn: turn.clone(),
                 action_attempt: attempt,
             },
@@ -704,9 +542,19 @@ impl Store {
         self.query_document_by_id("turns", id.to_string(), "turn")
     }
 
-    pub fn list_turns(&self, session_id: SessionId) -> Result<Vec<Turn>, StoreError> {
+    pub fn list_turns(&self, agent_id: AgentId) -> Result<Vec<Turn>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM turns WHERE session_id = ?1 ORDER BY created_at ASC, id ASC",
+            "SELECT document_json FROM turns WHERE agent_id = ?1 ORDER BY created_at ASC, id ASC",
+            [agent_id.to_string()],
+        )
+    }
+
+    pub fn list_session_turns(&self, session_id: SessionId) -> Result<Vec<Turn>, StoreError> {
+        self.query_documents(
+            "SELECT turns.document_json FROM turns
+             INNER JOIN agents ON agents.id = turns.agent_id
+             WHERE agents.session_id = ?1
+             ORDER BY turns.created_at ASC, turns.id ASC",
             [session_id.to_string()],
         )
     }
@@ -748,11 +596,11 @@ impl Store {
         usage: TokenUsage,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
-        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(existing.session_id)?;
+        let agent_lock = self.shared.agent_rollout_lock(existing.agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(existing.agent_id)?;
         let active =
-            crate::rollout::reconstruct_file(&self.shared.rollout_root, existing.session_id)?
+            crate::rollout::reconstruct_file(&self.shared.rollout_root, existing.agent_id)?
                 .active_turn
                 .ok_or_else(|| {
                     StoreError::Invariant(format!(
@@ -820,9 +668,9 @@ impl Store {
         acknowledged_control_ids: Vec<ControlMessageId>,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
-        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(existing.session_id)?;
+        let agent_lock = self.shared.agent_rollout_lock(existing.agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(existing.agent_id)?;
         let turn = self.get_turn(id)?;
         if turn.status == status {
             return Ok(turn);
@@ -842,18 +690,18 @@ impl Store {
         checkpoint: TurnContextCheckpoint,
     ) -> Result<Turn, StoreError> {
         let existing = self.get_turn(id)?;
-        let session_lock = self.shared.session_rollout_lock(existing.session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(existing.session_id)?;
+        let agent_lock = self.shared.agent_rollout_lock(existing.agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(existing.agent_id)?;
         let turn = self.get_turn(id)?;
         if turn.status.is_terminal() {
             return Err(StoreError::Invariant(format!(
                 "cannot checkpoint terminal Turn {id}"
             )));
         }
-        self.commit_session_rollout_item_locked(
-            turn.session_id,
-            SessionRolloutItem::ContextCheckpoint {
+        self.commit_agent_rollout_item_locked(
+            turn.agent_id,
+            AgentRolloutItem::ContextCheckpoint {
                 turn_id: id,
                 mutation: checkpoint.mutation,
                 usage: checkpoint.usage,
@@ -882,9 +730,9 @@ impl Store {
         turn.status = status;
         turn.error = error;
         turn.updated_at = Utc::now();
-        self.commit_session_rollout_item_locked(
-            turn.session_id,
-            SessionRolloutItem::TurnUpdated {
+        self.commit_agent_rollout_item_locked(
+            turn.agent_id,
+            AgentRolloutItem::TurnUpdated {
                 turn: turn.clone(),
                 acknowledged_control_ids,
             },
@@ -1085,11 +933,22 @@ impl Store {
         )
     }
 
+    pub fn list_agent_steps(&self, agent_id: AgentId) -> Result<Vec<AgentStep>, StoreError> {
+        self.query_documents(
+            "SELECT steps.document_json FROM steps
+             INNER JOIN turns ON turns.id = steps.turn_id
+             WHERE turns.agent_id = ?1
+             ORDER BY turns.created_at ASC, turns.id ASC, steps.sequence ASC",
+            [agent_id.to_string()],
+        )
+    }
+
     pub fn list_session_steps(&self, session_id: SessionId) -> Result<Vec<AgentStep>, StoreError> {
         self.query_documents(
             "SELECT steps.document_json FROM steps
              INNER JOIN turns ON turns.id = steps.turn_id
-             WHERE turns.session_id = ?1
+             INNER JOIN agents ON agents.id = turns.agent_id
+             WHERE agents.session_id = ?1
              ORDER BY turns.created_at ASC, turns.id ASC, steps.sequence ASC",
             [session_id.to_string()],
         )
@@ -1098,6 +957,7 @@ impl Store {
     pub fn append_session_event(
         &self,
         session_id: SessionId,
+        agent_id: Option<AgentId>,
         turn_id: Option<TurnId>,
         step_id: Option<StepId>,
         payload: SessionEventPayload,
@@ -1110,7 +970,14 @@ impl Store {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let event = append_session_event_tx(&transaction, session_id, turn_id, step_id, payload)?;
+        let event = append_session_event_tx(
+            &transaction,
+            session_id,
+            agent_id,
+            turn_id,
+            step_id,
+            payload,
+        )?;
         transaction.commit()?;
         self.shared.publish_session(event.clone());
         Ok(event)
@@ -1119,6 +986,7 @@ impl Store {
     pub fn publish_transient_session_event(
         &self,
         session_id: SessionId,
+        agent_id: Option<AgentId>,
         turn_id: Option<TurnId>,
         step_id: Option<StepId>,
         payload: SessionEventPayload,
@@ -1129,7 +997,14 @@ impl Store {
                 "durable Session events must be appended to the event log".to_string(),
             ));
         }
-        let event = pending_session_event(session_id, turn_id, step_id, payload);
+        let event = pending_session_event(
+            self.get_session(session_id)?.project_id,
+            session_id,
+            agent_id,
+            turn_id,
+            step_id,
+            payload,
+        );
         self.shared.publish_session(event.clone());
         Ok(event)
     }
@@ -1146,8 +1021,21 @@ impl Store {
         )
     }
 
-    pub fn create_workflow(&self, request: NewWorkflow) -> Result<Workflow, StoreError> {
+    pub fn create_session(&self, request: NewSession) -> Result<Session, StoreError> {
         self.ensure_project(request.project_id)?;
+        match (request.trigger.kind, request.trigger.source_session_id) {
+            (SessionTriggerKind::User, None) => {
+                return Err(StoreError::Invariant(
+                    "user-triggered Session requires a source Session".to_string(),
+                ));
+            }
+            (SessionTriggerKind::Manual, Some(_)) => {
+                return Err(StoreError::Invariant(
+                    "manual Session cannot name a source Session".to_string(),
+                ));
+            }
+            (SessionTriggerKind::User, Some(_)) | (SessionTriggerKind::Manual, None) => {}
+        }
         if request
             .program
             .project_id
@@ -1157,11 +1045,12 @@ impl Store {
                 "WorkflowProgram belongs to a different Project".to_string(),
             ));
         }
-        let started_from = request
-            .started_from_session_id
+        let source_session = request
+            .trigger
+            .source_session_id
             .map(|session_id| self.get_session(session_id))
             .transpose()?;
-        if started_from
+        if source_session
             .as_ref()
             .is_some_and(|session| session.project_id != request.project_id)
         {
@@ -1169,19 +1058,19 @@ impl Store {
                 "starting Session belongs to a different Project".to_string(),
             ));
         }
-        if started_from
+        if source_session
             .as_ref()
-            .is_some_and(|session| session.status == SessionStatus::Archived)
+            .is_some_and(|session| session.archived_at.is_some())
         {
             return Err(StoreError::Invariant(
-                "cannot start a Workflow from an archived Session".to_string(),
+                "cannot start a Session from an archived Session".to_string(),
             ));
         }
-        if let Some(session) = started_from.as_ref()
+        if let Some(session) = source_session.as_ref()
             && request.access > session.access
         {
             return Err(StoreError::Invariant(format!(
-                "Workflow access {} exceeds starting Session access {}",
+                "Session access {} exceeds starting Session access {}",
                 request.access, session.access
             )));
         }
@@ -1191,25 +1080,18 @@ impl Store {
             .find(|(_, access)| **access > request.access)
         {
             return Err(StoreError::Invariant(format!(
-                "Agent override {class_name}={access} exceeds Workflow access {}",
+                "Agent override {class_name}={access} exceeds Session access {}",
                 request.access
             )));
         }
-        let requested_model = request.default_model;
-        let default_model = if requested_model.trim().is_empty() {
-            started_from
-                .as_ref()
-                .map(|session| session.model.clone())
-                .ok_or_else(|| {
-                    StoreError::Invariant(
-                        "Project-level Workflow requires a default model".to_string(),
-                    )
-                })?
-        } else {
-            requested_model
-        };
+        let default_model = request.default_model;
+        if default_model.trim().is_empty() {
+            return Err(StoreError::Invariant(
+                "Session requires a default model".to_string(),
+            ));
+        }
         let enabled_skills = if request.enabled_skills.is_empty() {
-            started_from
+            source_session
                 .as_ref()
                 .map(|session| session.enabled_skills.clone())
                 .unwrap_or_default()
@@ -1218,11 +1100,11 @@ impl Store {
         };
         validate_workflow_instructions(&request.instructions)?;
         let now = Utc::now();
-        let workflow = Workflow {
-            id: WorkflowId::new(),
+        let session = Session {
+            id: SessionId::new(),
             project_id: request.project_id,
-            started_from_session_id: request.started_from_session_id,
             program: request.program,
+            title: request.title,
             request: request.request,
             instructions: request.instructions,
             trigger: request.trigger,
@@ -1230,118 +1112,57 @@ impl Store {
             access: request.access,
             enabled_skills,
             agent_access_overrides: request.agent_access_overrides,
-            status: WorkflowStatus::Created,
+            status: SessionStatus::Created,
             params: request.params,
             output: None,
             error: None,
             attention_required: false,
-            usage: WorkflowUsage::default(),
+            usage: SessionUsage::default(),
+            archived_at: None,
             created_at: now,
             updated_at: now,
         };
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
-            "INSERT INTO workflows
-             (id, project_id, started_from_session_id, program_slug, status, attention_required, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+            "INSERT INTO sessions
+             (id, project_id, program_slug, status, attention_required, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
             params![
-                workflow.id.to_string(),
-                workflow.project_id.to_string(),
-                workflow.started_from_session_id.map(|id| id.to_string()),
-                &workflow.program.manifest.slug,
-                enum_string(workflow.status)?,
-                workflow.updated_at.to_rfc3339(),
-                serde_json::to_string(&workflow)?,
+                session.id.to_string(),
+                session.project_id.to_string(),
+                &session.program.manifest.slug,
+                enum_string(session.status)?,
+                session.updated_at.to_rfc3339(),
+                serde_json::to_string(&session)?,
             ],
         )?;
-        let workflow_event = append_workflow_event_tx(
+        let event = append_session_event_tx(
             &transaction,
-            workflow.project_id,
-            workflow.id,
-            WorkflowEventPayload::WorkflowCreated {
-                request: workflow.request.clone(),
-                program_slug: workflow.program.manifest.slug.clone(),
-                source_sha256: workflow.program.sha256.clone(),
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionCreated {
+                request: session.request.clone(),
+                program_slug: session.program.manifest.slug.clone(),
+                source_sha256: session.program.sha256.clone(),
             },
         )?;
-        let session_event = started_from
-            .as_ref()
-            .map(|session| {
-                append_session_event_tx(
-                    &transaction,
-                    session.id,
-                    None,
-                    None,
-                    SessionEventPayload::Warning {
-                        message: format!("Started workflow {}", workflow.program.manifest.slug),
-                    },
-                )
-            })
-            .transpose()?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(workflow_event);
-        if let Some(session_event) = session_event {
-            self.shared.publish_session(session_event);
-        }
-        Ok(workflow)
+        self.shared.publish_session(event);
+        Ok(session)
     }
 
-    pub fn get_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.query_document_by_id("workflows", id.to_string(), "Workflow")
-    }
-
-    pub fn list_session_workflows(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Vec<Workflow>, StoreError> {
-        self.query_documents(
-            "SELECT DISTINCT wr.document_json FROM workflows wr
-             LEFT JOIN workflow_participants p ON p.workflow_id = wr.id
-             WHERE wr.started_from_session_id = ?1 OR p.session_id = ?1
-             ORDER BY wr.updated_at DESC, wr.id ASC",
-            [session_id.to_string()],
-        )
-    }
-
-    pub fn workflow_involves_session(
-        &self,
-        workflow_id: WorkflowId,
-        session_id: SessionId,
-    ) -> Result<bool, StoreError> {
-        Ok(self.connection()?.query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM workflows
-               WHERE id = ?1 AND started_from_session_id = ?2
-               UNION ALL
-               SELECT 1 FROM workflow_participants
-               WHERE workflow_id = ?1 AND session_id = ?2
-             )",
-            params![workflow_id.to_string(), session_id.to_string()],
-            |row| row.get(0),
-        )?)
-    }
-
-    pub fn list_project_workflows(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Vec<Workflow>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflows WHERE project_id = ?1
-             ORDER BY updated_at DESC, id ASC",
-            [project_id.to_string()],
-        )
-    }
-
-    pub fn latest_project_workflow_for_program(
+    pub fn latest_project_session_for_program(
         &self,
         project_id: ProjectId,
         program_slug: &str,
-    ) -> Result<Option<Workflow>, StoreError> {
+    ) -> Result<Option<Session>, StoreError> {
         self.connection()?
             .query_row(
-                "SELECT document_json FROM workflows
+                "SELECT document_json FROM sessions
                  WHERE project_id = ?1 AND program_slug = ?2
                  ORDER BY updated_at DESC, id ASC LIMIT 1",
                 params![project_id.to_string(), program_slug],
@@ -1352,57 +1173,57 @@ impl Store {
             .transpose()
     }
 
-    pub fn begin_workflow_effect(
+    pub fn begin_session_effect(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         key: impl Into<String>,
         kind: impl Into<String>,
         payload: Value,
-    ) -> Result<WorkflowEffect, StoreError> {
+    ) -> Result<SessionEffect, StoreError> {
         let key = key.into();
         let kind = kind.into();
-        let request_sha256 = workflow_effect_hash(&kind, &payload)?;
+        let request_sha256 = session_effect_hash(&kind, &payload)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let existing = transaction
             .query_row(
-                "SELECT document_json FROM workflow_effects
-                 WHERE workflow_id = ?1 AND effect_key = ?2",
-                params![workflow_id.to_string(), &key],
+                "SELECT document_json FROM session_effects
+                 WHERE session_id = ?1 AND effect_key = ?2",
+                params![session_id.to_string(), &key],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
         if let Some(document) = existing {
-            let effect: WorkflowEffect = serde_json::from_str(&document)?;
+            let effect: SessionEffect = serde_json::from_str(&document)?;
             if effect.kind != kind
                 || effect.request_sha256 != request_sha256
                 || effect.payload != payload
             {
                 return Err(StoreError::Invariant(format!(
-                    "Workflow effect {key} was replayed with a different request"
+                    "Session effect {key} was replayed with a different request"
                 )));
             }
             return Ok(effect);
         }
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
-        let effect = WorkflowEffect {
-            workflow_id,
+        ensure_session_accepts_effect_tx(&transaction, session_id)?;
+        let effect = SessionEffect {
+            session_id,
             key,
             kind,
             request_sha256,
             payload,
-            status: WorkflowEffectStatus::Started,
+            status: SessionEffectStatus::Started,
             result: None,
             error: None,
             started_at: Utc::now(),
             completed_at: None,
         };
         transaction.execute(
-            "INSERT INTO workflow_effects
-             (workflow_id, effect_key, status, started_at, document_json)
+            "INSERT INTO session_effects
+             (session_id, effect_key, status, started_at, document_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                workflow_id.to_string(),
+                session_id.to_string(),
                 &effect.key,
                 enum_string(effect.status)?,
                 effect.started_at.to_rfc3339(),
@@ -1413,23 +1234,23 @@ impl Store {
         Ok(effect)
     }
 
-    pub fn finish_workflow_effect(
+    pub fn finish_session_effect(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         key: &str,
         outcome: Result<Value, String>,
-    ) -> Result<WorkflowEffect, StoreError> {
-        let mut effect = self.get_workflow_effect(workflow_id, key)?;
+    ) -> Result<SessionEffect, StoreError> {
+        let mut effect = self.get_session_effect(session_id, key)?;
         let (status, result, error) = match outcome {
-            Ok(result) => (WorkflowEffectStatus::Completed, Some(result), None),
-            Err(error) => (WorkflowEffectStatus::Failed, None, Some(error)),
+            Ok(result) => (SessionEffectStatus::Completed, Some(result), None),
+            Err(error) => (SessionEffectStatus::Failed, None, Some(error)),
         };
-        if effect.status != WorkflowEffectStatus::Started {
+        if effect.status != SessionEffectStatus::Started {
             if effect.status == status && effect.result == result && effect.error == error {
                 return Ok(effect);
             }
             return Err(StoreError::Invariant(format!(
-                "Workflow effect {key} already has a different terminal outcome"
+                "Session effect {key} already has a different terminal outcome"
             )));
         }
         effect.status = status;
@@ -1437,269 +1258,278 @@ impl Store {
         effect.error = error;
         effect.completed_at = Some(Utc::now());
         let changed = self.connection()?.execute(
-            "UPDATE workflow_effects SET status = ?1, document_json = ?2
-             WHERE workflow_id = ?3 AND effect_key = ?4 AND status = 'started'",
+            "UPDATE session_effects SET status = ?1, document_json = ?2
+             WHERE session_id = ?3 AND effect_key = ?4 AND status = 'started'",
             params![
                 enum_string(effect.status)?,
                 serde_json::to_string(&effect)?,
-                workflow_id.to_string(),
+                session_id.to_string(),
                 key,
             ],
         )?;
-        ensure_one(changed, "workflow_effects")?;
+        ensure_one(changed, "session_effects")?;
         Ok(effect)
     }
 
-    pub fn get_workflow_effect(
+    pub fn get_session_effect(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         key: &str,
-    ) -> Result<WorkflowEffect, StoreError> {
+    ) -> Result<SessionEffect, StoreError> {
         let document = self
             .connection()?
             .query_row(
-                "SELECT document_json FROM workflow_effects
-                 WHERE workflow_id = ?1 AND effect_key = ?2",
-                params![workflow_id.to_string(), key],
+                "SELECT document_json FROM session_effects
+                 WHERE session_id = ?1 AND effect_key = ?2",
+                params![session_id.to_string(), key],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
             .ok_or_else(|| StoreError::NotFound {
-                entity: "workflow effect",
-                id: format!("{workflow_id}:{key}"),
+                entity: "session effect",
+                id: format!("{session_id}:{key}"),
             })?;
         Ok(serde_json::from_str(&document)?)
     }
 
-    pub fn list_workflow_effects(
+    pub fn list_session_effects(
         &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<WorkflowEffect>, StoreError> {
+        session_id: SessionId,
+    ) -> Result<Vec<SessionEffect>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM workflow_effects WHERE workflow_id = ?1
+            "SELECT document_json FROM session_effects WHERE session_id = ?1
              ORDER BY started_at ASC, effect_key ASC",
-            [workflow_id.to_string()],
+            [session_id.to_string()],
         )
     }
 
-    pub fn list_recoverable_workflows(&self) -> Result<Vec<Workflow>, StoreError> {
+    pub fn list_recoverable_sessions(&self) -> Result<Vec<Session>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM workflows
+            "SELECT document_json FROM sessions
              WHERE status NOT IN ('completed', 'failed', 'cancelled')
              ORDER BY updated_at ASC, id ASC",
             [],
         )
     }
 
-    pub fn start_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    pub fn start_session(&self, id: SessionId) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
-            &[WorkflowStatus::Created, WorkflowStatus::Running],
-            WorkflowStatus::Running,
+            &[SessionStatus::Created, SessionStatus::Running],
+            SessionStatus::Running,
             None,
         )
     }
 
-    pub fn pause_workflow(
+    pub fn pause_session(
         &self,
-        id: WorkflowId,
+        id: SessionId,
         reason: Option<String>,
-    ) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    ) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
             &[
-                WorkflowStatus::Running,
-                WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForDeadline,
-                WorkflowStatus::Paused,
+                SessionStatus::Running,
+                SessionStatus::WaitingForInput,
+                SessionStatus::WaitingForDeadline,
+                SessionStatus::Paused,
             ],
-            WorkflowStatus::Paused,
+            SessionStatus::Paused,
             reason,
         )
     }
 
-    pub fn resume_workflow(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    pub fn resume_session(&self, id: SessionId) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
             &[
-                WorkflowStatus::Paused,
-                WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForDeadline,
-                WorkflowStatus::Running,
+                SessionStatus::Paused,
+                SessionStatus::WaitingForInput,
+                SessionStatus::WaitingForDeadline,
+                SessionStatus::Running,
             ],
-            WorkflowStatus::Running,
+            SessionStatus::Running,
             None,
         )
     }
 
-    pub fn wait_workflow_for_user(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    pub fn wait_session_for_input(&self, id: SessionId) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
-            &[WorkflowStatus::Running, WorkflowStatus::WaitingForUser],
-            WorkflowStatus::WaitingForUser,
+            &[SessionStatus::Running, SessionStatus::WaitingForInput],
+            SessionStatus::WaitingForInput,
             None,
         )
     }
 
-    pub fn wait_workflow_for_deadline(&self, id: WorkflowId) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    pub fn wait_session_for_deadline(&self, id: SessionId) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
-            &[WorkflowStatus::Running, WorkflowStatus::WaitingForDeadline],
-            WorkflowStatus::WaitingForDeadline,
+            &[SessionStatus::Running, SessionStatus::WaitingForDeadline],
+            SessionStatus::WaitingForDeadline,
             None,
         )
     }
 
-    pub fn fail_workflow(
+    pub fn fail_session(
         &self,
-        id: WorkflowId,
+        id: SessionId,
         error: impl Into<String>,
-    ) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    ) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
             &[
-                WorkflowStatus::Created,
-                WorkflowStatus::Running,
-                WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForDeadline,
-                WorkflowStatus::Paused,
+                SessionStatus::Created,
+                SessionStatus::Running,
+                SessionStatus::WaitingForInput,
+                SessionStatus::WaitingForDeadline,
+                SessionStatus::Paused,
             ],
-            WorkflowStatus::Failed,
+            SessionStatus::Failed,
             Some(error.into()),
         )
     }
 
-    pub fn cancel_workflow(
+    pub fn cancel_session(
         &self,
-        id: WorkflowId,
+        id: SessionId,
         reason: impl Into<String>,
-    ) -> Result<Workflow, StoreError> {
-        self.transition_workflow(
+    ) -> Result<Session, StoreError> {
+        self.transition_session(
             id,
             &[
-                WorkflowStatus::Created,
-                WorkflowStatus::Running,
-                WorkflowStatus::WaitingForUser,
-                WorkflowStatus::WaitingForDeadline,
-                WorkflowStatus::Paused,
+                SessionStatus::Created,
+                SessionStatus::Running,
+                SessionStatus::WaitingForInput,
+                SessionStatus::WaitingForDeadline,
+                SessionStatus::Paused,
             ],
-            WorkflowStatus::Cancelled,
+            SessionStatus::Cancelled,
             Some(reason.into()),
         )
     }
 
-    fn transition_workflow(
+    fn transition_session(
         &self,
-        id: WorkflowId,
-        allowed_from: &[WorkflowStatus],
-        status: WorkflowStatus,
+        id: SessionId,
+        allowed_from: &[SessionStatus],
+        status: SessionStatus,
         reason: Option<String>,
-    ) -> Result<Workflow, StoreError> {
+    ) -> Result<Session, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut run: Workflow =
-            load_document_tx(&transaction, "workflows", &id.to_string(), "workflow")?;
-        if run.status == status {
-            return Ok(run);
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &id.to_string(), "session")?;
+        if session.status == status {
+            return Ok(session);
         }
-        if !allowed_from.contains(&run.status) {
+        if !allowed_from.contains(&session.status) {
             return Err(StoreError::Invariant(format!(
-                "cannot change Workflow {id} from {:?} to {status:?}",
-                run.status
+                "cannot change Session {id} from {:?} to {status:?}",
+                session.status
             )));
         }
-        run.status = status;
-        run.error = if status == WorkflowStatus::Failed {
+        session.status = status;
+        session.error = if status == SessionStatus::Failed {
             reason.clone()
         } else {
             None
         };
         if status.is_terminal() {
-            run.attention_required = false;
+            session.attention_required = false;
         }
-        run.updated_at = Utc::now();
+        session.updated_at = Utc::now();
         if status.is_terminal() {
-            terminalize_workflow_resources_tx(&transaction, run.id, run.updated_at)?;
+            terminalize_session_resources_tx(&transaction, session.id, session.updated_at)?;
         }
-        update_workflow_tx(&transaction, &run)?;
-        let event = append_workflow_event_tx(
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::WorkflowStatusChanged { status, reason },
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionChanged { status, reason },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(run)
+        self.shared.publish_session(event);
+        Ok(session)
     }
 
-    pub fn complete_workflow(&self, id: WorkflowId, output: Value) -> Result<Workflow, StoreError> {
+    pub fn complete_session(&self, id: SessionId, output: Value) -> Result<Session, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut run: Workflow =
-            load_document_tx(&transaction, "workflows", &id.to_string(), "workflow")?;
-        if run.status != WorkflowStatus::Running {
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &id.to_string(), "session")?;
+        if session.status != SessionStatus::Running {
             return Err(StoreError::Invariant(format!(
-                "cannot complete Workflow {id} from {:?}",
-                run.status
+                "cannot complete Session {id} from {:?}",
+                session.status
             )));
         }
-        run.status = WorkflowStatus::Completed;
-        run.output = Some(output.clone());
-        run.error = None;
-        run.attention_required = false;
-        run.updated_at = Utc::now();
-        terminalize_workflow_resources_tx(&transaction, run.id, run.updated_at)?;
-        update_workflow_tx(&transaction, &run)?;
-        let event = append_workflow_event_tx(
+        session.status = SessionStatus::Completed;
+        session.output = Some(output);
+        session.error = None;
+        session.attention_required = false;
+        session.updated_at = Utc::now();
+        terminalize_session_resources_tx(&transaction, session.id, session.updated_at)?;
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::WorkflowCompleted { output },
-        )?;
-        transaction.commit()?;
-        drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(run)
-    }
-
-    pub fn add_workflow_usage(
-        &self,
-        id: WorkflowId,
-        delta: WorkflowUsage,
-    ) -> Result<Workflow, StoreError> {
-        // Read and update under one database lock. Workflow actions can finish in
-        // parallel, so a separate get followed by update loses concurrent deltas.
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let document = transaction.query_row(
-            "SELECT document_json FROM workflows WHERE id = ?1",
-            [id.to_string()],
-            |row| row.get::<_, String>(0),
-        )?;
-        let mut run: Workflow = serde_json::from_str(&document)?;
-        apply_workflow_usage_delta(&mut run.usage, delta);
-        run.updated_at = Utc::now();
-        update_workflow_tx(&transaction, &run)?;
-        let event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::UsageUpdated {
-                usage: run.usage.clone(),
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionChanged {
+                status: SessionStatus::Completed,
+                reason: None,
             },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(event);
-        Ok(run)
+        self.shared.publish_session(event);
+        Ok(session)
+    }
+
+    pub fn add_session_usage(
+        &self,
+        id: SessionId,
+        delta: SessionUsage,
+    ) -> Result<Session, StoreError> {
+        // Read and update under one database lock. Session actions can finish in
+        // parallel, so a separate get followed by update loses concurrent deltas.
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let document = transaction.query_row(
+            "SELECT document_json FROM sessions WHERE id = ?1",
+            [id.to_string()],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut session: Session = serde_json::from_str(&document)?;
+        apply_session_usage_delta(&mut session.usage, delta);
+        session.updated_at = Utc::now();
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
+            &transaction,
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::UsageUpdated {
+                usage: session.usage.clone(),
+            },
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(event);
+        Ok(session)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn create_participant(
+    pub fn create_agent(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
         class_name: impl Into<String>,
         name: impl Into<String>,
         role: impl Into<String>,
@@ -1707,11 +1537,10 @@ impl Store {
         model: impl Into<String>,
         skills: Vec<String>,
         access: AccessPreset,
-    ) -> Result<WorkflowParticipant, StoreError> {
-        self.create_participant_with_ids(
-            workflow_id,
-            AgentInstanceId::new(),
-            SessionId::new(),
+    ) -> Result<Agent, StoreError> {
+        self.create_agent_with_id(
+            session_id,
+            AgentId::new(),
             class_name,
             name,
             role,
@@ -1723,11 +1552,10 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn create_participant_with_ids(
+    pub fn create_agent_with_id(
         &self,
-        workflow_id: WorkflowId,
-        participant_id: AgentInstanceId,
         session_id: SessionId,
+        agent_id: AgentId,
         class_name: impl Into<String>,
         name: impl Into<String>,
         role: impl Into<String>,
@@ -1735,7 +1563,7 @@ impl Store {
         model: impl Into<String>,
         skills: Vec<String>,
         access: AccessPreset,
-    ) -> Result<WorkflowParticipant, StoreError> {
+    ) -> Result<Agent, StoreError> {
         let system_prompt = system_prompt.into();
         validate_system_prompt(&system_prompt)?;
         let now = Utc::now();
@@ -1745,162 +1573,133 @@ impl Store {
         let class_name = class_name.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut run: Workflow = load_document_tx(
-            &transaction,
-            "workflows",
-            &workflow_id.to_string(),
-            "workflow",
-        )?;
-        if run.status != WorkflowStatus::Running {
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
+        if session.status != SessionStatus::Running {
             return Err(StoreError::Invariant(
-                "cannot add an Agent unless its Workflow is running".to_string(),
+                "cannot add an Agent unless its Session is running".to_string(),
             ));
         }
         let model = {
             if requested_model.trim().is_empty() {
-                run.default_model.clone()
+                session.default_model.clone()
             } else {
                 requested_model
             }
         };
-        let session = Session {
-            id: session_id,
-            project_id: run.project_id,
-            title: name.clone(),
-            system_prompt,
-            model,
-            access: std::cmp::min(access, run.access),
-            status: SessionStatus::Ready,
-            enabled_skills: if skills.is_empty() {
-                run.enabled_skills.clone()
-            } else {
-                skills.clone()
-            },
-            created_at: now,
-            updated_at: now,
-        };
-        let participant = WorkflowParticipant {
-            id: participant_id,
-            workflow_id: run.id,
+        let agent = Agent {
+            id: agent_id,
             session_id: session.id,
             class_name,
             name,
             role,
-            system_prompt: session.system_prompt.clone(),
-            model: session.model.clone(),
-            skills: session.enabled_skills.clone(),
+            system_prompt,
+            model,
+            access: std::cmp::min(access, session.access),
+            skills: if skills.is_empty() {
+                session.enabled_skills.clone()
+            } else {
+                skills
+            },
             created_at: now,
         };
-        run.usage.agents_created = run.usage.agents_created.saturating_add(1);
-        run.updated_at = now;
+        session.usage.agents_created = session.usage.agents_created.saturating_add(1);
+        session.updated_at = now;
         transaction.execute(
-            "INSERT INTO sessions (id, project_id, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO agents
+             (id, session_id, document_json)
+             VALUES (?1, ?2, ?3)",
             params![
+                agent.id.to_string(),
                 session.id.to_string(),
-                session.project_id.to_string(),
-                enum_string(session.status)?,
-                now.to_rfc3339(),
-                serde_json::to_string(&session)?,
+                serde_json::to_string(&agent)?,
             ],
         )?;
-        transaction.execute(
-            "INSERT INTO workflow_participants
-             (id, workflow_id, session_id, document_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                participant.id.to_string(),
-                run.id.to_string(),
-                session.id.to_string(),
-                serde_json::to_string(&participant)?,
-            ],
-        )?;
-        update_workflow_tx(&transaction, &run)?;
-        let created = append_session_event_tx(
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
             &transaction,
             session.id,
+            Some(agent.id),
             None,
             None,
-            SessionEventPayload::SessionCreated,
-        )?;
-        let attached = append_session_event_tx(
-            &transaction,
-            session.id,
-            None,
-            None,
-            SessionEventPayload::WorkflowAgentAttached {
-                workflow_id: run.id,
-                agent_instance_id: participant.id,
-            },
-        )?;
-        let run_event = append_workflow_event_tx(
-            &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::ParticipantCreated {
-                agent_instance_id: participant.id,
-                session_id: session.id,
-                name: participant.name.clone(),
-                role: participant.role.clone(),
+            SessionEventPayload::AgentCreated {
+                name: agent.name.clone(),
+                role: agent.role.clone(),
             },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_session(created);
-        self.shared.publish_session(attached);
-        self.shared.publish_workflow(run_event);
-        Ok(participant)
+        self.shared.publish_session(event);
+        Ok(agent)
     }
 
-    pub fn get_participant(&self, id: AgentInstanceId) -> Result<WorkflowParticipant, StoreError> {
-        self.query_document_by_id(
-            "workflow_participants",
-            id.to_string(),
-            "workflow participant",
-        )
+    pub fn get_agent(&self, id: AgentId) -> Result<Agent, StoreError> {
+        self.query_document_by_id("agents", id.to_string(), "agent")
     }
 
-    pub fn list_participants(
-        &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<WorkflowParticipant>, StoreError> {
+    pub fn list_agents(&self, session_id: SessionId) -> Result<Vec<Agent>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM workflow_participants WHERE workflow_id = ?1
-             ORDER BY created_at ASC, id ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn list_session_participants(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Vec<WorkflowParticipant>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM workflow_participants WHERE session_id = ?1
+            "SELECT document_json FROM agents WHERE session_id = ?1
              ORDER BY created_at ASC, id ASC",
             [session_id.to_string()],
         )
     }
 
-    pub fn list_workflow_sessions(
+    pub fn set_agent_access(
         &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<Session>, StoreError> {
-        self.query_documents(
-            "SELECT sessions.document_json FROM sessions
-             INNER JOIN workflow_participants
-               ON workflow_participants.session_id = sessions.id
-             WHERE workflow_participants.workflow_id = ?1
-             ORDER BY workflow_participants.created_at ASC, sessions.id ASC",
-            [workflow_id.to_string()],
-        )
+        agent_id: AgentId,
+        access: AccessPreset,
+    ) -> Result<Agent, StoreError> {
+        let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(agent_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut agent: Agent =
+            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
+        let session: Session = load_document_tx(
+            &transaction,
+            "sessions",
+            &agent.session_id.to_string(),
+            "session",
+        )?;
+        if session.status.is_terminal() || session.archived_at.is_some() {
+            return Err(StoreError::Invariant(
+                "cannot change an Agent in a terminal or archived Session".to_string(),
+            ));
+        }
+        if access > session.access {
+            return Err(StoreError::Invariant(format!(
+                "Agent access {access} exceeds Session access {}",
+                session.access
+            )));
+        }
+        let active = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE agent_id = ?1
+             AND status IN ('queued', 'running', 'paused'))",
+            [agent_id.to_string()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if active {
+            return Err(StoreError::Invariant(
+                "cannot change access while the Agent has an active Turn".to_string(),
+            ));
+        }
+        agent.access = access;
+        let changed = transaction.execute(
+            "UPDATE agents SET document_json = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&agent)?, agent.id.to_string()],
+        )?;
+        ensure_one(changed, "agents")?;
+        transaction.commit()?;
+        Ok(agent)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn create_action_invocation(
         &self,
-        workflow_id: WorkflowId,
-        agent_id: AgentInstanceId,
+        session_id: SessionId,
+        agent_id: AgentId,
         action_name: impl Into<String>,
         contract: impl Into<String>,
         arguments: Value,
@@ -1908,7 +1707,7 @@ impl Store {
     ) -> Result<ActionInvocation, StoreError> {
         self.create_action_invocation_with_id(
             ActionInvocationId::new(),
-            workflow_id,
+            session_id,
             agent_id,
             action_name,
             contract,
@@ -1922,8 +1721,8 @@ impl Store {
     pub fn create_action_invocation_with_id(
         &self,
         invocation_id: ActionInvocationId,
-        workflow_id: WorkflowId,
-        agent_id: AgentInstanceId,
+        session_id: SessionId,
+        agent_id: AgentId,
         action_name: impl Into<String>,
         contract: impl Into<String>,
         arguments: Value,
@@ -1934,34 +1733,25 @@ impl Store {
         let contract = contract.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let participant: WorkflowParticipant = load_document_tx(
-            &transaction,
-            "workflow_participants",
-            &agent_id.to_string(),
-            "workflow participant",
-        )?;
-        if participant.workflow_id != workflow_id {
+        let agent: Agent =
+            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
+        if agent.session_id != session_id {
             return Err(StoreError::Invariant(
-                "action Agent belongs to another Workflow".to_string(),
+                "action Agent belongs to another Session".to_string(),
             ));
         }
-        let run: Workflow = load_document_tx(
-            &transaction,
-            "workflows",
-            &workflow_id.to_string(),
-            "workflow",
-        )?;
-        if run.status != WorkflowStatus::Running {
+        let session: Session =
+            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
+        if session.status != SessionStatus::Running {
             return Err(StoreError::Invariant(
-                "cannot schedule an Action unless its Workflow is running".to_string(),
+                "cannot schedule an Action unless its Session is running".to_string(),
             ));
         }
         let now = Utc::now();
         let invocation = ActionInvocation {
             id: invocation_id,
-            workflow_id,
-            agent_instance_id: agent_id,
-            session_id: participant.session_id,
+            session_id,
+            agent_id,
             action_name,
             contract,
             arguments,
@@ -1973,24 +1763,30 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        insert_indexed_document_tx(
-            &transaction,
-            "action_invocations",
-            &invocation.id.to_string(),
-            &[workflow_id.to_string(), participant.session_id.to_string()],
-            invocation.status,
-            now,
-            &invocation,
+        transaction.execute(
+            "INSERT INTO action_invocations
+             (id, session_id, agent_id, status, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                invocation.id.to_string(),
+                session_id.to_string(),
+                agent_id.to_string(),
+                enum_string(invocation.status)?,
+                now.to_rfc3339(),
+                serde_json::to_string(&invocation)?,
+            ],
         )?;
-        let event = append_workflow_event_tx(
+        let event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            workflow_id,
+            session_id,
+            Some(agent_id),
+            None,
+            None,
             action_event_payload(&invocation, None),
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(event);
+        self.shared.publish_session(event);
         Ok(invocation)
     }
 
@@ -2003,12 +1799,12 @@ impl Store {
 
     pub fn list_action_invocations(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
     ) -> Result<Vec<ActionInvocation>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM action_invocations WHERE workflow_id = ?1
+            "SELECT document_json FROM action_invocations WHERE session_id = ?1
              ORDER BY created_at ASC, id ASC",
-            [workflow_id.to_string()],
+            [session_id.to_string()],
         )
     }
 
@@ -2033,14 +1829,14 @@ impl Store {
                 invocation.id, invocation.status
             )));
         }
-        let mut run: Workflow = load_document_tx(
+        let mut session: Session = load_document_tx(
             &transaction,
-            "workflows",
-            &invocation.workflow_id.to_string(),
-            "workflow",
+            "sessions",
+            &invocation.session_id.to_string(),
+            "session",
         )?;
-        if run.status != WorkflowStatus::Running {
-            return Err(StoreError::Invariant("Workflow is not running".to_string()));
+        if session.status != SessionStatus::Running {
+            return Err(StoreError::Invariant("Session is not running".to_string()));
         }
         let has_active = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM action_attempts
@@ -2061,7 +1857,6 @@ impl Store {
         let now = Utc::now();
         let attempt = ActionAttempt {
             id: ActionAttemptId::new(),
-            workflow_id: invocation.workflow_id,
             invocation_id,
             number,
             turn_id: None,
@@ -2074,8 +1869,8 @@ impl Store {
         invocation.status = ActionStatus::Running;
         invocation.error = None;
         invocation.updated_at = now;
-        run.usage.actions_started = run.usage.actions_started.saturating_add(1);
-        run.updated_at = now;
+        session.usage.actions_started = session.usage.actions_started.saturating_add(1);
+        session.updated_at = now;
         update_status_document_tx(
             &transaction,
             "action_invocations",
@@ -2085,11 +1880,10 @@ impl Store {
         )?;
         transaction.execute(
             "INSERT INTO action_attempts
-             (id, workflow_id, invocation_id, number, status, updated_at, document_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, invocation_id, number, status, updated_at, document_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 attempt.id.to_string(),
-                attempt.workflow_id.to_string(),
                 attempt.invocation_id.to_string(),
                 attempt.number,
                 enum_string(attempt.status)?,
@@ -2097,25 +1891,29 @@ impl Store {
                 serde_json::to_string(&attempt)?,
             ],
         )?;
-        update_workflow_tx(&transaction, &run)?;
-        let action_event = append_workflow_event_tx(
+        update_session_tx(&transaction, &session)?;
+        let action_event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
+            session.id,
+            Some(invocation.agent_id),
+            None,
+            None,
             action_event_payload(&invocation, Some(attempt.id)),
         )?;
-        let usage_event = append_workflow_event_tx(
+        let usage_event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::UsageUpdated {
-                usage: run.usage.clone(),
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::UsageUpdated {
+                usage: session.usage.clone(),
             },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(action_event);
-        self.shared.publish_workflow(usage_event);
+        self.shared.publish_session(action_event);
+        self.shared.publish_session(usage_event);
         Ok(attempt)
     }
 
@@ -2133,19 +1931,19 @@ impl Store {
         )
     }
 
-    pub fn list_workflow_action_attempts(
+    pub fn list_session_action_attempts(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
     ) -> Result<Vec<ActionAttempt>, StoreError> {
         self.query_documents(
             "SELECT action_attempts.document_json FROM action_attempts
              INNER JOIN action_invocations
                ON action_invocations.id = action_attempts.invocation_id
-             WHERE action_invocations.workflow_id = ?1
+             WHERE action_invocations.session_id = ?1
              ORDER BY action_invocations.created_at ASC,
                       action_invocations.id ASC,
                       action_attempts.number ASC",
-            [workflow_id.to_string()],
+            [session_id.to_string()],
         )
     }
 
@@ -2204,15 +2002,15 @@ impl Store {
         attempt.status = status;
         attempt.error = error;
         attempt.updated_at = now;
-        let mut run: Workflow = load_document_tx(
+        let mut session: Session = load_document_tx(
             &transaction,
-            "workflows",
-            &invocation.workflow_id.to_string(),
-            "workflow",
+            "sessions",
+            &invocation.session_id.to_string(),
+            "session",
         )?;
         if status == ActionStatus::Completed {
-            run.usage.actions_completed = run.usage.actions_completed.saturating_add(1);
-            run.updated_at = now;
+            session.usage.actions_completed = session.usage.actions_completed.saturating_add(1);
+            session.updated_at = now;
         }
         update_status_document_tx(
             &transaction,
@@ -2229,21 +2027,25 @@ impl Store {
             &attempt,
         )?;
         if status == ActionStatus::Completed {
-            update_workflow_tx(&transaction, &run)?;
+            update_session_tx(&transaction, &session)?;
         }
-        let action_event = append_workflow_event_tx(
+        let action_event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
+            session.id,
+            Some(invocation.agent_id),
+            None,
+            None,
             action_event_payload(&invocation, Some(attempt.id)),
         )?;
         let usage_event = if status == ActionStatus::Completed {
-            Some(append_workflow_event_tx(
+            Some(append_session_event_tx(
                 &transaction,
-                run.project_id,
-                run.id,
-                WorkflowEventPayload::UsageUpdated {
-                    usage: run.usage.clone(),
+                session.id,
+                None,
+                None,
+                None,
+                SessionEventPayload::UsageUpdated {
+                    usage: session.usage.clone(),
                 },
             )?)
         } else {
@@ -2251,9 +2053,9 @@ impl Store {
         };
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(action_event);
+        self.shared.publish_session(action_event);
         if let Some(event) = usage_event {
-            self.shared.publish_workflow(event);
+            self.shared.publish_session(event);
         }
         Ok(invocation)
     }
@@ -2261,30 +2063,36 @@ impl Store {
     pub fn create_human_request_with_id(
         &self,
         request_id: HumanRequestId,
-        workflow_id: WorkflowId,
         session_id: SessionId,
+        agent_id: AgentId,
         question: impl Into<String>,
         response_schema: Value,
     ) -> Result<HumanRequest, StoreError> {
         let question = question.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut run: Workflow = load_document_tx(
-            &transaction,
-            "workflows",
-            &workflow_id.to_string(),
-            "workflow",
-        )?;
-        if !matches!(run.status, WorkflowStatus::Running | WorkflowStatus::Paused) {
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
+        let agent: Agent =
+            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
+        if agent.session_id != session_id {
             return Err(StoreError::Invariant(
-                "cannot request human input unless its Workflow is running or paused".to_string(),
+                "HumanRequest Agent belongs to another Session".to_string(),
+            ));
+        }
+        if !matches!(
+            session.status,
+            SessionStatus::Running | SessionStatus::Paused
+        ) {
+            return Err(StoreError::Invariant(
+                "cannot request human input unless its Session is running or paused".to_string(),
             ));
         }
         let now = Utc::now();
         let request = HumanRequest {
             id: request_id,
-            workflow_id,
             session_id,
+            agent_id,
             question,
             response_schema,
             status: HumanRequestStatus::Open,
@@ -2292,66 +2100,58 @@ impl Store {
             created_at: now,
             resolved_at: None,
         };
-        run.attention_required = true;
-        let previous_status = run.status;
-        if run.status != WorkflowStatus::Paused {
-            run.status = WorkflowStatus::WaitingForUser;
+        session.attention_required = true;
+        let previous_status = session.status;
+        if session.status != SessionStatus::Paused {
+            session.status = SessionStatus::WaitingForInput;
         }
-        run.updated_at = now;
+        session.updated_at = now;
         transaction.execute(
             "INSERT INTO human_requests
-             (id, workflow_id, session_id, status, created_at, document_json)
+             (id, session_id, agent_id, status, created_at, document_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 request.id.to_string(),
-                workflow_id.to_string(),
                 session_id.to_string(),
+                agent_id.to_string(),
                 enum_string(request.status)?,
                 now.to_rfc3339(),
                 serde_json::to_string(&request)?
             ],
         )?;
-        update_workflow_tx(&transaction, &run)?;
-        let run_event = append_workflow_event_tx(
+        update_session_tx(&transaction, &session)?;
+        let request_event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            workflow_id,
-            WorkflowEventPayload::HumanRequestOpened {
+            session_id,
+            Some(agent_id),
+            None,
+            None,
+            SessionEventPayload::HumanRequestOpened {
                 human_request_id: request.id,
-                session_id,
                 question: request.question.clone(),
             },
         )?;
-        let status_event = (run.status != previous_status)
+        let status_event = (session.status != previous_status)
             .then(|| {
-                append_workflow_event_tx(
+                append_session_event_tx(
                     &transaction,
-                    run.project_id,
-                    workflow_id,
-                    WorkflowEventPayload::WorkflowStatusChanged {
-                        status: run.status,
+                    session_id,
+                    None,
+                    None,
+                    None,
+                    SessionEventPayload::SessionChanged {
+                        status: session.status,
                         reason: None,
                     },
                 )
             })
             .transpose()?;
-        let session_event = append_session_event_tx(
-            &transaction,
-            session_id,
-            None,
-            None,
-            SessionEventPayload::HumanRequestOpened {
-                workflow_id,
-                human_request_id: request.id,
-            },
-        )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(run_event);
+        self.shared.publish_session(request_event);
         if let Some(event) = status_event {
-            self.shared.publish_workflow(event);
+            self.shared.publish_session(event);
         }
-        self.shared.publish_session(session_event);
         Ok(request)
     }
 
@@ -2361,21 +2161,10 @@ impl Store {
 
     pub fn list_human_requests(
         &self,
-        workflow_id: WorkflowId,
-    ) -> Result<Vec<HumanRequest>, StoreError> {
-        self.query_documents(
-            "SELECT document_json FROM human_requests WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn list_session_human_requests(
-        &self,
         session_id: SessionId,
     ) -> Result<Vec<HumanRequest>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM human_requests WHERE session_id = ?1
-             ORDER BY created_at ASC, id ASC",
+            "SELECT document_json FROM human_requests WHERE session_id = ?1 ORDER BY created_at ASC",
             [session_id.to_string()],
         )
     }
@@ -2401,13 +2190,13 @@ impl Store {
         request.status = HumanRequestStatus::Answered;
         request.answer = Some(answer);
         request.resolved_at = Some(Utc::now());
-        let mut run: Workflow = load_document_tx(
+        let mut session: Session = load_document_tx(
             &transaction,
-            "workflows",
-            &request.workflow_id.to_string(),
-            "workflow",
+            "sessions",
+            &request.session_id.to_string(),
+            "session",
         )?;
-        let previous_status = run.status;
+        let previous_status = session.status;
         let changed = transaction.execute(
             "UPDATE human_requests SET status = ?1, document_json = ?2
              WHERE id = ?3 AND status = 'open'",
@@ -2419,62 +2208,55 @@ impl Store {
         )?;
         ensure_one(changed, "human_requests")?;
         let remaining = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM human_requests WHERE workflow_id = ?1
+            "SELECT EXISTS(SELECT 1 FROM human_requests WHERE session_id = ?1
              AND status = 'open' AND id != ?2)",
-            params![run.id.to_string(), id.to_string()],
+            params![session.id.to_string(), id.to_string()],
             |row| row.get::<_, bool>(0),
         )?;
-        run.attention_required = remaining;
-        if !remaining && run.status == WorkflowStatus::WaitingForUser {
-            run.status = WorkflowStatus::Running;
+        session.attention_required = remaining;
+        if !remaining && session.status == SessionStatus::WaitingForInput {
+            session.status = SessionStatus::Running;
         }
-        run.updated_at = Utc::now();
-        update_workflow_tx(&transaction, &run)?;
-        let run_event = append_workflow_event_tx(
+        session.updated_at = Utc::now();
+        update_session_tx(&transaction, &session)?;
+        let resolved_event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::HumanRequestResolved {
+            session.id,
+            Some(request.agent_id),
+            None,
+            None,
+            SessionEventPayload::HumanRequestResolved {
                 human_request_id: id,
             },
         )?;
-        let status_event = (run.status != previous_status)
+        let status_event = (session.status != previous_status)
             .then(|| {
-                append_workflow_event_tx(
+                append_session_event_tx(
                     &transaction,
-                    run.project_id,
-                    run.id,
-                    WorkflowEventPayload::WorkflowStatusChanged {
-                        status: run.status,
+                    session.id,
+                    None,
+                    None,
+                    None,
+                    SessionEventPayload::SessionChanged {
+                        status: session.status,
                         reason: None,
                     },
                 )
             })
             .transpose()?;
-        let session_event = append_session_event_tx(
-            &transaction,
-            request.session_id,
-            None,
-            None,
-            SessionEventPayload::HumanRequestResolved {
-                workflow_id: run.id,
-                human_request_id: id,
-            },
-        )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(run_event);
+        self.shared.publish_session(resolved_event);
         if let Some(event) = status_event {
-            self.shared.publish_workflow(event);
+            self.shared.publish_session(event);
         }
-        self.shared.publish_session(session_event);
         Ok(request)
     }
 
     pub fn create_control_message(
         &self,
-        workflow_id: WorkflowId,
         session_id: SessionId,
+        agent_id: AgentId,
         invocation_id: Option<ActionInvocationId>,
         kind: ControlMessageKind,
         content: impl Into<String>,
@@ -2482,22 +2264,18 @@ impl Store {
         let content = content.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run: Workflow = load_document_tx(
-            &transaction,
-            "workflows",
-            &workflow_id.to_string(),
-            "workflow",
-        )?;
-        if run.status.is_terminal() {
-            return Err(StoreError::Invariant(
-                "cannot control a terminal Workflow".to_string(),
-            ));
-        }
         let session: Session =
             load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
-        if session.project_id != run.project_id {
+        if session.status.is_terminal() {
             return Err(StoreError::Invariant(
-                "control Session does not belong to the Workflow Project".to_string(),
+                "cannot control a terminal Session".to_string(),
+            ));
+        }
+        let agent: Agent =
+            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
+        if agent.session_id != session.id {
+            return Err(StoreError::Invariant(
+                "control Agent does not belong to the Session".to_string(),
             ));
         }
         if let Some(invocation_id) = invocation_id {
@@ -2507,16 +2285,16 @@ impl Store {
                 &invocation_id.to_string(),
                 "action invocation",
             )?;
-            if invocation.workflow_id != workflow_id || invocation.session_id != session_id {
+            if invocation.session_id != session_id || invocation.agent_id != agent_id {
                 return Err(StoreError::Invariant(
-                    "control Action does not belong to the target Workflow Session".to_string(),
+                    "control Action does not belong to the target Agent".to_string(),
                 ));
             }
         }
         let message = ControlMessage {
             id: ControlMessageId::new(),
-            workflow_id,
             session_id,
+            agent_id,
             action_invocation_id: invocation_id,
             kind,
             content,
@@ -2528,59 +2306,60 @@ impl Store {
         };
         transaction.execute(
             "INSERT INTO control_messages
-             (id, workflow_id, session_id, status, claimed_turn_id, updated_at, document_json)
+             (id, session_id, agent_id, status, claimed_turn_id, updated_at, document_json)
              VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
             params![
                 message.id.to_string(),
-                workflow_id.to_string(),
                 session_id.to_string(),
+                agent_id.to_string(),
                 enum_string(message.status)?,
                 message.created_at.to_rfc3339(),
                 serde_json::to_string(&message)?,
             ],
         )?;
-        let event = append_workflow_event_tx(
+        let event = append_session_event_tx(
             &transaction,
-            run.project_id,
-            run.id,
-            WorkflowEventPayload::ControlMessageQueued {
+            session.id,
+            Some(agent_id),
+            None,
+            None,
+            SessionEventPayload::ControlMessageQueued {
                 control_message_id: message.id,
-                session_id,
                 kind,
             },
         )?;
         transaction.commit()?;
         drop(connection);
-        self.shared.publish_workflow(event);
+        self.shared.publish_session(event);
         Ok(message)
     }
 
     pub fn claim_control_messages(
         &self,
-        workflow_id: WorkflowId,
         session_id: SessionId,
+        agent_id: AgentId,
         invocation_id: Option<ActionInvocationId>,
         turn_id: TurnId,
     ) -> Result<Vec<ControlMessage>, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure_workflow_accepts_effect_tx(&transaction, workflow_id)?;
+        ensure_session_accepts_effect_tx(&transaction, session_id)?;
         let turn: Turn = load_document_tx(&transaction, "turns", &turn_id.to_string(), "turn")?;
-        if turn.session_id != session_id || turn.status.is_terminal() {
+        if turn.agent_id != agent_id || turn.status.is_terminal() {
             return Err(StoreError::Invariant(
                 "control messages can only be claimed by their active target Turn".to_string(),
             ));
         }
         let mut statement = transaction.prepare(
             "SELECT document_json FROM control_messages
-             WHERE workflow_id = ?1 AND session_id = ?2
+             WHERE session_id = ?1 AND agent_id = ?2
                AND (status = 'pending' OR (status = 'claimed' AND claimed_turn_id = ?3))
              ORDER BY created_at ASC, id ASC",
         )?;
         let rows = statement.query_map(
             params![
-                workflow_id.to_string(),
                 session_id.to_string(),
+                agent_id.to_string(),
                 turn_id.to_string()
             ],
             |row| row.get::<_, String>(0),
@@ -2620,23 +2399,11 @@ impl Store {
 
     pub fn list_control_messages(
         &self,
-        workflow_id: WorkflowId,
+        session_id: SessionId,
     ) -> Result<Vec<ControlMessage>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM control_messages WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
-        )
-    }
-
-    pub fn list_workflow_events(
-        &self,
-        workflow_id: WorkflowId,
-        after_sequence: u64,
-    ) -> Result<Vec<WorkflowEvent>, StoreError> {
-        self.query_documents(
-            "SELECT event_json FROM workflow_events WHERE workflow_id = ?1 AND sequence > ?2
-             ORDER BY sequence ASC",
-            params![workflow_id.to_string(), after_sequence],
+            "SELECT document_json FROM control_messages WHERE session_id = ?1 ORDER BY created_at ASC",
+            [session_id.to_string()],
         )
     }
 
@@ -2644,8 +2411,8 @@ impl Store {
     pub fn create_artifact(
         &self,
         project_id: ProjectId,
-        workflow_id: WorkflowId,
-        session_id: Option<SessionId>,
+        session_id: SessionId,
+        agent_id: Option<AgentId>,
         action_invocation_id: Option<ActionInvocationId>,
         kind: ArtifactKind,
         name: impl Into<String>,
@@ -2656,8 +2423,8 @@ impl Store {
         self.create_artifact_with_id(
             ArtifactId::new(),
             project_id,
-            workflow_id,
             session_id,
+            agent_id,
             action_invocation_id,
             kind,
             name,
@@ -2672,8 +2439,8 @@ impl Store {
         &self,
         id: ArtifactId,
         project_id: ProjectId,
-        workflow_id: WorkflowId,
-        session_id: Option<SessionId>,
+        session_id: SessionId,
+        agent_id: Option<AgentId>,
         action_invocation_id: Option<ActionInvocationId>,
         kind: ArtifactKind,
         name: impl Into<String>,
@@ -2681,17 +2448,33 @@ impl Store {
         metadata: Value,
         bytes: &[u8],
     ) -> Result<Artifact, StoreError> {
-        let run = self.get_workflow(workflow_id)?;
-        if run.project_id != project_id {
+        let session = self.get_session(session_id)?;
+        if session.project_id != project_id {
             return Err(StoreError::Invariant(
-                "artifact Project does not match Workflow".to_string(),
+                "artifact Project does not match Session".to_string(),
             ));
+        }
+        if let Some(agent_id) = agent_id {
+            let agent = self.get_agent(agent_id)?;
+            if agent.session_id != session_id {
+                return Err(StoreError::Invariant(
+                    "Artifact Agent belongs to another Session".to_string(),
+                ));
+            }
+        }
+        if let Some(invocation_id) = action_invocation_id {
+            let invocation = self.get_action_invocation(invocation_id)?;
+            if invocation.session_id != session_id || Some(invocation.agent_id) != agent_id {
+                return Err(StoreError::Invariant(
+                    "Artifact Action ownership does not match its Session and Agent".to_string(),
+                ));
+            }
         }
         let name = name.into();
         let stored = store_artifact_file(
             &self.shared.artifact_root,
-            workflow_id,
             session_id,
+            agent_id,
             id,
             &name,
             bytes,
@@ -2699,8 +2482,8 @@ impl Store {
         let artifact = Artifact {
             id,
             project_id,
-            workflow_id,
             session_id,
+            agent_id,
             action_invocation_id,
             kind,
             name,
@@ -2715,7 +2498,7 @@ impl Store {
         let inserted = self.insert_indexed_document(
             "artifacts",
             &id.to_string(),
-            &[workflow_id.to_string()],
+            &[session_id.to_string()],
             "created",
             artifact.created_at,
             &artifact,
@@ -2729,10 +2512,10 @@ impl Store {
         Ok(artifact)
     }
 
-    pub fn list_artifacts(&self, workflow_id: WorkflowId) -> Result<Vec<Artifact>, StoreError> {
+    pub fn list_artifacts(&self, session_id: SessionId) -> Result<Vec<Artifact>, StoreError> {
         self.query_documents(
-            "SELECT document_json FROM artifacts WHERE workflow_id = ?1 ORDER BY created_at ASC",
-            [workflow_id.to_string()],
+            "SELECT document_json FROM artifacts WHERE session_id = ?1 ORDER BY created_at ASC",
+            [session_id.to_string()],
         )
     }
 
@@ -2741,7 +2524,7 @@ impl Store {
         project_id: ProjectId,
     ) -> Result<Vec<Artifact>, StoreError> {
         self.query_documents(
-            "SELECT a.document_json FROM artifacts a JOIN workflows wr ON wr.id = a.workflow_id
+            "SELECT a.document_json FROM artifacts a JOIN sessions wr ON wr.id = a.session_id
              WHERE wr.project_id = ?1 ORDER BY a.created_at DESC",
             [project_id.to_string()],
         )
@@ -2774,7 +2557,7 @@ impl Store {
     ) -> Result<ProjectHome, StoreError> {
         if source.project_id != home.project_id
             || page.project_id != home.project_id
-            || source.workflow_id != page.workflow_id
+            || source.session_id != page.session_id
             || source.id != home.source_artifact_id
             || page.id != home.artifact_id
         {
@@ -2807,7 +2590,7 @@ impl Store {
             &transaction,
             "artifacts",
             &source.id.to_string(),
-            &[source.workflow_id.to_string()],
+            &[source.session_id.to_string()],
             "created",
             source.created_at,
             source,
@@ -2816,7 +2599,7 @@ impl Store {
             &transaction,
             "artifacts",
             &page.id.to_string(),
-            &[page.workflow_id.to_string()],
+            &[page.session_id.to_string()],
             "created",
             page.created_at,
             page,
@@ -2861,59 +2644,59 @@ impl Store {
         reconcile_artifact_files(&self.shared.artifact_root, &artifacts)
     }
 
-    pub fn session_rollout_path(&self, session_id: SessionId) -> PathBuf {
-        crate::rollout::path(&self.shared.rollout_root, session_id)
+    pub fn agent_rollout_path(&self, agent_id: AgentId) -> PathBuf {
+        crate::rollout::path(&self.shared.rollout_root, agent_id)
     }
 
-    pub fn list_session_rollout_records(
+    pub fn list_agent_rollout_records(
         &self,
-        session_id: SessionId,
-    ) -> Result<Vec<SessionRolloutRecord>, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        crate::rollout::read(&self.shared.rollout_root, session_id)
+        agent_id: AgentId,
+    ) -> Result<Vec<AgentRolloutRecord>, StoreError> {
+        let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        crate::rollout::read(&self.shared.rollout_root, agent_id)
     }
 
-    pub fn reconstruct_session_rollout(
+    pub fn reconstruct_agent_rollout(
         &self,
-        session_id: SessionId,
-    ) -> Result<SessionRolloutState, StoreError> {
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        crate::rollout::reconstruct_file(&self.shared.rollout_root, session_id)
+        agent_id: AgentId,
+    ) -> Result<AgentRolloutState, StoreError> {
+        let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        crate::rollout::reconstruct_file(&self.shared.rollout_root, agent_id)
     }
 
-    pub fn session_rollout_status(
+    pub fn agent_rollout_status(
         &self,
-        session_id: SessionId,
-    ) -> Result<SessionRolloutStatus, StoreError> {
-        self.get_session(session_id)?;
-        let session_lock = self.shared.session_rollout_lock(session_id)?;
-        let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-        self.replay_session_rollout_locked(session_id)?;
-        let last_sequence = crate::rollout::last_sequence(&self.shared.rollout_root, session_id)?;
+        agent_id: AgentId,
+    ) -> Result<AgentRolloutStatus, StoreError> {
+        self.get_agent(agent_id)?;
+        let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+        let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        self.replay_agent_rollout_locked(agent_id)?;
+        let last_sequence = crate::rollout::last_sequence(&self.shared.rollout_root, agent_id)?;
         let projected_sequence = self
             .connection()?
             .query_row(
-                "SELECT last_sequence FROM session_rollout_projection WHERE session_id = ?1",
-                [session_id.to_string()],
+                "SELECT last_sequence FROM agent_rollout_projection WHERE agent_id = ?1",
+                [agent_id.to_string()],
                 |row| row.get(0),
             )
             .optional()?
             .unwrap_or(0);
-        Ok(SessionRolloutStatus {
-            version: SESSION_ROLLOUT_VERSION,
+        Ok(AgentRolloutStatus {
+            version: AGENT_ROLLOUT_VERSION,
             last_sequence,
             projected_sequence,
         })
     }
 
-    fn commit_session_rollout_item_locked(
+    fn commit_agent_rollout_item_locked(
         &self,
-        session_id: SessionId,
-        item: SessionRolloutItem,
-    ) -> Result<SessionRolloutRecord, StoreError> {
-        self.replay_session_rollout_locked(session_id)?;
+        agent_id: AgentId,
+        item: AgentRolloutItem,
+    ) -> Result<AgentRolloutRecord, StoreError> {
+        self.replay_agent_rollout_locked(agent_id)?;
 
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2923,15 +2706,15 @@ impl Store {
             .rollout_sequences
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?
-            .get(&session_id)
+            .get(&agent_id)
             .copied()
             .unwrap_or(0);
-        let sequence = last_sequence.checked_add(1).ok_or_else(|| {
-            StoreError::Invariant("Session rollout sequence overflow".to_string())
-        })?;
-        let record = SessionRolloutRecord {
-            version: SESSION_ROLLOUT_VERSION,
-            session_id,
+        let sequence = last_sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Invariant("Agent rollout sequence overflow".to_string()))?;
+        let record = AgentRolloutRecord {
+            version: AGENT_ROLLOUT_VERSION,
+            agent_id,
             sequence,
             occurred_at: Utc::now(),
             item,
@@ -2945,13 +2728,13 @@ impl Store {
             .rollout_sequences
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?
-            .insert(session_id, sequence);
+            .insert(agent_id, sequence);
         crate::process_fault::reach_process_fault_boundary(
             crate::process_fault::ROLLOUT_APPENDED_BEFORE_PROJECTION,
         );
         let projection = (|| -> Result<ProjectionEvents, StoreError> {
             let events = apply_rollout_record_tx(&transaction, &record)?;
-            set_rollout_projection_tx(&transaction, session_id, sequence)?;
+            set_rollout_projection_tx(&transaction, agent_id, sequence)?;
             transaction.commit()?;
             Ok(events)
         })();
@@ -2959,25 +2742,22 @@ impl Store {
         let projection_events = match projection {
             Ok(events) => events,
             Err(initial_error) => {
-                if let Err(replay_error) = self.replay_session_rollout_locked(session_id) {
+                if let Err(replay_error) = self.replay_agent_rollout_locked(agent_id) {
                     return Err(StoreError::Invariant(format!(
-                        "Session rollout is durable but projection failed ({initial_error}) and immediate replay failed ({replay_error})"
+                        "Agent rollout is durable but projection failed ({initial_error}) and immediate replay failed ({replay_error})"
                     )));
                 }
                 ProjectionEvents::default()
             }
         };
-        for event in projection_events.workflow {
-            self.shared.publish_workflow(event);
-        }
-        for event in projection_events.session {
+        for event in projection_events.events {
             self.shared.publish_session(event);
         }
         Ok(record)
     }
 
-    fn replay_all_session_rollouts(&self) -> Result<(), StoreError> {
-        let mut session_ids = Vec::new();
+    fn replay_all_agent_rollouts(&self) -> Result<(), StoreError> {
+        let mut agent_ids = Vec::new();
         for entry in std::fs::read_dir(&*self.shared.rollout_root)
             .map_err(|error| StoreError::Io(error.to_string()))?
         {
@@ -2987,14 +2767,14 @@ impl Store {
                 .map_err(|error| StoreError::Io(error.to_string()))?;
             if !metadata.is_file() {
                 return Err(StoreError::Invariant(format!(
-                    "unexpected entry in Session rollout directory: {}",
+                    "unexpected entry in Agent rollout directory: {}",
                     entry.path().display()
                 )));
             }
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
                 return Err(StoreError::Invariant(format!(
-                    "unexpected entry in Session rollout directory: {}",
+                    "unexpected entry in Agent rollout directory: {}",
                     path.display()
                 )));
             }
@@ -3002,31 +2782,28 @@ impl Store {
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| {
-                    StoreError::Invariant(format!(
-                        "invalid Session rollout path: {}",
-                        path.display()
-                    ))
+                    StoreError::Invariant(format!("invalid Agent rollout path: {}", path.display()))
                 })?;
-            session_ids.push(
-                SessionId::from_str(stem)
+            agent_ids.push(
+                AgentId::from_str(stem)
                     .map_err(|error| StoreError::Invariant(error.to_string()))?,
             );
         }
-        session_ids.sort_unstable();
-        for session_id in session_ids {
-            let session_lock = self.shared.session_rollout_lock(session_id)?;
-            let _guard = session_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
-            self.replay_session_rollout_locked(session_id)?;
+        agent_ids.sort_unstable();
+        for agent_id in agent_ids {
+            let agent_lock = self.shared.agent_rollout_lock(agent_id)?;
+            let _guard = agent_lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+            self.replay_agent_rollout_locked(agent_id)?;
         }
         Ok(())
     }
 
-    fn replay_session_rollout_locked(&self, session_id: SessionId) -> Result<(), StoreError> {
+    fn replay_agent_rollout_locked(&self, agent_id: AgentId) -> Result<(), StoreError> {
         let mut connection = self.connection()?;
         let projected = connection
             .query_row(
-                "SELECT last_sequence FROM session_rollout_projection WHERE session_id = ?1",
-                [session_id.to_string()],
+                "SELECT last_sequence FROM agent_rollout_projection WHERE agent_id = ?1",
+                [agent_id.to_string()],
                 |row| row.get::<_, u64>(0),
             )
             .optional()?
@@ -3036,16 +2813,16 @@ impl Store {
             .rollout_sequences
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?
-            .get(&session_id)
+            .get(&agent_id)
             .copied();
         if cached == Some(projected) {
             return Ok(());
         }
         let (last_sequence, records) =
-            crate::rollout::read_after(&self.shared.rollout_root, session_id, projected)?;
+            crate::rollout::read_after(&self.shared.rollout_root, agent_id, projected)?;
         if projected > last_sequence {
             return Err(StoreError::Invariant(format!(
-                "Session {session_id} projection sequence {projected} is ahead of rollout {last_sequence}"
+                "Agent {agent_id} projection sequence {projected} is ahead of rollout {last_sequence}"
             )));
         }
         if projected < last_sequence {
@@ -3054,14 +2831,14 @@ impl Store {
             for record in &records {
                 apply_rollout_record_tx(&transaction, record)?;
             }
-            set_rollout_projection_tx(&transaction, session_id, last_sequence)?;
+            set_rollout_projection_tx(&transaction, agent_id, last_sequence)?;
             transaction.commit()?;
         }
         self.shared
             .rollout_sequences
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?
-            .insert(session_id, last_sequence);
+            .insert(agent_id, last_sequence);
         Ok(())
     }
 
@@ -3122,8 +2899,8 @@ impl Store {
         document: &T,
     ) -> Result<(), StoreError> {
         let columns = match indexes.len() {
-            1 => "id, workflow_id, status, updated_at, document_json",
-            2 => "id, workflow_id, session_id, status, updated_at, document_json",
+            1 => "id, session_id, status, updated_at, document_json",
+            2 => "id, session_id, session_id, status, updated_at, document_json",
             count => {
                 return Err(StoreError::Invariant(format!(
                     "unsupported index count {count}"
@@ -3262,7 +3039,7 @@ fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
     for directory in [
         "prompts",
         "rollouts",
-        "workflows",
+        "sessions",
         "skills",
         "sources",
         "state",
@@ -3288,7 +3065,7 @@ fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
     for relative in [
         "prompts",
         "rollouts",
-        "workflows",
+        "sessions",
         "skills",
         "sources",
         "state",
@@ -3339,7 +3116,7 @@ fn validate_system_prompt(content: &str) -> Result<(), StoreError> {
 fn validate_workflow_instructions(content: &str) -> Result<(), StoreError> {
     if content.len() > MAX_SYSTEM_PROMPT_BYTES {
         return Err(StoreError::Invariant(format!(
-            "Workflow instructions exceed the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
+            "Session instructions exceed the {MAX_SYSTEM_PROMPT_BYTES} byte limit"
         )));
     }
     Ok(())
@@ -3351,7 +3128,7 @@ fn hash_text(content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn workflow_effect_hash(kind: &str, payload: &Value) -> Result<String, StoreError> {
+fn session_effect_hash(kind: &str, payload: &Value) -> Result<String, StoreError> {
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(
         &json!({"kind": kind, "payload": payload}),
@@ -3375,87 +3152,73 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS sessions (
            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-           status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
+           program_slug TEXT NOT NULL, status TEXT NOT NULL,
+           attention_required INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS sessions_project_updated ON sessions(project_id, updated_at DESC);
-         CREATE TABLE IF NOT EXISTS turns (
-           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
+         CREATE INDEX IF NOT EXISTS sessions_project_program_updated ON sessions(project_id, program_slug, updated_at DESC);
+         CREATE TABLE IF NOT EXISTS agents (
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
+           document_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS agents_session_created ON agents(session_id, created_at ASC);
+         CREATE TABLE IF NOT EXISTS session_effects (
+           session_id TEXT NOT NULL REFERENCES sessions(id), effect_key TEXT NOT NULL,
+           status TEXT NOT NULL, started_at TEXT NOT NULL, document_json TEXT NOT NULL,
+           PRIMARY KEY(session_id, effect_key)
+         );
+         CREATE INDEX IF NOT EXISTS session_effects_started ON session_effects(session_id, started_at ASC);
+         CREATE TABLE IF NOT EXISTS action_invocations (
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           agent_id TEXT NOT NULL REFERENCES agents(id), status TEXT NOT NULL,
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS turns_session_created ON turns(session_id, created_at ASC);
+         CREATE TABLE IF NOT EXISTS action_attempts (
+           id TEXT PRIMARY KEY, invocation_id TEXT NOT NULL REFERENCES action_invocations(id), number INTEGER NOT NULL,
+           status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
+           UNIQUE(invocation_id, number)
+         );
+         CREATE TABLE IF NOT EXISTS turns (
+           id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), status TEXT NOT NULL,
+           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
+           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS turns_agent_created ON turns(agent_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS steps (
            id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES turns(id), sequence INTEGER NOT NULL,
            tool_call_id TEXT, status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
            UNIQUE(turn_id, sequence), UNIQUE(turn_id, tool_call_id)
          );
          CREATE TABLE IF NOT EXISTS session_events (
-           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), turn_id TEXT, step_id TEXT,
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           agent_id TEXT REFERENCES agents(id), turn_id TEXT REFERENCES turns(id), step_id TEXT REFERENCES steps(id),
            sequence INTEGER NOT NULL, occurred_at TEXT NOT NULL, event_json TEXT NOT NULL,
            UNIQUE(session_id, sequence)
          );
          CREATE INDEX IF NOT EXISTS session_events_sequence ON session_events(session_id, sequence ASC);
-         CREATE TABLE IF NOT EXISTS session_rollout_projection (
-           session_id TEXT PRIMARY KEY REFERENCES sessions(id), last_sequence INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflows (
-           id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-           started_from_session_id TEXT REFERENCES sessions(id), program_slug TEXT NOT NULL,
-           status TEXT NOT NULL,
-           attention_required INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS workflows_project_updated ON workflows(project_id, updated_at DESC);
-         CREATE INDEX IF NOT EXISTS workflows_project_program_updated ON workflows(project_id, program_slug, updated_at DESC);
-         CREATE INDEX IF NOT EXISTS workflows_starting_session_updated ON workflows(started_from_session_id, updated_at DESC);
-         CREATE TABLE IF NOT EXISTS workflow_effects (
-           workflow_id TEXT NOT NULL REFERENCES workflows(id), effect_key TEXT NOT NULL,
-           status TEXT NOT NULL, started_at TEXT NOT NULL, document_json TEXT NOT NULL,
-           PRIMARY KEY(workflow_id, effect_key)
-         );
-         CREATE INDEX IF NOT EXISTS workflow_effects_started ON workflow_effects(workflow_id, started_at ASC);
-         CREATE TABLE IF NOT EXISTS workflow_events (
-           id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           sequence INTEGER NOT NULL, occurred_at TEXT NOT NULL, event_json TEXT NOT NULL,
-           UNIQUE(workflow_id, sequence)
-         );
-         CREATE INDEX IF NOT EXISTS workflow_events_sequence ON workflow_events(workflow_id, sequence ASC);
-         CREATE TABLE IF NOT EXISTS workflow_participants (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           session_id TEXT NOT NULL REFERENCES sessions(id),
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           document_json TEXT NOT NULL, UNIQUE(workflow_id, session_id)
-         );
-         CREATE INDEX IF NOT EXISTS workflow_participants_session ON workflow_participants(session_id, created_at ASC);
-         CREATE TABLE IF NOT EXISTS action_invocations (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
-           created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
-           updated_at TEXT NOT NULL, document_json TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS action_attempts (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           invocation_id TEXT NOT NULL REFERENCES action_invocations(id), number INTEGER NOT NULL,
-           status TEXT NOT NULL, updated_at TEXT NOT NULL, document_json TEXT NOT NULL,
-           UNIQUE(invocation_id, number)
+         CREATE TABLE IF NOT EXISTS agent_rollout_projection (
+           agent_id TEXT PRIMARY KEY REFERENCES agents(id), last_sequence INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS human_requests (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           agent_id TEXT NOT NULL REFERENCES agents(id), status TEXT NOT NULL,
            created_at TEXT NOT NULL, updated_at TEXT GENERATED ALWAYS AS (COALESCE(json_extract(document_json, '$.resolved_at'), created_at)) VIRTUAL,
            document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS human_requests_session ON human_requests(session_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS control_messages (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
-           session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+           agent_id TEXT NOT NULL REFERENCES agents(id), status TEXT NOT NULL,
            claimed_turn_id TEXT REFERENCES turns(id),
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS control_messages_claim
-           ON control_messages(workflow_id, session_id, status, claimed_turn_id, created_at ASC);
+           ON control_messages(session_id, agent_id, status, claimed_turn_id, created_at ASC);
          CREATE TABLE IF NOT EXISTS artifacts (
-           id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), status TEXT NOT NULL,
+           id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL,
            created_at TEXT GENERATED ALWAYS AS (json_extract(document_json, '$.created_at')) VIRTUAL,
            updated_at TEXT NOT NULL, document_json TEXT NOT NULL
          );
@@ -3470,72 +3233,72 @@ fn initialize_new(connection: &Connection) -> Result<(), StoreError> {
            project_id TEXT NOT NULL REFERENCES projects(id),
            entity_kind TEXT NOT NULL,
            entity_id TEXT NOT NULL,
-           workflow_id TEXT
+           session_id TEXT
          );
          CREATE INDEX IF NOT EXISTS project_changes_project_sequence
            ON project_changes(project_id, sequence);
          CREATE TRIGGER IF NOT EXISTS project_change_project_insert
          AFTER INSERT ON projects BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
            VALUES (NEW.id, 'project', NEW.id, NULL);
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_project_update
          AFTER UPDATE ON projects BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
            VALUES (NEW.id, 'project', NEW.id, NULL);
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_session_insert
          AFTER INSERT ON sessions BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           VALUES (NEW.project_id, 'session', NEW.id, NULL);
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           VALUES (NEW.project_id, 'session', NEW.id, NEW.id);
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_session_update
          AFTER UPDATE ON sessions BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           VALUES (NEW.project_id, 'session', NEW.id, NULL);
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           VALUES (NEW.project_id, 'session', NEW.id, NEW.id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_agent_insert
+         AFTER INSERT ON agents BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT project_id, 'agent', NEW.id, NEW.session_id FROM sessions WHERE id = NEW.session_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS project_change_agent_update
+         AFTER UPDATE ON agents BEGIN
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT project_id, 'agent', NEW.id, NEW.session_id FROM sessions WHERE id = NEW.session_id;
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_turn_insert
          AFTER INSERT ON turns BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           SELECT project_id, 'session', NEW.session_id, NULL
-           FROM sessions WHERE id = NEW.session_id;
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT sessions.project_id, 'turn', NEW.id, agents.session_id
+           FROM agents JOIN sessions ON sessions.id = agents.session_id WHERE agents.id = NEW.agent_id;
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_turn_update
          AFTER UPDATE ON turns BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           SELECT project_id, 'session', NEW.session_id, NULL
-           FROM sessions WHERE id = NEW.session_id;
-         END;
-         CREATE TRIGGER IF NOT EXISTS project_change_workflow_insert
-         AFTER INSERT ON workflows BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           VALUES (NEW.project_id, 'workflow', NEW.id, NEW.id);
-         END;
-         CREATE TRIGGER IF NOT EXISTS project_change_workflow_update
-         AFTER UPDATE ON workflows BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           VALUES (NEW.project_id, 'workflow', NEW.id, NEW.id);
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT sessions.project_id, 'turn', NEW.id, agents.session_id
+           FROM agents JOIN sessions ON sessions.id = agents.session_id WHERE agents.id = NEW.agent_id;
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_artifact_insert
          AFTER INSERT ON artifacts BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           SELECT project_id, 'artifact', NEW.id, NEW.workflow_id
-           FROM workflows WHERE id = NEW.workflow_id;
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT project_id, 'artifact', NEW.id, NEW.session_id
+           FROM sessions WHERE id = NEW.session_id;
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_home_insert
          AFTER INSERT ON project_homes BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           SELECT NEW.project_id, 'project_home', NEW.project_id, workflow_id
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT NEW.project_id, 'project_home', NEW.project_id, session_id
            FROM artifacts WHERE id = NEW.artifact_id;
          END;
          CREATE TRIGGER IF NOT EXISTS project_change_home_update
          AFTER UPDATE ON project_homes BEGIN
-           INSERT INTO project_changes(project_id, entity_kind, entity_id, workflow_id)
-           SELECT NEW.project_id, 'project_home', NEW.project_id, workflow_id
+           INSERT INTO project_changes(project_id, entity_kind, entity_id, session_id)
+           SELECT NEW.project_id, 'project_home', NEW.project_id, session_id
            FROM artifacts WHERE id = NEW.artifact_id;
          END;"
     ))?;
-    reconcile_terminal_workflow_resources(connection)?;
+    reconcile_terminal_session_resources(connection)?;
     Ok(())
 }
 
@@ -3556,22 +3319,22 @@ fn verify_current(connection: &Connection) -> Result<(), StoreError> {
             "Project database integrity check failed: {integrity}"
         )));
     }
-    reconcile_terminal_workflow_resources(connection)?;
+    reconcile_terminal_session_resources(connection)?;
     Ok(())
 }
 
-fn ensure_workflow_accepts_effect_tx(
+fn ensure_session_accepts_effect_tx(
     transaction: &Transaction<'_>,
-    workflow_id: WorkflowId,
+    session_id: SessionId,
 ) -> Result<(), StoreError> {
     let status = transaction.query_row(
-        "SELECT status FROM workflows WHERE id = ?1",
-        [workflow_id.to_string()],
+        "SELECT status FROM sessions WHERE id = ?1",
+        [session_id.to_string()],
         |row| row.get::<_, String>(0),
     )?;
     if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
         return Err(StoreError::Invariant(format!(
-            "Workflow is terminal with status {status}"
+            "Session is terminal with status {status}"
         )));
     }
     Ok(())
@@ -3597,20 +3360,7 @@ fn load_document_tx<T: DeserializeOwned>(
     Ok(serde_json::from_str(&document)?)
 }
 
-fn message_workflow_project_id_tx(
-    transaction: &Transaction<'_>,
-    workflow_id: WorkflowId,
-) -> Result<ProjectId, StoreError> {
-    let workflow: Workflow = load_document_tx(
-        transaction,
-        "workflows",
-        &workflow_id.to_string(),
-        "workflow",
-    )?;
-    Ok(workflow.project_id)
-}
-
-fn apply_workflow_usage_delta(usage: &mut WorkflowUsage, delta: WorkflowUsage) {
+fn apply_session_usage_delta(usage: &mut SessionUsage, delta: SessionUsage) {
     usage.agents_created = usage.agents_created.saturating_add(delta.agents_created);
     usage.actions_started = usage.actions_started.saturating_add(delta.actions_started);
     usage.actions_completed = usage
@@ -3643,9 +3393,9 @@ fn token_usage_delta(current: TokenUsage, previous: TokenUsage) -> TokenUsage {
     }
 }
 
-fn terminalize_workflow_resources_tx(
+fn terminalize_session_resources_tx(
     transaction: &Transaction<'_>,
-    workflow_id: WorkflowId,
+    session_id: SessionId,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let now = now.to_rfc3339();
@@ -3656,8 +3406,8 @@ fn terminalize_workflow_resources_tx(
                  json_set(document_json, '$.status', 'applied'),
                  '$.applied_at', ?2
              )
-         WHERE workflow_id = ?1 AND status IN ('pending', 'claimed')",
-        params![workflow_id.to_string(), now],
+         WHERE session_id = ?1 AND status IN ('pending', 'claimed')",
+        params![session_id.to_string(), now],
     )?;
     transaction.execute(
         "UPDATE human_requests
@@ -3666,25 +3416,25 @@ fn terminalize_workflow_resources_tx(
                  json_set(document_json, '$.status', 'cancelled'),
                  '$.resolved_at', ?2
              )
-         WHERE workflow_id = ?1 AND status = 'open'",
-        params![workflow_id.to_string(), now],
+         WHERE session_id = ?1 AND status = 'open'",
+        params![session_id.to_string(), now],
     )?;
     Ok(())
 }
 
-fn reconcile_terminal_workflow_resources(connection: &Connection) -> Result<(), StoreError> {
-    let workflow_ids = {
+fn reconcile_terminal_session_resources(connection: &Connection) -> Result<(), StoreError> {
+    let session_ids = {
         let mut statement = connection.prepare(
-            "SELECT id FROM workflows WHERE status IN ('completed', 'failed', 'cancelled')",
+            "SELECT id FROM sessions WHERE status IN ('completed', 'failed', 'cancelled')",
         )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for id in workflow_ids {
-        let workflow_id =
-            WorkflowId::from_str(&id).map_err(|error| StoreError::Invariant(error.to_string()))?;
+    for id in session_ids {
+        let session_id =
+            SessionId::from_str(&id).map_err(|error| StoreError::Invariant(error.to_string()))?;
         let transaction = connection.unchecked_transaction()?;
-        terminalize_workflow_resources_tx(&transaction, workflow_id, Utc::now())?;
+        terminalize_session_resources_tx(&transaction, session_id, Utc::now())?;
         transaction.commit()?;
     }
     Ok(())
@@ -3693,10 +3443,39 @@ fn reconcile_terminal_workflow_resources(connection: &Connection) -> Result<(), 
 fn append_session_event_tx(
     transaction: &Transaction<'_>,
     session_id: SessionId,
+    agent_id: Option<AgentId>,
     turn_id: Option<TurnId>,
     step_id: Option<StepId>,
     payload: SessionEventPayload,
 ) -> Result<SessionEvent, StoreError> {
+    let session: Session =
+        load_document_tx(transaction, "sessions", &session_id.to_string(), "session")?;
+    if let Some(agent_id) = agent_id {
+        let agent: Agent = load_document_tx(transaction, "agents", &agent_id.to_string(), "agent")?;
+        if agent.session_id != session_id {
+            return Err(StoreError::Invariant(
+                "Session event Agent belongs to another Session".to_string(),
+            ));
+        }
+    }
+    if let Some(turn_id) = turn_id {
+        let turn: Turn = load_document_tx(transaction, "turns", &turn_id.to_string(), "turn")?;
+        let turn_agent: Agent =
+            load_document_tx(transaction, "agents", &turn.agent_id.to_string(), "agent")?;
+        if turn_agent.session_id != session_id || agent_id.is_some_and(|id| id != turn.agent_id) {
+            return Err(StoreError::Invariant(
+                "Session event Turn ownership does not match its Session and Agent".to_string(),
+            ));
+        }
+    }
+    if let Some(step_id) = step_id {
+        let step: AgentStep = load_document_tx(transaction, "steps", &step_id.to_string(), "step")?;
+        if turn_id != Some(step.turn_id) {
+            return Err(StoreError::Invariant(
+                "Session event Step does not belong to its Turn".to_string(),
+            ));
+        }
+    }
     let sequence = transaction.query_row(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?1",
         [session_id.to_string()],
@@ -3705,7 +3484,9 @@ fn append_session_event_tx(
     let event = SessionEvent {
         id: EventId::new(),
         sequence,
+        project_id: session.project_id,
         session_id,
+        agent_id,
         turn_id,
         step_id,
         occurred_at: Utc::now(),
@@ -3713,11 +3494,12 @@ fn append_session_event_tx(
     };
     transaction.execute(
         "INSERT INTO session_events
-         (id, session_id, turn_id, step_id, sequence, occurred_at, event_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (id, session_id, agent_id, turn_id, step_id, sequence, occurred_at, event_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             event.id.to_string(),
             session_id.to_string(),
+            agent_id.map(|id| id.to_string()),
             turn_id.map(|id| id.to_string()),
             step_id.map(|id| id.to_string()),
             sequence,
@@ -3730,21 +3512,20 @@ fn append_session_event_tx(
 
 #[derive(Default)]
 struct ProjectionEvents {
-    workflow: Vec<WorkflowEvent>,
-    session: Vec<SessionEvent>,
+    events: Vec<SessionEvent>,
 }
 
 fn validate_rollout_item_tx(
     transaction: &Transaction<'_>,
-    item: &SessionRolloutItem,
+    item: &AgentRolloutItem,
 ) -> Result<(), StoreError> {
     let (turn_id, acknowledged_control_ids) = match item {
-        SessionRolloutItem::ContextCheckpoint {
+        AgentRolloutItem::ContextCheckpoint {
             turn_id,
             acknowledged_control_ids,
             ..
         } => (*turn_id, acknowledged_control_ids),
-        SessionRolloutItem::TurnUpdated {
+        AgentRolloutItem::TurnUpdated {
             turn,
             acknowledged_control_ids,
             ..
@@ -3813,21 +3594,13 @@ fn apply_control_acknowledgements_tx(
             ],
         )?;
         ensure_one(changed, "control_messages")?;
-        events.workflow.push(append_workflow_event_tx(
-            transaction,
-            message_workflow_project_id_tx(transaction, message.workflow_id)?,
-            message.workflow_id,
-            WorkflowEventPayload::ControlMessageApplied {
-                control_message_id: *control_id,
-            },
-        )?);
-        events.session.push(append_session_event_tx(
+        events.events.push(append_session_event_tx(
             transaction,
             message.session_id,
+            Some(message.agent_id),
             Some(turn_id),
             None,
             SessionEventPayload::ControlMessageApplied {
-                workflow_id: message.workflow_id,
                 control_message_id: *control_id,
                 kind: message.kind,
             },
@@ -3838,20 +3611,20 @@ fn apply_control_acknowledgements_tx(
 
 fn apply_rollout_record_tx(
     transaction: &Transaction<'_>,
-    record: &SessionRolloutRecord,
+    record: &AgentRolloutRecord,
 ) -> Result<ProjectionEvents, StoreError> {
     let mut projected_events = ProjectionEvents::default();
     match &record.item {
-        SessionRolloutItem::TurnCreated {
+        AgentRolloutItem::TurnCreated {
             turn,
             action_attempt,
         } => {
             transaction.execute(
-                "INSERT INTO turns (id, session_id, status, updated_at, document_json)
+                "INSERT INTO turns (id, agent_id, status, updated_at, document_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     turn.id.to_string(),
-                    turn.session_id.to_string(),
+                    turn.agent_id.to_string(),
                     enum_string(turn.status)?,
                     turn.updated_at.to_rfc3339(),
                     serde_json::to_string(turn)?,
@@ -3864,15 +3637,18 @@ fn apply_rollout_record_tx(
                 action_attempt.status,
                 action_attempt,
             )?;
-            projected_events.session.push(append_session_event_tx(
+            let agent: Agent =
+                load_document_tx(transaction, "agents", &turn.agent_id.to_string(), "agent")?;
+            projected_events.events.push(append_session_event_tx(
                 transaction,
-                turn.session_id,
+                agent.session_id,
+                Some(turn.agent_id),
                 Some(turn.id),
                 None,
                 SessionEventPayload::TurnCreated,
             )?);
         }
-        SessionRolloutItem::ContextCheckpoint {
+        AgentRolloutItem::ContextCheckpoint {
             turn_id,
             usage,
             completed_model_steps,
@@ -3909,43 +3685,32 @@ fn apply_rollout_record_tx(
                 &turn,
             )?;
             if token_delta != TokenUsage::default() || hosted_search_delta > 0 {
-                let workflow_id = transaction
-                    .query_row(
-                        "SELECT workflow_id FROM action_attempts
-                         WHERE json_extract(document_json, '$.turn_id') = ?1",
-                        [turn_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| {
-                        StoreError::Invariant(format!(
-                            "Turn {turn_id} has no owning Workflow ActionAttempt"
-                        ))
-                    })?;
-                let workflow_id = WorkflowId::from_str(&workflow_id)
-                    .map_err(|error| StoreError::Invariant(error.to_string()))?;
-                let mut workflow: Workflow = load_document_tx(
+                let agent: Agent =
+                    load_document_tx(transaction, "agents", &turn.agent_id.to_string(), "agent")?;
+                let mut session: Session = load_document_tx(
                     transaction,
-                    "workflows",
-                    &workflow_id.to_string(),
-                    "workflow",
+                    "sessions",
+                    &agent.session_id.to_string(),
+                    "session",
                 )?;
-                apply_workflow_usage_delta(
-                    &mut workflow.usage,
-                    WorkflowUsage {
+                apply_session_usage_delta(
+                    &mut session.usage,
+                    SessionUsage {
                         tokens: token_delta,
                         hosted_search_calls: hosted_search_delta,
-                        ..WorkflowUsage::default()
+                        ..SessionUsage::default()
                     },
                 );
-                workflow.updated_at = record.occurred_at;
-                update_workflow_tx(transaction, &workflow)?;
-                projected_events.workflow.push(append_workflow_event_tx(
+                session.updated_at = record.occurred_at;
+                update_session_tx(transaction, &session)?;
+                projected_events.events.push(append_session_event_tx(
                     transaction,
-                    workflow.project_id,
-                    workflow.id,
-                    WorkflowEventPayload::UsageUpdated {
-                        usage: workflow.usage,
+                    session.id,
+                    Some(agent.id),
+                    Some(*turn_id),
+                    None,
+                    SessionEventPayload::UsageUpdated {
+                        usage: session.usage,
                     },
                 )?);
             }
@@ -3955,10 +3720,9 @@ fn apply_rollout_record_tx(
                 acknowledged_control_ids,
                 record.occurred_at,
             )?;
-            projected_events.workflow.extend(control_events.workflow);
-            projected_events.session.extend(control_events.session);
+            projected_events.events.extend(control_events.events);
         }
-        SessionRolloutItem::TurnUpdated {
+        AgentRolloutItem::TurnUpdated {
             turn,
             acknowledged_control_ids,
         } => {
@@ -3969,48 +3733,17 @@ fn apply_rollout_record_tx(
                 turn.status,
                 turn,
             )?;
-            let mut session: Session = load_document_tx(
+            let agent: Agent =
+                load_document_tx(transaction, "agents", &turn.agent_id.to_string(), "agent")?;
+            projected_events.events.push(append_session_event_tx(
                 transaction,
-                "sessions",
-                &turn.session_id.to_string(),
-                "session",
-            )?;
-            if session.status != SessionStatus::Archived {
-                session.status = match turn.status {
-                    TurnStatus::Queued | TurnStatus::Running => SessionStatus::Running,
-                    TurnStatus::Paused => SessionStatus::Paused,
-                    TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Cancelled => {
-                        SessionStatus::Ready
-                    }
-                    TurnStatus::Failed => SessionStatus::Failed,
-                };
-            }
-            session.updated_at = record.occurred_at;
-            update_status_document_tx(
-                transaction,
-                "sessions",
-                &session.id.to_string(),
-                session.status,
-                &session,
-            )?;
-            projected_events.session.push(append_session_event_tx(
-                transaction,
-                session.id,
+                agent.session_id,
+                Some(agent.id),
                 Some(turn.id),
                 None,
                 SessionEventPayload::TurnStatusChanged {
                     status: turn.status,
                     error: turn.error.clone(),
-                },
-            )?);
-            projected_events.session.push(append_session_event_tx(
-                transaction,
-                session.id,
-                Some(turn.id),
-                None,
-                SessionEventPayload::SessionStatusChanged {
-                    status: session.status,
-                    reason: None,
                 },
             )?);
             let control_events = apply_control_acknowledgements_tx(
@@ -4019,8 +3752,7 @@ fn apply_rollout_record_tx(
                 acknowledged_control_ids,
                 record.occurred_at,
             )?;
-            projected_events.workflow.extend(control_events.workflow);
-            projected_events.session.extend(control_events.session);
+            projected_events.events.extend(control_events.events);
             if turn.status.is_terminal() {
                 transaction.execute(
                     "UPDATE control_messages
@@ -4043,20 +3775,22 @@ fn apply_rollout_record_tx(
 
 fn set_rollout_projection_tx(
     transaction: &Transaction<'_>,
-    session_id: SessionId,
+    agent_id: AgentId,
     sequence: u64,
 ) -> Result<(), StoreError> {
     transaction.execute(
-        "INSERT INTO session_rollout_projection (session_id, last_sequence)
+        "INSERT INTO agent_rollout_projection (agent_id, last_sequence)
          VALUES (?1, ?2)
-         ON CONFLICT(session_id) DO UPDATE SET last_sequence = excluded.last_sequence",
-        params![session_id.to_string(), sequence],
+         ON CONFLICT(agent_id) DO UPDATE SET last_sequence = excluded.last_sequence",
+        params![agent_id.to_string(), sequence],
     )?;
     Ok(())
 }
 
 fn pending_session_event(
+    project_id: ProjectId,
     session_id: SessionId,
+    agent_id: Option<AgentId>,
     turn_id: Option<TurnId>,
     step_id: Option<StepId>,
     payload: SessionEventPayload,
@@ -4064,7 +3798,9 @@ fn pending_session_event(
     SessionEvent {
         id: EventId::new(),
         sequence: 0,
+        project_id,
         session_id,
+        agent_id,
         turn_id,
         step_id,
         occurred_at: Utc::now(),
@@ -4081,41 +3817,6 @@ fn is_transient_session_event(payload: &SessionEventPayload) -> bool {
     )
 }
 
-fn append_workflow_event_tx(
-    transaction: &Transaction<'_>,
-    project_id: ProjectId,
-    workflow_id: WorkflowId,
-    payload: WorkflowEventPayload,
-) -> Result<WorkflowEvent, StoreError> {
-    let sequence = transaction.query_row(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM workflow_events WHERE workflow_id = ?1",
-        [workflow_id.to_string()],
-        |row| row.get::<_, u64>(0),
-    )?;
-    let event = WorkflowEvent {
-        id: EventId::new(),
-        sequence,
-        project_id,
-        workflow_id,
-        occurred_at: Utc::now(),
-        payload,
-    };
-    transaction.execute(
-        "INSERT INTO workflow_events
-         (id, project_id, workflow_id, sequence, occurred_at, event_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            event.id.to_string(),
-            project_id.to_string(),
-            workflow_id.to_string(),
-            sequence,
-            event.occurred_at.to_rfc3339(),
-            serde_json::to_string(&event)?
-        ],
-    )?;
-    Ok(event)
-}
-
 fn insert_indexed_document_tx<T: Serialize, S: Serialize>(
     transaction: &Transaction<'_>,
     table: &str,
@@ -4126,8 +3827,8 @@ fn insert_indexed_document_tx<T: Serialize, S: Serialize>(
     document: &T,
 ) -> Result<(), StoreError> {
     let columns = match indexes.len() {
-        1 => "id, workflow_id, status, updated_at, document_json",
-        2 => "id, workflow_id, session_id, status, updated_at, document_json",
+        1 => "id, session_id, status, updated_at, document_json",
+        2 => "id, session_id, session_id, status, updated_at, document_json",
         count => {
             return Err(StoreError::Invariant(format!(
                 "unsupported index count {count}"
@@ -4167,19 +3868,19 @@ fn insert_indexed_document_tx<T: Serialize, S: Serialize>(
     Ok(())
 }
 
-fn update_workflow_tx(transaction: &Transaction<'_>, run: &Workflow) -> Result<(), StoreError> {
+fn update_session_tx(transaction: &Transaction<'_>, session: &Session) -> Result<(), StoreError> {
     let changed = transaction.execute(
-        "UPDATE workflows SET status = ?1, attention_required = ?2, updated_at = ?3,
+        "UPDATE sessions SET status = ?1, attention_required = ?2, updated_at = ?3,
          document_json = ?4 WHERE id = ?5",
         params![
-            enum_string(run.status)?,
-            run.attention_required,
-            run.updated_at.to_rfc3339(),
-            serde_json::to_string(run)?,
-            run.id.to_string()
+            enum_string(session.status)?,
+            session.attention_required,
+            session.updated_at.to_rfc3339(),
+            serde_json::to_string(session)?,
+            session.id.to_string()
         ],
     )?;
-    ensure_one(changed, "workflows")
+    ensure_one(changed, "sessions")
 }
 
 fn update_status_document_tx<T: Serialize, S: Serialize>(
@@ -4206,11 +3907,10 @@ fn update_status_document_tx<T: Serialize, S: Serialize>(
 fn action_event_payload(
     invocation: &ActionInvocation,
     attempt_id: Option<ActionAttemptId>,
-) -> WorkflowEventPayload {
-    WorkflowEventPayload::ActionChanged {
+) -> SessionEventPayload {
+    SessionEventPayload::ActionChanged {
         action_invocation_id: invocation.id,
         action_attempt_id: attempt_id,
-        agent_instance_id: invocation.agent_instance_id,
         action_name: invocation.action_name.clone(),
         status: invocation.status,
         error: invocation.error.clone(),

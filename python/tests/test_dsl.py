@@ -66,7 +66,7 @@ class ActionOptionsTest(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
-                return {"agent_instance_id": "page-agent", "session_id": "page-session"}
+                return {"agent_id": "page-agent", "session_id": "page-session"}
             if kind == "invoke_action":
                 return {
                     "action_invocation_id": "invocation-page",
@@ -102,7 +102,7 @@ class ActionOptionsTest(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if payload["action_name"] == "research":
                 return {
                     "action_invocation_id": "invocation-research",
@@ -129,7 +129,7 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertTrue(action_effects[0]["tools_enabled"])
         self.assertFalse(action_effects[1]["tools_enabled"])
         self.assertEqual(action_effects[1]["requested_tools"], [])
-        self.assertEqual(action_effects[1]["agent_instance_id"], "agent")
+        self.assertEqual(action_effects[1]["agent_id"], "agent")
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
         actions = 0
@@ -137,7 +137,7 @@ class ActionOptionsTest(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             nonlocal actions
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if kind == "invoke_action":
                 actions += 1
                 return {
@@ -161,8 +161,7 @@ class ActionOptionsTest(unittest.TestCase):
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent",
-                    "session_id": "session",
+                    "agent_id": "agent",
                     "access": payload["access"],
                 }
             if kind == "ask_human":
@@ -212,7 +211,7 @@ class ActionOptionsTest(unittest.TestCase):
                 await asyncio.sleep(delays.get(identity, 0))
                 if kind == "create_agent":
                     return {
-                        "agent_instance_id": f"agent-{payload['name']}",
+                        "agent_id": f"agent-{payload['name']}",
                         "session_id": f"session-{payload['name']}",
                     }
                 if kind == "invoke_action":
@@ -247,7 +246,7 @@ class ActionOptionsTest(unittest.TestCase):
     def test_typed_action_accepts_one_fenced_json_payload(self) -> None:
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if kind == "invoke_action":
                 return {
                     "action_invocation_id": "invocation-research",
@@ -264,7 +263,7 @@ class ActionOptionsTest(unittest.TestCase):
     def test_typed_action_extracts_object_after_provider_commentary(self) -> None:
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if kind == "invoke_action":
                 return {
                     "action_invocation_id": "invocation-research",
@@ -284,7 +283,7 @@ class ActionOptionsTest(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             effects.append((kind, payload))
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if kind == "invoke_action" and payload["action_name"] == "research":
                 return {
                     "action_invocation_id": "invocation-research",
@@ -306,7 +305,7 @@ class ActionOptionsTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(invoke()), {"answer": 42})
         repair = effects[-1][1]
-        self.assertEqual(repair["agent_instance_id"], "agent")
+        self.assertEqual(repair["agent_id"], "agent")
         self.assertFalse(repair["tools_enabled"])
         self.assertEqual(repair["requested_tools"], [])
 
@@ -316,7 +315,7 @@ class ActionOptionsTest(unittest.TestCase):
         async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
             nonlocal calls
             if kind == "create_agent":
-                return {"agent_instance_id": "agent", "session_id": "session"}
+                return {"agent_id": "agent"}
             if kind == "invoke_action":
                 calls += 1
                 return {
@@ -340,8 +339,7 @@ class ActionOptionsTest(unittest.TestCase):
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent",
-                    "session_id": "session",
+                    "agent_id": "agent",
                     "access": payload["access"],
                 }
             if kind == "invoke_action":
@@ -389,8 +387,7 @@ class ActionOptionsTest(unittest.TestCase):
             effects.append((kind, payload))
             if kind == "create_agent":
                 return {
-                    "agent_instance_id": "agent",
-                    "session_id": "session",
+                    "agent_id": "agent",
                     "access": payload["access"],
                 }
             if kind == "set_agent_access":
