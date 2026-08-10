@@ -86,9 +86,12 @@ An interrupt ends the current attempt and may let program code start a new
 attempt for the same invocation. A retry is never represented as a second
 logical ActionInvocation.
 
-Typed dict, list, bool, int, and float returns request JSON parsing. JSON repair
-and **finalize="after_search"** use no-tool model work; they never receive a
-hidden Registry.
+Typed dict, list, bool, int, and float returns request JSON parsing. With
+**finalize="always"**, the normal work Turn remains unconstrained and a second
+no-tool, no-search Turn produces the typed result only when the work Turn did
+not already return a valid value. JSON repair and
+**finalize="after_search"** also use no-tool, no-search model work; none receive
+a hidden Registry.
 
 **ask_human** returns a HumanMessage carrying HumanRequest provenance. Only an
 Action parameter typed as HumanMessage may turn that verified string answer
@@ -163,7 +166,7 @@ caller's WorkflowProgram before snapshots are built. `publish_artifact` writes
 deterministic Project-managed content.
 
 Project Home is also Project-managed. A normal Action returns a complete safe
-HTML fragment and passes that exact awaited `_ActionCall` to
+standalone HTML document and passes that exact awaited `_ActionCall` to
 `publish_project_home`. Publication verifies Action provenance, validates the
 HTML, and atomically updates the canonical page. No Workflow slug or special
 Summary Agent is trusted by the kernel.

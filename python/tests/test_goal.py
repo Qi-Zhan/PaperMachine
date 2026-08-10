@@ -25,8 +25,10 @@ class GoalWorkflowTests(unittest.TestCase):
         effects: list[tuple[str, dict[str, Any]]] = []
         responses = iter(
             [
-                "Inspected the failure.\n<!-- papermachine-goal:active -->",
-                "Fixed and verified it.\n<!-- papermachine-goal:complete -->",
+                "Inspected the failure and identified the cause.\n"
+                '```json\n{"message":"Inspected the failure.","status":"active"}\n```',
+                "Fixed the failure and verified the result.\n"
+                '```json\n{"message":"Fixed and verified it.","status":"complete"}\n```',
             ]
         )
 
@@ -76,19 +78,31 @@ class GoalWorkflowTests(unittest.TestCase):
         create = effects[0][1]
         self.assertEqual(create["model"], "glm")
         self.assertEqual(create["name"], "Cache goal")
-        first = effects[1][1]
-        second = effects[2][1]
+        work_actions = [effects[1][1], effects[2][1]]
         self.assertEqual(
-            {
-                first["agent_id"],
-                second["agent_id"],
-            },
+            {action["agent_id"] for action in work_actions},
             {"agent-goal"},
         )
-        self.assertEqual(first["action_name"], "work")
-        self.assertEqual(second["action_name"], "work")
-        self.assertEqual(first["arguments"]["objective"], "Find and fix the cache bug.")
-        self.assertEqual(second["arguments"]["objective"], "Find and fix the cache bug.")
+        self.assertEqual(
+            [action["action_name"] for action in work_actions],
+            ["work", "work"],
+        )
+        self.assertTrue(
+            all(
+                action["arguments"]["objective"] == "Find and fix the cache bug."
+                for action in work_actions
+            )
+        )
+        self.assertTrue(
+            all(action["response_format"] is None for action in work_actions)
+        )
+        self.assertTrue(all(action["tool_policy"] is None for action in work_actions))
+        self.assertTrue(
+            all(
+                action["web_search_context_size"] == "high"
+                for action in work_actions
+            )
+        )
         self.assertNotIn("ask_human", [kind for kind, _ in effects])
 
     def test_goal_can_finish_on_the_first_turn(self) -> None:
@@ -98,10 +112,14 @@ class GoalWorkflowTests(unittest.TestCase):
                     "agent_id": "agent-goal",
                     "access": payload["access"],
                 }
-            if kind == "invoke_action":
+            if kind == "invoke_action" and payload["action_name"] == "work":
                 return {
                     "action_invocation_id": "invocation-work",
-                    "output": "Already verified.\n<!-- papermachine-goal:complete -->",
+                    "output": (
+                        "Already verified.\n"
+                        '```json\n{"message":"Already verified.",'
+                        '"status":"complete"}\n```'
+                    ),
                     "turn_id": "turn-work",
                 }
             raise AssertionError(f"unexpected effect: {kind}")
@@ -126,21 +144,45 @@ class GoalWorkflowTests(unittest.TestCase):
             },
         )
 
-    def test_goal_turn_status_matches_codex_active_until_updated_semantics(self) -> None:
-        parse = WORKFLOW["_parse_goal_turn"]
+    def test_invalid_goal_decision_fails_without_another_work_turn(self) -> None:
+        actions: list[str] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            if kind == "create_agent":
+                return {"agent_id": "agent-goal", "access": payload["access"]}
+            if kind == "invoke_action":
+                actions.append(payload["action_name"])
+                return {
+                    "action_invocation_id": f"invocation-{len(actions)}",
+                    "output": (
+                        "Checked the current state."
+                        if payload["action_name"] == "work"
+                        else '{"message":"Checked.","status":"done"}'
+                    ),
+                }
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        _set_runtime(_Runtime(send))
+        with self.assertRaisesRegex(ValueError, "work.status must be one of"):
+            asyncio.run(
+                main(
+                    SessionContext(
+                        request="Verify the result.",
+                        instructions="",
+                        params={},
+                        session_id="workflow-goal",
+                    )
+                )
+            )
         self.assertEqual(
-            parse("Progress.\n<!-- papermachine-goal:active -->\n"),
-            ("Progress.", "active"),
+            actions,
+            [
+                "work",
+                "work_finalize",
+                "work_json_repair",
+                "work_json_repair",
+            ],
         )
-        self.assertEqual(
-            parse("Done.\n<!-- papermachine-goal:complete -->"),
-            ("Done.", "complete"),
-        )
-        self.assertEqual(
-            parse("External access is still unavailable.\n<!-- papermachine-goal:blocked -->"),
-            ("External access is still unavailable.", "blocked"),
-        )
-        self.assertEqual(parse("No control update."), ("No control update.", "active"))
 
 
 if __name__ == "__main__":

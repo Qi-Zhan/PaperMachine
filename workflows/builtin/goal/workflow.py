@@ -1,23 +1,22 @@
-from papermachine import Agent, action, workflow
+from papermachine import Agent, Literal, TypedDict, action, workflow
+
+
+class GoalDecision(TypedDict):
+    message: str
+    status: Literal["active", "complete", "blocked"]
 
 
 class GoalAgent(Agent):
     access = "workspace"
     role = "persistent goal agent"
-    system_prompt = """Own the user's objective until it is actually complete. Work in one persistent Session so prior reasoning, evidence, tool results, and workspace changes remain available across Turns. On every Turn, make concrete progress with the available tools instead of merely proposing future work. Preserve the full objective, verify the current state before claiming completion, and report uncertainty honestly. Do not wait for or ask the user to continue; make safe, reversible assumptions when possible.
-
-End every response with exactly one of these control lines as its final non-empty line:
-<!-- papermachine-goal:active -->
-<!-- papermachine-goal:complete -->
-<!-- papermachine-goal:blocked -->
-
-Use active whenever any required work remains or completion is not proved. Use complete only after auditing the whole objective against current evidence and verifying that every requested outcome is achieved. Use blocked only when the same external blocking condition has prevented meaningful progress for at least three consecutive Goal Turns. The control line is for the Workflow runtime; do not explain or quote it. The runtime automatically starts another Turn only while the status remains active."""
+    system_prompt = """Own the user's objective until it is actually complete. Work in one persistent Session so prior reasoning, evidence, tool results, and workspace changes remain available across Turns. On every Turn, make concrete progress with the available tools instead of merely proposing future work. Preserve the full objective, verify the current state before claiming completion, and report uncertainty honestly. Do not wait for or ask the user to continue; make safe, reversible assumptions when possible. Use active whenever any required work remains or completion is not proved. Use complete only after auditing the whole objective against current evidence and verifying that every requested outcome is achieved. Use blocked only when the same external blocking condition has prevented meaningful progress for at least three consecutive Goal Turns."""
 
     @action(
         search_context_size="high",
+        finalize="always",
     )
-    async def work(self, objective: str):
-        """Continue working toward objective now. Inspect the Workspace when useful, use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""
+    async def work(self, objective: str) -> GoalDecision:
+        """Continue working toward the objective now. Inspect the Workspace when useful, use tools whenever needed, perform concrete work rather than describing a future Turn, and verify the result. End the work phase with a normal user-facing report. The finalized result must be a JSON object containing exactly a message string and a status of active, complete, or blocked."""
 
 
 @workflow(
@@ -80,37 +79,18 @@ async def main(ctx):
     latest_result = ""
     while True:
         iterations += 1
-        result, status = _parse_goal_turn(
-            await agent.work(ctx.request)
-        )
-        if result:
-            latest_result = result
+        decision = await agent.work(ctx.request)
+        status = decision.get("status")
+        result = decision.get("message")
+        if status not in {"active", "complete", "blocked"}:
+            raise ValueError("Goal result status must be active, complete, or blocked")
+        if not isinstance(result, str):
+            raise ValueError("Goal result message must be a string")
+        if result.strip():
+            latest_result = result.strip()
         if status != "active":
             return {
-                "result": result or latest_result,
+                "result": result.strip() or latest_result,
                 "status": status,
                 "iterations": iterations,
             }
-
-
-def _parse_goal_turn(value):
-    text = str(value or "")
-    lines = text.splitlines()
-    last_nonempty = next(
-        (index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()),
-        None,
-    )
-    if last_nonempty is None:
-        return "", "active"
-
-    statuses = {
-        "<!-- papermachine-goal:active -->": "active",
-        "<!-- papermachine-goal:complete -->": "complete",
-        "<!-- papermachine-goal:blocked -->": "blocked",
-    }
-    status = statuses.get(lines[last_nonempty].strip())
-    if status is None:
-        # This is equivalent to a Codex Goal Turn that did not call update_goal:
-        # the persisted status remains active, so the runtime continues.
-        return text, "active"
-    return "\n".join(lines[:last_nonempty]).rstrip(), status

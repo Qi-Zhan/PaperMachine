@@ -12,7 +12,16 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeVar, get_origin
+from typing import (
+    Any,
+    Literal,
+    TypeVar,
+    TypedDict,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_typeddict,
+)
 
 _runtime: _Runtime | None = None
 T = TypeVar("T")
@@ -22,7 +31,7 @@ ACCESS_PROFILES = {
     "workspace",
     "full_access",
 }
-_DEFAULT_TOOL_POLICY = object()
+_INHERIT_ACTION_OPTION = object()
 
 
 class HumanMessage(str):
@@ -123,8 +132,8 @@ class _ActionDescriptor:
         self.prompt = (prompt or inspect.getdoc(function) or self.name).strip()
         self.signature = inspect.signature(function)
         self.human_message_parameter = _human_message_parameter(function)
-        self.return_kind = _json_return_kind(function)
-        self.response_format = _response_format(self.name, self.return_kind)
+        self.return_kind, response_schema = _json_return_schema(function)
+        self.response_format = _response_format(self.name, response_schema)
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
@@ -160,7 +169,7 @@ class _ActionDescriptor:
                     + ", ".join(unexpected)
                 )
             prompt = self.prompt
-            if self.return_kind is not None:
+            if self.return_kind is not None and self.finalize != "always":
                 prompt = (
                     f"{prompt}\n\nReturn only valid JSON with a top-level "
                     f"{self.return_kind}; do not use Markdown fences or add commentary outside JSON."
@@ -290,31 +299,82 @@ class Agent:
         )
         self.access = result["access"]
 
-def _json_return_kind(function: Callable[..., Any]) -> str | None:
+def _return_annotation(function: Callable[..., Any]) -> Any:
     try:
-        annotation = inspect.get_annotations(function, eval_str=True).get("return")
+        return inspect.get_annotations(function, eval_str=True).get("return")
     except (NameError, TypeError):
-        annotation = function.__annotations__.get("return")
+        return function.__annotations__.get("return")
+
+
+def _json_return_schema(
+    function: Callable[..., Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    annotation = _return_annotation(function)
+    if is_typeddict(annotation):
+        return "object", _json_schema(annotation)
     origin = get_origin(annotation) or annotation
-    return {
+    kind = {
         dict: "object",
         list: "array",
         bool: "boolean",
         int: "integer",
         float: "number",
     }.get(origin)
+    return (kind, _json_schema(annotation)) if kind is not None else (None, None)
 
 
-def _response_format(name: str, return_kind: str | None) -> dict[str, Any] | None:
-    if return_kind is None:
+def _json_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is Any:
+        return {}
+    if is_typeddict(annotation):
+        properties = {
+            name: _json_schema(field)
+            for name, field in get_type_hints(annotation).items()
+        }
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": sorted(annotation.__required_keys__),
+            "additionalProperties": False,
+        }
+    origin = get_origin(annotation) or annotation
+    if origin is Literal:
+        values = list(get_args(annotation))
+        if not values or len({type(value) for value in values}) != 1:
+            raise TypeError("Literal action result fields must use one JSON scalar type")
+        schema = _json_schema(type(values[0]))
+        schema["enum"] = values
+        return schema
+    scalar = {
+        str: "string",
+        bool: "boolean",
+        int: "integer",
+        float: "number",
+    }.get(origin)
+    if scalar is not None:
+        return {"type": scalar}
+    if origin is list:
+        arguments = get_args(annotation)
+        return {
+            "type": "array",
+            "items": _json_schema(arguments[0]) if arguments else {},
+        }
+    if origin is dict:
+        arguments = get_args(annotation)
+        schema: dict[str, Any] = {"type": "object"}
+        if len(arguments) == 2 and arguments[1] is not Any:
+            schema["additionalProperties"] = _json_schema(arguments[1])
+        return schema
+    raise TypeError(f"unsupported typed action result annotation: {annotation!r}")
+
+
+def _response_format(name: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    if schema is None:
         return None
-    schema: dict[str, Any] = {"type": return_kind}
-    if return_kind == "array":
-        schema["items"] = {}
     return {
         "name": f"{name}_result",
         "schema": schema,
-        "strict": False,
+        "strict": schema.get("additionalProperties") is False,
     }
 
 
@@ -358,7 +418,13 @@ class _ActionCall(Awaitable[Any]):
 
     async def _run(self) -> Any:
         remote = await self.agent._ensure_remote()
-        result = await self._invoke(remote, use_human_message=True)
+        result = await self._invoke(
+            remote,
+            response_format=(
+                None if self.finalize == "always" else _INHERIT_ACTION_OPTION
+            ),
+            use_human_message=True,
+        )
         invocation_id = result.get("action_invocation_id")
         if not isinstance(invocation_id, str) or not invocation_id:
             raise RuntimeError("invoke_action did not return action_invocation_id")
@@ -367,21 +433,41 @@ class _ActionCall(Awaitable[Any]):
             hosted_search_calls = int(result.get("hosted_search_calls_used", 0))
         except (TypeError, ValueError):
             hosted_search_calls = 0
+        if self.finalize == "always" and self.return_kind is not None:
+            try:
+                value = _validate_action_json(
+                    str(result.get("output", "")),
+                    self.return_kind,
+                    self.name,
+                    self.response_format["schema"],
+                )
+            except (json.JSONDecodeError, ValueError):
+                pass
+            else:
+                self._completed = True
+                return value
         should_finalize = self.finalize == "always" or (
             self.finalize == "after_search" and hosted_search_calls > 0
         )
         if should_finalize:
+            finalization_prompt = (
+                "Turn the immediately preceding action result into the actual final "
+                "deliverable requested by that action. The preceding result may be "
+                "research notes or progress narration rather than an answer. Do not do "
+                "new research or call tools. Return only the complete, self-contained "
+                "deliverable in the original requested format; preserve verified evidence, "
+                "source URLs, exact values, and material limitations."
+            )
+            if self.return_kind is not None:
+                finalization_prompt += (
+                    " Return only valid JSON with a top-level "
+                    f"{self.return_kind}; do not use Markdown fences or add commentary "
+                    "outside JSON."
+                )
             result = await self._invoke(
                 remote,
                 action_name=f"{self.name}_finalize",
-                prompt=(
-                    "Turn the immediately preceding action result into the actual final "
-                    "deliverable requested by that action. The preceding result may be "
-                    "research notes or progress narration rather than an answer. Do not do "
-                    "new research or call tools. Return only the complete, self-contained "
-                    "deliverable in the original requested format; preserve verified evidence, "
-                    "source URLs, exact values, and material limitations."
-                ),
+                prompt=finalization_prompt,
                 arguments={
                     "original_action": self.name,
                     "finalization_policy": self.finalize,
@@ -399,7 +485,12 @@ class _ActionCall(Awaitable[Any]):
         error: ValueError | json.JSONDecodeError | None = None
         for repair_attempt in range(3):
             try:
-                value = _validate_action_json(output, self.return_kind, self.name)
+                value = _validate_action_json(
+                    output,
+                    self.return_kind,
+                    self.name,
+                    self.response_format["schema"],
+                )
                 self._completed = True
                 return value
             except (json.JSONDecodeError, ValueError) as parse_error:
@@ -417,6 +508,7 @@ class _ActionCall(Awaitable[Any]):
                 ),
                 arguments={
                     "expected_top_level": self.return_kind,
+                    "expected_schema": self.response_format["schema"],
                     "parser_error": str(error),
                     "repair_attempt": repair_attempt + 1,
                 },
@@ -438,8 +530,9 @@ class _ActionCall(Awaitable[Any]):
         action_name: str | None = None,
         prompt: str | None = None,
         arguments: dict[str, Any] | None = None,
-        tool_policy: list[str] | None | object = _DEFAULT_TOOL_POLICY,
-        search_context_size: str | None = None,
+        response_format: dict[str, Any] | None | object = _INHERIT_ACTION_OPTION,
+        tool_policy: list[str] | None | object = _INHERIT_ACTION_OPTION,
+        search_context_size: str | None | object = _INHERIT_ACTION_OPTION,
         reasoning_effort: str | None = None,
         use_human_message: bool = False,
     ) -> Any:
@@ -450,15 +543,19 @@ class _ActionCall(Awaitable[Any]):
                 "action_name": action_name or self.name,
                 "prompt": prompt or self.prompt,
                 "arguments": self.arguments if arguments is None else arguments,
-                "response_format": self.response_format,
+                "response_format": (
+                    self.response_format
+                    if response_format is _INHERIT_ACTION_OPTION
+                    else response_format
+                ),
                 "tool_policy": (
                     self.tools
-                    if tool_policy is _DEFAULT_TOOL_POLICY
+                    if tool_policy is _INHERIT_ACTION_OPTION
                     else tool_policy
                 ),
                 "web_search_context_size": (
                     self.search_context_size
-                    if search_context_size is None
+                    if search_context_size is _INHERIT_ACTION_OPTION
                     else search_context_size
                 ),
                 "reasoning_effort": (
@@ -476,7 +573,12 @@ class _ActionCall(Awaitable[Any]):
         )
 
 
-def _validate_action_json(output: str, return_kind: str, action_name: str) -> Any:
+def _validate_action_json(
+    output: str,
+    return_kind: str,
+    action_name: str,
+    schema: dict[str, Any],
+) -> Any:
     parsed = _parse_action_json(output, return_kind)
     expected = {
         "object": dict,
@@ -492,7 +594,41 @@ def _validate_action_json(output: str, return_kind: str, action_name: str) -> An
             f"action {action_name} must return a JSON {return_kind}, "
             f"got {type(parsed).__name__}"
         )
+    _validate_json_schema(parsed, schema, action_name)
     return parsed
+
+
+def _validate_json_schema(value: Any, schema: dict[str, Any], path: str) -> None:
+    expected = {
+        "object": dict,
+        "array": list,
+        "string": str,
+        "boolean": bool,
+        "integer": int,
+        "number": (int, float),
+    }.get(schema.get("type"))
+    if expected is not None and (
+        not isinstance(value, expected)
+        or schema.get("type") in {"integer", "number"}
+        and isinstance(value, bool)
+    ):
+        raise ValueError(f"{path} does not match JSON type {schema['type']}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
+    if schema.get("type") == "object":
+        properties = schema.get("properties", {})
+        missing = sorted(set(schema.get("required", [])) - set(value))
+        if missing:
+            raise ValueError(f"{path} is missing required fields: {', '.join(missing)}")
+        extra = sorted(set(value) - set(properties))
+        if schema.get("additionalProperties") is False and extra:
+            raise ValueError(f"{path} has unknown fields: {', '.join(extra)}")
+        for name, child in properties.items():
+            if name in value:
+                _validate_json_schema(value[name], child, f"{path}.{name}")
+    if schema.get("type") == "array" and "items" in schema:
+        for index, item in enumerate(value):
+            _validate_json_schema(item, schema["items"], f"{path}[{index}]")
 
 
 def _parse_action_json(output: str, return_kind: str) -> Any:
@@ -732,6 +868,8 @@ __all__ = [
     "HumanMessage",
     "ProjectContext",
     "SessionContext",
+    "Literal",
+    "TypedDict",
     "action",
     "ask_human",
     "publish_artifact",

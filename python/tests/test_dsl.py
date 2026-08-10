@@ -7,13 +7,20 @@ from typing import Any
 from papermachine import (
     Agent,
     HumanMessage,
+    Literal,
     _Runtime,
     _set_runtime,
+    TypedDict,
     action,
     ask_human,
     publish_project_home,
     together,
 )
+
+
+class ActionDecision(TypedDict):
+    message: str
+    status: Literal["active", "complete", "blocked"]
 
 
 class Writer(Agent):
@@ -43,6 +50,16 @@ class FinalizingResearcher(Agent):
     @action(finalize="after_search")
     async def research(self, question: str) -> str:
         """Research and return the final answer."""
+
+
+class TypedFinalizingAgent(Agent):
+    @action(
+        search_context_size="high",
+        finalize="always",
+        tools=["apply_patch"],
+    )
+    async def resolve(self, objective: str) -> ActionDecision:
+        """Work on the objective, then return a structured decision."""
 
 
 class ConversationalAgent(Agent):
@@ -128,7 +145,94 @@ class ActionOptionsTest(unittest.TestCase):
         )
         self.assertIsNone(action_effects[0]["tool_policy"])
         self.assertEqual(action_effects[1]["tool_policy"], [])
+        self.assertIsNone(action_effects[1]["web_search_context_size"])
         self.assertEqual(action_effects[1]["agent_id"], "agent")
+
+    def test_typed_always_finalization_keeps_work_unstructured(self) -> None:
+        effects: list[tuple[str, dict[str, Any]]] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            effects.append((kind, payload))
+            if kind == "create_agent":
+                return {"agent_id": "agent"}
+            if payload["action_name"] == "resolve":
+                return {
+                    "action_invocation_id": "invocation-work",
+                    "output": "Inspected, changed, and verified the files.",
+                }
+            if payload["action_name"] == "resolve_finalize":
+                return {
+                    "action_invocation_id": "invocation-finalize",
+                    "output": '{"message":"Verified.","status":"complete"}',
+                }
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> dict[str, Any]:
+            _set_runtime(_Runtime(send))
+            return await TypedFinalizingAgent().resolve("Fix the bug")
+
+        self.assertEqual(
+            asyncio.run(invoke()),
+            {"message": "Verified.", "status": "complete"},
+        )
+        actions = [payload for kind, payload in effects if kind == "invoke_action"]
+        self.assertEqual(
+            [payload["action_name"] for payload in actions],
+            ["resolve", "resolve_finalize"],
+        )
+        work, finalizer = actions
+        self.assertNotIn("Return only valid JSON", work["prompt"])
+        self.assertIsNone(work["response_format"])
+        self.assertEqual(work["tool_policy"], ["apply_patch"])
+        self.assertEqual(work["web_search_context_size"], "high")
+        self.assertEqual(
+            finalizer["response_format"],
+            {
+                "name": "resolve_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "complete", "blocked"],
+                        },
+                    },
+                    "required": ["message", "status"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        )
+        self.assertEqual(finalizer["tool_policy"], [])
+        self.assertIsNone(finalizer["web_search_context_size"])
+
+    def test_typed_always_accepts_a_valid_work_result_without_finalizer(self) -> None:
+        actions: list[str] = []
+
+        async def send(_effect_id: str, kind: str, payload: dict[str, Any]) -> Any:
+            if kind == "create_agent":
+                return {"agent_id": "agent"}
+            if kind == "invoke_action":
+                actions.append(payload["action_name"])
+                return {
+                    "action_invocation_id": "invocation-work",
+                    "output": (
+                        "Verified the objective.\n"
+                        '```json\n{"message":"Verified.","status":"complete"}\n```'
+                    ),
+                }
+            raise AssertionError(f"unexpected effect: {kind}")
+
+        async def invoke() -> ActionDecision:
+            _set_runtime(_Runtime(send))
+            return await TypedFinalizingAgent().resolve("Verify the result")
+
+        self.assertEqual(
+            asyncio.run(invoke()),
+            {"message": "Verified.", "status": "complete"},
+        )
+        self.assertEqual(actions, ["resolve"])
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
         actions = 0

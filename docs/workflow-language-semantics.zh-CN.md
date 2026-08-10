@@ -80,8 +80,10 @@ await Action 后运行一次统一 sample/tool/follow-up loop：
 interrupt 结束当前 Attempt，程序可以为同一个 Invocation 开始新的 Attempt。retry 不会
 伪装成第二个逻辑 ActionInvocation。
 
-dict、list、bool、int、float typed return 请求 JSON parsing。JSON repair 与
-**finalize="after_search"** 使用无工具模型工作，不会获得隐藏 Registry。
+dict、list、bool、int、float typed return 请求 JSON parsing。使用
+**finalize="always"** 时，正常 work Turn 不受 structured output 约束，随后由第二个
+无工具、无搜索 Turn 在 work 未直接返回有效值时生成 typed result。JSON repair 与
+**finalize="after_search"** 同样使用无工具、无搜索模型工作，不会获得隐藏 Registry。
 
 **ask_human** 返回带 HumanRequest provenance 的 HumanMessage。只有 HumanMessage
 类型的 Action 参数能把这份已验证字符串作为直接用户输入；Rust 会验证 Session、
@@ -146,7 +148,7 @@ tombstone、分块大文本 Artifact、只返回二进制 metadata，并过滤�
 WorkflowProgram 的历史运行。`publish_artifact` 写入确定性的 Project-managed
 content。
 
-Project Home 同样位于 managed state。普通 Action 返回完整、安全的 HTML fragment，
+Project Home 同样位于 managed state。普通 Action 返回完整的独立 HTML 文档，
 再把那一个已经 await 的 `_ActionCall` 传给 `publish_project_home`。发布会验证精确
 Action provenance、校验 HTML，并原子更新 canonical page。内核不信任任何 Workflow
 slug，也没有特殊 Summary Agent 分支。
