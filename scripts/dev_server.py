@@ -58,6 +58,7 @@ def main() -> int:
     command = [
         cargo_executable(),
         "run",
+        "--release",
         "-p",
         "papermachine-server",
         "--",
