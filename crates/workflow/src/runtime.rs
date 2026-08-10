@@ -5,10 +5,7 @@ use papermachine_execution::SandboxPolicy;
 use papermachine_execution::SandboxRequest;
 use papermachine_execution::terminate_process_tree;
 use papermachine_protocol::*;
-use papermachine_session::ActionTurnContext;
-use papermachine_session::PromptLayerInput;
-use papermachine_session::TurnRuntime;
-use papermachine_session::TurnRuntimeError;
+use papermachine_store::NewActionInvocation;
 use papermachine_store::PROJECT_HOME_ROLE;
 use papermachine_store::PROJECT_HOME_SOURCE_ROLE;
 use papermachine_store::Store;
@@ -43,6 +40,7 @@ use crate::SessionExecution;
 use crate::SessionExecutor;
 use crate::SessionSuspension;
 use crate::python_runtime_sha256;
+use crate::wait_for_action;
 
 const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -52,7 +50,6 @@ const RESPONSE_CHANNEL_CAPACITY: usize = 64;
 #[derive(Clone)]
 pub struct PythonSessionExecutor {
     store: StoreHandle,
-    turns: TurnRuntime,
     python: PathBuf,
     python_runtime_root: PathBuf,
     work_root: PathBuf,
@@ -61,14 +58,12 @@ pub struct PythonSessionExecutor {
 impl PythonSessionExecutor {
     pub fn new(
         store: StoreHandle,
-        turns: TurnRuntime,
         python: impl Into<PathBuf>,
         python_runtime_root: impl Into<PathBuf>,
         work_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             store,
-            turns,
             python: python.into(),
             python_runtime_root: python_runtime_root.into(),
             work_root: work_root.into(),
@@ -159,10 +154,8 @@ impl PythonSessionExecutor {
         let effect_cancellation = cancellation.child_token();
         let context = Arc::new(SessionEffectContext {
             store: self.store.clone(),
-            turns: self.turns.clone(),
             session_id,
             cancellation: effect_cancellation.clone(),
-            agent_gates: Mutex::new(HashMap::new()),
             effect_gates: Mutex::new(HashMap::new()),
             suspensions: Mutex::new(HashMap::new()),
             completion: Mutex::new(None),
@@ -380,10 +373,8 @@ impl SessionExecutor for PythonSessionExecutor {
 
 struct SessionEffectContext {
     store: StoreHandle,
-    turns: TurnRuntime,
     session_id: SessionId,
     cancellation: CancellationToken,
-    agent_gates: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
     effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     suspensions: Mutex<HashMap<String, SessionSuspension>>,
     completion: Mutex<Option<Value>>,
@@ -530,7 +521,10 @@ impl SessionEffectContext {
             | SessionStatus::WaitingForDeadline => Err(SessionExecutionError::Suspended(
                 SessionSuspension::new(session.status, None),
             )),
-            SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+            SessionStatus::Closing
+            | SessionStatus::Completed
+            | SessionStatus::Failed
+            | SessionStatus::Cancelled => {
                 Err(SessionExecutionError::SessionTerminal(session.status))
             }
         }
@@ -708,265 +702,95 @@ impl SessionEffectContext {
         ));
         let session_id = self.session_id;
         let stored_payload = payload.clone();
-        let (agent, human_source, invocation) = self
+        let invocation = self
             .store
             .call(move |store| {
                 let agent = store.get_agent(agent_id)?;
+                if agent.session_id != session_id {
+                    return Err(SessionExecutionError::Protocol(
+                        "Action Agent belongs to another Session".to_string(),
+                    ));
+                }
                 let human_source =
                     resolve_human_turn_source(store, session_id, agent.id, &stored_payload)?;
-                let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
+                let input = human_source.as_ref().map_or_else(
+                    || format_action_turn_input(&stored_payload.arguments),
+                    |source| source.input.clone(),
+                );
+                let contract = human_source.as_ref().map_or_else(
+                    || stored_payload.prompt.clone(),
+                    |source| {
+                        format_human_action_contract(
+                            &stored_payload.prompt,
+                            &stored_payload.arguments,
+                            &source.argument_name,
+                        )
+                    },
+                );
+                let source = human_source.map_or(ActionSource::Workflow, |source| {
+                    ActionSource::HumanRequest {
+                        request_id: source.request_id,
+                    }
+                });
+                let action = NewActionInvocation {
+                    session_id,
+                    agent_id,
+                    action_name: stored_payload.action_name.clone(),
+                    contract,
+                    arguments: stored_payload.arguments.clone(),
+                    input,
+                    source,
+                    requested_tools: stored_payload.requested_tools.clone(),
+                    tools_enabled: stored_payload.tools_enabled,
+                    web_search_context_size: stored_payload.web_search_context_size,
+                    reasoning_effort: stored_payload.reasoning_effort,
+                    response_format: stored_payload.response_format.clone(),
+                };
                 let invocation = match store.get_action_invocation(invocation_id) {
                     Ok(invocation) => invocation,
-                    Err(StoreError::NotFound { .. }) => store.create_action_invocation_with_id(
-                        invocation_id,
-                        session_id,
-                        agent_id,
-                        stored_payload.action_name.clone(),
-                        stored_payload.prompt.clone(),
-                        stored_payload.arguments.clone(),
-                        stored_payload.requested_tools.clone(),
-                        source_human_request_id,
-                    )?,
+                    Err(StoreError::NotFound { .. }) => {
+                        store.create_action_invocation_with_id(invocation_id, action.clone())?
+                    }
                     Err(error) => return Err(error.into()),
                 };
-                Ok::<_, SessionExecutionError>((agent, human_source, invocation))
+                if invocation.session_id != action.session_id
+                    || invocation.agent_id != action.agent_id
+                    || invocation.action_name != action.action_name
+                    || invocation.contract != action.contract
+                    || invocation.arguments != action.arguments
+                    || invocation.input != action.input
+                    || invocation.source != action.source
+                    || invocation.requested_tools != action.requested_tools
+                    || invocation.tools_enabled != action.tools_enabled
+                    || invocation.web_search_context_size != action.web_search_context_size
+                    || invocation.reasoning_effort != action.reasoning_effort
+                    || invocation.response_format != action.response_format
+                {
+                    return Err(SessionExecutionError::Protocol(
+                        "replayed ActionInvocation has a different durable contract".to_string(),
+                    ));
+                }
+                Ok::<_, SessionExecutionError>(invocation)
             })
             .await?;
-        let source_human_request_id = human_source.as_ref().map(|source| source.request_id);
-        let turn_input = human_source.as_ref().map_or_else(
-            || format_action_turn_input(&payload.arguments),
-            |source| source.input.clone(),
-        );
-        let action_contract = human_source.as_ref().map_or_else(
-            || payload.prompt.clone(),
-            |source| {
-                format_human_action_contract(
-                    &payload.prompt,
-                    &payload.arguments,
-                    &source.argument_name,
-                )
-            },
-        );
-        if invocation.session_id != self.session_id
-            || invocation.agent_id != agent_id
-            || invocation.source_human_request_id != source_human_request_id
-            || invocation.requested_tools != payload.requested_tools
-        {
-            return Err(SessionExecutionError::Protocol(
-                "replayed ActionInvocation has different Session, Agent, requested tools, or human-message provenance"
-                    .to_string(),
-            ));
-        }
+        let invocation = wait_for_action(&self.store, invocation.id, &self.cancellation)
+            .await
+            .map_err(|error| match error {
+                crate::ActionRunnerError::Cancelled => SessionExecutionError::Cancelled,
+                other => SessionExecutionError::Action(other.to_string()),
+            })?;
         match invocation.status {
-            ActionStatus::Completed => return completed_action_result(&invocation),
-            ActionStatus::Failed | ActionStatus::Cancelled => {
-                return Err(SessionExecutionError::Action(
-                    invocation
-                        .error
-                        .unwrap_or_else(|| "previous Action attempt failed".to_string()),
-                ));
-            }
-            ActionStatus::Scheduled | ActionStatus::Running | ActionStatus::Interrupted => {}
-        }
-        let gate = {
-            let mut gates = self.agent_gates.lock().await;
-            Arc::clone(
-                gates
-                    .entry(agent_id)
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
-        };
-        let _agent_guard = gate.lock().await;
-        let invocation_id = invocation.id;
-        let session_id = self.session_id;
-        let (session, mut recovered_attempt) = self
-            .store
-            .call(move |store| {
-                let session = store.get_session(session_id)?;
-                let recovered_attempt = store
-                    .list_action_attempts(invocation_id)?
-                    .into_iter()
-                    .rev()
-                    .find(|attempt| !attempt.status.is_terminal());
-                Ok::<_, SessionExecutionError>((session, recovered_attempt))
-            })
-            .await?;
-        let mut interruption_guidance = None;
-        loop {
-            self.checkpoint().await?;
-            let attempt = match recovered_attempt.take() {
-                Some(attempt) => attempt,
-                None => {
-                    self.store
-                        .call(move |store| store.start_action_attempt(invocation_id))
-                        .await?
-                }
-            };
-            let guidance = interruption_guidance.take();
-            let context = ActionTurnContext {
-                action_invocation_id: invocation.id,
-                action_attempt_id: attempt.id,
-            };
-            let result = if let Some(turn_id) = attempt.turn_id {
-                let turn = self
-                    .store
-                    .call(move |store| store.get_turn(turn_id))
-                    .await?;
-                match turn.status {
-                    TurnStatus::Completed => Ok(turn),
-                    TurnStatus::Queued | TurnStatus::Running | TurnStatus::Paused => {
-                        self.turns
-                            .resume_action_attempt(
-                                turn.id,
-                                context,
-                                self.cancellation.child_token(),
-                            )
-                            .await
-                    }
-                    TurnStatus::Interrupted => Err(TurnRuntimeError::Interrupted(
-                        turn.error
-                            .unwrap_or_else(|| "Action Turn was interrupted".to_string()),
-                    )),
-                    TurnStatus::Cancelled => Err(TurnRuntimeError::Cancelled),
-                    TurnStatus::Failed => {
-                        let error = turn
-                            .error
-                            .unwrap_or_else(|| "Action Turn failed before restart".to_string());
-                        let attempt_id = attempt.id;
-                        let stored_error = error.clone();
-                        self.store
-                            .call(move |store| {
-                                store.finish_action(
-                                    invocation_id,
-                                    attempt_id,
-                                    ActionStatus::Failed,
-                                    None,
-                                    Some(stored_error),
-                                )
-                            })
-                            .await?;
-                        return Err(SessionExecutionError::Action(error));
-                    }
-                }
-            } else {
-                let mut prompt_layers = Vec::new();
-                if !session.instructions.trim().is_empty() {
-                    prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Session,
-                        "Session instructions",
-                        format!("session:{}:instructions", session.id),
-                        &session.instructions,
-                    ));
-                }
-                if !action_contract.trim().is_empty() {
-                    prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Session,
-                        "Action contract",
-                        format!(
-                            "session:{}:action-contract:{}",
-                            session.id, payload.action_name
-                        ),
-                        &action_contract,
-                    ));
-                }
-                if let Some(value) = guidance.as_ref() {
-                    prompt_layers.push(PromptLayerInput::new(
-                        PromptLayerKind::Control,
-                        "Human interruption guidance",
-                        format!("action-attempt:{}:guidance", attempt.id),
-                        value,
-                    ));
-                }
-                self.turns
-                    .execute_action_attempt(
-                        agent.id,
-                        turn_input.clone(),
-                        None,
-                        prompt_layers,
-                        payload.reasoning_effort,
-                        payload.requested_tools.clone(),
-                        payload.tools_enabled,
-                        payload.web_search_context_size,
-                        payload.response_format.clone(),
-                        context,
-                        self.cancellation.child_token(),
-                    )
-                    .await
-            };
-            match result {
-                Ok(turn) => {
-                    let action_output = json!({
-                        "message": turn.output.clone().unwrap_or_default(),
-                        "turn_id": turn.id,
-                        "hosted_search_calls_used": turn.hosted_search_calls_used,
-                    });
-                    let attempt_id = attempt.id;
-                    self.store
-                        .call(move |store| {
-                            store.finish_action(
-                                invocation_id,
-                                attempt_id,
-                                ActionStatus::Completed,
-                                Some(action_output),
-                                None,
-                            )
-                        })
-                        .await?;
-                    return Ok(json!({
-                        "action_invocation_id": invocation.id,
-                        "output": turn.output.unwrap_or_default(),
-                        "turn_id": turn.id,
-                        "hosted_search_calls_used": turn.hosted_search_calls_used,
-                    }));
-                }
-                Err(TurnRuntimeError::Interrupted(reason)) => {
-                    let attempt_id = attempt.id;
-                    let stored_reason = reason.clone();
-                    self.store
-                        .call(move |store| {
-                            store.finish_action(
-                                invocation_id,
-                                attempt_id,
-                                ActionStatus::Interrupted,
-                                None,
-                                Some(stored_reason),
-                            )
-                        })
-                        .await?;
-                    interruption_guidance = Some(reason);
-                }
-                Err(TurnRuntimeError::Cancelled) if self.cancellation.is_cancelled() => {
-                    let attempt_id = attempt.id;
-                    self.store
-                        .call(move |store| {
-                            store.finish_action(
-                                invocation_id,
-                                attempt_id,
-                                ActionStatus::Cancelled,
-                                None,
-                                Some("Session cancelled".to_string()),
-                            )
-                        })
-                        .await?;
-                    return Err(SessionExecutionError::Cancelled);
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    let stored_message = message.clone();
-                    let attempt_id = attempt.id;
-                    self.store
-                        .call(move |store| {
-                            store.finish_action(
-                                invocation_id,
-                                attempt_id,
-                                ActionStatus::Failed,
-                                None,
-                                Some(stored_message),
-                            )
-                        })
-                        .await?;
-                    return Err(SessionExecutionError::Action(message));
-                }
+            ActionStatus::Completed => completed_action_result(&invocation),
+            ActionStatus::Failed | ActionStatus::Cancelled => Err(SessionExecutionError::Action(
+                invocation
+                    .error
+                    .unwrap_or_else(|| "Action failed without an error".to_string()),
+            )),
+            ActionStatus::Scheduled | ActionStatus::Running | ActionStatus::Interrupted => {
+                Err(SessionExecutionError::Protocol(format!(
+                    "Action {} wait ended in non-terminal state {:?}",
+                    invocation.id, invocation.status
+                )))
             }
         }
     }

@@ -22,6 +22,8 @@ use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::ActionRunner;
+
 pub type SessionOutcome = Result<Value, String>;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -59,6 +61,7 @@ pub struct SessionScheduler {
 struct SessionSchedulerInner {
     store: StoreHandle,
     executor: Arc<dyn SessionExecutor>,
+    action_runner: Option<ActionRunner>,
     permits: Arc<Semaphore>,
     handles: Mutex<HashMap<SessionId, ScheduledRun>>,
 }
@@ -75,18 +78,28 @@ impl SessionScheduler {
         max_concurrent_runs: usize,
     ) -> Self {
         let permits = Arc::new(Semaphore::new(max_concurrent_runs.max(1)));
-        Self::new_with_permits(store, executor, permits)
+        Self {
+            inner: Arc::new(SessionSchedulerInner {
+                store,
+                executor,
+                action_runner: None,
+                permits,
+                handles: Mutex::new(HashMap::new()),
+            }),
+        }
     }
 
     pub fn new_with_permits(
         store: StoreHandle,
         executor: Arc<dyn SessionExecutor>,
         permits: Arc<Semaphore>,
+        action_runner: ActionRunner,
     ) -> Self {
         Self {
             inner: Arc::new(SessionSchedulerInner {
                 store,
                 executor,
+                action_runner: Some(action_runner),
                 permits,
                 handles: Mutex::new(HashMap::new()),
             }),
@@ -199,7 +212,14 @@ impl SessionScheduler {
         }
         self.inner
             .store
-            .call(move |store| store.cancel_session(session_id, "cancelled by user"))
+            .call(move |store| {
+                store.begin_session_closing(
+                    session_id,
+                    SessionStatus::Cancelled,
+                    None,
+                    Some("cancelled by user".to_string()),
+                )
+            })
             .await?;
         if let Some(handle) = self.inner.handles.lock().await.get(&session_id) {
             handle.cancellation.cancel();
@@ -258,6 +278,109 @@ impl SessionScheduler {
 }
 
 async fn run_scheduled(
+    inner: Arc<SessionSchedulerInner>,
+    session_id: SessionId,
+    cancellation: CancellationToken,
+) -> SessionOutcome {
+    let Some(action_runner) = inner.action_runner.clone() else {
+        let outcome = run_workflow(Arc::clone(&inner), session_id, cancellation).await;
+        let current = inner
+            .store
+            .call(move |store| store.get_session(session_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        return if current.status == SessionStatus::Closing {
+            finish_closing(&inner.store, session_id).await
+        } else {
+            outcome
+        };
+    };
+    let current = inner
+        .store
+        .call(move |store| store.get_session(session_id))
+        .await
+        .map_err(|error| error.to_string())?;
+    if current.status == SessionStatus::Closing {
+        action_runner
+            .run_session(session_id, cancellation.child_token())
+            .await
+            .map_err(|error| error.to_string())?;
+        let session = inner
+            .store
+            .call(move |store| store.finish_session_closing(session_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        return session_outcome(session);
+    }
+    let action_cancellation = cancellation.child_token();
+    let workflow_cancellation = cancellation.child_token();
+    let mut action_task = tokio::spawn({
+        let action_cancellation = action_cancellation.clone();
+        async move {
+            action_runner
+                .run_session(session_id, action_cancellation)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    });
+    let mut workflow_task = tokio::spawn(run_workflow(
+        Arc::clone(&inner),
+        session_id,
+        workflow_cancellation.clone(),
+    ));
+    tokio::select! {
+        result = &mut workflow_task => {
+            action_task
+                .await
+                .map_err(|error| format!("Action runner task failed: {error}"))??;
+            let outcome = result.map_err(|error| format!("Session runtime task failed: {error}"))?;
+            finish_closing(&inner.store, session_id).await?;
+            outcome
+        }
+        result = &mut action_task => {
+            let result = result
+                .map_err(|error| format!("Action runner task failed: {error}"))?;
+            match result {
+                Ok(()) => {
+                    let outcome = workflow_task
+                        .await
+                        .map_err(|error| format!("Session runtime task failed: {error}"))?;
+                    finish_closing(&inner.store, session_id).await?;
+                    outcome
+                }
+                Err(error) => {
+                    workflow_cancellation.cancel();
+                    let _ = workflow_task.await;
+                    let current = inner
+                        .store
+                        .call(move |store| store.get_session(session_id))
+                        .await
+                        .map_err(|store_error| store_error.to_string())?;
+                    if !current.status.is_terminal() {
+                        inner
+                            .store
+                            .call({
+                                let error = error.clone();
+                                move |store| {
+                                    store.begin_session_closing(
+                                        session_id,
+                                        SessionStatus::Failed,
+                                        None,
+                                        Some(error),
+                                    )
+                                }
+                            })
+                            .await
+                            .map_err(|store_error| store_error.to_string())?;
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+async fn run_workflow(
     inner: Arc<SessionSchedulerInner>,
     session_id: SessionId,
     cancellation: CancellationToken,
@@ -334,10 +457,17 @@ async fn run_scheduled(
             .await
             .map_err(|error| error.to_string())?;
         if cancellation.is_cancelled() {
-            if !current.status.is_terminal() {
+            if !current.status.is_terminal() && current.status != SessionStatus::Closing {
                 inner
                     .store
-                    .call(move |store| store.cancel_session(session_id, "cancelled by user"))
+                    .call(move |store| {
+                        store.begin_session_closing(
+                            session_id,
+                            SessionStatus::Cancelled,
+                            None,
+                            Some("cancelled by user".to_string()),
+                        )
+                    })
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -352,7 +482,14 @@ async fn run_scheduled(
                     .store
                     .call({
                         let output = output.clone();
-                        move |store| store.complete_session(session_id, output)
+                        move |store| {
+                            store.begin_session_closing(
+                                session_id,
+                                SessionStatus::Completed,
+                                Some(output),
+                                None,
+                            )
+                        }
                     })
                     .await
                     .map_err(|error| error.to_string())?;
@@ -386,13 +523,42 @@ async fn run_scheduled(
                     .store
                     .call({
                         let error = error.clone();
-                        move |store| store.fail_session(session_id, error)
+                        move |store| {
+                            store.begin_session_closing(
+                                session_id,
+                                SessionStatus::Failed,
+                                None,
+                                Some(error),
+                            )
+                        }
                     })
                     .await
                     .map_err(|store_error| store_error.to_string())?;
                 return Err(error);
             }
         }
+    }
+}
+
+async fn finish_closing(store: &StoreHandle, session_id: SessionId) -> SessionOutcome {
+    let session = store
+        .call(move |store| store.finish_session_closing(session_id))
+        .await
+        .map_err(|error| error.to_string())?;
+    session_outcome(session)
+}
+
+fn session_outcome(session: papermachine_protocol::Session) -> SessionOutcome {
+    match session.status {
+        SessionStatus::Completed => session.output.ok_or_else(|| {
+            session
+                .error
+                .unwrap_or_else(|| "Session completed without output".to_string())
+        }),
+        SessionStatus::Failed | SessionStatus::Cancelled => Err(session
+            .error
+            .unwrap_or_else(|| format!("Session ended as {:?}", session.status))),
+        status => Err(format!("Session did not finish Closing: {status:?}")),
     }
 }
 
@@ -416,7 +582,10 @@ async fn wait_until_runnable(
             .map_err(|error| error.to_string())?;
         match session.status {
             SessionStatus::Created | SessionStatus::Running => return Ok(()),
-            SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+            SessionStatus::Closing
+            | SessionStatus::Completed
+            | SessionStatus::Failed
+            | SessionStatus::Cancelled => {
                 return Err(session
                     .error
                     .unwrap_or_else(|| format!("Session ended as {:?}", session.status)));

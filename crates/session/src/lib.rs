@@ -368,12 +368,6 @@ async fn run_scheduled_turn_inner(
     action_context: ActionTurnContext,
     cancellation: CancellationToken,
 ) -> Result<(), TurnRuntimeError> {
-    let _permit = tokio::select! {
-        permit = Arc::clone(&inner.permits).acquire_owned() => {
-            permit.map_err(|error| TurnRuntimeError::Scheduling(error.to_string()))?
-        }
-        _ = cancellation.cancelled() => return Err(TurnRuntimeError::Cancelled),
-    };
     let (turn, agent, session, rollout) = inner
         .store
         .call(move |store| {
@@ -457,7 +451,9 @@ async fn run_scheduled_turn_inner(
     let control: Arc<dyn AgentControlPlane> = Arc::new(StoreAgentControlPlane {
         store: inner.store.clone(),
     });
-    let runtime = AgentRuntime::new(Arc::clone(&inner.model), tools, events).with_control(control);
+    let runtime = AgentRuntime::new(Arc::clone(&inner.model), tools, events)
+        .with_control(control)
+        .with_sampling_permits(Arc::clone(&inner.permits));
     let mut request = AgentTurnRequest::new(
         session.project_id,
         session.id,
@@ -586,7 +582,10 @@ impl AgentControlPlane for StoreAgentControlPlane {
                     }
                 }
                 SessionStatus::Created | SessionStatus::Running => break,
-                SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+                SessionStatus::Closing
+                | SessionStatus::Completed
+                | SessionStatus::Failed
+                | SessionStatus::Cancelled => {
                     return Ok(AgentCheckpoint {
                         guidance: Vec::new(),
                         interrupt: Some(format!("Session entered {:?}", run.status)),

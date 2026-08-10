@@ -8,6 +8,7 @@ use crate::ModelResponseFormat;
 use crate::ModelRouteSnapshot;
 use crate::ProjectId;
 use crate::PromptSnapshot;
+use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::StepId;
 use crate::TokenUsage;
@@ -32,6 +33,7 @@ pub enum SessionStatus {
     WaitingForInput,
     WaitingForDeadline,
     Paused,
+    Closing,
     Completed,
     Failed,
     Cancelled,
@@ -78,6 +80,8 @@ pub struct Session {
     /// remains the hard upper bound.
     pub agent_access_overrides: BTreeMap<String, AccessPreset>,
     pub status: SessionStatus,
+    /// Final status selected when `status == Closing`; otherwise `None`.
+    pub closing_status: Option<SessionStatus>,
     pub params: Value,
     pub output: Option<Value>,
     pub error: Option<String>,
@@ -161,6 +165,14 @@ impl ActionStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ActionSource {
+    Workflow,
+    HumanRequest { request_id: HumanRequestId },
+    Agent { sender_agent_id: AgentId },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ActionInvocation {
     pub id: ActionInvocationId,
     pub session_id: SessionId,
@@ -169,9 +181,14 @@ pub struct ActionInvocation {
     /// Stable Action method contract (normally its Python docstring/prompt).
     pub contract: String,
     pub arguments: Value,
+    /// Exact user-role input fixed when the Action is admitted.
+    pub input: String,
+    pub source: ActionSource,
     pub requested_tools: Vec<String>,
-    /// Direct HumanRequest whose answer became this Action Turn's user input.
-    pub source_human_request_id: Option<HumanRequestId>,
+    pub tools_enabled: bool,
+    pub web_search_context_size: Option<WebSearchContextSize>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub response_format: Option<ModelResponseFormat>,
     pub status: ActionStatus,
     pub output: Option<Value>,
     pub error: Option<String>,

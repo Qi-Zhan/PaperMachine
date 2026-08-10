@@ -1,3 +1,4 @@
+use crate::NewActionInvocation;
 use crate::NewSession;
 use crate::StoreError;
 use crate::StoreShared;
@@ -29,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 21;
+const SCHEMA_VERSION: u32 = 22;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -464,15 +465,15 @@ impl Store {
         }
         let mut attempt = self.get_action_attempt(attempt_id)?;
         let invocation = self.get_action_invocation(attempt.invocation_id)?;
-        let valid_input = match invocation.source_human_request_id {
-            None => true,
-            Some(request_id) => {
+        let valid_input = match invocation.source {
+            ActionSource::HumanRequest { request_id } => {
                 let request = self.get_human_request(request_id)?;
                 request.session_id == invocation.session_id
                     && request.agent_id == agent_id
                     && request.status == HumanRequestStatus::Answered
                     && request.answer.as_ref().and_then(Value::as_str) == Some(input.as_str())
             }
+            ActionSource::Workflow | ActionSource::Agent { .. } => invocation.input == input,
         };
         if !valid_input
             || attempt.status.is_terminal()
@@ -1113,6 +1114,7 @@ impl Store {
             enabled_skills,
             agent_access_overrides: request.agent_access_overrides,
             status: SessionStatus::Created,
+            closing_status: None,
             params: request.params,
             output: None,
             error: None,
@@ -1409,6 +1411,115 @@ impl Store {
         )
     }
 
+    pub fn begin_session_closing(
+        &self,
+        id: SessionId,
+        final_status: SessionStatus,
+        output: Option<Value>,
+        error: Option<String>,
+    ) -> Result<Session, StoreError> {
+        if !final_status.is_terminal() {
+            return Err(StoreError::Invariant(
+                "Session Closing requires a terminal final status".to_string(),
+            ));
+        }
+        if (final_status == SessionStatus::Completed) != output.is_some() {
+            return Err(StoreError::Invariant(
+                "only a completed Session Closing transition carries output".to_string(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &id.to_string(), "session")?;
+        if session.status == SessionStatus::Closing {
+            if session.closing_status == Some(final_status)
+                && session.output == output
+                && session.error == error
+            {
+                return Ok(session);
+            }
+            return Err(StoreError::Invariant(format!(
+                "Session {id} is already Closing with a different outcome"
+            )));
+        }
+        if session.status.is_terminal() {
+            if session.status == final_status && session.output == output && session.error == error
+            {
+                return Ok(session);
+            }
+            return Err(StoreError::Invariant(format!(
+                "terminal Session {id} cannot enter Closing"
+            )));
+        }
+        session.status = SessionStatus::Closing;
+        session.closing_status = Some(final_status);
+        session.output = output;
+        session.error = error.clone();
+        session.attention_required = false;
+        session.updated_at = Utc::now();
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
+            &transaction,
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionChanged {
+                status: SessionStatus::Closing,
+                reason: error,
+            },
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(event);
+        Ok(session)
+    }
+
+    pub fn finish_session_closing(&self, id: SessionId) -> Result<Session, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session: Session =
+            load_document_tx(&transaction, "sessions", &id.to_string(), "session")?;
+        if session.status.is_terminal() {
+            return Ok(session);
+        }
+        if session.status != SessionStatus::Closing {
+            return Err(StoreError::Invariant(format!(
+                "cannot finish Session {id} from {:?}",
+                session.status
+            )));
+        }
+        let final_status = session.closing_status.ok_or_else(|| {
+            StoreError::Invariant(format!("Closing Session {id} has no final status"))
+        })?;
+        if !final_status.is_terminal() {
+            return Err(StoreError::Invariant(format!(
+                "Closing Session {id} has invalid final status {final_status:?}"
+            )));
+        }
+        session.status = final_status;
+        session.closing_status = None;
+        session.updated_at = Utc::now();
+        terminalize_session_resources_tx(&transaction, session.id, session.updated_at)?;
+        update_session_tx(&transaction, &session)?;
+        let event = append_session_event_tx(
+            &transaction,
+            session.id,
+            None,
+            None,
+            None,
+            SessionEventPayload::SessionChanged {
+                status: final_status,
+                reason: session.error.clone(),
+            },
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(event);
+        Ok(session)
+    }
+
     fn transition_session(
         &self,
         id: SessionId,
@@ -1430,6 +1541,7 @@ impl Store {
             )));
         }
         session.status = status;
+        session.closing_status = None;
         session.error = if status == SessionStatus::Failed {
             reason.clone()
         } else {
@@ -1469,6 +1581,7 @@ impl Store {
             )));
         }
         session.status = SessionStatus::Completed;
+        session.closing_status = None;
         session.output = Some(output);
         session.error = None;
         session.attention_required = false;
@@ -1695,53 +1808,37 @@ impl Store {
         Ok(agent)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn create_action_invocation(
         &self,
-        session_id: SessionId,
-        agent_id: AgentId,
-        action_name: impl Into<String>,
-        contract: impl Into<String>,
-        arguments: Value,
-        requested_tools: Vec<String>,
+        action: NewActionInvocation,
     ) -> Result<ActionInvocation, StoreError> {
-        self.create_action_invocation_with_id(
-            ActionInvocationId::new(),
-            session_id,
-            agent_id,
-            action_name,
-            contract,
-            arguments,
-            requested_tools,
-            None,
-        )
+        self.create_action_invocation_with_id(ActionInvocationId::new(), action)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn create_action_invocation_with_id(
         &self,
         invocation_id: ActionInvocationId,
-        session_id: SessionId,
-        agent_id: AgentId,
-        action_name: impl Into<String>,
-        contract: impl Into<String>,
-        arguments: Value,
-        requested_tools: Vec<String>,
-        source_human_request_id: Option<HumanRequestId>,
+        action: NewActionInvocation,
     ) -> Result<ActionInvocation, StoreError> {
-        let action_name = action_name.into();
-        let contract = contract.into();
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let agent: Agent =
-            load_document_tx(&transaction, "agents", &agent_id.to_string(), "agent")?;
-        if agent.session_id != session_id {
+        let agent: Agent = load_document_tx(
+            &transaction,
+            "agents",
+            &action.agent_id.to_string(),
+            "agent",
+        )?;
+        if agent.session_id != action.session_id {
             return Err(StoreError::Invariant(
                 "action Agent belongs to another Session".to_string(),
             ));
         }
-        let session: Session =
-            load_document_tx(&transaction, "sessions", &session_id.to_string(), "session")?;
+        let session: Session = load_document_tx(
+            &transaction,
+            "sessions",
+            &action.session_id.to_string(),
+            "session",
+        )?;
         if session.status != SessionStatus::Running {
             return Err(StoreError::Invariant(
                 "cannot schedule an Action unless its Session is running".to_string(),
@@ -1750,13 +1847,18 @@ impl Store {
         let now = Utc::now();
         let invocation = ActionInvocation {
             id: invocation_id,
-            session_id,
-            agent_id,
-            action_name,
-            contract,
-            arguments,
-            requested_tools,
-            source_human_request_id,
+            session_id: action.session_id,
+            agent_id: action.agent_id,
+            action_name: action.action_name,
+            contract: action.contract,
+            arguments: action.arguments,
+            input: action.input,
+            source: action.source,
+            requested_tools: action.requested_tools,
+            tools_enabled: action.tools_enabled,
+            web_search_context_size: action.web_search_context_size,
+            reasoning_effort: action.reasoning_effort,
+            response_format: action.response_format,
             status: ActionStatus::Scheduled,
             output: None,
             error: None,
@@ -1769,8 +1871,8 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 invocation.id.to_string(),
-                session_id.to_string(),
-                agent_id.to_string(),
+                invocation.session_id.to_string(),
+                invocation.agent_id.to_string(),
                 enum_string(invocation.status)?,
                 now.to_rfc3339(),
                 serde_json::to_string(&invocation)?,
@@ -1778,8 +1880,8 @@ impl Store {
         )?;
         let event = append_session_event_tx(
             &transaction,
-            session_id,
-            Some(agent_id),
+            invocation.session_id,
+            Some(invocation.agent_id),
             None,
             None,
             action_event_payload(&invocation, None),
@@ -1806,6 +1908,57 @@ impl Store {
              ORDER BY created_at ASC, id ASC",
             [session_id.to_string()],
         )
+    }
+
+    pub fn cancel_pending_action(
+        &self,
+        invocation_id: ActionInvocationId,
+        reason: impl Into<String>,
+    ) -> Result<ActionInvocation, StoreError> {
+        let reason = reason.into();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut invocation: ActionInvocation = load_document_tx(
+            &transaction,
+            "action_invocations",
+            &invocation_id.to_string(),
+            "action invocation",
+        )?;
+        if invocation.status == ActionStatus::Cancelled {
+            return Ok(invocation);
+        }
+        if !matches!(
+            invocation.status,
+            ActionStatus::Scheduled | ActionStatus::Interrupted
+        ) {
+            return Err(StoreError::Invariant(format!(
+                "cannot cancel pending Action {} from {:?}",
+                invocation.id, invocation.status
+            )));
+        }
+        invocation.status = ActionStatus::Cancelled;
+        invocation.output = None;
+        invocation.error = Some(reason);
+        invocation.updated_at = Utc::now();
+        update_status_document_tx(
+            &transaction,
+            "action_invocations",
+            &invocation.id.to_string(),
+            invocation.status,
+            &invocation,
+        )?;
+        let event = append_session_event_tx(
+            &transaction,
+            invocation.session_id,
+            Some(invocation.agent_id),
+            None,
+            None,
+            action_event_payload(&invocation, None),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.shared.publish_session(event);
+        Ok(invocation)
     }
 
     pub fn start_action_attempt(

@@ -10,7 +10,7 @@ use papermachine_skills::ProjectSkillCatalog;
 use papermachine_store::{NewSession, Store, StoreHandle};
 use papermachine_tools::ToolCatalog;
 use papermachine_workflow::{
-    PythonSessionExecutor, SessionExecution, SessionExecutor, python_runtime_sha256,
+    ActionRunner, PythonSessionExecutor, SessionExecution, SessionExecutor, python_runtime_sha256,
     resolve_python_executable,
 };
 use serde_json::json;
@@ -134,7 +134,7 @@ fn runtime_with(
     work_root: &Path,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
-) -> PythonSessionExecutor {
+) -> TestSessionRuntime {
     let store = StoreHandle::spawn((*store).clone()).expect("Store thread should start");
     runtime_on_handle(store, work_root, model, tools)
 }
@@ -144,7 +144,7 @@ fn runtime_on_handle(
     work_root: &Path,
     model: Arc<dyn ModelClient>,
     tools: ToolCatalog,
-) -> PythonSessionExecutor {
+) -> TestSessionRuntime {
     let skills = Arc::new(ProjectSkillCatalog::new(store.clone()));
     let turns = TurnRuntime::new(
         store.clone(),
@@ -157,22 +157,53 @@ fn runtime_on_handle(
             max_concurrent_turns: 2,
         },
     );
-    PythonSessionExecutor::new(
-        store,
-        turns,
+    let executor = PythonSessionExecutor::new(
+        store.clone(),
         resolve_python_executable().expect("Python 3.11 or newer should be available"),
         python_runtime_root(),
         work_root,
-    )
+    );
+    TestSessionRuntime {
+        executor,
+        actions: ActionRunner::new(store, turns),
+    }
 }
 
-fn runtime(store: Arc<Store>, work_root: &Path) -> PythonSessionExecutor {
+fn runtime(store: Arc<Store>, work_root: &Path) -> TestSessionRuntime {
     runtime_with(
         store,
         work_root,
         Arc::new(ScriptedModelClient::default()),
         ToolCatalog::default(),
     )
+}
+
+struct TestSessionRuntime {
+    executor: PythonSessionExecutor,
+    actions: ActionRunner,
+}
+
+#[async_trait::async_trait]
+impl SessionExecutor for TestSessionRuntime {
+    async fn execute(
+        &self,
+        session_id: papermachine_protocol::SessionId,
+        cancellation: CancellationToken,
+    ) -> Result<SessionExecution, String> {
+        let action_cancellation = cancellation.child_token();
+        let action_task = tokio::spawn({
+            let runner = self.actions.clone();
+            let action_cancellation = action_cancellation.clone();
+            async move { runner.run_session(session_id, action_cancellation).await }
+        });
+        let result = self.executor.execute(session_id, cancellation).await;
+        action_cancellation.cancel();
+        action_task
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        result
+    }
 }
 
 fn completed_response(text: &str, input_tokens: u64, output_tokens: u64) -> Vec<ModelEvent> {

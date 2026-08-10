@@ -1,5 +1,6 @@
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocation;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::Agent;
 use papermachine_protocol::ModelRouteCapabilities;
 use papermachine_protocol::ModelRouteSnapshot;
@@ -14,6 +15,7 @@ use papermachine_protocol::WorkflowProgramId;
 use papermachine_protocol::WorkflowProgramManifest;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use papermachine_protocol::WorkflowProgramSource;
+use papermachine_store::NewActionInvocation;
 use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
@@ -64,14 +66,20 @@ impl ActionHarness {
         input: &str,
         expected_access: AccessPreset,
     ) -> Result<ActionTurn, StoreError> {
-        let invocation = store.create_action_invocation(
-            self.session.id,
-            self.agent.id,
-            "test_action",
-            "Exercise the Turn store",
-            json!({"input": input}),
-            Vec::new(),
-        )?;
+        let invocation = store.create_action_invocation(NewActionInvocation {
+            session_id: self.session.id,
+            agent_id: self.agent.id,
+            action_name: "test_action".to_string(),
+            contract: "Exercise the Turn store".to_string(),
+            arguments: json!({"input": input}),
+            input: input.to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: Vec::new(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })?;
         let attempt = store.start_action_attempt(invocation.id)?;
         let turn = store.create_turn_for_attempt(
             attempt.id,

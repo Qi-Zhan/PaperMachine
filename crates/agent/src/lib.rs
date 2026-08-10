@@ -47,6 +47,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 const DELTA_EVENT_CHUNK_BYTES: usize = 256;
@@ -311,6 +312,7 @@ pub struct AgentRuntime {
     tools: ToolRegistry,
     events: Arc<dyn AgentEventSink>,
     control: Arc<dyn AgentControlPlane>,
+    sampling_permits: Option<Arc<Semaphore>>,
 }
 
 impl AgentRuntime {
@@ -324,11 +326,17 @@ impl AgentRuntime {
             tools,
             events,
             control: Arc::new(NoopControlPlane),
+            sampling_permits: None,
         }
     }
 
     pub fn with_control(mut self, control: Arc<dyn AgentControlPlane>) -> Self {
         self.control = control;
+        self
+    }
+
+    pub fn with_sampling_permits(mut self, permits: Arc<Semaphore>) -> Self {
+        self.sampling_permits = Some(permits);
         self
     }
 
@@ -835,6 +843,15 @@ impl AgentRuntime {
         cancellation: &CancellationToken,
         emit_message_events: bool,
     ) -> Result<SampledStep, AgentError> {
+        let _sampling_permit = if let Some(permits) = self.sampling_permits.as_ref() {
+            Some(tokio::select! {
+                permit = Arc::clone(permits).acquire_owned() => permit
+                    .map_err(|error| ModelError::Transport(error.to_string()))?,
+                _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+            })
+        } else {
+            None
+        };
         let mut stream = tokio::select! {
             result = self.model.stream(request) => result?,
             _ = cancellation.cancelled() => return Err(AgentError::Cancelled),

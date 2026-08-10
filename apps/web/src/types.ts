@@ -8,6 +8,7 @@ export type SessionStatus =
   | 'waiting_for_input'
   | 'waiting_for_deadline'
   | 'paused'
+  | 'closing'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -186,6 +187,7 @@ export interface Session {
   enabled_skills: string[]
   agent_access_overrides: Record<string, AccessPreset>
   status: SessionStatus
+  closing_status: SessionStatus | null
   params: Record<string, unknown>
   output: unknown | null
   error: string | null
@@ -229,8 +231,16 @@ export interface ActionInvocation {
   action_name: string
   contract: string
   arguments: unknown
+  input: string
+  source:
+    | { kind: 'workflow' }
+    | { kind: 'human_request'; request_id: Id }
+    | { kind: 'agent'; sender_agent_id: Id }
   requested_tools: string[]
-  source_human_request_id: Id | null
+  tools_enabled: boolean
+  web_search_context_size: WebSearchContextSize | null
+  reasoning_effort: ReasoningEffort | null
+  response_format: unknown | null
   status: ActionStatus
   output: unknown | null
   error: string | null

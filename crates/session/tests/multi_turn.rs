@@ -6,6 +6,7 @@ use papermachine_model::ModelError;
 use papermachine_model::ModelStream;
 use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::Agent;
 use papermachine_protocol::ControlMessageKind;
 use papermachine_protocol::ControlMessageStatus;
@@ -29,6 +30,7 @@ use papermachine_session::TurnRuntime;
 use papermachine_session::TurnRuntimeConfig;
 use papermachine_session::TurnRuntimeError;
 use papermachine_skills::ProjectSkillCatalog;
+use papermachine_store::NewActionInvocation;
 use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::StoreHandle;
@@ -135,14 +137,20 @@ async fn execute_action(
     input: &str,
 ) -> Turn {
     let invocation = store
-        .create_action_invocation(
-            session.id,
-            agent.id,
-            "respond",
-            "Respond",
-            json!({"message": input}),
-            Vec::new(),
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: session.id,
+            agent_id: agent.id,
+            action_name: "respond".to_string(),
+            contract: "Respond".to_string(),
+            arguments: json!({"message": input}),
+            input: input.to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: Vec::new(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("Action should be created");
     let attempt = store
         .start_action_attempt(invocation.id)
@@ -192,14 +200,20 @@ async fn cancelling_an_action_turn_reaches_its_execution() {
         .expect("Project should be created");
     let (session, agent) = session_agent(&store, project.id, "");
     let invocation = store
-        .create_action_invocation(
-            session.id,
-            agent.id,
-            "investigate",
-            "Wait",
-            json!({}),
-            Vec::new(),
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: session.id,
+            agent_id: agent.id,
+            action_name: "investigate".to_string(),
+            contract: "Wait".to_string(),
+            arguments: json!({}),
+            input: "Wait".to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: Vec::new(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("Action should be created");
     let attempt = store
         .start_action_attempt(invocation.id)
@@ -319,14 +333,20 @@ async fn claimed_guidance_is_checkpointed_before_sampling() {
         .expect("Project should be created");
     let (session, agent) = session_agent(&store, project.id, "");
     let invocation = store
-        .create_action_invocation(
-            session.id,
-            agent.id,
-            "respond",
-            "Use guidance",
-            json!({}),
-            Vec::new(),
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: session.id,
+            agent_id: agent.id,
+            action_name: "respond".to_string(),
+            contract: "Use guidance".to_string(),
+            arguments: json!({}),
+            input: "Use guidance".to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: Vec::new(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("Action should be created");
     let attempt = store
         .start_action_attempt(invocation.id)

@@ -513,7 +513,7 @@ async fn interactive_session_has_one_agent_rollout_and_exact_human_provenance() 
         .iter()
         .find(|action| action["agent_id"] == first_turn["agent_id"])
         .expect("Action should belong to the Turn Agent");
-    let request_id = action["source_human_request_id"]
+    let request_id = action["source"]["request_id"]
         .as_str()
         .expect("interactive Action should preserve HumanRequest provenance");
     assert!(

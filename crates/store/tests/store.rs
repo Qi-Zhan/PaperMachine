@@ -1,5 +1,6 @@
 use papermachine_protocol::AccessPreset;
 use papermachine_protocol::ActionInvocationId;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::ActionStatus;
 use papermachine_protocol::ArtifactId;
 use papermachine_protocol::ArtifactKind;
@@ -20,6 +21,7 @@ use papermachine_protocol::SessionTriggerKind;
 use papermachine_protocol::SessionUsage;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::ToolSetSnapshot;
+use papermachine_store::NewActionInvocation;
 use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::TurnContextCheckpoint;
@@ -422,13 +424,22 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
     let invocation = store
         .create_action_invocation_with_id(
             ActionInvocationId::new(),
-            session.id,
-            agent.id,
-            "respond",
-            "Respond to the human",
-            json!({"message": "Inspect the cache."}),
-            Vec::new(),
-            Some(request.id),
+            NewActionInvocation {
+                session_id: session.id,
+                agent_id: agent.id,
+                action_name: "respond".to_string(),
+                contract: "Respond to the human".to_string(),
+                arguments: json!({"message": "Inspect the cache."}),
+                input: "Inspect the cache.".to_string(),
+                source: ActionSource::HumanRequest {
+                    request_id: request.id,
+                },
+                requested_tools: Vec::new(),
+                tools_enabled: true,
+                web_search_context_size: None,
+                reasoning_effort: None,
+                response_format: None,
+            },
         )
         .expect("Action should be created");
     let attempt = store
@@ -454,13 +465,22 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
     let forged = store
         .create_action_invocation_with_id(
             ActionInvocationId::new(),
-            session.id,
-            agent.id,
-            "respond",
-            "Respond to the human",
-            json!({"message": "Different"}),
-            Vec::new(),
-            Some(request.id),
+            NewActionInvocation {
+                session_id: session.id,
+                agent_id: agent.id,
+                action_name: "respond".to_string(),
+                contract: "Respond to the human".to_string(),
+                arguments: json!({"message": "Different"}),
+                input: "Different".to_string(),
+                source: ActionSource::HumanRequest {
+                    request_id: request.id,
+                },
+                requested_tools: Vec::new(),
+                tools_enabled: true,
+                web_search_context_size: None,
+                reasoning_effort: None,
+                response_format: None,
+            },
         )
         .expect("Action should be recorded before provenance validation");
     let forged_attempt = store
@@ -533,14 +553,20 @@ fn concurrent_action_start_admits_one_attempt_and_counts_completion_once() {
     let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Research);
     let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
     let invocation = store
-        .create_action_invocation(
-            harness.session.id,
-            harness.agent.id,
-            "once",
-            "Start once",
-            json!({}),
-            Vec::new(),
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: harness.session.id,
+            agent_id: harness.agent.id,
+            action_name: "once".to_string(),
+            contract: "Start once".to_string(),
+            arguments: json!({}),
+            input: "{}".to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: Vec::new(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("Action should be created");
     let barrier = Arc::new(Barrier::new(3));
     let workers = (0..2)
@@ -739,14 +765,20 @@ fn project_home_is_owned_by_exact_session_action_and_agent() {
         )
         .expect("second Agent should be created");
     let action = store
-        .create_action_invocation(
-            session.id,
-            agent.id,
-            "maintain_project_home",
-            "Maintain the Project home",
-            json!({}),
-            vec!["read_resource".to_string()],
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: session.id,
+            agent_id: agent.id,
+            action_name: "maintain_project_home".to_string(),
+            contract: "Maintain the Project home".to_string(),
+            arguments: json!({}),
+            input: "{}".to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: vec!["read_resource".to_string()],
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("Action should be created");
     let html = "<section><h2>Verified result</h2></section>".to_string();
     assert!(

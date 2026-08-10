@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use papermachine_model::ModelClient;
 use papermachine_model::ScriptedModelClient;
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::MessageRole;
 use papermachine_protocol::ModelContextMutation;
 use papermachine_protocol::ModelEvent;
@@ -19,6 +20,7 @@ use papermachine_session::ActionTurnContext;
 use papermachine_session::TurnRuntime;
 use papermachine_session::TurnRuntimeConfig;
 use papermachine_skills::ProjectSkillCatalog;
+use papermachine_store::NewActionInvocation;
 use papermachine_store::NewSession;
 use papermachine_store::Store;
 use papermachine_store::StoreHandle;
@@ -232,14 +234,20 @@ fn workflow_recovery_fixture(
         .build();
     let requested_tools = vec!["write_file".to_string()];
     let invocation = store
-        .create_action_invocation(
-            run.id,
-            agent.id,
-            "recover",
-            "recover",
-            json!({}),
-            requested_tools.clone(),
-        )
+        .create_action_invocation(NewActionInvocation {
+            session_id: run.id,
+            agent_id: agent.id,
+            action_name: "recover".to_string(),
+            contract: "recover".to_string(),
+            arguments: json!({}),
+            input: "recover".to_string(),
+            source: ActionSource::Workflow,
+            requested_tools: requested_tools.clone(),
+            tools_enabled: true,
+            web_search_context_size: None,
+            reasoning_effort: None,
+            response_format: None,
+        })
         .expect("invocation should be created");
     let attempt = store
         .start_action_attempt(invocation.id)

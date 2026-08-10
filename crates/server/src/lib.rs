@@ -44,6 +44,7 @@ use papermachine_tools::ReadFileTool;
 use papermachine_tools::ReadResourceTool;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::WriteFileTool;
+use papermachine_workflow::ActionRunner;
 use papermachine_workflow::PythonSessionExecutor;
 use papermachine_workflow::SessionExecutor;
 use papermachine_workflow::SessionScheduler;
@@ -341,15 +342,16 @@ impl ProjectRuntimeFactory {
         );
         let executor: Arc<dyn SessionExecutor> = Arc::new(PythonSessionExecutor::new(
             store.clone(),
-            turns.clone(),
             catalog.python(),
             catalog.python_runtime_root(),
             workflow_runtime_root,
         ));
+        let action_runner = ActionRunner::new(store.clone(), turns.clone());
         let scheduler = SessionScheduler::new_with_permits(
             store.clone(),
             executor,
             Arc::clone(&self.session_permits),
+            action_runner,
         );
         scheduler
             .recover()
@@ -1253,6 +1255,7 @@ async fn archive_session(
             Ok(()) | Err(SessionSchedulerError::TerminalSession { .. }) => {}
             Err(error) => return Err(error.into()),
         }
+        let _ = runtime.scheduler.wait(session_id).await?;
     }
     runtime
         .store

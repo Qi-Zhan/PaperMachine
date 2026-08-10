@@ -11,13 +11,18 @@ mod project_home;
 mod rollout;
 
 use papermachine_protocol::AccessPreset;
+use papermachine_protocol::ActionSource;
 use papermachine_protocol::AgentId;
 use papermachine_protocol::ControlMessageId;
 use papermachine_protocol::ModelContextMutation;
+use papermachine_protocol::ModelResponseFormat;
 use papermachine_protocol::ProjectId;
+use papermachine_protocol::ReasoningEffort;
 use papermachine_protocol::SessionEvent;
+use papermachine_protocol::SessionId;
 use papermachine_protocol::SessionTrigger;
 use papermachine_protocol::TokenUsage;
+use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkflowProgramSnapshot;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -57,6 +62,22 @@ pub struct NewSession {
     pub access: AccessPreset,
     pub enabled_skills: Vec<String>,
     pub agent_access_overrides: BTreeMap<String, AccessPreset>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewActionInvocation {
+    pub session_id: SessionId,
+    pub agent_id: AgentId,
+    pub action_name: String,
+    pub contract: String,
+    pub arguments: Value,
+    pub input: String,
+    pub source: ActionSource,
+    pub requested_tools: Vec<String>,
+    pub tools_enabled: bool,
+    pub web_search_context_size: Option<WebSearchContextSize>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub response_format: Option<ModelResponseFormat>,
 }
 
 #[derive(Clone, Debug)]
