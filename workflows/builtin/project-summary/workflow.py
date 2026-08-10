@@ -2,13 +2,13 @@ from papermachine import Agent, action, publish_project_home, wait, workflow
 
 
 class ProjectSummaryAgent(Agent):
-    access = "model_only"
+    access = "workspace"
     role = "Project curator"
-    system_prompt = """Maintain the Project home as an evidence-grounded map of this research world. Use the supplied Project snapshots to keep its objectives, key results, decisions, provenance, open questions, and useful next actions current. Choose headings, tables, charts, links, or other semantic HTML when they help. Return the complete HTML fragment and do not invent facts."""
+    system_prompt = """Maintain the Project home as the best current view of this research world. Inspect the available evidence and collaborate with relevant Agents when useful. Return one complete standalone HTML document."""
 
-    @action(tools=[])
+    @action(search_context_size="low")
     async def maintain_project_home(self, changed_resources: list[dict]):
-        """Update the complete current Project home from these Project snapshots."""
+        """Maintain the Project home."""
 
 
 @workflow(

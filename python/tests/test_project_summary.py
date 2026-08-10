@@ -27,7 +27,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             if kind == "create_agent":
                 return {
                     "agent_id": "agent-summary",
-                    "access": "model_only",
+                    "access": "workspace",
                 }
             if kind == "project_changes":
                 self.assertTrue(payload["exclude_current_program"])
@@ -66,7 +66,8 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     }],
                 )
                 self.assertEqual(payload["action_name"], "maintain_project_home")
-                self.assertEqual(payload["tool_policy"], [])
+                self.assertIsNone(payload["tool_policy"])
+                self.assertEqual(payload["web_search_context_size"], "low")
                 self.assertIsNone(payload["response_format"])
                 return {
                     "action_invocation_id": f"invocation-summary-{page}",
@@ -116,9 +117,10 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             ],
         )
 
-    def test_summary_receives_snapshots_without_model_tools(self) -> None:
+    def test_summary_uses_normal_agent_defaults(self) -> None:
         agent_type = WORKFLOW["ProjectSummaryAgent"]
-        self.assertEqual(agent_type.maintain_project_home.tools, [])
+        self.assertEqual(agent_type.access, "workspace")
+        self.assertIsNone(agent_type.maintain_project_home.tools)
 
 if __name__ == "__main__":
     unittest.main()

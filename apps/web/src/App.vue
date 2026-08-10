@@ -852,7 +852,7 @@ async function runProjectSummary(input: {
       instructions: input.instructions.trim(),
       params: { interval_minutes: input.intervalMinutes },
       model,
-      access: 'model_only',
+      access: 'workspace',
       enabled_skills: [],
     })
     if (input.replaceSessionId && input.replaceSessionId !== session.id) {
