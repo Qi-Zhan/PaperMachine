@@ -20,9 +20,9 @@ ACCESS_PROFILES = {
     "model_only",
     "read_only",
     "workspace",
-    "research",
     "full_access",
 }
+_DEFAULT_TOOL_POLICY = object()
 
 
 class HumanMessage(str):
@@ -128,7 +128,7 @@ class _ActionDescriptor:
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
-        self.tools = _normalize_action_tools(tools if tools is not None else [])
+        self.tools = None if tools is None else _normalize_action_tools(tools)
 
     def __get__(self, instance: Agent | None, owner: type[Agent]) -> Any:
         if instance is None:
@@ -230,10 +230,10 @@ def _human_message_parameter(function: Callable[..., Any]) -> str | None:
 
 class Agent:
     system_prompt = ""
-    role = "research agent"
+    role = "agent"
     model = ""
     skills: list[str] = []
-    access = "research"
+    access = "workspace"
 
     def __init__(
         self,
@@ -330,7 +330,7 @@ class _ActionCall(Awaitable[Any]):
         search_context_size: str | None,
         reasoning_effort: str | None,
         finalize: str | None,
-        tools: list[str],
+        tools: list[str] | None,
         human_message_parameter: str | None,
         human_request_id: str | None,
     ) -> None:
@@ -343,7 +343,7 @@ class _ActionCall(Awaitable[Any]):
         self.search_context_size = search_context_size
         self.reasoning_effort = reasoning_effort
         self.finalize = finalize
-        self.tools = list(tools)
+        self.tools = None if tools is None else list(tools)
         self.human_message_parameter = human_message_parameter
         self.human_request_id = human_request_id
         self.action_invocation_id: str | None = None
@@ -386,7 +386,7 @@ class _ActionCall(Awaitable[Any]):
                     "original_action": self.name,
                     "finalization_policy": self.finalize,
                 },
-                tools_enabled=False,
+                tool_policy=[],
                 search_context_size=None,
                 reasoning_effort=self.reasoning_effort,
                 use_human_message=False,
@@ -420,7 +420,7 @@ class _ActionCall(Awaitable[Any]):
                     "parser_error": str(error),
                     "repair_attempt": repair_attempt + 1,
                 },
-                tools_enabled=False,
+                tool_policy=[],
                 search_context_size=None,
                 reasoning_effort="low",
                 use_human_message=False,
@@ -438,7 +438,7 @@ class _ActionCall(Awaitable[Any]):
         action_name: str | None = None,
         prompt: str | None = None,
         arguments: dict[str, Any] | None = None,
-        tools_enabled: bool = True,
+        tool_policy: list[str] | None | object = _DEFAULT_TOOL_POLICY,
         search_context_size: str | None = None,
         reasoning_effort: str | None = None,
         use_human_message: bool = False,
@@ -451,8 +451,11 @@ class _ActionCall(Awaitable[Any]):
                 "prompt": prompt or self.prompt,
                 "arguments": self.arguments if arguments is None else arguments,
                 "response_format": self.response_format,
-                "tools_enabled": tools_enabled,
-                "requested_tools": self.tools if tools_enabled else [],
+                "tool_policy": (
+                    self.tools
+                    if tool_policy is _DEFAULT_TOOL_POLICY
+                    else tool_policy
+                ),
                 "web_search_context_size": (
                     self.search_context_size
                     if search_context_size is None

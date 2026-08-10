@@ -46,7 +46,6 @@ ACCESS_PROFILES = {
     "model_only",
     "read_only",
     "workspace",
-    "research",
     "full_access",
 }
 WORKFLOW_METADATA_KEYS = {
@@ -103,7 +102,7 @@ class Validator(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         if any(isinstance(base, ast.Name) and base.id == "Agent" for base in node.bases):
             actions: list[dict[str, Any]] = []
-            access = "research"
+            access = "workspace"
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_decorator(item, "action"):
                     actions.append(
@@ -135,7 +134,7 @@ class Validator(ast.NodeVisitor):
 
     def action_tools(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> list[str]:
+    ) -> list[str] | None:
         decorator = next(
             (
                 item
@@ -153,10 +152,10 @@ class Validator(ast.NodeVisitor):
             None,
         )
         if not isinstance(decorator, ast.Call):
-            return []
+            return None
         keywords = [item for item in decorator.keywords if item.arg == "tools"]
         if not keywords:
-            return []
+            return None
         if len(keywords) > 1:
             self.error(decorator, "action tools may be declared only once")
             return []

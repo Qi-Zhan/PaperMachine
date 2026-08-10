@@ -2,7 +2,7 @@ from papermachine import Agent, action, workflow
 
 
 class GoalAgent(Agent):
-    access = "research"
+    access = "workspace"
     role = "persistent goal agent"
     system_prompt = """Own the user's objective until it is actually complete. Work in one persistent Session so prior reasoning, evidence, tool results, and workspace changes remain available across Turns. On every Turn, make concrete progress with the available tools instead of merely proposing future work. Preserve the full objective, verify the current state before claiming completion, and report uncertainty honestly. Do not wait for or ask the user to continue; make safe, reversible assumptions when possible.
 
@@ -15,10 +15,9 @@ Use active whenever any required work remains or completion is not proved. Use c
 
     @action(
         search_context_size="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def work(self, objective: str):
-        """Continue working toward objective now. Read relevant Project resources when useful. Use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""
+        """Continue working toward objective now. Inspect the Workspace when useful, use tools whenever they are needed, perform concrete work rather than describing what a future Turn could do, verify the results you produced, and return a normal user-facing progress update or final result followed by the required Goal control line."""
 
 
 @workflow(
@@ -53,10 +52,9 @@ Use active whenever any required work remains or completion is not proved. Use c
                     "model_only",
                     "read_only",
                     "workspace",
-                    "research",
                     "full_access",
                 ],
-                "default": "research",
+                "default": "workspace",
                 "x-ui-order": 4,
             },
         },
@@ -67,7 +65,7 @@ async def main(ctx):
     title = str(ctx.params.get("session_title") or "Goal").strip()
     custom_prompt = str(ctx.params.get("agent_system_prompt") or "").strip()
     model = str(ctx.params.get("agent_model") or "")
-    access = str(ctx.params.get("agent_access") or "research")
+    access = str(ctx.params.get("agent_access") or "workspace")
     system_prompt = GoalAgent.system_prompt
     if custom_prompt:
         system_prompt = f"{system_prompt}\n\nUser-configured Goal instructions:\n{custom_prompt}"

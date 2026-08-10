@@ -79,7 +79,7 @@ pub struct WorkflowAgentDeclaration {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct WorkflowActionDeclaration {
     pub name: String,
-    pub tools: Vec<String>,
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

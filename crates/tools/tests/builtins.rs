@@ -46,7 +46,7 @@ impl ToolExecutor for ProbeTool {
 }
 
 fn context(root: &std::path::Path) -> ToolContext {
-    context_with_access(root, AccessPreset::Research)
+    context_with_access(root, AccessPreset::Workspace)
 }
 
 fn context_with_access(root: &std::path::Path, access: AccessPreset) -> ToolContext {
@@ -96,14 +96,13 @@ fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
     let names = |access| {
         catalog
             .materialize_action_tools(
-                &[
+                Some(&[
                     "read_file".to_string(),
                     "write_file".to_string(),
                     "exec_command".to_string(),
                     "fetch_url".to_string(),
-                ],
+                ]),
                 access,
-                true,
             )
             .expect("Action tools should materialize")
             .definitions
@@ -113,18 +112,34 @@ fn catalog_filters_declared_workspace_tools_for_each_access_profile() {
     };
 
     assert_eq!(names(AccessPreset::ModelOnly), Vec::<String>::new());
-    assert_eq!(names(AccessPreset::ReadOnly), vec!["read_file"]);
+    assert_eq!(
+        names(AccessPreset::ReadOnly),
+        vec!["exec_command", "read_file"]
+    );
     assert_eq!(
         names(AccessPreset::Workspace),
         vec!["exec_command", "read_file", "write_file"]
     );
     assert_eq!(
-        names(AccessPreset::Research),
+        names(AccessPreset::FullAccess),
         vec!["exec_command", "fetch_url", "read_file", "write_file"]
     );
     assert_eq!(
-        names(AccessPreset::FullAccess),
-        vec!["exec_command", "fetch_url", "read_file", "write_file"]
+        catalog
+            .materialize_action_tools(None, AccessPreset::Workspace)
+            .expect("bare Action should use the access defaults")
+            .definitions
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>(),
+        vec!["exec_command", "read_file", "write_file"]
+    );
+    assert!(
+        catalog
+            .materialize_action_tools(Some(&[]), AccessPreset::FullAccess)
+            .expect("explicit empty policy should disable local tools")
+            .definitions
+            .is_empty()
     );
 }
 
@@ -143,21 +158,20 @@ fn catalog_rejects_registration_conflicts_unknown_requests_and_definition_drift(
         .expect("probe tool should register")
         .build();
     let unknown = catalog
-        .materialize_action_tools(&["missing_tool".to_string()], AccessPreset::Research, true)
+        .materialize_action_tools(Some(&["missing_tool".to_string()]), AccessPreset::Workspace)
         .expect_err("unknown Action tool must fail validation");
     assert!(matches!(unknown, ToolError::UnknownTool(_)));
     assert!(
         catalog
             .materialize_action_tools(
-                &["read_file".to_string(), "read_file".to_string()],
-                AccessPreset::Research,
-                true,
+                Some(&["read_file".to_string(), "read_file".to_string()]),
+                AccessPreset::Workspace,
             )
             .is_err()
     );
 
     let snapshot = catalog
-        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Research, true)
+        .materialize_action_tools(Some(&["read_file".to_string()]), AccessPreset::Workspace)
         .expect("snapshot should materialize");
     assert!(
         ToolCatalog::default()
@@ -183,10 +197,10 @@ fn one_persistent_agent_can_receive_different_exact_registries_per_action() {
         .expect("write tool should register")
         .build();
     let read_turn = catalog
-        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Workspace, true)
+        .materialize_action_tools(Some(&["read_file".to_string()]), AccessPreset::Workspace)
         .expect("read Action should materialize");
     let write_turn = catalog
-        .materialize_action_tools(&["write_file".to_string()], AccessPreset::Workspace, true)
+        .materialize_action_tools(Some(&["write_file".to_string()]), AccessPreset::Workspace)
         .expect("write Action should materialize");
 
     assert_ne!(read_turn.sha256, write_turn.sha256);
@@ -222,13 +236,13 @@ async fn builtins_recheck_access_without_the_registry() {
         )
         .await
         .expect_err("read-only profile must reject direct writes");
-    let command_error = ExecCommandTool
+    let command = ExecCommandTool
         .execute(
             context_with_access(directory.path(), AccessPreset::ReadOnly),
             json!({"command": "true"}),
         )
         .await
-        .expect_err("read-only profile must reject direct commands");
+        .expect("read-only access may run a sandboxed command");
     let fetch_error = FetchUrlTool
         .execute(
             context_with_access(directory.path(), AccessPreset::Workspace),
@@ -237,7 +251,7 @@ async fn builtins_recheck_access_without_the_registry() {
         .await
         .expect_err("workspace profile must reject direct network fetches");
     assert!(matches!(write_error, ToolError::PermissionDenied { .. }));
-    assert!(matches!(command_error, ToolError::PermissionDenied { .. }));
+    assert_eq!(command.value["exit_code"], 0);
     assert!(matches!(fetch_error, ToolError::PermissionDenied { .. }));
 }
 
@@ -350,7 +364,7 @@ async fn relative_paths_resolve_from_the_workspace_cwd() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn research_can_read_host_files_but_not_host_credentials() {
+async fn workspace_can_read_host_files_but_not_host_credentials() {
     let directory = tempdir().expect("temporary directory should be created");
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace should be created");
@@ -358,12 +372,12 @@ async fn research_can_read_host_files_but_not_host_credentials() {
     let credential = directory.path().join(".env.local");
     std::fs::write(&ordinary, "ordinary host data").expect("host fixture should be written");
     std::fs::write(&credential, "API_KEY=private").expect("credential fixture should be written");
-    let access = context_with_access(&workspace, AccessPreset::Research);
+    let access = context_with_access(&workspace, AccessPreset::Workspace);
 
     let hosts = ReadFileTool
         .execute(access.clone(), json!({"path": "/etc/hosts"}))
         .await
-        .expect("research should read a normal host file");
+        .expect("workspace access should read a normal host file");
     assert!(
         !hosts.value["content"]
             .as_str()
@@ -373,12 +387,12 @@ async fn research_can_read_host_files_but_not_host_credentials() {
     let ordinary = ReadFileTool
         .execute(access.clone(), json!({"path": ordinary}))
         .await
-        .expect("research should read a host file outside the Workspace");
+        .expect("workspace access should read a host file outside the Workspace");
     assert_eq!(ordinary.value["content"], "ordinary host data");
     let error = ReadFileTool
         .execute(access, json!({"path": credential}))
         .await
-        .expect_err("research must not read host credentials");
+        .expect_err("workspace access must not read host credentials");
     assert!(matches!(error, ToolError::SensitivePath(_)));
 }
 
@@ -392,11 +406,11 @@ async fn workspace_presets_cannot_read_credentials_or_write_protected_metadata()
 
     let read_error = ReadFileTool
         .execute(
-            context_with_access(directory.path(), AccessPreset::Research),
+            context_with_access(directory.path(), AccessPreset::Workspace),
             json!({"path": ".env"}),
         )
         .await
-        .expect_err("research preset must not expose Workspace credentials");
+        .expect_err("workspace access must not expose Workspace credentials");
     let write_error = WriteFileTool
         .execute(
             context_with_access(directory.path(), AccessPreset::Workspace),

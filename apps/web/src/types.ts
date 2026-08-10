@@ -1,7 +1,9 @@
 export type Id = string
 
-export const ACCESS_PRESETS = ['model_only', 'read_only', 'workspace', 'research', 'full_access'] as const
+export const ACCESS_PRESETS = ['model_only', 'read_only', 'workspace', 'full_access'] as const
 export type AccessPreset = (typeof ACCESS_PRESETS)[number]
+export type WebSearchContextSize = 'low' | 'medium' | 'high'
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type SessionStatus =
   | 'created'
   | 'running'
@@ -75,7 +77,7 @@ export interface ModelRouteSnapshot {
   upstream_model: string
   context_window: number
   capabilities: { hosted_web_search: boolean }
-  reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  reasoning_effort: ReasoningEffort | null
   config_sha256: string
 }
 
@@ -87,7 +89,6 @@ export interface TurnEnvironmentSnapshot {
     workspace_root: string
     cwd: string
     filesystem: unknown
-    tools: unknown
     network: unknown
     environment: unknown
   }
@@ -104,8 +105,7 @@ export interface Turn {
   prompt: PromptSnapshot
   environment: TurnEnvironmentSnapshot
   tool_set: ToolSetSnapshot
-  tools_enabled: boolean
-  web_search_context_size: 'low' | 'medium' | 'high' | null
+  web_search_context_size: WebSearchContextSize | null
   response_format: unknown | null
   skill_snapshots: SkillSnapshot[]
   usage: TokenUsage
@@ -236,8 +236,7 @@ export interface ActionInvocation {
     | { kind: 'workflow' }
     | { kind: 'human_request'; request_id: Id }
     | { kind: 'agent'; sender_agent_id: Id }
-  requested_tools: string[]
-  tools_enabled: boolean
+  tool_policy: string[] | null
   web_search_context_size: WebSearchContextSize | null
   reasoning_effort: ReasoningEffort | null
   response_format: unknown | null
@@ -405,7 +404,7 @@ export interface WorkflowAgentDeclaration {
   actions: WorkflowActionDeclaration[]
   access: AccessPreset
 }
-export interface WorkflowActionDeclaration { name: string; tools: string[] }
+export interface WorkflowActionDeclaration { name: string; tools: string[] | null }
 export interface WorkflowDiagnostic { severity: 'error' | 'warning'; message: string; line: number | null; column: number | null }
 export interface WorkflowValidation {
   valid: boolean

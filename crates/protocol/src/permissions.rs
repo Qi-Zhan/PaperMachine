@@ -1,9 +1,9 @@
-//! Materialized filesystem, tool, and network authorization.
+//! Materialized filesystem and child-process authorization.
 //!
 //! The split between user-facing presets and a concrete per-Turn policy is
 //! adapted from OpenAI Codex `codex-rs/protocol/src/permissions.rs` at commit
 //! `b2dc8b3e4be4fe3a453d50e13835f707b258f15b`. PaperMachine keeps a smaller
-//! research-specific policy surface and adds an immutable managed-state deny.
+//! policy surface and adds an immutable managed-state deny.
 
 use crate::WorkspaceAttachment;
 use schemars::JsonSchema;
@@ -46,7 +46,6 @@ pub enum AccessPreset {
     ModelOnly,
     ReadOnly,
     Workspace,
-    Research,
     FullAccess,
 }
 
@@ -56,30 +55,21 @@ impl AccessPreset {
             Self::ModelOnly => "model_only",
             Self::ReadOnly => "read_only",
             Self::Workspace => "workspace",
-            Self::Research => "research",
             Self::FullAccess => "full_access",
         }
     }
 
-    pub fn tool_capabilities(self) -> ToolCapabilities {
+    pub fn allows_local_tool(self, name: &str) -> bool {
         match self {
-            Self::ModelOnly => ToolCapabilities::default(),
-            Self::ReadOnly => ToolCapabilities {
-                read_file: true,
-                ..ToolCapabilities::default()
-            },
-            Self::Workspace => ToolCapabilities {
-                read_file: true,
-                write_file: true,
-                exec_command: true,
-                fetch_url: false,
-            },
-            Self::Research | Self::FullAccess => ToolCapabilities {
-                read_file: true,
-                write_file: true,
-                exec_command: true,
-                fetch_url: true,
-            },
+            Self::ModelOnly => false,
+            Self::ReadOnly => matches!(name, "read_file" | "exec_command"),
+            Self::Workspace => matches!(name, "read_file" | "write_file" | "exec_command"),
+            Self::FullAccess => {
+                matches!(
+                    name,
+                    "read_file" | "write_file" | "exec_command" | "fetch_url"
+                )
+            }
         }
     }
 }
@@ -115,33 +105,9 @@ pub struct FilesystemAuthorization {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-pub struct ToolCapabilities {
-    pub read_file: bool,
-    pub write_file: bool,
-    pub exec_command: bool,
-    pub fetch_url: bool,
-}
-
-impl ToolCapabilities {
-    pub fn allows(&self, name: &str) -> bool {
-        match name {
-            "read_file" => self.read_file,
-            "write_file" => self.write_file,
-            "exec_command" => self.exec_command,
-            "fetch_url" => self.fetch_url,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct NetworkCapabilities {
     /// Network available to an untrusted child process.
     pub child_process: bool,
-    /// Controlled Rust-owned HTTPS fetch tool.
-    pub controlled_fetch: bool,
-    /// Provider-hosted web search, further bounded by provider capability.
-    pub hosted_web_search: bool,
 }
 
 /// Environment variables available to untrusted child processes. The runtime
@@ -161,7 +127,6 @@ pub struct AuthorizationContext {
     pub workspace_root: String,
     pub cwd: String,
     pub filesystem: FilesystemAuthorization,
-    pub tools: ToolCapabilities,
     pub network: NetworkCapabilities,
     pub environment: EnvironmentAuthorization,
 }
@@ -201,43 +166,27 @@ impl AuthorizationContext {
             return Err("Turn cwd must stay inside the Workspace".to_string());
         }
 
-        let (read, write, tools, network) = match preset {
+        let (read, write, network) = match preset {
             AccessPreset::ModelOnly => (
                 FilesystemScope::None,
                 FilesystemScope::None,
-                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::ReadOnly => (
                 FilesystemScope::Host,
                 FilesystemScope::None,
-                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
             ),
             AccessPreset::Workspace => (
                 FilesystemScope::Host,
                 FilesystemScope::Workspace,
-                preset.tool_capabilities(),
                 NetworkCapabilities::default(),
-            ),
-            AccessPreset::Research => (
-                FilesystemScope::Host,
-                FilesystemScope::Workspace,
-                preset.tool_capabilities(),
-                NetworkCapabilities {
-                    child_process: false,
-                    controlled_fetch: true,
-                    hosted_web_search: true,
-                },
             ),
             AccessPreset::FullAccess => (
                 FilesystemScope::Host,
                 FilesystemScope::Host,
-                preset.tool_capabilities(),
                 NetworkCapabilities {
                     child_process: true,
-                    controlled_fetch: true,
-                    hosted_web_search: true,
                 },
             ),
         };
@@ -264,7 +213,6 @@ impl AuthorizationContext {
                     user_credential_roots()
                 },
             },
-            tools,
             network,
             environment: EnvironmentAuthorization {
                 inherit_core: true,
@@ -467,7 +415,7 @@ mod tests {
 
     #[test]
     fn workspace_policy_protects_metadata_credentials_and_managed_state() {
-        let policy = policy(AccessPreset::Research);
+        let policy = policy(AccessPreset::Workspace);
         assert_eq!(
             policy.authorize_path(Path::new("/workspace/.git/config"), PathOperation::Write),
             Err(PathAuthorizationFailure::ProtectedWorkspaceMetadata)
@@ -526,10 +474,10 @@ mod tests {
 
     #[test]
     fn policy_hash_is_stable_and_sensitive_to_the_workspace() {
-        let first = policy(AccessPreset::Research);
-        let second = policy(AccessPreset::Research);
+        let first = policy(AccessPreset::Workspace);
+        let second = policy(AccessPreset::Workspace);
         let other = AuthorizationContext::materialize(
-            AccessPreset::Research,
+            AccessPreset::Workspace,
             "/other".to_string(),
             "/other".to_string(),
             vec!["/managed/project".to_string()],

@@ -71,8 +71,7 @@ impl ToolExecutor for FetchUrlTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.authorization.tools.fetch_url || !context.authorization.network.controlled_fetch
-        {
+        if !context.authorization.preset.allows_local_tool("fetch_url") {
             return Err(ToolError::PermissionDenied {
                 tool: "fetch_url".to_string(),
                 access: context.authorization.preset,

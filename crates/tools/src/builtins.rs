@@ -59,7 +59,7 @@ impl ToolExecutor for ReadFileTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.authorization.tools.read_file {
+        if !context.authorization.preset.allows_local_tool("read_file") {
             return Err(ToolError::PermissionDenied {
                 tool: "read_file".to_string(),
                 access: context.authorization.preset,
@@ -145,7 +145,7 @@ impl ToolExecutor for WriteFileTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.authorization.tools.write_file {
+        if !context.authorization.preset.allows_local_tool("write_file") {
             return Err(ToolError::PermissionDenied {
                 tool: "write_file".to_string(),
                 access: context.authorization.preset,
@@ -191,7 +191,7 @@ impl ToolExecutor for ExecCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "exec_command".to_string(),
-            description: "Run a shell command under the current Session access profile. Workspace and research profiles remain sandboxed.".to_string(),
+            description: "Run a shell command under the current Session access profile. Non-full-access commands remain sandboxed.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -210,7 +210,11 @@ impl ToolExecutor for ExecCommandTool {
         context: ToolContext,
         arguments: Value,
     ) -> Result<ToolOutput, ToolError> {
-        if !context.authorization.tools.exec_command {
+        if !context
+            .authorization
+            .preset
+            .allows_local_tool("exec_command")
+        {
             return Err(ToolError::PermissionDenied {
                 tool: "exec_command".to_string(),
                 access: context.authorization.preset,

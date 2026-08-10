@@ -220,7 +220,6 @@ function accessLabel(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnly')
   if (access === 'read_only') return t('access.readOnly')
   if (access === 'workspace') return t('access.workspace')
-  if (access === 'research') return t('access.research')
   return t('access.fullAccess')
 }
 

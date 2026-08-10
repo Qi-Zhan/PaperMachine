@@ -322,7 +322,7 @@ const programLoading = ref(false)
 const validation = ref<WorkflowValidation | null>(null)
 const requestInput = ref<HTMLTextAreaElement | null>(null)
 const model = ref('')
-const access = ref<AccessPreset>('research')
+const access = ref<AccessPreset>('workspace')
 const enabledSkills = ref<string[]>([])
 const agentOverrides = reactive<Record<string, AccessPreset | ''>>({})
 let programRequest = 0
@@ -391,7 +391,7 @@ watch(
     localError.value = ''
     programError.value = ''
     model.value = props.session?.default_model ?? props.defaultModel
-    access.value = props.session?.access ?? 'research'
+    access.value = props.session?.access ?? 'workspace'
     enabledSkills.value = [...(props.session?.enabled_skills ?? [])]
     initializeValues()
     resetAgentOverrides()
@@ -534,14 +534,12 @@ function accessLabel(value: AccessPreset): string {
   if (value === 'model_only') return t('access.modelOnly')
   if (value === 'read_only') return t('access.readOnly')
   if (value === 'workspace') return t('access.workspace')
-  if (value === 'research') return t('access.research')
   return t('access.fullAccess')
 }
 function accessDescription(value: AccessPreset): string {
   if (value === 'model_only') return t('access.modelOnlyDescription')
   if (value === 'read_only') return t('access.readOnlyDescription')
   if (value === 'workspace') return t('access.workspaceDescription')
-  if (value === 'research') return t('access.researchDescription')
   return t('access.fullAccessDescription')
 }
 </script>

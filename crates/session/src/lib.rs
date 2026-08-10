@@ -153,8 +153,7 @@ impl TurnRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
-        requested_tools: Vec<String>,
-        tools_enabled: bool,
+        tool_policy: Option<Vec<String>>,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         context: ActionTurnContext,
@@ -167,8 +166,7 @@ impl TurnRuntime {
                 model_override,
                 prompt_layers,
                 reasoning_effort,
-                requested_tools,
-                tools_enabled,
+                tool_policy,
                 web_search_context_size,
                 response_format,
                 context.action_attempt_id,
@@ -233,8 +231,7 @@ impl TurnRuntime {
         model_override: Option<&str>,
         prompt_layers: Vec<PromptLayerInput>,
         reasoning_effort: Option<ReasoningEffort>,
-        requested_tools: Vec<String>,
-        tools_enabled: bool,
+        tool_policy: Option<Vec<String>>,
         web_search_context_size: Option<WebSearchContextSize>,
         response_format: Option<ModelResponseFormat>,
         action_attempt_id: ActionAttemptId,
@@ -269,11 +266,10 @@ impl TurnRuntime {
             .call(move |store| store.get_project_system_prompt(project_id))
             .await?;
         let prompt = build_prompt_snapshot(&agent, project_prompt, prompt_layers, &resolved);
-        let tool_set = self.inner.tools.materialize_action_tools(
-            &requested_tools,
-            agent.access,
-            tools_enabled,
-        )?;
+        let tool_set = self
+            .inner
+            .tools
+            .materialize_action_tools(tool_policy.as_deref(), agent.access)?;
         let model_route = self.inner.model.resolve_route_snapshot(
             &model,
             reasoning_effort,
@@ -292,7 +288,6 @@ impl TurnRuntime {
                     input,
                     model_route,
                     prompt,
-                    tools_enabled,
                     access,
                     tool_set,
                     web_search_context_size,
@@ -479,7 +474,6 @@ async fn run_scheduled_turn_inner(
     request.resume_current_turn = resume_current_turn;
     request.checkpoint_message = active_rollout.checkpoint_message;
     request.reasoning_effort = turn.model_route.reasoning_effort;
-    request.tools_enabled = turn.tools_enabled;
     request.web_search_context_size = turn.web_search_context_size;
     request.response_format = turn.response_format;
     request.model_context_window = turn.model_route.context_window;

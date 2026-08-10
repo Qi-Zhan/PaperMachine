@@ -128,7 +128,7 @@ fn session_is_the_workflow_instance_and_owns_multiple_agents() {
         },
         params: json!({}),
         default_model: "test-model".to_string(),
-        access: AccessPreset::Research,
+        access: AccessPreset::Workspace,
         enabled_skills: Vec::new(),
         agent_access_overrides: BTreeMap::new(),
     });
@@ -181,7 +181,7 @@ fn session_is_the_workflow_instance_and_owns_multiple_agents() {
             "Gather evidence.",
             "research-model",
             Vec::new(),
-            AccessPreset::Research,
+            AccessPreset::Workspace,
         )
         .expect("Researcher should be created");
 
@@ -287,15 +287,15 @@ fn turn_creation_requires_workspace_and_pins_agent_access() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "turns");
-    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let first = harness
-        .create_turn(&store, "First", AccessPreset::Research)
+        .create_turn(&store, "First", AccessPreset::Workspace)
         .expect("Turn should be created");
     assert_eq!(first.agent_id, harness.agent.id);
     assert_eq!(
         first.environment.authorization.preset,
-        AccessPreset::Research
+        AccessPreset::Workspace
     );
     assert!(
         store
@@ -321,7 +321,7 @@ fn turn_creation_requires_workspace_and_pins_agent_access() {
             .environment
             .authorization
             .preset,
-        AccessPreset::Research
+        AccessPreset::Workspace
     );
     store.cancel_turn(second.id).expect("Turn should cancel");
 
@@ -381,7 +381,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "human");
-    let session = create_root_session(&store, project.id, "Interactive", AccessPreset::Research);
+    let session = create_root_session(&store, project.id, "Interactive", AccessPreset::Workspace);
     let agent = store
         .create_agent(
             session.id,
@@ -391,7 +391,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
             "",
             "test-model",
             Vec::new(),
-            AccessPreset::Research,
+            AccessPreset::Workspace,
         )
         .expect("Agent should be created");
     let request = store
@@ -434,8 +434,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
                 source: ActionSource::HumanRequest {
                     request_id: request.id,
                 },
-                requested_tools: Vec::new(),
-                tools_enabled: true,
+                tool_policy: Some(Vec::new()),
                 web_search_context_size: None,
                 reasoning_effort: None,
                 response_format: None,
@@ -452,8 +451,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
             "Inspect the cache.",
             model_route("test-model"),
             PromptSnapshot::default(),
-            true,
-            AccessPreset::Research,
+            AccessPreset::Workspace,
             empty_tool_set(),
             None,
             None,
@@ -475,8 +473,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
                 source: ActionSource::HumanRequest {
                     request_id: request.id,
                 },
-                requested_tools: Vec::new(),
-                tools_enabled: true,
+                tool_policy: Some(Vec::new()),
                 web_search_context_size: None,
                 reasoning_effort: None,
                 response_format: None,
@@ -494,8 +491,7 @@ fn human_answer_is_the_only_valid_input_for_its_action() {
                 "Different",
                 model_route("test-model"),
                 PromptSnapshot::default(),
-                true,
-                AccessPreset::Research,
+                AccessPreset::Workspace,
                 empty_tool_set(),
                 None,
                 None,
@@ -510,7 +506,7 @@ fn session_effect_replay_requires_the_identical_request() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "effects");
-    let session = create_root_session(&store, project.id, "Effects", AccessPreset::Research);
+    let session = create_root_session(&store, project.id, "Effects", AccessPreset::Workspace);
     let payload = json!({"name": "Researcher"});
     let started = store
         .begin_session_effect(
@@ -550,8 +546,8 @@ fn concurrent_action_start_admits_one_attempt_and_counts_completion_once() {
         Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
     );
     let project = project(&store, &directory, "action-cas");
-    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let invocation = store
         .create_action_invocation(NewActionInvocation {
             session_id: harness.session.id,
@@ -561,8 +557,7 @@ fn concurrent_action_start_admits_one_attempt_and_counts_completion_once() {
             arguments: json!({}),
             input: "{}".to_string(),
             source: ActionSource::Workflow,
-            requested_tools: Vec::new(),
-            tools_enabled: true,
+            tool_policy: Some(Vec::new()),
             web_search_context_size: None,
             reasoning_effort: None,
             response_format: None,
@@ -624,8 +619,8 @@ fn concurrent_human_answers_use_one_open_request_cas() {
         Store::open_in_memory(directory.path().join("managed")).expect("store should open"),
     );
     let project = project(&store, &directory, "human-cas");
-    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let request = store
         .create_human_request_with_id(
             HumanRequestId::new(),
@@ -668,7 +663,7 @@ fn project_changes_page_current_entities_and_chunk_text_artifacts() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "changes");
-    let source = create_root_session(&store, project.id, "Evidence", AccessPreset::Research);
+    let source = create_root_session(&store, project.id, "Evidence", AccessPreset::Workspace);
     let source_agent = store
         .create_agent(
             source.id,
@@ -682,9 +677,9 @@ fn project_changes_page_current_entities_and_chunk_text_artifacts() {
         )
         .expect("source Agent should be created");
     let summary = create_root_session(&store, project.id, "Summary", AccessPreset::ModelOnly);
-    let action_harness = ActionHarness::create(&store, &source, AccessPreset::Research);
+    let action_harness = ActionHarness::create(&store, &source, AccessPreset::Workspace);
     let action_turn = action_harness
-        .create_action_turn(&store, "Trace this result", AccessPreset::Research)
+        .create_action_turn(&store, "Trace this result", AccessPreset::Workspace)
         .expect("provenance Turn should be created");
     let text = "evidence\n".repeat(160_000);
     let text_artifact = store
@@ -784,10 +779,10 @@ fn control_claim_is_agent_scoped_and_applied_by_checkpoint() {
     let directory = tempdir().expect("temporary directory should be created");
     let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
     let project = project(&store, &directory, "controls");
-    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Origin", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let created = harness
-        .create_action_turn(&store, "Work", AccessPreset::Research)
+        .create_action_turn(&store, "Work", AccessPreset::Workspace)
         .expect("Action Turn should be created");
     store
         .start_turn(created.turn.id)
@@ -889,8 +884,7 @@ fn project_home_is_owned_by_exact_session_action_and_agent() {
             arguments: json!({}),
             input: "{}".to_string(),
             source: ActionSource::Workflow,
-            requested_tools: Vec::new(),
-            tools_enabled: true,
+            tool_policy: Some(Vec::new()),
             web_search_context_size: None,
             reasoning_effort: None,
             response_format: None,
@@ -949,7 +943,8 @@ fn database_reopens_artifacts_and_accumulates_usage() {
     let (project_id, session_id, artifact_id) = {
         let store = Store::create(&managed).expect("store should be created");
         let project = project(&store, &directory, "persist");
-        let session = create_root_session(&store, project.id, "Persistent", AccessPreset::Research);
+        let session =
+            create_root_session(&store, project.id, "Persistent", AccessPreset::Workspace);
         let agent = store
             .create_agent(
                 session.id,

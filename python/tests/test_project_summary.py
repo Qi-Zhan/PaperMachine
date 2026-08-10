@@ -55,7 +55,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     }],
                 )
                 self.assertEqual(payload["action_name"], "maintain_project_home")
-                self.assertEqual(payload["requested_tools"], [])
+                self.assertEqual(payload["tool_policy"], [])
                 self.assertIsNone(payload["response_format"])
                 return {
                     "action_invocation_id": "invocation-summary",

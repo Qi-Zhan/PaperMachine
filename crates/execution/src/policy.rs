@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn materialized_authorization_maps_without_reinterpreting_the_preset() {
         let authorization = AuthorizationContext::materialize(
-            AccessPreset::Research,
+            AccessPreset::Workspace,
             "/workspace".to_string(),
             "/workspace".to_string(),
             vec!["/managed".to_string()],

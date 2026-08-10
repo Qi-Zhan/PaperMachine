@@ -105,7 +105,7 @@ const title = ref('')
 const { t } = useAppI18n()
 const systemPrompt = ref('')
 const model = ref('')
-const access = ref<AccessPreset>('research')
+const access = ref<AccessPreset>('workspace')
 const enabledSkills = ref<string[]>([])
 const titleInput = ref<HTMLInputElement | null>(null)
 const accessProfiles = computed(() => ACCESS_PRESETS.map((value) => ({
@@ -124,7 +124,7 @@ watch(
     title.value = ''
     systemPrompt.value = ''
     model.value = props.defaultModel
-    access.value = 'research'
+    access.value = 'workspace'
     enabledSkills.value = []
     await nextTick()
     titleInput.value?.focus()
@@ -147,7 +147,6 @@ function accessLabel(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnly')
   if (access === 'read_only') return t('access.readOnly')
   if (access === 'workspace') return t('access.workspace')
-  if (access === 'research') return t('access.research')
   return t('access.fullAccess')
 }
 
@@ -155,7 +154,6 @@ function accessDescription(access: AccessPreset): string {
   if (access === 'model_only') return t('access.modelOnlyDescription')
   if (access === 'read_only') return t('access.readOnlyDescription')
   if (access === 'workspace') return t('access.workspaceDescription')
-  if (access === 'research') return t('access.researchDescription')
   return t('access.fullAccessDescription')
 }
 </script>

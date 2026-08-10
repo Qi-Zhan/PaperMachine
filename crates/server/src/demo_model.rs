@@ -92,7 +92,7 @@ fn generated_workflow(prompt: &str) -> String {
 
 
 class EvidenceResearcher(Agent):
-    access = "research"
+    access = "model_only"
     role = "evidence collection"
     system_prompt = "Find concrete support and preserve uncertainty."
 

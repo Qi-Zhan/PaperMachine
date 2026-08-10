@@ -27,10 +27,10 @@ fn rollout_reconstructs_completed_context_without_turn_history_copies() {
     let project = store
         .create_project("Rollout", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let turn = harness
-        .create_turn(&store, "question", AccessPreset::Research)
+        .create_turn(&store, "question", AccessPreset::Workspace)
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
     let context = vec![
@@ -93,10 +93,10 @@ fn opening_store_replays_rollout_ahead_of_sqlite_projection() {
     let project = store
         .create_project("Replay", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let turn = harness
-        .create_turn(&store, "resume me", AccessPreset::Research)
+        .create_turn(&store, "resume me", AccessPreset::Workspace)
         .expect("Turn should be created");
     let before_checkpoint = store.start_turn(turn.id).expect("Turn should start");
     let context = vec![message(MessageRole::User, "resume me")];
@@ -168,10 +168,10 @@ fn truncated_final_record_is_repaired_without_losing_prior_records() {
     let project = store
         .create_project("Tail repair", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     harness
-        .create_turn(&store, "durable", AccessPreset::Research)
+        .create_turn(&store, "durable", AccessPreset::Workspace)
         .expect("Turn should create a canonical record");
     let rollout_path = store.agent_rollout_path(harness.agent.id);
     let expected_len = std::fs::metadata(&rollout_path)
@@ -209,7 +209,7 @@ fn assistant_deltas_are_broadcast_without_entering_durable_history() {
     let project = store
         .create_project("Streaming", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = create_root_session(&store, project.id, "Session", AccessPreset::Research);
+    let session = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
     let durable_before = store
         .list_session_events(session.id, 0)
         .expect("events should load");
@@ -260,10 +260,10 @@ fn compaction_replaces_reconstructed_context_but_keeps_prior_records() {
     let project = store
         .create_project("Compaction", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let turn = harness
-        .create_turn(&store, "large context", AccessPreset::Research)
+        .create_turn(&store, "large context", AccessPreset::Workspace)
         .expect("Turn should be created");
     store.start_turn(turn.id).expect("Turn should start");
     store
@@ -351,7 +351,7 @@ fn concurrent_agent_rollout_appends_have_one_contiguous_sequence() {
     let project = store
         .create_project("Writer", directory.path().join("workspace"))
         .expect("Project should be created");
-    let session = create_root_session(&store, project.id, "Session", AccessPreset::Research);
+    let session = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
     let before = store
         .list_session_events(session.id, 0)
         .expect("initial events should load")
@@ -398,8 +398,8 @@ fn one_agent_writer_admits_only_one_concurrent_active_turn() {
     let project = store
         .create_project("Turn writer", directory.path().join("workspace"))
         .expect("Project should be created");
-    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Research);
-    let harness = ActionHarness::create(&store, &origin, AccessPreset::Research);
+    let origin = create_root_session(&store, project.id, "Session", AccessPreset::Workspace);
+    let harness = ActionHarness::create(&store, &origin, AccessPreset::Workspace);
     let agent_id = harness.agent.id;
     let barrier = Arc::new(Barrier::new(3));
     let mut writers = Vec::new();
@@ -409,7 +409,7 @@ fn one_agent_writer_admits_only_one_concurrent_active_turn() {
         let harness = harness.clone();
         writers.push(std::thread::spawn(move || {
             barrier.wait();
-            harness.create_turn(&store, input, AccessPreset::Research)
+            harness.create_turn(&store, input, AccessPreset::Workspace)
         }));
     }
     barrier.wait();

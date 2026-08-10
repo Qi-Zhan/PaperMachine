@@ -771,7 +771,7 @@ mod tests {
                 trigger: Default::default(),
                 params: json!({}),
                 default_model: "test-model".to_string(),
-                access: AccessPreset::Research,
+                access: AccessPreset::Workspace,
                 enabled_skills: Vec::new(),
                 agent_access_overrides: Default::default(),
             })

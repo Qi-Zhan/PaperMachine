@@ -33,10 +33,12 @@ impl ToolCatalog {
     /// Requested tools are filtered by the Turn access ceiling.
     pub fn materialize_action_tools(
         &self,
-        requested_tools: &[String],
+        tool_policy: Option<&[String]>,
         access: AccessPreset,
-        tools_enabled: bool,
     ) -> Result<ToolSetSnapshot, ToolError> {
+        let requested_tools = tool_policy
+            .map(|tools| tools.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|| self.tools.keys().collect());
         let mut requested = BTreeSet::new();
         let mut selected = Vec::new();
         for name in requested_tools {
@@ -49,7 +51,7 @@ impl ToolCatalog {
                 .tools
                 .get(name)
                 .ok_or_else(|| ToolError::UnknownTool(name.clone()))?;
-            if tools_enabled && access.tool_capabilities().allows(name) {
+            if access.allows_local_tool(name) {
                 selected.push((name, entry));
             }
         }

@@ -207,7 +207,7 @@ fn workflow_recovery_fixture(
             trigger: Default::default(),
             params: json!({}),
             default_model: "test-model".to_string(),
-            access: AccessPreset::Research,
+            access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })
@@ -222,7 +222,7 @@ fn workflow_recovery_fixture(
             "",
             "test-model",
             Vec::new(),
-            AccessPreset::Research,
+            AccessPreset::Workspace,
         )
         .expect("Agent should be created");
     let calls = Arc::new(AtomicUsize::new(0));
@@ -242,8 +242,7 @@ fn workflow_recovery_fixture(
             arguments: json!({}),
             input: "recover".to_string(),
             source: ActionSource::Workflow,
-            requested_tools: requested_tools.clone(),
-            tools_enabled: true,
+            tool_policy: Some(requested_tools.clone()),
             web_search_context_size: None,
             reasoning_effort: None,
             response_format: None,
@@ -257,7 +256,7 @@ fn workflow_recovery_fixture(
         .resolve_route_snapshot("test-model", None, 128_000)
         .expect("test model route should resolve");
     let tool_set = catalog
-        .materialize_action_tools(&requested_tools, AccessPreset::Research, true)
+        .materialize_action_tools(Some(&requested_tools), AccessPreset::Workspace)
         .expect("Action tool set should materialize");
     let turn = store
         .create_turn_for_attempt(
@@ -266,8 +265,7 @@ fn workflow_recovery_fixture(
             "recover",
             model_route,
             empty_prompt_snapshot(),
-            true,
-            AccessPreset::Research,
+            AccessPreset::Workspace,
             tool_set,
             None,
             None,

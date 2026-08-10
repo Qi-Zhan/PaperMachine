@@ -12,8 +12,6 @@ class WorkflowValidationTests(unittest.TestCase):
 from papermachine import Agent, action, ask_human, workflow
 
 class Reviewer(Agent):
-    access = "model_only"
-
     @action
     async def assess(self, report: str) -> dict:
         """Assess the report."""
@@ -40,8 +38,8 @@ async def main(ctx):
             [
                 {
                     "class_name": "Reviewer",
-                    "actions": [{"name": "assess", "tools": []}],
-                    "access": "model_only",
+                    "actions": [{"name": "assess", "tools": None}],
+                    "access": "workspace",
                 }
             ],
         )

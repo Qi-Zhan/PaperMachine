@@ -2,13 +2,12 @@ from papermachine import Agent, HumanMessage, action, ask_human, workflow
 
 
 class InteractiveAgent(Agent):
-    access = "research"
+    access = "workspace"
     role = "interactive project agent"
     system_prompt = """Work with the user as a persistent project agent. Treat each Turn as part of one continuing conversation, retain prior conclusions and tool results, and use the Project workspace and enabled skills when they help. Answer the latest human message directly. Use tools when the task requires evidence or concrete changes, make uncertainty visible, and ask the human when a consequential choice cannot be inferred safely."""
 
     @action(
         search_context_size="low",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
     )
     async def respond(self, message: HumanMessage):
         """Respond to the human's latest message as the next Turn of this persistent Session. Follow the requested task through to a useful result; do not restate this action contract or expose workflow plumbing."""
@@ -41,10 +40,9 @@ class InteractiveAgent(Agent):
                     "model_only",
                     "read_only",
                     "workspace",
-                    "research",
                     "full_access",
                 ],
-                "default": "research",
+                "default": "workspace",
                 "x-ui-order": 3,
             },
         },
@@ -54,7 +52,7 @@ class InteractiveAgent(Agent):
 async def main(ctx):
     title = str(ctx.params.get("session_title") or "New project Session").strip()
     custom_prompt = str(ctx.params.get("agent_system_prompt") or "").strip()
-    access = str(ctx.params.get("agent_access") or "research")
+    access = str(ctx.params.get("agent_access") or "workspace")
     system_prompt = InteractiveAgent.system_prompt
     if custom_prompt:
         system_prompt = f"{system_prompt}\n\nUser-configured Agent instructions:\n{custom_prompt}"

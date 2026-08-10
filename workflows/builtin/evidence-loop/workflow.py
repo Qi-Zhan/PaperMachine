@@ -18,14 +18,14 @@ class Planner(Agent):
 
 
 class Researcher(Agent):
-    access = "research"
+    access = "model_only"
     role = "independent evidence route"
     system_prompt = """Research the full user request through your assigned route. Use the live tools that are actually available, search beyond the first plausible answer, and verify consequential claims with primary or authoritative sources. Never merge evidence about different candidates into one answer. Preserve direct URLs, exact names, values, dates, contradictions, uncertainty, and unresolved gaps. Return an evidence report, not a polished final answer."""
 
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=[],
     )
     async def research(
         self,

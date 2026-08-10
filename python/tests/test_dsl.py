@@ -92,7 +92,7 @@ class ActionOptionsTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(invoke()), "page-artifact")
         action = next(payload for kind, payload in effects if kind == "invoke_action")
-        self.assertEqual(action["requested_tools"], ["exec_command"])
+        self.assertEqual(action["tool_policy"], ["exec_command"])
         publication = effects[-1][1]
         self.assertEqual(publication["action_invocation_id"], "invocation-page")
 
@@ -126,9 +126,8 @@ class ActionOptionsTest(unittest.TestCase):
             [payload["action_name"] for payload in action_effects],
             ["research", "research_finalize"],
         )
-        self.assertTrue(action_effects[0]["tools_enabled"])
-        self.assertFalse(action_effects[1]["tools_enabled"])
-        self.assertEqual(action_effects[1]["requested_tools"], [])
+        self.assertIsNone(action_effects[0]["tool_policy"])
+        self.assertEqual(action_effects[1]["tool_policy"], [])
         self.assertEqual(action_effects[1]["agent_id"], "agent")
 
     def test_after_search_finalization_skips_search_free_result(self) -> None:
@@ -306,8 +305,7 @@ class ActionOptionsTest(unittest.TestCase):
         self.assertEqual(asyncio.run(invoke()), {"answer": 42})
         repair = effects[-1][1]
         self.assertEqual(repair["agent_id"], "agent")
-        self.assertFalse(repair["tools_enabled"])
-        self.assertEqual(repair["requested_tools"], [])
+        self.assertEqual(repair["tool_policy"], [])
 
     def test_typed_action_stops_after_two_failed_repairs(self) -> None:
         calls = 0
@@ -356,14 +354,14 @@ class ActionOptionsTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(invoke()), "done")
         self.assertEqual(effects[-1][0], "invoke_action")
-        self.assertTrue(effects[-1][1]["tools_enabled"])
         self.assertEqual(effects[-1][1]["web_search_context_size"], "low")
         self.assertEqual(effects[-1][1]["reasoning_effort"], "low")
-        self.assertEqual(effects[-1][1]["requested_tools"], [])
+        self.assertIsNone(effects[-1][1]["tool_policy"])
         self.assertEqual(effects[0][1]["access"], "model_only")
 
-    def test_bare_action_defaults_to_no_local_tools(self) -> None:
-        self.assertEqual(RouteResearcher.investigate.tools, [])
+    def test_bare_action_uses_access_defaults(self) -> None:
+        self.assertIsNone(RouteResearcher.investigate.tools)
+        self.assertEqual(RouteResearcher.access, "workspace")
 
     def test_action_rejects_invalid_or_duplicate_tool_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "non-empty names"):
@@ -399,7 +397,7 @@ class ActionOptionsTest(unittest.TestCase):
             writer = Writer(access="read_only")
             await writer.set_access("workspace")
             await writer._ensure_remote()
-            await writer.set_access("research")
+            await writer.set_access("full_access")
 
         asyncio.run(invoke())
         self.assertEqual(
@@ -408,7 +406,7 @@ class ActionOptionsTest(unittest.TestCase):
         )
         self.assertEqual(effects[0][1]["access"], "read_only")
         self.assertEqual(effects[1][1]["access"], "workspace")
-        self.assertEqual(effects[2][1]["access"], "research")
+        self.assertEqual(effects[2][1]["access"], "full_access")
 
     def test_invalid_access_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Agent access must be one of"):

@@ -739,8 +739,7 @@ impl SessionEffectContext {
                     arguments: stored_payload.arguments.clone(),
                     input,
                     source,
-                    requested_tools: stored_payload.requested_tools.clone(),
-                    tools_enabled: stored_payload.tools_enabled,
+                    tool_policy: stored_payload.tool_policy.clone(),
                     web_search_context_size: stored_payload.web_search_context_size,
                     reasoning_effort: stored_payload.reasoning_effort,
                     response_format: stored_payload.response_format.clone(),
@@ -759,8 +758,7 @@ impl SessionEffectContext {
                     || invocation.arguments != action.arguments
                     || invocation.input != action.input
                     || invocation.source != action.source
-                    || invocation.requested_tools != action.requested_tools
-                    || invocation.tools_enabled != action.tools_enabled
+                    || invocation.tool_policy != action.tool_policy
                     || invocation.web_search_context_size != action.web_search_context_size
                     || invocation.reasoning_effort != action.reasoning_effort
                     || invocation.response_format != action.response_format
@@ -1407,9 +1405,8 @@ struct InvokeActionEffect {
     prompt: String,
     arguments: Value,
     response_format: Option<ModelResponseFormat>,
-    #[serde(default = "default_tools_enabled")]
-    tools_enabled: bool,
-    requested_tools: Vec<String>,
+    #[serde(default)]
+    tool_policy: Option<Vec<String>>,
     #[serde(default)]
     web_search_context_size: Option<WebSearchContextSize>,
     #[serde(default)]
@@ -1418,10 +1415,6 @@ struct InvokeActionEffect {
     human_request_id: Option<String>,
     #[serde(default)]
     human_message_argument: Option<String>,
-}
-
-const fn default_tools_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]

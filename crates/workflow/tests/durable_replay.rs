@@ -65,7 +65,7 @@ const RUN_ACCESS_SOURCE: &str = r#"from papermachine import Agent, action, workf
 
 
 class Conservative(Agent):
-    access = "research"
+    access = "workspace"
 
     @action
     async def inspect(self, question: str) -> str:
@@ -373,7 +373,7 @@ async fn abrupt_runtime_loss_replays_effects_without_duplicate_resources() {
             trigger: Default::default(),
             params: json!({}),
             default_model: "scripted".to_string(),
-            access: AccessPreset::Research,
+            access: AccessPreset::Workspace,
             enabled_skills: Vec::new(),
             agent_access_overrides: Default::default(),
         })

@@ -184,8 +184,7 @@ pub struct ActionInvocation {
     /// Exact user-role input fixed when the Action is admitted.
     pub input: String,
     pub source: ActionSource,
-    pub requested_tools: Vec<String>,
-    pub tools_enabled: bool,
+    pub tool_policy: Option<Vec<String>>,
     pub web_search_context_size: Option<WebSearchContextSize>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub response_format: Option<ModelResponseFormat>,
@@ -299,7 +298,6 @@ pub struct Turn {
     pub prompt: PromptSnapshot,
     pub environment: TurnEnvironmentSnapshot,
     pub tool_set: ToolSetSnapshot,
-    pub tools_enabled: bool,
     pub web_search_context_size: Option<WebSearchContextSize>,
     pub response_format: Option<ModelResponseFormat>,
     pub skill_snapshots: Vec<SkillSnapshot>,

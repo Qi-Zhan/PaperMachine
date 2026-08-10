@@ -24,6 +24,7 @@ use papermachine_protocol::SessionId;
 use papermachine_protocol::TokenUsage;
 use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
+use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkspaceAttachment;
 use papermachine_tools::ReadFileTool;
 use papermachine_tools::ToolCatalog;
@@ -65,7 +66,7 @@ fn read_tools() -> ToolRegistry {
         .expect("read tool should register")
         .build();
     let snapshot = catalog
-        .materialize_action_tools(&["read_file".to_string()], AccessPreset::Research, true)
+        .materialize_action_tools(Some(&["read_file".to_string()]), AccessPreset::Workspace)
         .expect("read tool set should materialize");
     catalog
         .registry_for_snapshot(&snapshot)
@@ -81,9 +82,8 @@ fn read_write_tools() -> ToolRegistry {
         .build();
     let snapshot = catalog
         .materialize_action_tools(
-            &["read_file".to_string(), "write_file".to_string()],
-            AccessPreset::Research,
-            true,
+            Some(&["read_file".to_string(), "write_file".to_string()]),
+            AccessPreset::Workspace,
         )
         .expect("read-write tool set should materialize");
     catalog
@@ -162,7 +162,7 @@ async fn agent_executes_a_tool_then_follows_up() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Use tools and report evidence.",
@@ -284,7 +284,7 @@ async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_executio
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Use tools safely.",
@@ -350,13 +350,14 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Research carefully.",
         "Read the evidence.",
     );
     request.hosted_web_search_supported = true;
+    request.web_search_context_size = Some(WebSearchContextSize::Low);
 
     let result = runtime
         .run(request, CancellationToken::new())
@@ -380,7 +381,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
 }
 
 #[tokio::test]
-async fn tools_enabled_false_omits_local_and_hosted_tools() {
+async fn empty_registry_and_no_search_context_omit_all_tools() {
     let model = ScriptedModelClient::new([vec![
         ModelEvent::OutputTextDelta {
             delta: "Enough evidence.".to_string(),
@@ -390,20 +391,24 @@ async fn tools_enabled_false_omits_local_and_hosted_tools() {
         },
     ]]);
     let events = RecordingAgentEventSink::default();
-    let runtime = AgentRuntime::new(Arc::new(model.clone()), read_tools(), Arc::new(events));
+    let runtime = AgentRuntime::new(
+        Arc::new(model.clone()),
+        ToolRegistry::default(),
+        Arc::new(events),
+    );
     let directory = tempdir().expect("temporary workspace should be created");
     let mut request = AgentTurnRequest::new(
         ProjectId::new(),
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Research carefully.",
         "Find the answer.",
     );
-    request.tools_enabled = false;
+    request.hosted_web_search_supported = true;
 
     runtime
         .run(request, CancellationToken::new())
@@ -442,7 +447,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Research carefully.",
@@ -550,7 +555,7 @@ async fn long_session_history_is_compacted_before_the_next_sample() {
         session_id,
         agent_id,
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Continue the research.",
@@ -706,7 +711,7 @@ async fn output_limit_retry_is_concise_and_preserves_failed_usage() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Return valid JSON.",
@@ -755,7 +760,7 @@ async fn terminal_output_limit_failure_emits_all_consumed_usage() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Return valid JSON.",
@@ -827,7 +832,7 @@ async fn retry_discards_partial_deltas_from_the_failed_attempt() {
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Return a short response.",
@@ -899,7 +904,7 @@ async fn retry_recovers_when_provider_completes_with_reasoning_but_no_message() 
         SessionId::new(),
         AgentId::new(),
         TurnId::new(),
-        turn_environment(directory.path(), AccessPreset::Research),
+        turn_environment(directory.path(), AccessPreset::Workspace),
         directory.path().join("sandbox"),
         "test-model",
         "Return a short response.",

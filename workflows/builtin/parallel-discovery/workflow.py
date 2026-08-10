@@ -2,21 +2,21 @@ from papermachine import Agent, action, together, workflow
 
 
 class Researcher(Agent):
-    access = "research"
+    access = "model_only"
     role = "independent research route"
     system_prompt = "Gather concrete evidence, preserve provenance, and state uncertainty."
 
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=[],
     )
     async def investigate(
         self,
         question: str,
         perspective: str,
     ):
-        """Investigate the question from the assigned perspective. Read relevant Project resources when earlier work may help, but independently verify material claims. Use tools when useful and return evidence, counterevidence, and open questions."""
+        """Investigate the question from the assigned perspective with hosted search when available. Independently verify material claims and return evidence, counterevidence, and open questions."""
 
 
 class Synthesizer(Agent):

@@ -335,7 +335,6 @@ const accessProfiles = computed(() => [
   { value: 'model_only' as const, label: t('access.modelOnly') },
   { value: 'read_only' as const, label: t('access.readOnly') },
   { value: 'workspace' as const, label: t('access.workspace') },
-  { value: 'research' as const, label: t('access.research') },
   { value: 'full_access' as const, label: t('access.fullAccess') },
 ])
 
@@ -409,7 +408,7 @@ function agentForTurn(turn: Turn) {
   return props.view.agents.find((agent) => agent.id === turn.agent_id) ?? null
 }
 function turnIsHumanTriggered(turnId: string): boolean {
-  return actionForTurn(turnId)?.source_human_request_id != null
+  return actionForTurn(turnId)?.source.kind === 'human_request'
 }
 function turnMessage(turn: Turn): string {
   const primary = primaryActionText(actionForTurn(turn.id)?.arguments)

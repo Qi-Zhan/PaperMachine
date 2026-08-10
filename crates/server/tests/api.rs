@@ -453,7 +453,7 @@ async fn session_creation_validates_program_contract_and_project_scope() {
             "instructions": "",
             "params": {},
             "model": "demo-model",
-            "access": "research"
+            "access": "workspace"
         }),
     )
     .await;
@@ -466,13 +466,13 @@ async fn session_creation_validates_program_contract_and_project_scope() {
             "instructions": "",
             "params": {},
             "model": "demo-model",
-            "access": "research"
+            "access": "workspace"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let session = start_interactive_session(&app, owner.id, "Scoped", "research").await;
+    let session = start_interactive_session(&app, owner.id, "Scoped", "workspace").await;
     let wrong_project = app
         .oneshot(empty_request(
             "GET",
@@ -488,7 +488,7 @@ async fn interactive_session_has_one_agent_rollout_and_exact_human_provenance() 
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let project = create_project(&app, directory.path(), "Interactive").await;
-    let session = start_interactive_session(&app, project.id, "Conversation", "research").await;
+    let session = start_interactive_session(&app, project.id, "Conversation", "workspace").await;
     let waiting =
         wait_for_session_status(&app, project.id, session.id, &["waiting_for_input"]).await;
     assert_eq!(waiting["agents"].as_array().map(Vec::len), Some(1));
@@ -557,7 +557,7 @@ async fn archiving_a_session_cancels_its_runtime_and_hides_it_from_the_index() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let project = create_project(&app, directory.path(), "Archive").await;
-    let session = start_interactive_session(&app, project.id, "Close me", "research").await;
+    let session = start_interactive_session(&app, project.id, "Close me", "workspace").await;
     wait_for_session_status(&app, project.id, session.id, &["waiting_for_input"]).await;
     let response = app
         .clone()
@@ -602,7 +602,7 @@ async fn one_workflow_session_owns_all_of_its_agents_actions_and_turns() {
             "instructions": "",
             "params": {"perspectives": ["primary", "counterevidence"]},
             "model": "demo-model",
-            "access": "research"
+            "access": "workspace"
         }),
     )
     .await;
@@ -664,7 +664,7 @@ async fn per_agent_model_profiles_are_bound_inside_one_session() {
                 "synthesis_model": "review-model"
             },
             "model": "research-model",
-            "access": "research"
+            "access": "workspace"
         }),
     )
     .await;
@@ -706,7 +706,7 @@ async fn child_session_keeps_provenance_and_cannot_exceed_source_access() {
             "params": {},
             "source_session_id": origin.id,
             "model": "demo-model",
-            "access": "research"
+            "access": "full_access"
         }),
     )
     .await;
@@ -751,7 +751,7 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
     let directory = tempdir().expect("temporary directory should be created");
     let app = test_app(&directory).await;
     let project = create_project(&app, directory.path(), "Summary").await;
-    let source = start_interactive_session(&app, project.id, "Evidence", "research").await;
+    let source = start_interactive_session(&app, project.id, "Evidence", "workspace").await;
     send_interactive_message(&app, project.id, source.id, "Record the current result.").await;
 
     let run_summary = || {
@@ -890,7 +890,7 @@ async fn generated_workflow_can_be_validated_saved_and_run_as_a_session() {
             "instructions": "",
             "params": {},
             "model": "demo-model",
-            "access": "research"
+            "access": "workspace"
         }),
     )
     .await;

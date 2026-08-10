@@ -147,7 +147,7 @@ impl WorkflowProgramCatalog {
         for agent in &validation.agents {
             for action in &agent.actions {
                 let mut seen = BTreeSet::new();
-                for tool in &action.tools {
+                for tool in action.tools.iter().flatten() {
                     let message = if tool.trim().is_empty() {
                         Some(format!(
                             "Action {}.{} declares an empty tool name",

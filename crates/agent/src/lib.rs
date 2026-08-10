@@ -80,10 +80,8 @@ pub struct AgentTurnRequest {
     pub hosted_search_calls_used: u32,
     pub resume_current_turn: bool,
     pub checkpoint_message: Option<String>,
-    pub hosted_tools: Vec<HostedTool>,
     pub hosted_web_search_supported: bool,
     pub web_search_context_size: Option<WebSearchContextSize>,
-    pub tools_enabled: bool,
     pub response_format: Option<ModelResponseFormat>,
     pub model_context_window: usize,
 }
@@ -120,10 +118,8 @@ impl AgentTurnRequest {
             hosted_search_calls_used: 0,
             resume_current_turn: false,
             checkpoint_message: None,
-            hosted_tools: vec![HostedTool::WebSearch],
             hosted_web_search_supported: false,
             web_search_context_size: None,
-            tools_enabled: true,
             response_format: None,
             model_context_window: papermachine_model::DEFAULT_MODEL_CONTEXT_WINDOW,
         }
@@ -373,19 +369,13 @@ impl AgentRuntime {
         let mut tool_call_ids = tool_call_ids_from_history(&history);
         let execution_gate = Arc::new(RwLock::new(()));
         let mut total_usage = request.initial_usage;
-        let tool_definitions = if request.tools_enabled {
-            self.tools.definitions()
-        } else {
-            Vec::new()
-        };
-        let hosted_tools = if request.tools_enabled
-            && request.environment.authorization.network.hosted_web_search
-            && request.hosted_web_search_supported
-        {
-            request.hosted_tools.clone()
-        } else {
-            Vec::new()
-        };
+        let tool_definitions = self.tools.definitions();
+        let hosted_tools =
+            if request.web_search_context_size.is_some() && request.hosted_web_search_supported {
+                vec![HostedTool::WebSearch]
+            } else {
+                Vec::new()
+            };
         let model_instructions = request.instructions.clone();
         let history_budget = history_token_budget(&request, &tool_definitions)?;
         let compact_trigger = history_budget.saturating_mul(AUTO_COMPACT_PERCENT) / 100;
@@ -560,7 +550,6 @@ impl AgentRuntime {
                 "available_tools": model_request.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
                 "available_hosted_tools": model_request.hosted_tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
                 "web_search_context_size": request.web_search_context_size,
-                "tools_enabled": request.tools_enabled,
                 "hosted_search_calls_used": hosted_search_calls_used,
                 "tool_choice": model_request.tool_choice,
                 "final_sample": final_sample,

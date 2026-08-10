@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 22;
+const SCHEMA_VERSION: u32 = 23;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -435,7 +435,6 @@ impl Store {
         input: impl Into<String>,
         model_route: ModelRouteSnapshot,
         prompt: PromptSnapshot,
-        tools_enabled: bool,
         expected_access: AccessPreset,
         tool_set: papermachine_protocol::ToolSetSnapshot,
         web_search_context_size: Option<WebSearchContextSize>,
@@ -512,7 +511,6 @@ impl Store {
             prompt,
             environment,
             tool_set,
-            tools_enabled,
             web_search_context_size,
             response_format,
             skill_snapshots,
@@ -1851,8 +1849,7 @@ impl Store {
             arguments: action.arguments,
             input: action.input,
             source: action.source,
-            requested_tools: action.requested_tools,
-            tools_enabled: action.tools_enabled,
+            tool_policy: action.tool_policy,
             web_search_context_size: action.web_search_context_size,
             reasoning_effort: action.reasoning_effort,
             response_format: action.response_format,
