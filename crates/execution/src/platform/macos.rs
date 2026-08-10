@@ -45,6 +45,10 @@ fn seatbelt_profile(policy: &ResolvedSandboxPolicy) -> String {
             ));
         }
         rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
+        rules.push("(allow file-read* file-write* (literal \"/dev/ptmx\"))".to_string());
+        rules.push(
+            "(allow file-read* file-write* (regex #\"^/dev/ttys[0-9A-Za-z]+$\"))".to_string(),
+        );
     }
     if policy.filesystem_read == FilesystemPolicy::Scoped {
         let mut denied = BTreeSet::from([

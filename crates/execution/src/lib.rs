@@ -80,6 +80,31 @@ pub struct CommandOutput {
 pub struct SandboxExecutor;
 
 impl SandboxExecutor {
+    pub async fn prepare_shell(
+        &self,
+        cwd: &Path,
+        sandbox_root: &Path,
+        shell_command: &str,
+        policy: SandboxPolicy,
+        tty: bool,
+    ) -> Result<PreparedSandboxCommand, ExecutionError> {
+        if shell_command.trim().is_empty() {
+            return Err(ExecutionError::InvalidCommand(
+                "command must not be empty".to_string(),
+            ));
+        }
+        let (program, args) = shell_program(shell_command, tty);
+        SandboxManager
+            .prepare(SandboxRequest::new(
+                program,
+                args,
+                cwd,
+                sandbox_root,
+                policy,
+            ))
+            .await
+    }
+
     pub async fn run_shell(
         &self,
         cwd: &Path,
@@ -93,12 +118,13 @@ impl SandboxExecutor {
                 "command must not be empty".to_string(),
             ));
         }
-        let (program, args) = shell_program(shell_command);
-        self.run(
-            SandboxRequest::new(program, args, cwd, sandbox_root, policy),
-            cancellation,
-        )
-        .await
+        let timeout = policy.timeout;
+        let max_output_bytes = policy.max_output_bytes;
+        let prepared = self
+            .prepare_shell(cwd, sandbox_root, shell_command, policy, false)
+            .await?;
+        self.run_prepared_with_limits(prepared, timeout, max_output_bytes, cancellation)
+            .await
     }
 
     pub async fn run(
@@ -109,6 +135,17 @@ impl SandboxExecutor {
         let timeout = request.policy.timeout;
         let max_output_bytes = request.policy.max_output_bytes;
         let prepared = SandboxManager.prepare(request).await?;
+        self.run_prepared_with_limits(prepared, timeout, max_output_bytes, cancellation)
+            .await
+    }
+
+    async fn run_prepared_with_limits(
+        &self,
+        prepared: PreparedSandboxCommand,
+        timeout: Duration,
+        max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> Result<CommandOutput, ExecutionError> {
         let backend = prepared.backend();
         let mut command = prepared.into_command();
         let mut child = command
@@ -146,7 +183,7 @@ impl SandboxExecutor {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+fn shell_program(shell_command: &str, _tty: bool) -> (OsString, Vec<OsString>) {
     let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe"));
     (
         shell,
@@ -160,23 +197,47 @@ fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
 }
 
 #[cfg(target_os = "macos")]
-fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
-    (
-        OsString::from("/bin/zsh"),
-        vec![OsString::from("-c"), OsString::from(shell_command)],
-    )
+fn shell_program(shell_command: &str, tty: bool) -> (OsString, Vec<OsString>) {
+    if tty {
+        (
+            OsString::from("/usr/bin/script"),
+            vec![
+                OsString::from("-q"),
+                OsString::from("/dev/null"),
+                OsString::from("/bin/zsh"),
+                OsString::from("-lc"),
+                OsString::from(shell_command),
+            ],
+        )
+    } else {
+        (
+            OsString::from("/bin/zsh"),
+            vec![OsString::from("-lc"), OsString::from(shell_command)],
+        )
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
-    (
-        OsString::from("/bin/sh"),
-        vec![OsString::from("-c"), OsString::from(shell_command)],
-    )
+fn shell_program(shell_command: &str, tty: bool) -> (OsString, Vec<OsString>) {
+    if tty {
+        (
+            OsString::from("/usr/bin/script"),
+            vec![
+                OsString::from("-qfec"),
+                OsString::from(shell_command),
+                OsString::from("/dev/null"),
+            ],
+        )
+    } else {
+        (
+            OsString::from("/bin/sh"),
+            vec![OsString::from("-c"), OsString::from(shell_command)],
+        )
+    }
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn shell_program(shell_command: &str) -> (OsString, Vec<OsString>) {
+fn shell_program(shell_command: &str, _tty: bool) -> (OsString, Vec<OsString>) {
     (
         OsString::from("sh"),
         vec![OsString::from("-c"), OsString::from(shell_command)],

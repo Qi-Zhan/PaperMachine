@@ -90,8 +90,8 @@ fn turn_created_event_does_not_duplicate_turn_fields() {
 #[test]
 fn tool_definition_wire_shape_uses_input_schema() {
     let definition = ToolDefinition {
-        name: "read_file".to_string(),
-        description: "Read one file".to_string(),
+        name: "exec_command".to_string(),
+        description: "Run one command".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
         supports_parallel: true,
     };

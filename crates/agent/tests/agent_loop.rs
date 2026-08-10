@@ -26,10 +26,10 @@ use papermachine_protocol::TurnEnvironmentSnapshot;
 use papermachine_protocol::TurnId;
 use papermachine_protocol::WebSearchContextSize;
 use papermachine_protocol::WorkspaceAttachment;
-use papermachine_tools::ReadFileTool;
+use papermachine_tools::ApplyPatchTool;
+use papermachine_tools::ExecCommandTool;
 use papermachine_tools::ToolCatalog;
 use papermachine_tools::ToolRegistry;
-use papermachine_tools::WriteFileTool;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -60,32 +60,32 @@ fn turn_environment(
     .expect("fixture environment should materialize")
 }
 
-fn read_tools() -> ToolRegistry {
+fn command_tools() -> ToolRegistry {
     let catalog = ToolCatalog::builder()
-        .register_workspace(ReadFileTool)
-        .expect("read tool should register")
+        .register_workspace(ExecCommandTool::default())
+        .expect("command tool should register")
         .build();
     let snapshot = catalog
-        .materialize_action_tools(Some(&["read_file".to_string()]), AccessPreset::Workspace)
-        .expect("read tool set should materialize");
+        .materialize_action_tools(Some(&["exec_command".to_string()]), AccessPreset::Workspace)
+        .expect("command tool set should materialize");
     catalog
         .registry_for_snapshot(&snapshot)
-        .expect("read registry should rebuild")
+        .expect("command registry should rebuild")
 }
 
-fn read_write_tools() -> ToolRegistry {
+fn workspace_tools() -> ToolRegistry {
     let catalog = ToolCatalog::builder()
-        .register_workspace(ReadFileTool)
-        .expect("read tool should register")
-        .register_workspace(WriteFileTool)
-        .expect("write tool should register")
+        .register_workspace(ExecCommandTool::default())
+        .expect("command tool should register")
+        .register_workspace(ApplyPatchTool)
+        .expect("patch tool should register")
         .build();
     let snapshot = catalog
         .materialize_action_tools(
-            Some(&["read_file".to_string(), "write_file".to_string()]),
+            Some(&["exec_command".to_string(), "apply_patch".to_string()]),
             AccessPreset::Workspace,
         )
-        .expect("read-write tool set should materialize");
+        .expect("Workspace tool set should materialize");
     catalog
         .registry_for_snapshot(&snapshot)
         .expect("read-write registry should rebuild")
@@ -123,8 +123,8 @@ async fn agent_executes_a_tool_then_follows_up() {
                 item: serde_json::json!({
                     "type": "function_call",
                     "call_id": "call-write",
-                    "name": "write_file",
-                    "arguments": r#"{"path":"result.md","content":"evidence"}"#
+                    "name": "apply_patch",
+                    "arguments": r#"{"patch":"*** Begin Patch\n*** Add File: result.md\n+evidence\n*** End Patch"}"#
                 }),
             },
             ModelEvent::Completed {
@@ -153,7 +153,7 @@ async fn agent_executes_a_tool_then_follows_up() {
             },
         ],
     ]);
-    let tools = read_write_tools();
+    let tools = workspace_tools();
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
@@ -179,7 +179,7 @@ async fn agent_executes_a_tool_then_follows_up() {
     assert_eq!(
         std::fs::read_to_string(directory.path().join("result.md"))
             .expect("result file should exist"),
-        "evidence"
+        "evidence\n"
     );
 
     let requests = model.requests().expect("requests should be recorded");
@@ -261,8 +261,8 @@ async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_executio
         item: serde_json::json!({
             "type": "function_call",
             "call_id": "duplicate-call",
-            "name": "write_file",
-            "arguments": r#"{"path":"must-not-exist.txt","content":"unsafe"}"#
+            "name": "apply_patch",
+            "arguments": r#"{"patch":"*** Begin Patch\n*** Add File: must-not-exist.txt\n+unsafe\n*** End Patch"}"#
         }),
     };
     let model = ScriptedModelClient::new([vec![
@@ -273,11 +273,7 @@ async fn duplicate_provider_tool_call_ids_fail_before_any_tool_event_or_executio
         },
     ]]);
     let events = RecordingAgentEventSink::default();
-    let runtime = AgentRuntime::new(
-        Arc::new(model),
-        read_write_tools(),
-        Arc::new(events.clone()),
-    );
+    let runtime = AgentRuntime::new(Arc::new(model), workspace_tools(), Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
     let request = AgentTurnRequest::new(
         ProjectId::new(),
@@ -322,8 +318,8 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
                 item: serde_json::json!({
                     "type": "function_call",
                     "call_id": "call-read",
-                    "name": "read_file",
-                    "arguments": r#"{"path":"evidence.txt"}"#
+                    "name": "exec_command",
+                    "arguments": r#"{"cmd":"cat evidence.txt"}"#
                 }),
             },
             ModelEvent::Completed {
@@ -339,7 +335,7 @@ async fn hosted_search_usage_is_observed_across_a_turn() {
             },
         ],
     ]);
-    let tools = read_tools();
+    let tools = command_tools();
     let events = RecordingAgentEventSink::default();
     let runtime = AgentRuntime::new(Arc::new(model.clone()), tools, Arc::new(events.clone()));
     let directory = tempdir().expect("temporary workspace should be created");
@@ -437,7 +433,7 @@ async fn finish_control_forces_the_next_sample_to_disable_tools() {
     ]]);
     let runtime = AgentRuntime::new(
         Arc::new(model.clone()),
-        read_tools(),
+        command_tools(),
         Arc::new(RecordingAgentEventSink::default()),
     )
     .with_control(Arc::new(FinishNowControl));

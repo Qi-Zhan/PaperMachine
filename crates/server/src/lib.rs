@@ -38,11 +38,11 @@ use papermachine_store::ProjectCatalog;
 use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_store::StoreHandle;
+use papermachine_tools::ApplyPatchTool;
 use papermachine_tools::ExecCommandTool;
-use papermachine_tools::FetchUrlTool;
-use papermachine_tools::ReadFileTool;
+use papermachine_tools::ProcessTable;
 use papermachine_tools::ToolCatalog;
-use papermachine_tools::WriteFileTool;
+use papermachine_tools::WriteStdinTool;
 use papermachine_workflow::ActionRunner;
 use papermachine_workflow::PythonSessionExecutor;
 use papermachine_workflow::SessionExecutor;
@@ -103,7 +103,7 @@ type InitializedModels = (
     Vec<ModelProviderInfo>,
 );
 
-const LOCAL_TOOL_NAMES: [&str; 4] = ["read_file", "write_file", "exec_command", "fetch_url"];
+const LOCAL_TOOL_NAMES: [&str; 3] = ["exec_command", "write_stdin", "apply_patch"];
 
 #[derive(Clone)]
 pub struct AppState {
@@ -265,6 +265,7 @@ struct ProjectRuntime {
     scheduler: SessionScheduler,
     turns: TurnRuntime,
     skills: Arc<ProjectSkillCatalog>,
+    processes: ProcessTable,
 }
 
 struct ProjectRuntimeFactory {
@@ -274,6 +275,8 @@ struct ProjectRuntimeFactory {
     model_context_window: usize,
     turn_permits: Arc<Semaphore>,
     session_permits: Arc<Semaphore>,
+    max_processes_per_agent: usize,
+    shutdown: CancellationToken,
 }
 
 impl ProjectRuntimeFactory {
@@ -292,15 +295,15 @@ impl ProjectRuntimeFactory {
                 Ok(())
             })
             .await?;
+        let processes =
+            ProcessTable::new(self.max_processes_per_agent, self.shutdown.child_token());
         let tools = ToolCatalog::builder()
-            .register_workspace(ReadFileTool)
-            .context("failed to register read_file")?
-            .register_workspace(WriteFileTool)
-            .context("failed to register write_file")?
-            .register_workspace(FetchUrlTool)
-            .context("failed to register fetch_url")?
-            .register_workspace(ExecCommandTool)
+            .register_workspace(ExecCommandTool::new(processes.clone()))
             .context("failed to register exec_command")?
+            .register_workspace(WriteStdinTool::new(processes.clone()))
+            .context("failed to register write_stdin")?
+            .register_workspace(ApplyPatchTool)
+            .context("failed to register apply_patch")?
             .build();
         let mut catalog = self.base_catalog.clone();
         let catalog_project = project.clone();
@@ -354,6 +357,7 @@ impl ProjectRuntimeFactory {
             scheduler,
             turns,
             skills,
+            processes,
         })
     }
 }
@@ -429,6 +433,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         }
     };
 
+    let shutdown = CancellationToken::new();
     let runtime_factory = Arc::new(ProjectRuntimeFactory {
         base_catalog,
         model: Arc::clone(&model),
@@ -441,6 +446,8 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
                 .max(1),
         )),
         session_permits: Arc::new(Semaphore::new(config.max_concurrent_runs.max(1))),
+        max_processes_per_agent: config.max_parallel_actions.max(1),
+        shutdown: shutdown.clone(),
     });
     let (catalog_projects, failures) = catalog.scan_resilient()?;
     for failure in failures {
@@ -476,7 +483,7 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         default_workspace_root: config.default_workspace_root.clone(),
         projects: Arc::new(RwLock::new(projects)),
         runtime_factory,
-        shutdown: CancellationToken::new(),
+        shutdown,
         generator: WorkflowGenerator::new(Arc::clone(&model), &default_model),
         default_model,
         model_context_window,
@@ -844,6 +851,9 @@ async fn remove_project(
         .remove(&project_id)
         .expect("verified Project must still exist");
     let managed_root = project.store.managed_root().to_path_buf();
+    if let Some(runtime) = project.runtime.get() {
+        runtime.processes.shutdown().await;
+    }
     project.store.shutdown().await?;
     let trash = match retire_catalog_project(Arc::clone(&state.catalog), project_id).await {
         Ok(trash) => trash,

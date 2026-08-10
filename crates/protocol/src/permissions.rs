@@ -62,13 +62,9 @@ impl AccessPreset {
     pub fn allows_local_tool(self, name: &str) -> bool {
         match self {
             Self::ModelOnly => false,
-            Self::ReadOnly => matches!(name, "read_file" | "exec_command"),
-            Self::Workspace => matches!(name, "read_file" | "write_file" | "exec_command"),
-            Self::FullAccess => {
-                matches!(
-                    name,
-                    "read_file" | "write_file" | "exec_command" | "fetch_url"
-                )
+            Self::ReadOnly => matches!(name, "exec_command" | "write_stdin"),
+            Self::Workspace | Self::FullAccess => {
+                matches!(name, "exec_command" | "write_stdin" | "apply_patch")
             }
         }
     }

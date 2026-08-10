@@ -232,7 +232,7 @@ fn workflow_recovery_fixture(
         })
         .expect("tool should register")
         .build();
-    let requested_tools = vec!["write_file".to_string()];
+    let requested_tools = vec!["apply_patch".to_string()];
     let invocation = store
         .create_action_invocation(NewActionInvocation {
             session_id: run.id,
@@ -277,7 +277,7 @@ fn workflow_recovery_fixture(
         message(MessageRole::User, "recover"),
         ModelInputItem::FunctionCall {
             call_id: "call-recovery".to_string(),
-            name: "write_file".to_string(),
+            name: "apply_patch".to_string(),
             arguments: "{}".to_string(),
         },
     ];
@@ -302,7 +302,7 @@ fn workflow_recovery_fixture(
         .expect("context should checkpoint");
     let step_id = create_step.then(|| {
         store
-            .create_tool_step(turn.id, "call-recovery", "write_file", json!({}))
+            .create_tool_step(turn.id, "call-recovery", "apply_patch", json!({}))
             .expect("Tool Step should be created")
             .id
     });
@@ -341,7 +341,7 @@ struct CountingTool {
 impl ToolExecutor for CountingTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "write_file".to_string(),
+            name: "apply_patch".to_string(),
             description: "recovery probe".to_string(),
             input_schema: json!({"type": "object"}),
             supports_parallel: false,

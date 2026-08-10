@@ -9,17 +9,13 @@ publish = false
 async-trait.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
-futures.workspace = true
-html2text.workspace = true
 papermachine-execution = { path = "../execution" }
 papermachine-protocol = { path = "../protocol" }
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 tempfile = "3.20"

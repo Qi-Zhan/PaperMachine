@@ -14,6 +14,10 @@ use std::io::Write;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) async fn resolve_tool_path(
     authorization: &AuthorizationContext,
@@ -119,18 +123,76 @@ pub(crate) fn write_resolved_file(
     create_parents: bool,
 ) -> Result<(), ToolError> {
     let (parent, name) = open_parent(path, create_parents)?;
+    match parent.symlink_metadata(&name) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+            return Err(ToolError::Io(format!(
+                "destination is not a regular file: {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(map_capability_error(error)),
+    }
+    let temporary = OsString::from(format!(
+        ".{}.papermachine-{}-{}.tmp",
+        Path::new(&name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("file"),
+        std::process::id(),
+        NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No)
+            .maybe_dir(false);
+        let mut file = parent
+            .open_with(&temporary, &options)
+            .map_err(map_capability_error)?;
+        file.write_all(content).map_err(map_capability_error)?;
+        file.sync_all().map_err(map_capability_error)?;
+        parent
+            .rename(&temporary, &parent, &name)
+            .map_err(map_capability_error)?;
+        sync_directory(&parent)
+    })();
+    if result.is_err() {
+        let _ = parent.remove_file(&temporary);
+    }
+    result
+}
+
+pub(crate) fn create_resolved_file(path: &Path, content: &[u8]) -> Result<(), ToolError> {
+    let (parent, name) = open_parent(path, true)?;
     let mut options = OpenOptions::new();
     options
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .follow(FollowSymlinks::No)
         .maybe_dir(false);
     let mut file = parent
         .open_with(&name, &options)
         .map_err(map_capability_error)?;
     file.write_all(content).map_err(map_capability_error)?;
-    file.sync_all().map_err(map_capability_error)
+    file.sync_all().map_err(map_capability_error)?;
+    sync_directory(&parent)
+}
+
+pub(crate) fn remove_resolved_file(path: &Path) -> Result<(), ToolError> {
+    let (parent, name) = open_parent(path, false)?;
+    parent.remove_file(name).map_err(map_capability_error)?;
+    sync_directory(&parent)
+}
+
+fn sync_directory(directory: &Dir) -> Result<(), ToolError> {
+    directory
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+        .map_err(map_capability_error)
 }
 
 fn open_parent(path: &Path, create_parents: bool) -> Result<(Dir, OsString), ToolError> {

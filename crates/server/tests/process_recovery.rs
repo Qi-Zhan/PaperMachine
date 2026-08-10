@@ -222,8 +222,8 @@ fn sse_text(text: &str) -> Response {
 
 fn sse_tool_call(call_id: &str, command: &str) -> Response {
     let arguments = serde_json::to_string(&json!({
-        "command": command,
-        "timeout_seconds": 30,
+        "cmd": command,
+        "yield_time_ms": 30000,
     }))
     .expect("tool arguments should serialize");
     let call = json!({

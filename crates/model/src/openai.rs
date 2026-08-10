@@ -1681,8 +1681,8 @@ mod tests {
                 "item": {
                     "type": "function_call",
                     "call_id": "call-1",
-                    "name": "read_file",
-                    "arguments": "{\"path\":\"paper.md\"}"
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"cat paper.md\"}"
                 }
             })
             .to_string(),
@@ -1790,8 +1790,8 @@ mod tests {
             let call_item = json!({
                 "type": "function_call",
                 "call_id": "call-1",
-                "name": "read_file",
-                "arguments": "{\"path\":\"paper.md\"}"
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"cat paper.md\"}"
             });
             websocket
                 .send(Message::Text(

@@ -28,7 +28,7 @@ class Writer(Agent):
 
 
 class StructuredResearcher(Agent):
-    @action(tools=["read_file"])
+    @action(tools=["apply_patch"])
     async def research(self) -> dict:
         """Return structured evidence."""
 
@@ -374,7 +374,7 @@ class ActionOptionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
 
             class DuplicateName(Agent):
-                @action(tools=["read_file", "read_file"])
+                @action(tools=["apply_patch", "apply_patch"])
                 async def run(self) -> str:
                     """Invalid Action."""
 

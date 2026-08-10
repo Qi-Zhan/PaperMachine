@@ -341,8 +341,10 @@ async fn run_scheduled_turn(
                 .join(turn.agent_id.to_string())
                 .join(turn.id.to_string())
         });
+    let turn_cancellation = cancellation.clone();
     let result =
         run_scheduled_turn_inner(Arc::clone(&inner), turn_id, action_context, cancellation).await;
+    turn_cancellation.cancel();
     if let Some(sandbox) = sandbox
         && tokio::fs::try_exists(&sandbox).await.unwrap_or(false)
     {
@@ -1430,7 +1432,7 @@ mod recovery_tests {
     fn recovery_synthesizes_one_stable_aborted_output() {
         let repaired = repair_interrupted_tool_calls(vec![ModelInputItem::FunctionCall {
             call_id: "call-read".to_string(),
-            name: "read_file".to_string(),
+            name: "exec_command".to_string(),
             arguments: "{\"path\":\"evidence.md\"}".to_string(),
         }]);
 

@@ -71,7 +71,7 @@ from papermachine import Agent, action, workflow
 class Curator(Agent):
     access = "model_only"
 
-    @action(tools=["exec_command", "fetch_url"])
+    @action(tools=["exec_command", "apply_patch"])
     async def maintain(self):
         """Maintain the page."""
 
@@ -91,7 +91,7 @@ async def main(ctx):
             [
                 {
                     "name": "maintain",
-                    "tools": ["exec_command", "fetch_url"],
+                    "tools": ["exec_command", "apply_patch"],
                 }
             ],
         )
@@ -112,8 +112,8 @@ async def main(ctx):
     await Worker().work()
 '''
         cases = [
-            ("['read_file']", "TOOLS", "literal list"),
-            ("[]", "['read_file', 'read_file']", "duplicates"),
+            ("['apply_patch']", "TOOLS", "literal list"),
+            ("[]", "['apply_patch', 'apply_patch']", "duplicates"),
             ("[]", "['']", "non-empty"),
         ]
         for tools, declaration, expected in cases:

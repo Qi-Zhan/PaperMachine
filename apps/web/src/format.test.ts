@@ -53,7 +53,7 @@ describe('format helpers', () => {
 
   it('summarizes tool steps as Codex-style activity rows', () => {
     expect(agentActivityKind('web_search')).toBe('search')
-    expect(agentActivityKind('read_file')).toBe('read')
+    expect(agentActivityKind('list_agents')).toBe('read')
     expect(agentActivityKind('apply_patch')).toBe('edit')
     expect(agentActivityKind('shell_command')).toBe('command')
     expect(agentActivitySubject({ action: { query: '  exact   clue search  ' } })).toBe('exact clue search')

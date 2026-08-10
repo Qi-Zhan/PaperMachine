@@ -5,9 +5,10 @@
 //! approvals, and telemetry while retaining a spec/runtime pair.
 //! Human interaction is a durable Workflow effect, never a model-visible tool.
 
-mod builtins;
-mod fetch;
+mod command;
+mod patch;
 mod path;
+mod process;
 mod registry;
 
 use async_trait::async_trait;
@@ -25,10 +26,10 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-pub use builtins::ExecCommandTool;
-pub use builtins::ReadFileTool;
-pub use builtins::WriteFileTool;
-pub use fetch::FetchUrlTool;
+pub use command::ExecCommandTool;
+pub use command::WriteStdinTool;
+pub use patch::ApplyPatchTool;
+pub use process::ProcessTable;
 pub use registry::ToolCatalog;
 pub use registry::ToolCatalogBuilder;
 pub use registry::ToolRegistry;
@@ -93,8 +94,6 @@ pub enum ToolError {
     Cancelled,
     #[error("tool execution failed: {0}")]
     Execution(String),
-    #[error("network tool failed: {0}")]
-    Network(String),
     #[error("command isolation is unavailable: {0}")]
     IsolationUnavailable(String),
     #[error("tool registry lock poisoned")]
