@@ -708,212 +708,16 @@ body.sidebar-resizing * {
 .project-home {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   background: var(--canvas);
 }
 
-.project-home-summary {
-  width: min(980px, 100%);
-  min-height: 100%;
-  margin: 0 auto;
-  padding: clamp(38px, 6vw, 76px) clamp(24px, 6vw, 72px) 96px;
-  color: #303633;
-  font-size: 14px;
-  line-height: 1.72;
-}
-
-.project-home-summary > :first-child,
-.project-home-summary article > :first-child,
-.project-home-summary section > :first-child {
-  margin-top: 0;
-}
-
-.project-home-summary > :last-child,
-.project-home-summary article > :last-child,
-.project-home-summary section > :last-child {
-  margin-bottom: 0;
-}
-
-.project-home-summary article,
-.project-home-summary header,
-.project-home-summary section,
-.project-home-summary footer {
+.project-home-document {
   display: block;
-}
-
-.project-home-summary header {
-  margin-bottom: 36px;
-}
-
-.project-home-summary section {
-  margin-top: 36px;
-}
-
-.project-home-summary h1,
-.project-home-summary h2,
-.project-home-summary h3,
-.project-home-summary h4 {
-  color: #202522;
-  line-height: 1.28;
-}
-
-.project-home-summary h1 {
-  margin: 0 0 14px;
-  font-size: clamp(26px, 4vw, 36px);
-  font-weight: 690;
-  letter-spacing: -0.025em;
-}
-
-.project-home-summary h2 {
-  margin: 42px 0 14px;
-  padding-bottom: 9px;
-  border-bottom: 1px solid var(--border);
-  font-size: 18px;
-  font-weight: 670;
-}
-
-.project-home-summary h3 {
-  margin: 28px 0 10px;
-  font-size: 14px;
-  font-weight: 680;
-}
-
-.project-home-summary h4 {
-  margin: 22px 0 8px;
-  font-size: 12px;
-  font-weight: 680;
-}
-
-.project-home-summary p,
-.project-home-summary ul,
-.project-home-summary ol,
-.project-home-summary dl,
-.project-home-summary pre,
-.project-home-summary blockquote,
-.project-home-summary table,
-.project-home-summary figure,
-.project-home-summary details {
-  margin: 13px 0 0;
-}
-
-.project-home-summary ul,
-.project-home-summary ol {
-  padding-left: 22px;
-}
-
-.project-home-summary li + li {
-  margin-top: 6px;
-}
-
-.project-home-summary a {
-  color: var(--blue);
-  text-decoration: underline;
-  text-decoration-color: rgba(53, 111, 153, 0.35);
-  text-underline-offset: 2px;
-}
-
-.project-home-summary strong {
-  color: #272c29;
-  font-weight: 680;
-}
-
-.project-home-summary code {
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: var(--surface-strong);
-  font-size: 0.88em;
-}
-
-.project-home-summary pre {
-  padding: 15px 17px;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  white-space: pre-wrap;
-}
-
-.project-home-summary pre code {
-  padding: 0;
-  background: transparent;
-}
-
-.project-home-summary blockquote {
-  padding: 2px 0 2px 17px;
-  border-left: 3px solid var(--border-strong);
-  color: var(--muted);
-}
-
-.project-home-summary table {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.project-home-summary figure {
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.project-home-summary img {
-  display: block;
-  width: auto;
-  max-width: 100%;
-  height: auto;
-  margin: 0 auto;
-}
-
-.project-home-summary figcaption {
-  margin-top: 9px;
-  color: var(--muted);
-  font-size: 12px;
-  text-align: center;
-}
-
-.project-home-summary th,
-.project-home-summary td {
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-  vertical-align: top;
-}
-
-.project-home-summary th {
-  color: #414744;
-  background: var(--surface);
-  font-weight: 670;
-}
-
-.project-home-summary dt {
-  margin-top: 14px;
-  color: #292e2b;
-  font-weight: 680;
-}
-
-.project-home-summary dd {
-  margin: 4px 0 0;
-  color: var(--muted);
-}
-
-.project-home-summary hr {
-  margin: 36px 0;
+  height: 100%;
   border: 0;
-  border-top: 1px solid var(--border);
-}
-
-.project-home-summary details {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.project-home-summary summary {
-  cursor: pointer;
-  color: #343a37;
-  font-weight: 650;
+  background: var(--canvas);
 }
 
 .project-home-state {
@@ -2643,21 +2447,6 @@ body.sidebar-resizing * {
 
   .project-header-actions {
     gap: 4px;
-  }
-
-  .project-home-summary {
-    padding: 28px 18px 72px;
-  }
-
-  .project-home-summary header,
-  .project-home-summary section {
-    margin-top: 28px;
-    margin-bottom: 28px;
-  }
-
-  .project-home-summary table {
-    display: block;
-    overflow-x: auto;
   }
 
   .conversation-timeline {
