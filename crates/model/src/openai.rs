@@ -1107,14 +1107,31 @@ fn model_input_json(item: &ModelInputItem) -> Value {
             "type": "function_call",
             "call_id": call_id,
             "name": name,
-            "arguments": arguments,
+            "arguments": replayable_tool_arguments(arguments),
         }),
         ModelInputItem::FunctionCallOutput { call_id, output } => json!({
             "type": "function_call_output",
             "call_id": call_id,
             "output": output.to_string(),
         }),
-        ModelInputItem::ResponseItem { item } => item.clone(),
+        ModelInputItem::ResponseItem { item } => {
+            let mut item = item.clone();
+            if item.get("type").and_then(Value::as_str) == Some("function_call")
+                && let Some(arguments) = item.get("arguments").and_then(Value::as_str)
+            {
+                item["arguments"] = replayable_tool_arguments(arguments).into();
+            }
+            item
+        }
+    }
+}
+
+fn replayable_tool_arguments(arguments: &str) -> &str {
+    // Keep the canonical model output untouched, but never let malformed
+    // historical arguments make the provider reject the Agent's next turn.
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(Value::Object(_)) => arguments,
+        _ => "{}",
     }
 }
 
@@ -1309,6 +1326,30 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn malformed_tool_arguments_are_safe_to_replay() {
+        let invalid = r#"{"text":"quoted "bad""}"#;
+        let canonical = json!({
+            "type": "function_call",
+            "call_id": "call-invalid",
+            "name": "patch",
+            "arguments": invalid,
+        });
+
+        let replayed = model_input_json(&ModelInputItem::ResponseItem {
+            item: canonical.clone(),
+        });
+        assert_eq!(replayed["arguments"], "{}");
+        assert_eq!(canonical["arguments"], invalid);
+
+        let replayed = model_input_json(&ModelInputItem::FunctionCall {
+            call_id: "call-invalid".to_string(),
+            name: "patch".to_string(),
+            arguments: invalid.to_string(),
+        });
+        assert_eq!(replayed["arguments"], "{}");
     }
 
     #[test]
