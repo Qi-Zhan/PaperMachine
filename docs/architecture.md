@@ -17,7 +17,7 @@ Project
     ActionInvocations
       ActionAttempts -> Turns
         AgentSteps                 disposable query/UI projection
-    HumanRequests / ControlMessages
+    HumanRequests / AgentInputs
     Effect journal
     Artifacts
   Prompts / Skills / Workflow source / Project Home
@@ -106,25 +106,25 @@ Before inserting a Turn, the host resolves four immutable snapshots:
 | `ModelRouteSnapshot` | profile, provider, upstream model, capabilities, context window, effective reasoning, non-secret configuration SHA-256 |
 | `TurnEnvironmentSnapshot` | Workspace ID/revision/path and materialized authorization hash |
 | `ToolSetSnapshot` | exact sorted local definitions and SHA-256 |
-| `PromptSnapshot` | ordered runtime, Project, Session, Agent, Skill, Action, and control instructions |
+| `PromptSnapshot` | ordered runtime, Project, Session, Agent, Skill, Action, and retry guidance |
 
 The Turn and its required ActionAttempt attachment enter the canonical Agent
 rollout before execution. Access, route, ToolSet, or prompt drift fails closed
 on resume.
 
-The ToolCatalog is trusted host configuration. For an Action, its
-static `tools=[...]` declaration is the requested set. Workspace tools are
-filtered by access; Project tools require explicit Action declaration. Hosted
-web search is a provider capability outside the local Registry. Registry
-membership controls visibility and dispatch, while file/network/sandbox rules
-remain independent enforcement.
+The ToolCatalog is trusted host configuration. Bare Actions receive all
+collaboration tools plus native tools allowed by access; `tools=[]` means an
+empty Registry, and a non-empty declaration selects an exact subset. Child
+Agents never receive `spawn_agent`. Hosted web search is a provider capability
+outside the local Registry. Registry membership controls visibility and
+dispatch, while file/network/sandbox rules remain independent enforcement.
 
 ## Agent loop and canonical history
 
 The Agent runtime follows the Codex-shaped loop:
 
 ```text
-checkpoint inputs and controls
+checkpoint Agent inputs
   -> sample model
   -> validate stable response items
   -> append ContextCheckpoint and sync JSONL
@@ -141,7 +141,7 @@ item kinds:
 ```text
 TurnCreated        Turn + required ActionAttempt
 ContextCheckpoint append/replace context, usage, cursors, terminal candidate
-TurnUpdated        Turn boundary and acknowledged controls
+TurnUpdated        Turn boundary and acknowledged Agent inputs
 ```
 
 SQLite Turns are the query projection. AgentSteps and Session events are also
@@ -193,26 +193,40 @@ persistent terminal Session. Rust/Python frames are limited to 16 MiB, at most
 64 effects may be in flight, response channels are bounded, and any protocol
 reader/writer/handler failure ends the run.
 
-## Transactions and control
+The ActionRunner is the only path from a durable ActionInvocation to a Turn.
+Workflow Actions and collaboration-created `agent_task` Actions share its
+per-Agent FIFO. Different Agents may run concurrently; one Agent has one active
+Turn. Model permits cover sampling only, so a parent waiting in `wait_agent`
+does not block its child from sampling. Workflow waits do not freeze other
+Agents in that Session; explicit pause, Closing, and terminal states do.
+
+Collaboration tools operate on this existing lifecycle. Queue-only
+`send_message` writes one durable AgentInput. `start_turn=true` and
+`spawn_agent` create ordinary Actions. `wait_agent` observes Action status and
+persists nothing. Interrupt records durable intent and cancels the live Action;
+only descendants in the caller Session may be interrupted. Session Closing
+stops admission, cancels and joins unfinished child work, then commits the
+terminal status.
+
+## Transactions and Agent input
 
 Session transitions, Action start/finish, HumanRequest resolution, usage, and
 terminal cleanup use typed `BEGIN IMMEDIATE` transactions with allowed-from
 checks. Human answers use `id + open status` CAS.
 
-Control messages transition `pending -> claimed -> applied`. Claim binds a
-target Turn. Application occurs only in the canonical checkpoint or terminal
-transaction that consumes the message; a crash before checkpoint lets that same
-Turn reclaim it.
+AgentInput transitions `pending -> claimed -> applied` and records a Human or
+Agent source. Claim binds a target Turn. Application occurs only in the
+canonical checkpoint or terminal transaction that consumes the input; a crash
+before checkpoint lets that same Turn reclaim it.
 
 ## Project Home
 
 Project Home is Project-managed structured source plus immutable HTML/source
-Artifacts. It is not in the Workspace. A Summary Action is a normal Agent
-Action whose ToolSet contains only the generic `read_resource` Project tool.
-It reads relevant resources on demand and returns the complete HTML fragment.
-Publication accepts the exact awaited Action call, verifies provenance,
-validates the fragment, and commits it atomically. No Summary slug or Agent
-class is hard-coded.
+Artifacts. It is not in the Workspace. The Workflow runtime derives bounded
+current entity snapshots from the Project change log and passes them to an
+ordinary Summary Action with an empty ToolSet. Publication accepts the exact
+awaited Action call, verifies provenance, validates the fragment, and commits
+it atomically. No Summary slug or Agent class is hard-coded.
 
 ## Adaptation boundary
 

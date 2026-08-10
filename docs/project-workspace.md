@@ -77,54 +77,64 @@ materializes the Agent access preset, bounded by its Session ceiling, into a
 `TurnEnvironmentSnapshot`:
 
 - Workspace attachment ID, revision, path, and cwd;
-- exact filesystem, tool, network, and child-environment policy;
+- exact filesystem, network, and child-environment policy;
 - protected PaperMachine-managed roots; and
 - a SHA-256 authorization hash.
 
 创建 Turn 前，Store 会确认挂载路径仍是 recorded canonical path 上的真实目录，
 再把受 Session ceiling 约束的 Agent access preset 实体化成
 `TurnEnvironmentSnapshot`，包括 Workspace ID/revision/path/cwd、精确的
-文件/工具/网络/子进程环境策略、受保护的 managed roots 与权限 SHA-256。
+文件/网络/子进程环境策略、受保护的 managed roots 与权限 SHA-256。
 
-`read_only`, `workspace`, and `research` may read ordinary host files, while
-only `workspace`/`research` may write inside the Workspace; non-`full_access`
-never writes outside it. Every profile is denied PaperMachine managed roots,
-and non-`full_access` also denies credential paths. Relative paths resolve from
-the Workspace cwd, and direct file tools and command sandboxes share this rule.
+`read_only`, `workspace`, and `full_access` may read ordinary host files.
+`workspace` writes only inside the Workspace; `full_access` may write ordinary
+host files. Every profile is denied PaperMachine managed roots, and
+non-`full_access` also denies credential paths. Relative paths resolve from the
+Workspace cwd. `exec_command`, `write_stdin`, and `apply_patch` share this
+materialized policy.
 
-`read_only`、`workspace` 与 `research` 可以读取普通宿主机文件，但只有
-`workspace`/`research` 能在 Workspace 内写入；非 `full_access` 永远不能在
-Workspace 外写入。所有档位都不能读写 PaperMachine managed roots，非
-`full_access` 还会拒绝 credential 路径。相对路径始终以 Workspace cwd 解析，直接
-文件工具与 command sandbox 使用同一规则。
+`read_only`、`workspace` 与 `full_access` 可以读取普通宿主机文件；`workspace`
+只能写 Workspace，`full_access` 可以写普通宿主机文件。所有档位都不能读写
+PaperMachine managed roots，非 `full_access` 还会拒绝 credential 路径。相对路径
+始终以 Workspace cwd 解析，`exec_command`、`write_stdin` 与 `apply_patch` 使用
+同一份 materialized policy。
 
-At the same boundary, the host ToolCatalog creates one exact ToolRegistry. For
-a Workflow Action, `@action(tools=[...])` supplies the candidates and access
-filters its Workspace tools; declared Project tools are admitted only on that
-path. Sorted definitions and a SHA-256 are persisted in the Turn's
-`ToolSetSnapshot`. Model exposure, dispatch, pause/resume, and recovery rebuild
-from that immutable snapshot; direct tools and process sandboxes still enforce
-the authorization context internally. Prompt text cannot change either
-boundary. Later relocation, permission changes, or Action calls affect only
-later Turns.
+At the same boundary, the host ToolCatalog creates one exact ToolRegistry.
+Bare Actions receive collaboration tools plus access-allowed native tools;
+`tools=[]` means none and a non-empty list selects an exact subset. Sorted
+definitions and a SHA-256 are persisted in `ToolSetSnapshot`. Model exposure,
+dispatch, pause/resume, and recovery rebuild from that immutable snapshot;
+tools and process sandboxes still enforce authorization internally. Prompt
+text cannot change either boundary. Later relocation, permission changes, or
+Action calls affect only later Turns.
 
-在同一创建边界，host ToolCatalog 会生成一个精确 ToolRegistry。Workflow Action
-以 `@action(tools=[...])` 提供候选工具，再由 access 过滤其中的 Workspace 工具；
-Project 工具只允许通过这条路径进入。排序后的 definitions 与 SHA-256 固化在 Turn 的
-`ToolSetSnapshot` 中。model exposure、dispatch、pause/resume 和 recovery 都从这份
-不可变快照重建；direct tool 与 process sandbox 仍在内部执行 authorization 检查。
-prompt 文本无法改变任一边界，后续 relocation、权限变化或 Action 调用只影响后续 Turn。
+在同一创建边界，host ToolCatalog 会生成一个精确 ToolRegistry。bare Action 获得
+协作工具和 access 允许的 native tools；`tools=[]` 表示空 Registry，非空列表选择
+精确子集。排序后的 definitions 与 SHA-256 固化在 `ToolSetSnapshot`。model
+exposure、dispatch、pause/resume 与 recovery 都从该快照重建；tool 与 process
+sandbox 仍在内部执行 authorization。prompt 无法改变任一边界，后续 relocation、
+权限变化或 Action 调用只影响后续 Turn。
 
-Project Summary is ordinary Agent work but uses Project tools, not filesystem
-access. Its source, canonical page, and history remain in managed Project state.
-Other Agents do not see them through Workspace and never receive Project tools
-automatically; an Action must explicitly declare `read_resource` and choose a
-`pm://` resource.
+Project Summary is ordinary Agent work with an empty ToolSet. The Workflow
+runtime obtains bounded Project entity snapshots through
+`ctx.project.changes(exclude_current_program=True)` and passes them as Action
+data. This prevents earlier Summary runs from becoming new evidence. Summary
+source, canonical page, and history remain in managed Project state; other
+Agents do not see them through Workspace.
 
-Project Summary 是普通 Agent 工作，但它使用 Project 工具，而不是文件系统权限。
-其 source、canonical page 与历史留在 managed Project state。其他 Agent 不会通过
-Workspace 看到这些内容，也不会自动获得 Project 工具；Action 必须显式声明
-`read_resource` 并选择一个 `pm://` resource。
+Project Summary 是 `tools=[]` 的普通 Agent 工作。Workflow runtime 通过
+`ctx.project.changes(exclude_current_program=True)` 获取有界 Project entity
+snapshot，再把它们作为 Action data 传入，因此旧 Summary 运行不会反过来成为新
+evidence。Summary source、canonical page 与历史留在 managed Project state，其他
+Agent 不会通过 Workspace 看到它们。
+
+Agent collaboration exchanges durable messages and Action results, not file
+authority. A child inherits the parent's Workspace attachment but may only keep
+or lower access. `list_agents` never exposes transcripts or managed files.
+
+Agent 协作交换的是持久消息与 Action result，不是文件权限。child 继承 parent 的
+Workspace attachment，但 access 只能保持或降低；`list_agents` 不暴露 transcript
+或 managed file。
 
 ## Recovery and inspection
 

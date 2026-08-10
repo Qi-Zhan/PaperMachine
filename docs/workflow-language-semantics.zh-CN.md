@@ -15,7 +15,7 @@ WorkflowProgram 定义
 
 Project 同时拥有 WorkflowProgram 定义与 Session 执行。Session 是一次不可变 program
 snapshot，加上输入、配置、状态、effect journal、Agent、event、human request、
-control、usage、output 与 Artifact。Agent 是 Session 内模型身份的公开名称。没有
+AgentInput、usage、output 与 Artifact。Agent 是 Session 内模型身份的公开名称。没有
 Participant entity，也没有每个 Agent 再套一层 Session。
 
 每个 Turn 都由 ActionAttempt 创建。交互聊天也遵循同一规则：
@@ -89,12 +89,15 @@ Agent、request status 与 exact text。
 
 ## Tool 与权限
 
-**@action(tools=[...])** 声明完整的本地工具请求；bare **@action** 等于没有本地工具。
-host 拒绝未知或重复名称。
+bare **@action** 获得协作工具和 access 允许的 native tools；
+**@action(tools=[])** 表示空 Registry，非空静态列表选择精确子集。host 拒绝未知或
+重复名称。
 
-- Workspace tool 按 Agent 的 materialized access 过滤；
-- Project tool 只有当前 Action 明确声明时才进入；
-- hosted web search 独立由 provider capability、access 与 search_context_size 控制。
+- native tools 是 `exec_command`、`write_stdin`、`apply_patch`，由 access 过滤；
+- 协作工具是 `list_agents`、`send_message`、`wait_agent`、`spawn_agent`、
+  `interrupt_agent`，child Agent 不获得 spawn；
+- hosted web search 独立由 `search_context_size` 与 provider capability 控制，
+  不依赖本地 access preset。
 
 tool membership 决定模型可见性与 dispatch。filesystem、command、network、
 managed-root 与 credential rule 仍是独立硬约束。
@@ -110,28 +113,38 @@ Agent 只有一个 canonical rollout 与一个 active Turn。
 
 这是唯一必要的串行规则；Session 并不是全局单线程。
 
-## 人工输入、等待与控制
+Agent 创建的 task 与 Workflow Action 使用同一个 durable ActionRunner 和 per-Agent
+FIFO。queue-only message 只进入 AgentInput，不启动 Turn；`wait_agent` 只观察 Action
+状态，不保存第二种 wait。spawn 会原子创建同 Session child 和首个 Action；child
+继承模型身份配置，access 只能保持或降低，不能再次 spawn，并在 Session Closing 时
+被 join。
+
+## 人工输入、等待与 AgentInput
 
 **ask_human** 与 **wait** 是 replayable suspension effect。wait 只保存一条 journal，
 deadline 由 started_at 加 interval 得出。当所有 live future 都停在可 replay 的等待上，
 Rust 会结束空闲 Python process 并释放 permit。合法回答或到期 deadline 会让同一
 Session 再次 runnable；重放不可变 source 后会到达已存 effect result。
 
-Control 状态为 **pending -> claimed -> applied**：
+AgentInput 状态为 **pending -> claimed -> applied**，并记录 Human 或 Agent source：
 
-- guide 在下一次 sample 前进入 canonical context；
+- message 与 guide 在下一次 sample 前进入 canonical context；
 - finish 强制下一次 sample 不使用本地工具；
 - interrupt 结束 active Attempt；
 - pause 在 checkpoint 停止，resume 继续，cancel 终止 Session。
 
-只有消费 control 的 checkpoint 或 terminal transaction 才会把 claim 变成 applied。
+只有消费 input 的 checkpoint 或 terminal transaction 才会把 claim 变成 applied；
+checkpoint 前 crash 时，同一 Turn 可以重新 claim。
 
 ## Project API
 
-`ctx.project.changes()` 只返回 cursor 与发生变化的 Project-managed resource URI，
-不返回内容，也不读取 Workspace 文件。把 cursor 作为 `after_cursor` 传回可得到之后
-的 committed changes。Action 可声明通用 `read_resource` 工具，按需读取选中的
-`pm://` resource。`publish_artifact` 写入确定性的 Project-managed content。
+`ctx.project.changes()` 返回 opaque cursor 与发生变化的 Project、Session、Agent、
+Turn、Artifact、Project Home 的有界当前 snapshot。把 cursor 作为 `after_cursor`
+传回可得到之后的 committed changes。page 从 change log 派生，会去重、返回
+tombstone、分块大文本 Artifact、只返回二进制 metadata，并过滤调用 Session。
+`exclude_current_program=True` 还会在构造 snapshot 前跳过调用方
+WorkflowProgram 的历史运行。`publish_artifact` 写入确定性的 Project-managed
+content。
 
 Project Home 同样位于 managed state。普通 Action 返回完整、安全的 HTML fragment，
 再把那一个已经 await 的 `_ActionCall` 传给 `publish_project_home`。发布会验证精确

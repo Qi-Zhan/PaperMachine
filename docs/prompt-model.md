@@ -18,7 +18,7 @@ The host renders these ordered layers:
 | 3 | session | immutable Session instructions and current Action contract |
 | 4 | agent | Agent class or constructor system prompt |
 | 5 | skills | complete resolved instructions of enabled Project Skills |
-| 6 | control | explicit guidance for the current ActionAttempt |
+| 6 | control | explicit retry guidance for the current ActionAttempt |
 
 Each layer records its kind, name, stable source, content, and SHA-256.
 PromptSnapshot also stores the rendered provider instructions and their hash.
@@ -46,7 +46,8 @@ Workspace 文件不会隐式成为 prompt；只有工具读取，或程序显式
 - WorkflowProgram source is snapshotted into the Session.
 - Skill instructions are resolved in full into each Turn; recovery never reads
   a live Skill file.
-- Control guidance applies only to the targeted attempt.
+- Claimed AgentInput is appended to canonical model context at the next safe
+  checkpoint; retry guidance may become a control prompt layer.
 - Editing any source affects only future Sessions or Turns, never an existing
   Turn snapshot.
 
@@ -55,7 +56,8 @@ Workspace 文件不会隐式成为 prompt；只有工具读取，或程序显式
 - Agent system prompt 在创建 Agent 时固定。
 - WorkflowProgram source 会完整固化到 Session。
 - Skill instructions 会解析进 Turn，恢复时不会读取 live Skill。
-- control guidance 只作用于目标 attempt。
+- claimed AgentInput 会在下一个安全 checkpoint 进入 canonical model context；
+  retry guidance 可以成为 control prompt layer。
 - 修改任何来源都只影响之后创建的 Session 或 Turn，不会改写已有快照。
 
 The New Session dialog launches **interactive-agent**. Its optional “Agent
@@ -81,12 +83,14 @@ Session launch 保存两种不同输入：**request** 是具体任务，**instru
 Session Action 共享的策略。request 必须由程序显式传入 Action，不会被提升为 system
 instruction；instructions 则刻意进入 Session prompt layer。
 
-Project content is never injected at launch. `ctx.project.changes()` exposes
-only changed `pm://` URIs. An Action must declare `read_resource` and choose
-what to read; content enters as an ordinary tool result, not a prompt layer.
+Project content is never injected at launch. `ctx.project.changes()` returns
+bounded current entity snapshots to Workflow Python. Content reaches a model
+only when Workflow code passes those snapshots as Action arguments; it remains
+message data, not a prompt layer.
 
-Project 内容不会在启动时注入。`ctx.project.changes()` 只给出变化的 `pm://` URI；
-Action 必须声明 `read_resource` 并自行选择读取对象，内容以普通 tool result 进入模型。
+Project 内容不会在启动时注入。`ctx.project.changes()` 向 Workflow Python 返回有界的
+当前 entity snapshot；只有 Workflow 把它们作为 Action argument 传入时才进入模型，
+并且仍是 message data，不是 prompt layer。
 
 For interactive input, an answered HumanRequest is passed as a HumanMessage
 argument. Provenance is stored on HumanRequest and ActionInvocation; Turn no
@@ -96,14 +100,14 @@ Session `instructions` have deliberately different semantics. The exact string i
 available to Python as `ctx.instructions`, and the runtime also snapshots it as
 a Session instruction layer on every Action Turn. Use it for
 cross-Agent rules such as language, evidence policy, output conventions, or a
-summary policy. Use `ctx.request` for the concrete task and `read_resource` for
-selected Project results. This prevents task data or old model output from
-becoming system-level authority.
+summary policy. Use `ctx.request` for the concrete task and explicitly pass
+selected Project snapshots as Action data. This prevents task data or old model
+output from becoming system-level authority.
 
 Session `instructions` 的语义刻意不同：Python 可通过 `ctx.instructions` 读取原文，
 runtime 也会把它作为每个 Action Turn 的 Session instruction layer 固化。
 它适合跨 Agent 的语言、证据、输出或摘要策略；具体任务放在 `ctx.request`，选择的
-Project 结果通过 `read_resource` 按需读取。这样不会误把任务数据或旧模型输出提升成
+Project snapshot 作为 Action data 显式传入。这样不会误把任务数据或旧模型输出提升成
 system 级指令。
 
 交互输入通过 HumanMessage 参数传递已回答的 HumanRequest。来源记录在
@@ -132,15 +136,16 @@ fail closed。
 
 The cache identity is Agent-scoped. Stable runtime, Project, Session, Agent,
 and Skill layers form a reusable prefix across that Agent's Turns. Concrete
-Action input remains message data. Action contract, controls, or Skill changes
-intentionally change the prefix. The provider ultimately decides cache reuse
-from the request it receives.
+Action input and AgentInput remain message data after the stable instruction
+prefix. Action-contract or Skill changes intentionally change that prefix. The
+provider ultimately decides cache reuse from the request it receives.
 
 cache identity 以 Agent 为单位。同一 Agent 的 runtime、Project、Session、Agent 与
-Skill 层通常形成稳定前缀；具体 Action input 保留为 message data。Action contract、
-control 或 Skill 改变会有意改变前缀，最终是否命中由 provider 根据实际请求决定。
+Skill 层通常形成稳定前缀；具体 Action input 与 AgentInput 保留为该前缀之后的 message
+data。Action contract 或 Skill 改变会有意改变前缀，最终是否命中由 provider 根据
+实际请求决定。
 
-Project Summary follows the same rules: one ordinary Agent, one ordinary Action
-contract, the generic `read_resource` tool, and optional Session instructions
+Project Summary follows the same rules: one ordinary Agent, one ordinary
+no-tool Action receiving Project snapshots, and optional Session instructions
 describing what to emphasize. It has no hidden reviewer prompt or special
 kernel prompt path.

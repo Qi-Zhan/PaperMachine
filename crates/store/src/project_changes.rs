@@ -13,7 +13,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-const CURSOR_PREFIX: &str = "pc1_";
+const CURSOR_PREFIX: &str = "pc2_";
 const PAGE_BYTES: usize = 1024 * 1024;
 const PAGE_RESERVE_BYTES: usize = 4096;
 
@@ -40,6 +40,7 @@ struct ChangeCursor {
     session_id: SessionId,
     sequence: u64,
     continuation: Option<ArtifactContinuation>,
+    exclude_current_program: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,6 +56,7 @@ impl Store {
         project_id: ProjectId,
         calling_session_id: SessionId,
         after_cursor: Option<&str>,
+        exclude_current_program: bool,
     ) -> Result<ProjectSnapshotPage, StoreError> {
         let calling_session = self.get_session(calling_session_id)?;
         ensure_project(
@@ -69,11 +71,15 @@ impl Store {
                 session_id: calling_session_id,
                 sequence: 0,
                 continuation: None,
+                exclude_current_program,
             },
         };
-        if cursor.project_id != project_id || cursor.session_id != calling_session_id {
+        if cursor.project_id != project_id
+            || cursor.session_id != calling_session_id
+            || cursor.exclude_current_program != exclude_current_program
+        {
             return Err(StoreError::Invariant(
-                "Project change cursor belongs to another Project or Session".to_string(),
+                "Project change cursor belongs to another query".to_string(),
             ));
         }
 
@@ -90,7 +96,12 @@ impl Store {
                 cursor.sequence = captured_cursor;
                 break captured_cursor;
             }
-            let changes = latest_entity_changes(batch.changes, calling_session_id);
+            let changes = latest_entity_changes(
+                self,
+                batch.changes,
+                calling_session_id,
+                exclude_current_program.then_some(&calling_session.program.manifest.slug),
+            )?;
             let mut stopped_for_size = false;
             for change in changes {
                 let snapshot = self.snapshot_change(project_id, &change)?;
@@ -389,18 +400,28 @@ impl Store {
 }
 
 fn latest_entity_changes(
+    store: &Store,
     changes: Vec<ProjectChange>,
     calling_session_id: SessionId,
-) -> Vec<ProjectChange> {
+    excluded_program: Option<&str>,
+) -> Result<Vec<ProjectChange>, StoreError> {
     let mut latest = HashMap::<(String, String), ProjectChange>::new();
     for change in changes {
-        if change.session_id != Some(calling_session_id) {
-            latest.insert((change.kind.clone(), change.entity_id.clone()), change);
+        if change.session_id == Some(calling_session_id) {
+            continue;
         }
+        if let (Some(program), Some(session_id)) = (excluded_program, change.session_id) {
+            match store.get_session(session_id) {
+                Ok(session) if session.program.manifest.slug == program => continue,
+                Ok(_) | Err(StoreError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        latest.insert((change.kind.clone(), change.entity_id.clone()), change);
     }
     let mut changes = latest.into_values().collect::<Vec<_>>();
     changes.sort_by_key(|change| change.sequence);
-    changes
+    Ok(changes)
 }
 
 fn artifact_snapshot(

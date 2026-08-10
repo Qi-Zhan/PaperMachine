@@ -73,6 +73,8 @@ import { api } from '../api'
 import { useAppI18n } from '../i18n'
 import type { ProjectOverview } from '../types'
 
+const MAX_PROJECT_HOME_IMAGE_BYTES = 2 * 1024 * 1024
+
 const props = defineProps<{
   overview: ProjectOverview
   summaryBusy: boolean
@@ -141,6 +143,7 @@ function sanitizeProjectHome(source: string): string {
   const body = parsed.body.innerHTML.trim() || source
   const sanitized = DOMPurify.sanitize(body, {
     USE_PROFILES: { html: true },
+    ADD_DATA_URI_TAGS: ['img'],
     ALLOW_DATA_ATTR: false,
     FORBID_ATTR: ['style', 'srcdoc'],
     FORBID_TAGS: [
@@ -151,7 +154,6 @@ function sanitizeProjectHome(source: string): string {
       'embed',
       'form',
       'iframe',
-      'img',
       'input',
       'link',
       'math',
@@ -168,6 +170,21 @@ function sanitizeProjectHome(source: string): string {
     ],
   })
   const clean = new DOMParser().parseFromString(sanitized, 'text/html')
+  clean.body.querySelectorAll('img').forEach((image) => {
+    const src = image.getAttribute('src') ?? ''
+    const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([a-z0-9+/=]+)$/i.exec(src)
+    const encoded = match?.[1] ?? ''
+    const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0
+    const bytes = Math.floor((encoded.length * 3) / 4) - padding
+    if (!match || bytes <= 0 || bytes > MAX_PROJECT_HOME_IMAGE_BYTES) {
+      image.remove()
+      return
+    }
+    image.removeAttribute('srcset')
+    image.setAttribute('loading', 'lazy')
+    image.setAttribute('decoding', 'async')
+    if (!image.hasAttribute('alt')) image.setAttribute('alt', '')
+  })
   clean.body.querySelectorAll('a[href]').forEach((anchor) => {
     const href = anchor.getAttribute('href') ?? ''
     if (/^https?:\/\//i.test(href)) {

@@ -15,7 +15,7 @@ WorkflowProgram definition
 
 Project owns WorkflowProgram definitions and Session executions. A Session is
 one immutable program snapshot plus its input, configuration, status, effect
-journal, Agents, events, human requests, controls, usage, output, and
+journal, Agents, events, human requests, Agent inputs, usage, output, and
 Artifacts. Agent is the public name for a model identity inside that Session.
 Session directly owns its Agents.
 
@@ -97,13 +97,16 @@ text.
 
 ## Tools and access
 
-**@action(tools=[...])** declares the complete local tool request. Bare
-**@action** means no local tools. The host rejects unknown or duplicate names.
+Bare **@action** uses collaboration tools plus native tools allowed by access.
+**@action(tools=[])** means an empty local Registry; a non-empty static list
+selects an exact subset. The host rejects unknown or duplicate names.
 
-- Workspace tools are filtered by the Agent's materialized access.
-- Project tools are admitted only when the current Action declares them.
-- Hosted web search is separate and requires provider capability, access, and
-  search_context_size.
+- Native tools are `exec_command`, `write_stdin`, and `apply_patch`; access
+  filters them.
+- Collaboration tools are `list_agents`, `send_message`, `wait_agent`,
+  `spawn_agent`, and `interrupt_agent`; child Agents do not receive spawn.
+- Hosted web search is separate and requires `search_context_size` plus provider
+  capability, not a local access preset.
 
 Tool membership decides visibility and dispatch. Filesystem, command, network,
 managed-root, and credential rules remain independent enforcement.
@@ -122,7 +125,14 @@ canonical rollout and one active Turn.
 This is the only required serialization rule; a Session is not globally
 single-threaded.
 
-## Human input, waits, and controls
+Agent-created tasks use the same durable ActionRunner and per-Agent FIFO as
+Workflow Actions. Queue-only messages enter AgentInput without starting a Turn.
+`wait_agent` observes Action state and persists no second wait primitive. A
+spawn creates a same-Session child plus its first Action atomically; the child
+inherits identity configuration and same-or-lower access, cannot spawn again,
+and is joined during Session Closing.
+
+## Human input, waits, and Agent input
 
 **ask_human** and **wait** are replayable suspension effects. Wait stores one
 journal record, whose started_at plus interval defines its deadline. When all
@@ -130,23 +140,27 @@ live futures are at replayable waits, Rust terminates the idle Python process
 and releases its permit. An answer or due deadline makes the same Session
 runnable; immutable source replay reaches the stored effect result.
 
-Controls transition **pending -> claimed -> applied**:
+AgentInput transitions **pending -> claimed -> applied** and records a Human or
+Agent source:
 
-- guide enters canonical context before the next sample;
+- message and guide enter canonical context before the next sample;
 - finish forces the next sample to return without local tools;
 - interrupt ends the active attempt;
 - pause stops at checkpoints; resume continues; cancel terminates the Session.
 
 A claim becomes applied only in the checkpoint or terminal transaction that
-consumes it.
+consumes it. A crash before checkpoint lets the same Turn reclaim the input.
 
 ## Project APIs
 
-`ctx.project.changes()` returns a cursor and stable URIs for changed
-Project-managed resources, not their contents or Workspace files. Passing the
-cursor back as `after_cursor` returns later committed changes. An Action may
-declare the generic `read_resource` tool to inspect selected `pm://` resources.
-`publish_artifact` writes deterministic Project-managed content.
+`ctx.project.changes()` returns an opaque cursor and bounded current snapshots
+of changed Project, Session, Agent, Turn, Artifact, and Project Home entities.
+Passing the cursor back as `after_cursor` returns later committed changes.
+Pages are derived from the change log, deduplicate entities, emit tombstones,
+chunk large text Artifacts, expose binary metadata only, and filter the calling
+Session. `exclude_current_program=True` also skips historical runs of the
+caller's WorkflowProgram before snapshots are built. `publish_artifact` writes
+deterministic Project-managed content.
 
 Project Home is also Project-managed. A normal Action returns a complete safe
 HTML fragment and passes that exact awaited `_ActionCall` to

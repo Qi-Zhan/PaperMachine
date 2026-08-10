@@ -8,7 +8,7 @@ Project
     Agents                        independent model identities and rollouts
       ActionInvocation
         ActionAttempt -> Turn -> model/tool Steps
-    effects, events, human requests, controls, artifacts
+    effects, events, human requests, Agent inputs, artifacts
 ~~~
 
 A WorkflowProgram is immutable Python source plus a manifest. Starting one
@@ -28,26 +28,29 @@ durable HumanRequest answer and passes it to an ordinary Action. **goal** and
 no slug-specific execution path.
 
 One Session may run several Agents concurrently, while each Agent admits one
-active Turn at a time. A Session-origin launch records provenance but still
-creates an independent Session with one immutable program snapshot.
+active Turn at a time. Agents collaborate through durable `AgentInput` and
+ordinary `agent_task` Actions: `list_agents`, `send_message`, `wait_agent`,
+`spawn_agent`, and `interrupt_agent` never create a second scheduler or
+recovery protocol. A Session-origin launch records provenance but still creates
+an independent Session with one immutable program snapshot.
 
-Project Home is the output of the ordinary **project-summary** Session. Its
-Agent discovers changed `pm://` resources, reads what matters with the generic
-`read_resource` tool, and returns one complete HTML fragment. The host validates
-and publishes that exact Action result as immutable source and HTML Artifacts.
-The page is Project-managed state, not a Workspace file or embedded dashboard.
+Project Home is the output of the ordinary **project-summary** Session.
+`ctx.project.changes()` supplies bounded Project entity snapshots directly to
+its no-tool Action. The Agent returns one complete HTML fragment; the host
+validates and publishes that exact Action result as immutable source and HTML
+Artifacts. The page is Project-managed state, not a Workspace file or embedded
+dashboard.
 
 ## Storage
 
 The **Project Page** can run the reviewed `project-summary` Workflow once or in
-a normal loop separated by durable waits. Its ordinary Agent receives only
-changed resource URIs, reads relevant Project content on demand, and returns a
-complete HTML fragment. The runtime validates and publishes that exact Action
-result. The Project stores one canonical Artifact/source/revision reference;
-unchanged refreshes reuse it. That sanitized fragment is the Project home page
-itself; there is no fixed dashboard or embedded frame. The summary policy is
-the run's ordinary `instructions` field; there is no review Action, hidden
-summary daemon, or extra instance model.
+a normal loop separated by durable waits. Snapshot pages are derived from the
+Project change log and bounded to about 1 MiB. The built-in excludes prior runs
+of its own WorkflowProgram, so the derived Home never becomes its own evidence.
+The Project stores one canonical Artifact/source/revision reference;
+unchanged refreshes reuse it. The sanitized fragment is the Project home page
+itself; there is no fixed dashboard, embedded frame, hidden summary daemon, or
+special Summary runtime.
 
 **resource_root** contains read-only application resources: web assets, the
 Python DSL runtime, and built-in WorkflowPrograms. The server requires it via
@@ -99,12 +102,14 @@ Before every Turn the host freezes four independent snapshots:
 - **TurnEnvironmentSnapshot**: Workspace revision and materialized access;
 - **ToolSetSnapshot**: exact sorted local tool definitions and hash;
 - **PromptSnapshot**: rendered runtime, Project, Session, Agent, Skill, Action,
-  and control instructions.
+  and retry-guidance instructions.
 
-**@action(tools=[...])** requests local tools. The host validates names, filters
-Workspace tools by Agent access, and admits Project tools only through an
-explicit Action declaration. Hosted web search remains a provider capability.
-Registry membership controls model visibility and dispatch; filesystem,
+Bare **@action** uses collaboration tools plus the native tools allowed by the
+Agent's access. **@action(tools=[])** creates an empty local Registry; a
+non-empty list selects an exact subset. The native surface is
+`exec_command`, `write_stdin`, and `apply_patch`. Hosted web search is outside
+the local Registry and depends only on `search_context_size` plus provider
+capability. Registry membership controls visibility and dispatch; filesystem,
 network, managed-root, credential, and sandbox checks remain independent hard
 enforcement.
 
@@ -141,7 +146,7 @@ runtime dependency.
 - **crates/model**: provider profiles, routing, and Responses transports.
 - **crates/tools**: host ToolCatalog, per-Turn ToolRegistry, and local tools.
 - **crates/execution**: process lifecycle and OS sandbox enforcement.
-- **crates/agent**: sampling, tool execution, controls, and context.
+- **crates/agent**: sampling, tool execution, Agent inputs, and context.
 - **crates/session**: ActionAttempt and Turn execution for durable Agents.
 - **crates/store**: Project SQLite, Agent rollouts, managed files, and Artifacts.
 - **crates/workflow**: Python validation, effect interpretation, and scheduling.

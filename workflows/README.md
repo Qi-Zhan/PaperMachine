@@ -11,6 +11,6 @@ effect runtime.
 Each source defines Agent classes with an explicit `access` profile and
 `@action` methods, plus exactly one async
 function decorated with `@workflow(...)`. Python owns ordinary control flow;
-Rust owns Sessions, Turns, tools, sandboxing, permissions, timers, human requests,
-events, and persistence. A Workflow stores its exact source and SHA-256, so
+Rust owns Sessions, Turns, tools, sandboxing, permissions, durable waits,
+human requests, Agent inputs, events, and persistence. A Workflow stores its exact source and SHA-256, so
 later edits cannot change the meaning of an existing run.

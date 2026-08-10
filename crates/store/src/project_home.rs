@@ -48,7 +48,7 @@ impl Store {
             ));
         }
         let session = self.get_session(session_id)?;
-        let html = html.trim();
+        let html = normalize_html_fragment(&html);
         if html.is_empty() {
             return Err(StoreError::Invariant(
                 "Project-home Action returned an empty page".to_string(),
@@ -75,7 +75,6 @@ impl Store {
             "revision": revision,
             "html": html,
         }))?;
-        let page = format!("<article>\n{html}\n</article>");
         let now = Utc::now();
         let source_file = store_artifact_file(
             &self.managed_root().join("artifacts"),
@@ -110,7 +109,7 @@ impl Store {
             Some(agent_id),
             artifact_id,
             "project-home.html",
-            page.as_bytes(),
+            html.as_bytes(),
         ) {
             Ok(file) => file,
             Err(error) => {
@@ -178,6 +177,12 @@ fn remove_artifact_file(store: &Store, artifact: &Artifact) {
     );
 }
 
+fn normalize_html_fragment(html: &str) -> &str {
+    let html = html.trim();
+    let html = html.strip_prefix("```html\n").unwrap_or(html).trim();
+    html.strip_suffix("```").unwrap_or(html).trim()
+}
+
 fn validate_html_fragment(html: &str) -> Result<(), StoreError> {
     if html.len() > MAX_PAGE_BYTES {
         return Err(StoreError::Invariant(format!(
@@ -189,67 +194,12 @@ fn validate_html_fragment(html: &str) -> Result<(), StoreError> {
             "Project-home HTML must not contain NUL bytes".to_string(),
         ));
     }
-    if !html.starts_with('<') || !html.ends_with('>') || html.contains("```") {
+    if !html.starts_with('<') || !html.ends_with('>') {
         return Err(StoreError::Invariant(
             "Project-home output must be only an HTML fragment".to_string(),
         ));
     }
-    let lower = html.to_ascii_lowercase();
-    let forbidden_tags = [
-        "article", "audio", "base", "button", "canvas", "embed", "form", "head", "html", "iframe",
-        "img", "input", "link", "math", "meta", "object", "option", "script", "select", "style",
-        "svg", "template", "textarea", "video",
-    ];
-    if let Some(tag) = forbidden_tags
-        .iter()
-        .find(|tag| contains_html_tag(&lower, tag))
-    {
-        return Err(StoreError::Invariant(format!(
-            "Project-home HTML contains forbidden <{tag}> markup"
-        )));
-    }
-    if lower.contains("style=")
-        || lower.contains("srcdoc=")
-        || lower.contains("javascript:")
-        || contains_event_handler(&lower)
-    {
-        return Err(StoreError::Invariant(
-            "Project-home HTML contains an unsafe attribute or URL".to_string(),
-        ));
-    }
     Ok(())
-}
-
-fn contains_html_tag(html: &str, tag: &str) -> bool {
-    let prefix = format!("<{tag}");
-    html.match_indices(&prefix).any(|(index, _)| {
-        html.as_bytes()
-            .get(index + prefix.len())
-            .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
-    })
-}
-
-fn contains_event_handler(html: &str) -> bool {
-    let bytes = html.as_bytes();
-    for index in 0..bytes.len().saturating_sub(3) {
-        if !bytes[index].is_ascii_whitespace()
-            || bytes[index + 1] != b'o'
-            || bytes[index + 2] != b'n'
-        {
-            continue;
-        }
-        let mut cursor = index + 3;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
-            cursor += 1;
-        }
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if cursor < bytes.len() && bytes[cursor] == b'=' {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -257,19 +207,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_invalid_markup() {
-        for html in [
-            "<script>alert(1)</script>",
-            "<img src=x>",
-            "<p onclick=alert(1)>x</p>",
-            "<a href=javascript:alert(1)>x</a>",
-            "```html\n<h1>Result</h1>\n```",
-            "Result without markup",
-        ] {
-            assert!(validate_html_fragment(html).is_err(), "accepted {html}");
-        }
+    fn normalizes_and_bounds_html_fragments() {
+        assert!(validate_html_fragment("Result without markup").is_err());
+        assert!(validate_html_fragment("<p>Result\0</p>").is_err());
         assert!(
-            validate_html_fragment("<h1>Result</h1><table><tr><td>1</td></tr></table>").is_ok()
+            validate_html_fragment(
+                "<style>table { border-collapse: collapse }</style><article><h1>Result</h1><p>Literal ```html text is harmless.</p><table style=\"border-collapse: collapse\"><tr><td>1</td></tr></table></article>"
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            normalize_html_fragment("```html\n<article>Result</article>\n```"),
+            "<article>Result</article>"
+        );
+        assert_eq!(
+            normalize_html_fragment("```html\n<article>Partial result</article>"),
+            "<article>Partial result</article>"
         );
     }
 }

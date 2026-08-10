@@ -791,6 +791,7 @@ body.sidebar-resizing * {
 .project-home-summary pre,
 .project-home-summary blockquote,
 .project-home-summary table,
+.project-home-summary figure,
 .project-home-summary details {
   margin: 13px 0 0;
 }
@@ -847,6 +848,28 @@ body.sidebar-resizing * {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
+}
+
+.project-home-summary figure {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.project-home-summary img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.project-home-summary figcaption {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 .project-home-summary th,

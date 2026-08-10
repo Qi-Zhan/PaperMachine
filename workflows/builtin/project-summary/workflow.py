@@ -37,35 +37,30 @@ async def main(ctx):
     cursor = None
 
     while True:
-        changes = await ctx.project.changes(after_cursor=cursor)
-        next_cursor = changes["cursor"]
-        if cursor is not None and not changes["changed"]:
-            cursor = next_cursor
-            if changes["has_more"]:
-                continue
-            await wait(
-                minutes=interval_minutes,
-                name="project-summary-refresh",
-            )
-            continue
-        action = summarizer.maintain_project_home(changes["resources"])
-        await action
-        next_refresh_count = refresh_count + 1
-        artifact = await publish_project_home(
-            action=action,
-            metadata={
-                "project_cursor": next_cursor,
-                "refresh_count": next_refresh_count,
-                "scheduled": interval_minutes > 0,
-            },
+        changes = await ctx.project.changes(
+            after_cursor=cursor,
+            exclude_current_program=True,
         )
-        refresh_count = next_refresh_count
-        artifact_id = artifact.id
+        next_cursor = changes["cursor"]
+        if changes["changed"]:
+            action = summarizer.maintain_project_home(changes["resources"])
+            await action
+            next_refresh_count = refresh_count + 1
+            artifact = await publish_project_home(
+                action=action,
+                metadata={
+                    "project_cursor": next_cursor,
+                    "refresh_count": next_refresh_count,
+                    "scheduled": interval_minutes > 0,
+                },
+            )
+            refresh_count = next_refresh_count
+            artifact_id = artifact.id
         cursor = next_cursor
-        if interval_minutes <= 0:
-            return {"artifact_id": artifact_id, "refresh_count": refresh_count}
         if changes["has_more"]:
             continue
+        if interval_minutes <= 0:
+            return {"artifact_id": artifact_id, "refresh_count": refresh_count}
         await wait(
             minutes=interval_minutes,
             name="project-summary-refresh",

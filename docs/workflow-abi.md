@@ -11,12 +11,12 @@ from papermachine import Agent, action, together, workflow
 
 
 class Researcher(Agent):
-    access = "research"
+    access = "model_only"
 
     @action(
         search_context_size="low",
         reasoning_effort="high",
-        tools=["read_file", "write_file", "exec_command", "fetch_url"],
+        tools=[],
     )
     async def investigate(self, question: str, perspective: str):
         """Find evidence, counterevidence, provenance, and uncertainty."""
@@ -75,11 +75,34 @@ The runtime supplies:
 | `ctx.params` | launch parameters validated before scheduling |
 | `ctx.trigger` | `manual` or source-Session `user` provenance |
 | `ctx.session_id` | current Session ID |
-| `ctx.project` | changed-resource cursor API |
+| `ctx.project` | paged Project entity-snapshot API |
 
-Request and changed resource URIs become model data only when Workflow code
-passes them to an Action. Project contents require an explicit `read_resource`
-tool call.
+Request and Project snapshots become model data only when Workflow code passes
+them to an Action. No Project content is injected into ordinary Agents.
+
+`await ctx.project.changes(after_cursor=cursor, exclude_current_program=False)`
+returns:
+
+```json
+{
+  "cursor": "opaque-host-cursor",
+  "changed": true,
+  "has_more": false,
+  "resources": [{
+    "kind": "turn",
+    "id": "...",
+    "session_id": "...",
+    "deleted": false,
+    "data": {}
+  }]
+}
+```
+
+Pages are derived from the change log rather than stored as another projection.
+Large text Artifacts span pages; binary Artifacts expose metadata only. Setting
+`exclude_current_program=True` skips historical runs owned by the caller's
+WorkflowProgram before materializing snapshots; its cursor cannot be reused
+with another query.
 
 ## Public surface
 
@@ -91,7 +114,7 @@ tool call.
 | `await together(...)` | explicit concurrency; direct same-Agent duplicates are rejected |
 | `await ask_human(...)` | durable, schema-validated human input |
 | `await wait(...)` | durable deadline derived from the effect start time |
-| `await ctx.project.changes(...)` | cursor and changed Project resource URIs |
+| `await ctx.project.changes(...)` | opaque cursor and bounded current Project entity snapshots |
 | `await publish_artifact(...)` | deterministic Project-managed text Artifact |
 | `await publish_project_home(action=call)` | publish that exact completed Action's HTML result |
 
@@ -107,22 +130,26 @@ environment access, reflection, and dynamic code are outside the ABI.
 
 `@action` accepts a prompt string or docstring plus:
 
-- `tools=[...]`: complete static local-tool request; default `[]`;
+- `tools=None` (the omitted default): access-allowed native and collaboration tools;
+- `tools=[]`: empty local Registry;
+- `tools=[...]`: exact static subset request;
 - `search_context_size`: hosted search retrieval size;
 - `reasoning_effort`: per-Action model compute override;
 - `finalize`: optional `after_search` or `always` no-tool finalization Turn.
 
 Tool names must be static, non-empty, and unique. Rust rejects unknown tools,
-filters Workspace tools by access, admits Project tools only for explicitly
-declaring Actions, then stores the exact definitions and hash in the
-Turn. Hosted web search remains provider-controlled and is not a local tool
-name.
+filters native tools by access, removes `spawn_agent` from child Agents, then
+stores the exact definitions and hash in the Turn. The native tools are
+`exec_command`, `write_stdin`, and `apply_patch`; collaboration tools are
+`list_agents`, `send_message`, `wait_agent`, `spawn_agent`, and
+`interrupt_agent`. Hosted web search remains provider-controlled and is not a
+local tool name.
 
 Return annotations `dict`, `list`, `bool`, `int`, and `float` request typed JSON
 parsing. Repair uses an empty Registry.
 
-An Agent declares one of `model_only`, `read_only`, `workspace`, `research`, or
-`full_access`. The launch access is a hard ceiling; a Session-origin launch is
+An Agent declares one of `model_only`, `read_only`, `workspace`, or
+`full_access`; the default is `workspace`. The launch access is a hard ceiling; a Session-origin launch is
 also bounded by that Session. Agent class overrides cannot widen it. Each Turn
 keeps the access snapshot captured at creation.
 
@@ -130,12 +157,28 @@ Agent `model=""` inherits the Session's default model profile. A non-empty
 value selects another configured profile. Route resolution and all non-secret
 provider settings are frozen in `ModelRouteSnapshot` before the Turn exists.
 
+Collaboration calls are model tools, not Python Workflow functions:
+
+```text
+list_agents()
+send_message(agent_id, message, start_turn=false)
+wait_agent(action_invocation_ids, timeout_ms?)
+spawn_agent(task, name?, access?)
+interrupt_agent(agent_id)
+```
+
+Queue-only messages enter durable AgentInput. A started message or spawn creates
+an ordinary `agent_task` Action in the same ActionRunner used by Workflow
+Actions. `wait_agent` stores no second wait record. A child inherits its
+parent's model, prompt, role, class, skills, and same-or-lower access; spawn
+depth is one.
+
 ## Effect wire protocol
 
 The isolated runner reserves stdout for newline-delimited JSON:
 
 ```json
-{"id":"root/together:0/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_id":"...","action_name":"investigate","arguments":{"question":"..."},"tools":["read_file"]}}
+{"id":"root/together:0/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_id":"...","action_name":"investigate","arguments":{"question":"..."},"tool_policy":[],"web_search_context_size":"low"}}
 {"id":"root/together:0/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
 ```
 

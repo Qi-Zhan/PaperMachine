@@ -659,10 +659,14 @@ class ProjectContext:
         self,
         *,
         after_cursor: str | None = None,
+        exclude_current_program: bool = False,
     ) -> dict[str, Any]:
         return await _effect(
             "project_changes",
-            {"after_cursor": after_cursor},
+            {
+                "after_cursor": after_cursor,
+                "exclude_current_program": exclude_current_program,
+            },
         )
 
 

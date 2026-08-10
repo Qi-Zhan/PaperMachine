@@ -714,7 +714,7 @@ fn project_changes_page_current_entities_and_chunk_text_artifacts() {
     let mut seen = Vec::new();
     loop {
         let page = store
-            .project_snapshot_changes(project.id, summary.id, cursor.as_deref())
+            .project_snapshot_changes(project.id, summary.id, cursor.as_deref(), false)
             .expect("Project changes should page");
         assert!(serde_json::to_vec(&page).expect("page should encode").len() <= 1024 * 1024);
         cursor = Some(page.cursor);
@@ -763,14 +763,52 @@ fn project_changes_page_current_entities_and_chunk_text_artifacts() {
     assert!(binary.data["content"].is_null());
 
     let incremental = store
-        .project_snapshot_changes(project.id, summary.id, cursor.as_deref())
+        .project_snapshot_changes(project.id, summary.id, cursor.as_deref(), false)
         .expect("stable cursor should resume");
     assert!(!incremental.changed);
     assert!(!incremental.has_more);
     assert!(incremental.resources.is_empty());
     assert!(
         store
-            .project_snapshot_changes(project.id, summary.id, Some("not-a-cursor"))
+            .project_snapshot_changes(project.id, summary.id, Some("not-a-cursor"), false)
+            .is_err()
+    );
+}
+
+#[test]
+fn project_changes_can_exclude_prior_runs_of_the_calling_program() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let store = Store::open_in_memory(directory.path().join("managed")).expect("store should open");
+    let project = project(&store, &directory, "changes-program-filter");
+    let previous = create_root_session(&store, project.id, "Previous run", AccessPreset::ModelOnly);
+    store
+        .complete_session(
+            previous.id,
+            json!({"home": "generated summary context".repeat(60_000)}),
+        )
+        .expect("large prior Summary Session should complete");
+    let caller = create_root_session(&store, project.id, "Current run", AccessPreset::ModelOnly);
+
+    let mut cursor = None;
+    let mut seen = Vec::new();
+    loop {
+        let page = store
+            .project_snapshot_changes(project.id, caller.id, cursor.as_deref(), true)
+            .expect("same-program runs should be skipped before materialization");
+        cursor = Some(page.cursor);
+        seen.extend(page.resources);
+        if !page.has_more {
+            break;
+        }
+    }
+
+    assert!(seen.iter().any(|resource| resource.kind == "project"));
+    assert!(!seen.iter().any(|resource| {
+        resource.session_id == Some(previous.id) || resource.session_id == Some(caller.id)
+    }));
+    assert!(
+        store
+            .project_snapshot_changes(project.id, caller.id, cursor.as_deref(), false)
             .is_err()
     );
 }

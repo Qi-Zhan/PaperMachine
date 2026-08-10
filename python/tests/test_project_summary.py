@@ -30,45 +30,58 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                     "access": "model_only",
                 }
             if kind == "project_changes":
-                self.assertIsNone(payload["after_cursor"])
+                self.assertTrue(payload["exclude_current_program"])
+                cursor = payload["after_cursor"]
+                self.assertIn(cursor, (None, "pc1_snapshot", "pc2_snapshot"))
+                page = {None: 1, "pc1_snapshot": 2, "pc2_snapshot": 3}[cursor]
+                if page == 3:
+                    return {
+                        "cursor": "pc3_snapshot",
+                        "has_more": False,
+                        "changed": False,
+                        "resources": [],
+                    }
                 return {
-                    "cursor": "pc1_snapshot",
-                    "has_more": False,
+                    "cursor": f"pc{page}_snapshot",
+                    "has_more": True,
                     "changed": True,
                     "resources": [{
-                        "kind": "project",
-                        "id": "project-1",
-                        "session_id": None,
+                        "kind": "project" if page == 1 else "session",
+                        "id": f"resource-{page}",
+                        "session_id": None if page == 1 else "session-2",
                         "deleted": False,
-                        "data": {"id": "project-1", "name": "PaperMachine"},
+                        "data": {"page": page},
                     }],
                 }
             if kind == "invoke_action":
+                page = payload["arguments"]["changed_resources"][0]["data"]["page"]
                 self.assertEqual(
                     payload["arguments"]["changed_resources"],
                     [{
-                        "kind": "project",
-                        "id": "project-1",
-                        "session_id": None,
+                        "kind": "project" if page == 1 else "session",
+                        "id": f"resource-{page}",
+                        "session_id": None if page == 1 else "session-2",
                         "deleted": False,
-                        "data": {"id": "project-1", "name": "PaperMachine"},
+                        "data": {"page": page},
                     }],
                 )
                 self.assertEqual(payload["action_name"], "maintain_project_home")
                 self.assertEqual(payload["tool_policy"], [])
                 self.assertIsNone(payload["response_format"])
                 return {
-                    "action_invocation_id": "invocation-summary",
-                    "output": "<h1>PaperMachine</h1>",
+                    "action_invocation_id": f"invocation-summary-{page}",
+                    "output": f"<h1>PaperMachine page {page}</h1>",
                 }
             if kind == "publish_project_home":
+                page = payload["metadata"]["refresh_count"]
                 self.assertEqual(
-                    payload["action_invocation_id"], "invocation-summary"
+                    payload["action_invocation_id"], f"invocation-summary-{page}"
                 )
-                self.assertEqual(payload["metadata"]["project_cursor"], "pc1_snapshot")
-                self.assertEqual(payload["metadata"]["refresh_count"], 1)
+                self.assertEqual(
+                    payload["metadata"]["project_cursor"], f"pc{page}_snapshot"
+                )
                 return {
-                    "artifact_id": "artifact-summary",
+                    "artifact_id": f"artifact-summary-{page}",
                     "name": "project-home.html",
                     "kind": "report",
                     "media_type": "text/html; charset=utf-8",
@@ -88,7 +101,7 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(output, {"artifact_id": "artifact-summary", "refresh_count": 1})
+        self.assertEqual(output, {"artifact_id": "artifact-summary-2", "refresh_count": 2})
         self.assertEqual(
             [kind for kind, _ in effects],
             [
@@ -96,6 +109,10 @@ class ProjectSummaryWorkflowTests(unittest.TestCase):
                 "create_agent",
                 "invoke_action",
                 "publish_project_home",
+                "project_changes",
+                "invoke_action",
+                "publish_project_home",
+                "project_changes",
             ],
         )
 

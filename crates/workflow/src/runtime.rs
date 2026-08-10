@@ -888,6 +888,7 @@ impl SessionEffectContext {
                     session.project_id,
                     session_id,
                     payload.after_cursor.as_deref(),
+                    payload.exclude_current_program,
                 )?)
                 .map_err(SessionExecutionError::from)
             })
@@ -1434,6 +1435,8 @@ struct AskHumanEffect {
 struct ProjectChangesEffect {
     #[serde(default)]
     after_cursor: Option<String>,
+    #[serde(default)]
+    exclude_current_program: bool,
 }
 
 #[derive(Debug, Deserialize)]
