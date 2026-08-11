@@ -44,28 +44,30 @@ const MODEL_PROFILE: &str = "process-test-model";
 const PROVIDER_KEY_ENV: &str = "PAPERMACHINE_PROCESS_TEST_KEY";
 const WAIT_LIMIT: Duration = Duration::from_secs(20);
 
-const WORKFLOW_SOURCE: &str = r#"from papermachine import Agent, action, workflow
+const WORKFLOW_SOURCE: &str = r#"version 1;
 
+agent ProcessWorker {
+    access = workspace;
+    role = "process recovery test worker";
+    system = "";
+    action work(task) {
+        tools = ["exec_command"];
+        prompt = "Execute the supplied deterministic process recovery test task.";
+    }
+}
 
-class ProcessWorker(Agent):
-    access = "workspace"
-    role = "process recovery test worker"
-
-    @action(tools=["exec_command"])
-    async def work(self, task: str):
-        """Execute the supplied deterministic process recovery test task."""
-
-
-@workflow(
-    slug="process-recovery",
-    name="Process recovery",
-    description="Exercise one deterministic Agent Action across a process restart.",
-    params_schema={"type": "object", "properties": {}, "additionalProperties": False},
-)
-async def main(ctx):
-    worker = ProcessWorker(name="Process worker")
-    result = await worker.work(ctx.request)
-    return {"result": str(result)}
+workflow process_recovery {
+    slug = "process-recovery";
+    name = "Process recovery";
+    description = "Exercise one deterministic Agent Action across a process restart.";
+    request = required;
+    params {}
+    run(ctx) {
+        let worker = ProcessWorker(key = "main", name = "Process worker");
+        let result = await worker.work(task = ctx.request);
+        return {result};
+    }
+}
 "#;
 
 #[derive(Clone)]
@@ -571,7 +573,6 @@ fn prepare_resource_root(root: &Path) {
         &repository.join("workflows/builtin"),
         &root.join("workflows/builtin"),
     );
-    copy_directory(&repository.join("python"), &root.join("python"));
     let web_dist = root.join("apps/web/dist");
     std::fs::create_dir_all(&web_dist).expect("web dist should be created");
     std::fs::write(

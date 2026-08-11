@@ -37,21 +37,24 @@ impl WorkflowGenerator {
                 "workflow description must contain 1-12000 characters".to_string(),
             ));
         }
-        let instructions = r#"You design PaperMachine Python workflow DSL programs. Return only executable workflow.py source, without Markdown fences or explanation.
+        let instructions = r#"You design PaperMachine Workflow Language v1 programs. Return only executable workflow.pm source, without Markdown fences or explanation.
 
-Available API:
-- Agent base class; class attributes: role, system_prompt, model, skills, access.
-- @action, @action("prompt"), or @action(search_context_size="low", reasoning_effort="high", finalize="after_search", tools=[...]) on async Agent methods. Omitting `tools` uses collaboration tools plus the native tools allowed by the Agent access profile; `tools=[]` disables all local tools; a non-empty list selects an exact subset. Collaboration tools are list_agents, send_message, wait_agent, spawn_agent, and interrupt_agent. Native tools are exec_command, write_stdin, and apply_patch. Hosted web search remains separate and requires search_context_size. The method body is declarative; its docstring/prompt and arguments become a Session Turn. An Action continues its model/tool loop until the model returns a terminal answer, the user interrupts it, or runtime infrastructure fails. Use a model_only Agent and `tools=[]` for reasoning only over supplied evidence. Use finalize="after_search" when a hosted-search Action itself must return a final deliverable. Use finalize="always" for an unconstrained typed work Turn with a no-tool, no-search finalizer fallback.
-- Annotate an action with -> dict, -> list, -> bool, -> int, or -> float when workflow control flow needs parsed JSON rather than raw text.
-- @workflow(slug=..., name=..., description=..., request_mode="required", params_schema={...}) on exactly one async main(ctx). Use request_mode="none" only for a persistent interaction that deliberately starts without a user task and obtains each user message through ask_human.
-- ctx.request is the concrete per-Session task. Also available: ctx.instructions, ctx.params, ctx.trigger, ctx.session_id, and await ctx.project.changes(after_cursor=...). The changes effect returns an opaque cursor and bounded current Project entity snapshots; Project contents enter a model only when Workflow code passes those snapshots to an Action.
-- await together(a.action(...), b.action(...)) for explicit concurrency. Never put two actions from the same Agent in one together().
-- await ask_human(question, response_schema={...}, agent=optional_agent).
-- await wait(seconds=... or minutes=..., name="...") for a sequential durable deadline.
-- await publish_artifact(name, text, kind="report", media_type="text/html; charset=utf-8", metadata={...}, agent=optional_agent) for durable text output. Generated HTML must be self-contained and script-free.
-- await publish_project_home(action=completed_action, metadata={...}) publishes that Action's complete self-contained HTML document as the Project home.
+The language is a single-file, Rust-like dynamic workflow language:
+- Start with `version 1;`. There are no imports, modules, macros, eval, arbitrary I/O, recursion, closures, higher-order functions, or try/catch.
+- Declare boundary schemas with `schema Name = object { field: string, optional?: list(string) };`. Available schema forms are any, string, bool, int, number, list(T), map(T), object {...}, enum[...], model_profile, and access. Schema options include default, title, description, min, max, min_len, and max_len.
+- Declare `agent Name { access = workspace; role = "..."; system = "..."; action act(arg) { prompt = "..."; } }`. Action options are tools, search_context, reasoning_effort, finalize, and result. Omitting tools uses the normal allowed tools; `tools = []` disables local tools. Hosted search is selected with search_context = low|medium|high. Use `finalize = after_search` for a search-backed final deliverable and `finalize = if_needed` with an object/list result schema for a normal work report plus typed control result.
+- Declare exactly one `workflow slug_name { slug = "optional-kebab-slug"; name = "..."; description = "..."; request = required|none; params { ... } run(ctx) { ... } }`.
+- Variables are dynamic: `let` is not rebindable, `var` is. Lists and objects are immutable; use append, extend, and update to return new values. Conditions are strict booleans and missing fields fail.
+- Control flow includes if/else, match with a `_` arm, finite for, while, loop, break, continue, return, and await. Every while/loop cycle must pass a durable await.
+- Top-level `fn helper(args) { ... }` may await effects but cannot recurse.
+- Agent construction uses named options `key`, `name`, `role`, `system`, `model`, `skills`, and `access`. Identity is template plus key; use stable unique scalar keys for dynamic instances.
+- Invoke Actions with `let result = await agent.action(arg = value);`.
+- Fixed concurrency is `parallel { primary => { ... }, challenge => { ... } }`. Dynamic concurrency is `parallel for item in items key item.id { ... }`; it returns results in input order. Never run two Actions on one Agent concurrently.
+- Durable builtins are `await ask_human(...)`, `await wait(...)`, `await ctx.project.changes(...)`, `await publish_artifact(...)`, and `await publish_home(action = completed_action)`.
+- Pure builtins: len, range, enumerate, zip, min, max, clamp, get, append, extend, update, slice, trim, string, int, number, is_*, assert, fail.
+- ctx exposes request, instructions, params, trigger, session_id, and project. Project contents enter a model only when the Workflow passes them to an Action.
 
-Use ordinary Python if/for/while for control logic. Human and deadline waits are durable. All imports must be a single `from papermachine import ...` statement. Do not import or access files, network, subprocesses, environment variables, reflection, MCP, plugins, or external libraries from Workflow Python. Agent access defaults to `workspace`; explicitly use `model_only` for evaluators and writers that need only supplied evidence, `read_only` when commands must not write, and `full_access` only when unrestricted host writes or shell network are truly required. Prefer 2-4 clearly related Agent classes and keep the program understandable to a researcher editing it."#;
+Prefer 2-4 clearly related Agent templates and ordinary control flow. Use model_only for evaluators and writers over supplied evidence, read_only when commands may inspect but not write, workspace for normal file work, and full_access only when truly required."#;
         let prompt = format!(
             "Create a workflow for this request:\n{description}\n\nRequested name: {}\nRequested slug: {}",
             request.name.as_deref().unwrap_or("choose a concise name"),

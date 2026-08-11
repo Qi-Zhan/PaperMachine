@@ -8,6 +8,7 @@ use papermachine_protocol::ModelEvent;
 use papermachine_protocol::ModelInputItem;
 use papermachine_protocol::ModelRequest;
 use papermachine_protocol::TokenUsage;
+use serde_json::json;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DemoModelClient;
@@ -17,6 +18,10 @@ impl ModelClient for DemoModelClient {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
         if request.instructions.contains("Maintain the Project home") {
             return Ok(stream::iter(project_home_response().into_iter().map(Ok)).boxed());
+        }
+        if let Some(response_format) = &request.response_format {
+            let output = demo_structured_response(&response_format.name);
+            return Ok(completed_text(output));
         }
         let prompt = request
             .input
@@ -29,25 +34,61 @@ impl ModelClient for DemoModelClient {
             .unwrap_or_default();
         let output = if request
             .instructions
-            .contains("PaperMachine Python workflow DSL")
+            .contains("PaperMachine Workflow Language v1")
         {
             generated_workflow(prompt)
         } else {
             demo_research_response(prompt)
         };
-        Ok(stream::iter([
-            Ok(ModelEvent::OutputTextDelta { delta: output }),
-            Ok(ModelEvent::Completed {
-                usage: TokenUsage {
-                    input_tokens: 240,
-                    output_tokens: 180,
-                    cached_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                },
-            }),
-        ])
-        .boxed())
+        Ok(completed_text(output))
     }
+}
+
+fn completed_text(output: String) -> ModelStream {
+    stream::iter([
+        Ok(ModelEvent::OutputTextDelta { delta: output }),
+        Ok(ModelEvent::Completed {
+            usage: TokenUsage {
+                input_tokens: 240,
+                output_tokens: 180,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+            },
+        }),
+    ])
+    .boxed()
+}
+
+fn demo_structured_response(name: &str) -> String {
+    let value = match name {
+        "work_result" => json!({
+            "message": "Demo mode completed and verified the requested runtime exercise.",
+            "status": "complete"
+        }),
+        "plan_result" => json!({
+            "deliverable": "A bounded demo synthesis",
+            "acceptance_criteria": ["Run two independent routes", "Preserve the demo evidence boundary"],
+            "routes": [
+                {"key": "primary", "name": "Primary route", "objective": "Exercise the primary evidence worldline"},
+                {"key": "challenge", "name": "Challenge route", "objective": "Exercise the counterevidence worldline"}
+            ],
+            "verification_notes": ["Demo mode validates orchestration, not external evidence"]
+        }),
+        "assess_result" => json!({
+            "complete": true,
+            "rationale": "Both demo routes completed; no evidence-bearing claim is made.",
+            "supported_conclusions": ["The Workflow runtime completed both named routes"],
+            "unresolved_gaps": ["External evidence was not collected in demo mode"],
+            "contradictions": [],
+            "follow_ups": []
+        }),
+        "review_draft_result" => json!({
+            "complete": true,
+            "feedback": "The draft preserves the demo evidence boundary."
+        }),
+        _ => json!({}),
+    };
+    serde_json::to_string(&value).expect("demo structured response should serialize")
 }
 
 fn project_home_response() -> Vec<ModelEvent> {
@@ -59,7 +100,7 @@ fn project_home_response() -> Vec<ModelEvent> {
     };
     vec![
         ModelEvent::OutputTextDelta {
-            delta: "<header><h1>Project overview</h1><p>Demo mode verifies the Project resource and publication path without claiming evidence-bearing research results.</p></header><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section>".to_string(),
+            delta: "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Project overview</title></head><body><header><h1>Project overview</h1><p>Demo mode verifies the Project resource and publication path without claiming evidence-bearing research results.</p></header><section><h2>Next action</h2><p>Run with a configured provider to produce a Project-specific evidence summary.</p></section></body></html>".to_string(),
         },
         ModelEvent::Completed { usage },
     ]
@@ -88,44 +129,48 @@ fn generated_workflow(prompt: &str) -> String {
         .filter(|value| !value.starts_with("derive "))
         .unwrap_or("generated-evidence-review");
     format!(
-        r#"from papermachine import Agent, action, together, workflow
+        r#"version 1;
 
+agent EvidenceResearcher {{
+    access = model_only;
+    role = "evidence collection";
+    system = "Find concrete support and preserve uncertainty.";
+    action investigate(question, perspective) {{
+        prompt = "Investigate the question from the requested perspective and report evidence, counterevidence, and limitations.";
+    }}
+}}
 
-class EvidenceResearcher(Agent):
-    access = "model_only"
-    role = "evidence collection"
-    system_prompt = "Find concrete support and preserve uncertainty."
+agent Reviewer {{
+    access = model_only;
+    role = "critical synthesis";
+    system = "Compare independent findings and keep conclusions bounded.";
+    action review(question, findings) {{
+        prompt = "Compare the findings and produce a bounded synthesis with explicit disagreements and missing evidence.";
+    }}
+}}
 
-    @action
-    async def investigate(self, question: str, perspective: str):
-        """Investigate the question from the requested perspective and report evidence, counterevidence, and limitations."""
-
-
-class Reviewer(Agent):
-    access = "model_only"
-    role = "critical synthesis"
-
-    @action
-    async def review(self, question: str, findings: list[str]):
-        """Compare the findings and produce a bounded synthesis with explicit disagreements and missing evidence."""
-
-
-@workflow(
-    slug={requested_slug:?},
-    name={requested_name:?},
-    description="Run two independent evidence routes and synthesize their disagreements.",
-    params_schema={{"type": "object", "additionalProperties": False}},
-)
-async def main(ctx):
-    primary = EvidenceResearcher(name="Primary evidence")
-    challenge = EvidenceResearcher(name="Challenge", role="counterevidence")
-    reviewer = Reviewer(name="Review")
-    findings = await together(
-        primary.investigate(ctx.request, "primary evidence"),
-        challenge.investigate(ctx.request, "counterevidence and boundary cases"),
-    )
-    summary = await reviewer.review(ctx.request, list(findings))
-    return {{"summary": summary}}
+workflow generated {{
+    slug = {requested_slug:?};
+    name = {requested_name:?};
+    description = "Run two independent evidence routes and synthesize their disagreements.";
+    request = required;
+    params {{}}
+    run(ctx) {{
+        let findings = parallel {{
+            primary => {{
+                let worker = EvidenceResearcher(key = "primary", name = "Primary evidence");
+                await worker.investigate(question = ctx.request, perspective = "primary evidence")
+            }},
+            challenge => {{
+                let worker = EvidenceResearcher(key = "challenge", name = "Challenge");
+                await worker.investigate(question = ctx.request, perspective = "counterevidence and boundary cases")
+            }},
+        }};
+        let reviewer = Reviewer(key = "main", name = "Review");
+        let summary = await reviewer.review(question = ctx.request, findings = [findings.primary, findings.challenge]);
+        return {{summary}};
+    }}
+}}
 "#
     )
 }

@@ -1,235 +1,96 @@
-# Python Workflow ABI
+# Durable Workflow contract
 
-PaperMachine WorkflowPrograms are isolated async Python programs. Python describes
-control flow; Rust owns every durable mutation, model Turn, permission check,
-and Project resource.
+This document defines the v1 boundary between Workflow Language source and the
+PaperMachine host.
 
-## Minimal source
+## Program snapshot
 
-```python
-from papermachine import Agent, action, together, workflow
+Saving and starting compile source immediately. A `WorkflowProgramManifest`
+contains stable ID, slug, name, description, language version, request mode, and
+params JSON Schema. A Session freezes:
 
+- owner and source kind;
+- managed definition path ending in `workflow.pm`;
+- source and source SHA-256;
+- manifest and language version;
+- canonical serialized IR SHA-256.
 
-class Researcher(Agent):
-    access = "model_only"
+Recovery recompiles from the frozen source. Source hash, language version,
+manifest, and IR hash must all match. v1 intentionally has no legacy document
+decoder or migration execution path.
 
-    @action(
-        search_context_size="low",
-        reasoning_effort="high",
-        tools=[],
-    )
-    async def investigate(self, question: str, perspective: str):
-        """Find evidence, counterevidence, provenance, and uncertainty."""
+## Compilation
 
+The compiler consists of a UTF-8 lexer, recursive-descent statement parser,
+Pratt expression parser, span-carrying AST, semantic checker, and canonical IR
+serializer. Diagnostics report one-based line and column. Node IDs follow parsed
+semantic order; source spans are excluded from the canonical hash, so formatting
+alone does not alter IR identity.
 
-class Synthesizer(Agent):
-    access = "model_only"
+Top-level declarations are schemas, Agent templates, local functions, and one
+Workflow. Functions may perform effects but cannot recurse or escape as values.
+The call graph is closed in one file.
 
-    @action(tools=[])
-    async def synthesize(self, question: str, findings: list[str]):
-        """Compare the findings and return a bounded conclusion."""
+## Values and boundaries
 
+Runtime values are `null`, `bool`, `int`, `number`, `string`, immutable list and
+object values, plus unforgeable Agent, Action-result, HumanMessage, and Artifact
+handles. Opaque provenance survives member/index access and collection joins but
+is stripped only when an ordinary JSON result crosses the Session output
+boundary.
 
-@workflow(
-    slug="parallel-review",
-    name="Parallel review",
-    description="Research in parallel, then synthesize.",
-    params_schema={"type": "object", "additionalProperties": False},
-)
-async def main(ctx):
-    support = Researcher(name="Support")
-    limits = Researcher(name="Limits")
-    findings = await together(
-        support.investigate(ctx.request, "support"),
-        limits.investigate(ctx.request, "limitations"),
-    )
-    return {
-        "summary": await Synthesizer(name="Synthesis").synthesize(
-            ctx.request, list(findings)
-        )
-    }
-```
+Schemas are limited to `any`, scalar types, list, map, object, and scalar enum,
+with optional/default fields and length/numeric constraints. The same validator
+serves params, structured Action output, and HumanRequest answers.
 
-An Action body is declarative. Awaiting it asks Rust to create the
-ActionInvocation, ActionAttempt, and Turn for that Agent in the current
-Session.
+## Effects and replay
 
-## Manifest and context
+The interpreter restarts from root. Local environments are not persisted.
+Durable effects use a path composed from IR Node IDs, function call sites, loop
+iterations, and parallel branch identity. Dynamic branch keys are canonical
+scalars and hashed into paths; completion order never changes identity.
 
-Exactly one async entrypoint has literal `@workflow(...)` metadata:
+`session_effects` stores effect kind, payload, request hash, status, result, and
+error. A completed effect replays its result. A failed effect replays its failure.
+A started human/deadline wait suspends. Same path plus changed request fails
+closed.
 
-| Field | Contract |
-|---|---|
-| `slug` | lowercase kebab-case catalog key |
-| `name` | user-facing name |
-| `description` | short purpose |
-| `request_mode` | `"required"` by default; `"none"` for interaction driven by `ask_human` |
-| `params_schema` | supported JSON Schema subset; `format: "model-profile"` selects configured profiles |
+The host effects are Agent creation/access, Action invocation, human request,
+deadline wait, Project changes, Artifact publication, and Project Home
+publication. Workflow completion is the interpreter return value, not an effect.
 
-The runtime supplies:
+## Action contract
 
-| Value | Meaning |
-|---|---|
-| `ctx.request` | immutable launch task, or empty for `request_mode="none"` |
-| `ctx.instructions` | optional Session-wide guidance; also a Session prompt layer |
-| `ctx.params` | launch parameters validated before scheduling |
-| `ctx.trigger` | `manual` or source-Session `user` provenance |
-| `ctx.session_id` | current Session ID |
-| `ctx.project` | paged Project entity-snapshot API |
+An Action declaration fixes prompt, parameters, tool policy, search context,
+reasoning effort, finalization policy, and optional result schema. Awaiting an
+Action creates a durable ActionInvocation on the shared ActionRunner.
 
-Request and Project snapshots become model data only when Workflow code passes
-them to an Action. No Project content is injected into ordinary Agents.
+- no result schema: return terminal text;
+- ordinary structured result: use the schema as model response format and
+  validate the returned JSON;
+- `if_needed`: run the normal tool-capable work Turn with a generated typed
+  trailer, parse whole/fenced/first structured JSON, then at most one no-tool
+  finalizer and two low-reasoning repairs;
+- `after_search`: run one no-tool final deliverable Turn only when hosted search
+  was actually used.
 
-`await ctx.project.changes(after_cursor=cursor, exclude_current_program=False)`
-returns:
+All structured paths use the identical schema. Exhausting repairs fails the
+Action. Await returns the dynamic value while retaining its exact invocation ID,
+which is required by Project Home publication.
 
-```json
-{
-  "cursor": "opaque-host-cursor",
-  "changed": true,
-  "has_more": false,
-  "resources": [{
-    "kind": "turn",
-    "id": "...",
-    "session_id": "...",
-    "deleted": false,
-    "data": {}
-  }]
-}
-```
+An opaque HumanMessage may be the sole argument of a direct-human Action. The
+host verifies Session, Agent, answered request, argument name, and exact answer
+before creating the Turn.
 
-Pages are derived from the change log rather than stored as another projection.
-Large text Artifacts span pages; binary Artifacts expose metadata only. Setting
-`exclude_current_program=True` skips historical runs owned by the caller's
-WorkflowProgram before materializing snapshots; its cursor cannot be reused
-with another query.
+## Concurrency and suspension
 
-## Public surface
+Fixed parallel branches return a name-keyed object. `parallel for` requires
+unique scalar keys and returns a list in input order. Branches clone local
+environments and merge only through results. Different Agents may run
+concurrently; one Agent cannot run two Actions concurrently. The shared
+Workspace is not filesystem-isolated.
 
-| Primitive | Meaning |
-|---|---|
-| `Agent(...)` | local declaration; first remote use creates one durable Agent under the current Session |
-| `await agent.set_access(...)` | change access between Turns; upgrades within the Session ceiling require human approval |
-| `@action(...)` | declare a model Action, prompt, options, typed result, and complete local tool list |
-| `await together(...)` | explicit concurrency; direct same-Agent duplicates are rejected |
-| `await ask_human(...)` | durable, schema-validated human input |
-| `await wait(...)` | durable deadline derived from the effect start time |
-| `await ctx.project.changes(...)` | opaque cursor and bounded current Project entity snapshots |
-| `await publish_artifact(...)` | deterministic Project-managed text Artifact |
-| `await publish_project_home(action=call)` | publish that exact completed Action's HTML result |
-
-The only exports are `Agent`, `ArtifactRef`, `HumanMessage`, `ProjectContext`,
-`SessionContext`, `action`, `ask_human`, `publish_artifact`,
-`publish_project_home`, `together`, `wait`, and `workflow`.
-
-Ordinary `if`, `for`, `while`, functions, collections, and exceptions are the
-control language. Arbitrary imports, filesystem/network access, subprocesses,
-environment access, reflection, and dynamic code are outside the ABI.
-
-## Action options and tools
-
-`@action` accepts a prompt string or docstring plus:
-
-- `tools=None` (the omitted default): access-allowed native and collaboration tools;
-- `tools=[]`: empty local Registry;
-- `tools=[...]`: exact static subset request;
-- `search_context_size`: hosted search retrieval size;
-- `reasoning_effort`: per-Action model compute override;
-- `finalize`: optional `after_search` or `always` no-tool finalization Turn.
-
-Tool names must be static, non-empty, and unique. Rust rejects unknown tools,
-filters native tools by access, removes `spawn_agent` from child Agents, then
-stores the exact definitions and hash in the Turn. The native tools are
-`exec_command`, `write_stdin`, and `apply_patch`; collaboration tools are
-`list_agents`, `send_message`, `wait_agent`, `spawn_agent`, and
-`interrupt_agent`. Hosted web search remains provider-controlled and is not a
-local tool name.
-
-Return annotations `dict`, `list`, `bool`, `int`, and `float` request typed JSON
-parsing. Repair uses an empty Registry.
-
-An Agent declares one of `model_only`, `read_only`, `workspace`, or
-`full_access`; the default is `workspace`. The launch access is a hard ceiling; a Session-origin launch is
-also bounded by that Session. Agent class overrides cannot widen it. Each Turn
-keeps the access snapshot captured at creation.
-
-Agent `model=""` inherits the Session's default model profile. A non-empty
-value selects another configured profile. Route resolution and all non-secret
-provider settings are frozen in `ModelRouteSnapshot` before the Turn exists.
-
-Collaboration calls are model tools, not Python Workflow functions:
-
-```text
-list_agents()
-send_message(agent_id, message, start_turn=false)
-wait_agent(action_invocation_ids, timeout_ms?)
-spawn_agent(task, name?, access?)
-interrupt_agent(agent_id)
-```
-
-Queue-only messages enter durable AgentInput. A started message or spawn creates
-an ordinary `agent_task` Action in the same ActionRunner used by Workflow
-Actions. `wait_agent` stores no second wait record. A child inherits its
-parent's model, prompt, role, class, skills, and same-or-lower access; spawn
-depth is one.
-
-## Effect wire protocol
-
-The isolated runner reserves stdout for newline-delimited JSON:
-
-```json
-{"id":"root/together:0/branch:0/effect:0/invoke_action","kind":"invoke_action","payload":{"agent_id":"...","action_name":"investigate","arguments":{"question":"..."},"tool_policy":[],"web_search_context_size":"low"}}
-{"id":"root/together:0/branch:0/effect:0/invoke_action","ok":true,"result":{"output":"...","turn_id":"..."}}
-```
-
-Frames are limited to 16 MiB in both directions. Python permits at most 64
-in-flight effects; Rust uses a bounded response channel and propagates reader,
-writer, or handler failure immediately.
-
-The request ID is both response correlation and durable idempotency identity.
-Sequential effects reserve stable paths; `together` gives each branch a stable
-subpath, so completion order cannot change identity. Rust journals the exact
-kind and payload hash. Reusing a path with another request is a protocol error.
-
-The complete effect set is:
-
-```text
-create_agent       set_agent_access   invoke_action
-wait               ask_human          project_changes
-publish_artifact   publish_project_home
-complete
-```
-
-Unknown effects and malformed or cross-Session IDs fail closed.
-
-## Replay and suspension
-
-On restart, the immutable source runs again from its entrypoint. Completed
-effects return their stored results. A started host effect redispatches only
-under its deterministic, idempotent domain contract. Source or runtime ABI hash
-drift fails closed.
-
-Model tool calls are not Workflow effects. A FunctionCall enters canonical
-Agent context before dispatch; output enters canonical context before another
-sample. Recovery never executes an old call. A missing output becomes
-`"aborted"`, after which the same Agent observes reality and decides whether a
-new call is needed.
-
-When all live effect futures are `ask_human` or `wait` suspensions, Rust stops
-the idle Python process and releases the run permit. An answer or deadline
-restarts source replay. A wait deadline is computed from the journaled effect's
-`started_at` and interval.
-
-## Catalog
-
-The catalog truth is the filesystem:
-
-```text
-workflows/builtin/<slug>/workflow.py
-<data-dir>/projects/<project-id>/workflows/<slug>/workflow.py
-```
-
-Both roots use the same AST validator. Saving a Project Workflow replaces that
-editable slug; existing Sessions retain their immutable source and ABI snapshots.
-Validation returns only manifest, Agent/Action declarations, tool names, and
-diagnostics. It does not manufacture a second feature summary.
+If branches suspend, the host waits until all runnable branches settle, then
+selects human input over deadlines and otherwise the earliest deadline. A hard
+branch failure cancels and joins siblings. Cancellation propagates through the
+Session, ActionRunner, model loop, and tools.

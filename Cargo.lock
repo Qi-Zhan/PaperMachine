@@ -3767,7 +3767,6 @@ dependencies = [
  "futures",
  "hex",
  "papermachine-agent",
- "papermachine-execution",
  "papermachine-model",
  "papermachine-protocol",
  "papermachine-session",

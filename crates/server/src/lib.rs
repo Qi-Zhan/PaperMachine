@@ -48,14 +48,15 @@ use papermachine_workflow::ActionControl;
 use papermachine_workflow::ActionRunner;
 use papermachine_workflow::COLLABORATION_TOOL_NAMES;
 use papermachine_workflow::CollaborationTools;
-use papermachine_workflow::PythonSessionExecutor;
 use papermachine_workflow::SessionExecutor;
 use papermachine_workflow::SessionScheduler;
 use papermachine_workflow::SessionSchedulerError;
 use papermachine_workflow::WorkflowGenerationRequest;
 use papermachine_workflow::WorkflowGenerator;
+use papermachine_workflow::WorkflowInterpreter;
 use papermachine_workflow::WorkflowProgramCatalog;
 use papermachine_workflow::WorkflowProgramCatalogError;
+use papermachine_workflow::language::{apply_json_schema_defaults, validate_json_schema_value};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -284,15 +285,11 @@ struct ProjectRuntimeFactory {
 
 impl ProjectRuntimeFactory {
     async fn build(&self, project: &Project, store: StoreHandle) -> anyhow::Result<ProjectRuntime> {
-        let workflow_runtime_root = store.managed_root().join("workflow-runtime");
         let sandbox_root = store.managed_root().join("runtime/sandboxes");
-        let runtime_root = workflow_runtime_root.clone();
         store
             .call::<_, anyhow::Error, _>(move |core| {
                 core.reconcile_artifacts()
                     .context("failed to reconcile Artifact storage")?;
-                reset_ephemeral_directory(&runtime_root)
-                    .context("failed to reset Python WorkflowProgram runtime")?;
                 reset_ephemeral_directory(&sandbox_root)
                     .context("failed to reset Agent sandboxes")?;
                 Ok(())
@@ -342,11 +339,9 @@ impl ProjectRuntimeFactory {
             },
             Arc::clone(&self.turn_permits),
         );
-        let executor: Arc<dyn SessionExecutor> = Arc::new(PythonSessionExecutor::new(
+        let executor: Arc<dyn SessionExecutor> = Arc::new(WorkflowInterpreter::new(
             store.clone(),
-            catalog.python(),
-            catalog.python_runtime_root(),
-            workflow_runtime_root,
+            tools.names().map(str::to_string),
         ));
         let action_runner = ActionRunner::new(store.clone(), turns.clone(), action_control);
         let scheduler = SessionScheduler::new_with_permits(
@@ -395,16 +390,8 @@ pub async fn initialize(config: &ServerConfig) -> anyhow::Result<AppState> {
         "PaperMachine built-in WorkflowProgram directory is missing: {}",
         builtins_root.display()
     );
-    let python_runtime_root = config.resource_root.join("python");
-    let validator = python_runtime_root.join("papermachine/_validate.py");
-    anyhow::ensure!(
-        validator.is_file(),
-        "PaperMachine Python runtime is missing: {}",
-        validator.display()
-    );
     let base_catalog = WorkflowProgramCatalog::scan(
         &workflows_root,
-        &python_runtime_root,
         NATIVE_TOOL_NAMES
             .into_iter()
             .chain(COLLABORATION_TOOL_NAMES)
@@ -625,7 +612,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         model_context_window: state.model_context_window,
         model_profiles: state.model_profiles.clone(),
         model_providers: state.model_providers.clone(),
-        workflow_runtime: "python_effect_dsl",
+        workflow_runtime: "workflow_language_v1",
     })
 }
 
@@ -1549,9 +1536,11 @@ async fn create_session(
             "Agent access override references unknown class {unknown:?}"
         )));
     }
-    validate_schema_value(&snapshot.manifest.params_schema, &request.params, "params")
+    let mut params = request.params;
+    apply_json_schema_defaults(&snapshot.manifest.params_schema, &mut params);
+    validate_json_schema_value(&snapshot.manifest.params_schema, &params, "params")
         .map_err(ApiError::bad_request)?;
-    validate_model_profile_params(&state, &snapshot.manifest.params_schema, &request.params)?;
+    validate_model_profile_params(&state, &snapshot.manifest.params_schema, &params)?;
     let title = request
         .title
         .as_deref()
@@ -1576,7 +1565,7 @@ async fn create_session(
                     },
                     source_session_id: request.source_session_id,
                 },
-                params: request.params,
+                params,
                 default_model: model,
                 access: request.access,
                 enabled_skills: request.enabled_skills,
@@ -1681,12 +1670,14 @@ async fn answer_human_request(
         .store
         .call(move |store| store.get_human_request(id))
         .await?;
-    validate_schema_value(&current.response_schema, &request.answer, "answer")
+    let mut answer = request.answer;
+    apply_json_schema_defaults(&current.response_schema, &mut answer);
+    validate_json_schema_value(&current.response_schema, &answer, "answer")
         .map_err(ApiError::bad_request)?;
     Ok(Json(
         runtime
             .store
-            .call(move |store| store.answer_human_request(id, request.answer))
+            .call(move |store| store.answer_human_request(id, answer))
             .await?,
     ))
 }
@@ -1889,65 +1880,6 @@ async fn artifact_content(
         HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
     Ok(response)
-}
-
-fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
-    if schema.as_object().is_none_or(serde_json::Map::is_empty) {
-        return Ok(());
-    }
-    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
-        && !allowed.contains(value)
-    {
-        return Err(format!("{path} is not one of the allowed values"));
-    }
-    match schema.get("type").and_then(Value::as_str) {
-        Some("object") => {
-            let object = value
-                .as_object()
-                .ok_or_else(|| format!("{path} must be an object"))?;
-            let properties = schema.get("properties").and_then(Value::as_object);
-            if let Some(required) = schema.get("required").and_then(Value::as_array) {
-                for key in required.iter().filter_map(Value::as_str) {
-                    if !object.contains_key(key) {
-                        return Err(format!("{path}.{key} is required"));
-                    }
-                }
-            }
-            if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-                for key in object.keys() {
-                    if !properties.is_some_and(|properties| properties.contains_key(key)) {
-                        return Err(format!("{path}.{key} is not an allowed field"));
-                    }
-                }
-            }
-            if let Some(properties) = properties {
-                for (key, child) in object {
-                    if let Some(child_schema) = properties.get(key) {
-                        validate_schema_value(child_schema, child, &format!("{path}.{key}"))?;
-                    }
-                }
-            }
-        }
-        Some("array") => {
-            let array = value
-                .as_array()
-                .ok_or_else(|| format!("{path} must be an array"))?;
-            if let Some(items) = schema.get("items") {
-                for (index, item) in array.iter().enumerate() {
-                    validate_schema_value(items, item, &format!("{path}[{index}]"))?;
-                }
-            }
-        }
-        Some("string") if !value.is_string() => return Err(format!("{path} must be a string")),
-        Some("integer") if !value.is_i64() && !value.is_u64() => {
-            return Err(format!("{path} must be an integer"));
-        }
-        Some("number") if !value.is_number() => return Err(format!("{path} must be a number")),
-        Some("boolean") if !value.is_boolean() => return Err(format!("{path} must be a boolean")),
-        Some("null") if !value.is_null() => return Err(format!("{path} must be null")),
-        _ => {}
-    }
-    Ok(())
 }
 
 fn parse_id<T: FromStr>(value: &str, kind: &str) -> ApiResult<T> {

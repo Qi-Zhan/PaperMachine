@@ -22,7 +22,8 @@ pub struct WorkflowProgramManifest {
     pub slug: String,
     pub name: String,
     pub description: String,
-    pub entrypoint: String,
+    /// PaperMachine Workflow Language semantic version.
+    pub language_version: u32,
     /// Whether this program starts from one immutable user task or creates its
     /// own interaction points (for example, a persistent interactive Session).
     pub request_mode: WorkflowRequestMode,
@@ -54,8 +55,8 @@ pub struct WorkflowProgramSnapshot {
     pub source: WorkflowProgramSource,
     pub definition_path: String,
     pub sha256: String,
-    /// Exact PaperMachine Python DSL ABI used to validate and execute the Run.
-    pub runtime_sha256: String,
+    /// SHA-256 of the canonical compiled Workflow IR.
+    pub ir_sha256: String,
     pub source_code: String,
 }
 

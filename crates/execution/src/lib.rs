@@ -4,7 +4,7 @@
 //! selection, and descendant cleanup are adapted from OpenAI Codex at commit
 //! `b2dc8b3e4be4fe3a453d50e13835f707b258f15b`. PaperMachine owns the smaller
 //! authorization model and uses this crate for both Agent commands and
-//! Workflow Python.
+//! Agent command execution and operating-system sandbox boundaries.
 
 mod environment;
 mod manager;

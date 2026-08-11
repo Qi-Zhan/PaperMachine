@@ -3,7 +3,6 @@ use crate::ExecutionError;
 use papermachine_protocol::AuthorizationContext;
 use papermachine_protocol::EnvironmentAuthorization;
 use papermachine_protocol::FilesystemScope;
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -94,36 +93,6 @@ impl SandboxPolicy {
             },
             environment: authorization.environment.clone(),
             timeout,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-        })
-    }
-
-    pub fn workflow_runtime(workspace: &Path) -> Result<Self, ExecutionError> {
-        if !workspace.is_absolute() {
-            return Err(ExecutionError::InvalidPolicy(format!(
-                "Workflow runtime root must be absolute: {}",
-                workspace.display()
-            )));
-        }
-        Ok(Self {
-            filesystem_read: FilesystemPolicy::Scoped,
-            filesystem_write: FilesystemPolicy::Scoped,
-            read_roots: vec![workspace.to_path_buf()],
-            write_roots: vec![workspace.to_path_buf()],
-            workspace_roots: Vec::new(),
-            unreadable_roots: Vec::new(),
-            read_only_roots: Vec::new(),
-            sensitive_path_names: Vec::new(),
-            protected_workspace_metadata: Vec::new(),
-            network: NetworkPolicy::Deny,
-            environment: EnvironmentAuthorization {
-                inherit_core: true,
-                deny_name_fragments: ["KEY", "SECRET", "TOKEN"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            },
-            timeout: Duration::from_secs(60),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         })
     }

@@ -1,26 +1,14 @@
+use crate::language::{compile_source, validate_source};
 use chrono::Utc;
-use hex::encode;
-use papermachine_protocol::DiagnosticSeverity;
-use papermachine_protocol::Project;
-use papermachine_protocol::ProjectId;
-use papermachine_protocol::WorkflowDiagnostic;
-use papermachine_protocol::WorkflowProgram;
-use papermachine_protocol::WorkflowProgramSnapshot;
-use papermachine_protocol::WorkflowProgramSource;
-use papermachine_protocol::WorkflowValidation;
-use papermachine_store::Store;
-use papermachine_store::StoreError;
-use sha2::Digest;
-use sha2::Sha256;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::env;
+use papermachine_protocol::{
+    Project, ProjectId, WorkflowProgram, WorkflowProgramSnapshot, WorkflowProgramSource,
+    WorkflowValidation,
+};
+use papermachine_store::{Store, StoreError};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 type WorkflowKey = (Option<ProjectId>, String);
@@ -31,7 +19,7 @@ pub struct LoadedWorkflowProgram {
     pub source_code: String,
     pub path: PathBuf,
     pub validation: WorkflowValidation,
-    pub runtime_sha256: String,
+    pub ir_sha256: String,
 }
 
 impl LoadedWorkflowProgram {
@@ -42,7 +30,7 @@ impl LoadedWorkflowProgram {
             source: self.registration.source,
             definition_path: self.registration.definition_path.clone(),
             sha256: self.registration.sha256.clone(),
-            runtime_sha256: self.runtime_sha256.clone(),
+            ir_sha256: self.ir_sha256.clone(),
             source_code: self.source_code.clone(),
         }
     }
@@ -51,9 +39,6 @@ impl LoadedWorkflowProgram {
 #[derive(Clone, Debug)]
 pub struct WorkflowProgramCatalog {
     builtins_root: PathBuf,
-    python_runtime_root: PathBuf,
-    python: PathBuf,
-    runtime_sha256: String,
     known_tools: BTreeSet<String>,
     entries: BTreeMap<WorkflowKey, LoadedWorkflowProgram>,
 }
@@ -61,24 +46,17 @@ pub struct WorkflowProgramCatalog {
 impl WorkflowProgramCatalog {
     pub fn scan(
         workflows_root: impl AsRef<Path>,
-        python_runtime_root: impl AsRef<Path>,
         known_tools: impl IntoIterator<Item = String>,
     ) -> Result<Self, WorkflowProgramCatalogError> {
         let builtins_root = workflows_root.as_ref().join("builtin");
-        let python_runtime_root = python_runtime_root.as_ref().to_path_buf();
         if !builtins_root.is_dir() {
             return Err(WorkflowProgramCatalogError::Path(format!(
                 "built-in Workflow directory is missing: {}",
                 builtins_root.display()
             )));
         }
-        let python = resolve_python_executable()?;
-        let runtime_sha256 = python_runtime_sha256(&python_runtime_root)?;
         let mut catalog = Self {
             builtins_root,
-            python_runtime_root,
-            python,
-            runtime_sha256,
             known_tools: known_tools.into_iter().collect(),
             entries: BTreeMap::new(),
         };
@@ -89,7 +67,7 @@ impl WorkflowProgramCatalog {
         Ok(catalog)
     }
 
-    /// Load or refresh the workflow programs owned by one managed Project.
+    /// Load or refresh Workflow programs owned by one managed Project.
     pub fn load_project(
         &mut self,
         project: &Project,
@@ -99,11 +77,11 @@ impl WorkflowProgramCatalog {
             .retain(|(owner, _), _| *owner != Some(project.id));
         store.ensure_managed_directory("workflows")?;
         for slug in store.list_managed_directories("workflows")? {
-            let relative = PathBuf::from("workflows").join(slug).join("workflow.py");
+            let relative = PathBuf::from("workflows").join(slug).join("workflow.pm");
             if !store.managed_file_exists(&relative)? {
                 continue;
             }
-            let source_code = store.read_managed_text(&relative, 4 * 1024 * 1024)?;
+            let source_code = store.read_managed_text(&relative, 128 * 1024)?;
             let path = store.managed_path(&relative)?;
             let loaded = self.load_source(
                 &path,
@@ -143,45 +121,7 @@ impl WorkflowProgramCatalog {
         &self,
         source: &str,
     ) -> Result<WorkflowValidation, WorkflowProgramCatalogError> {
-        let mut validation = validate_with_python(&self.python, &self.python_runtime_root, source)?;
-        for agent in &validation.agents {
-            for action in &agent.actions {
-                let mut seen = BTreeSet::new();
-                for tool in action.tools.iter().flatten() {
-                    let message = if tool.trim().is_empty() {
-                        Some(format!(
-                            "Action {}.{} declares an empty tool name",
-                            agent.class_name, action.name
-                        ))
-                    } else if !seen.insert(tool.as_str()) {
-                        Some(format!(
-                            "Action {}.{} declares duplicate tool {tool:?}",
-                            agent.class_name, action.name
-                        ))
-                    } else if !self.known_tools.contains(tool) {
-                        Some(format!(
-                            "Action {}.{} declares unknown tool {tool:?}",
-                            agent.class_name, action.name
-                        ))
-                    } else {
-                        None
-                    };
-                    if let Some(message) = message {
-                        validation.diagnostics.push(WorkflowDiagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            line: None,
-                            column: None,
-                        });
-                    }
-                }
-            }
-        }
-        validation.valid = !validation
-            .diagnostics
-            .iter()
-            .any(|item| item.severity == DiagnosticSeverity::Error);
-        Ok(validation)
+        Ok(validate_source(source, &self.known_tools))
     }
 
     pub fn save_user(
@@ -190,17 +130,13 @@ impl WorkflowProgramCatalog {
         source: &str,
         store: &Store,
     ) -> Result<LoadedWorkflowProgram, WorkflowProgramCatalogError> {
-        let validation = self.validate_source(source)?;
-        if !validation.valid {
-            return Err(WorkflowProgramCatalogError::Invalid(Box::new(validation)));
-        }
-        let manifest = validation.manifest.clone().ok_or_else(|| {
-            WorkflowProgramCatalogError::Validator(
-                "valid source did not return a manifest".to_string(),
-            )
-        })?;
+        let compiled = compile_source(source, &self.known_tools)
+            .map_err(WorkflowProgramCatalogError::Invalid)?;
+        let manifest = compiled.manifest;
+        let validation = compiled.validation;
+        let ir_sha256 = compiled.ir_sha256;
         let key = (Some(project.id), manifest.slug.clone());
-        let sha256 = encode(Sha256::digest(source.as_bytes()));
+        let sha256 = hex::encode(Sha256::digest(source.as_bytes()));
         if let Some(existing) = self.entries.get(&key)
             && existing.registration.sha256 == sha256
         {
@@ -209,7 +145,7 @@ impl WorkflowProgramCatalog {
         let path = store.write_managed_file(
             PathBuf::from("workflows")
                 .join(&manifest.slug)
-                .join("workflow.py"),
+                .join("workflow.pm"),
             source.as_bytes(),
         )?;
         let loaded = LoadedWorkflowProgram {
@@ -224,7 +160,7 @@ impl WorkflowProgramCatalog {
             source_code: source.to_string(),
             path,
             validation,
-            runtime_sha256: self.runtime_sha256.clone(),
+            ir_sha256,
         };
         self.entries.insert(key, loaded.clone());
         Ok(loaded)
@@ -269,17 +205,11 @@ impl WorkflowProgramCatalog {
         managed_root: Option<&Path>,
         updated_at: chrono::DateTime<Utc>,
     ) -> Result<LoadedWorkflowProgram, WorkflowProgramCatalogError> {
-        let validation = self.validate_source(&source_code)?;
-        if !validation.valid {
-            return Err(WorkflowProgramCatalogError::InvalidFile {
+        let compiled = compile_source(&source_code, &self.known_tools).map_err(|validation| {
+            WorkflowProgramCatalogError::InvalidFile {
                 path: path.to_path_buf(),
-                validation: Box::new(validation),
-            });
-        }
-        let manifest = validation.manifest.clone().ok_or_else(|| {
-            WorkflowProgramCatalogError::Validator(
-                "valid source did not return a manifest".to_string(),
-            )
+                validation,
+            }
         })?;
         let definition_path = match project {
             Some(_) => project_definition_path(
@@ -303,25 +233,17 @@ impl WorkflowProgramCatalog {
         Ok(LoadedWorkflowProgram {
             registration: WorkflowProgram {
                 project_id: project.map(|project| project.id),
-                manifest,
+                manifest: compiled.manifest,
                 source,
                 definition_path,
-                sha256: encode(Sha256::digest(source_code.as_bytes())),
+                sha256: hex::encode(Sha256::digest(source_code.as_bytes())),
                 updated_at,
             },
             source_code,
             path: path.to_path_buf(),
-            validation,
-            runtime_sha256: self.runtime_sha256.clone(),
+            validation: compiled.validation,
+            ir_sha256: compiled.ir_sha256,
         })
-    }
-
-    pub fn python(&self) -> &Path {
-        &self.python
-    }
-
-    pub fn python_runtime_root(&self) -> &Path {
-        &self.python_runtime_root
     }
 }
 
@@ -334,49 +256,13 @@ fn project_definition_path(
         .map_err(|error| WorkflowProgramCatalogError::Path(error.to_string()))
 }
 
-fn validate_with_python(
-    python: &Path,
-    runtime_root: &Path,
-    source: &str,
-) -> Result<WorkflowValidation, WorkflowProgramCatalogError> {
-    let validator = runtime_root.join("papermachine").join("_validate.py");
-    if !validator.is_file() {
-        return Err(WorkflowProgramCatalogError::Validator(format!(
-            "validator is missing: {}",
-            validator.display()
-        )));
-    }
-    let mut child = Command::new(python)
-        .arg(&validator)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| WorkflowProgramCatalogError::Validator(error.to_string()))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| {
-            WorkflowProgramCatalogError::Validator("validator stdin is unavailable".to_string())
-        })?
-        .write_all(source.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(WorkflowProgramCatalogError::Validator(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| WorkflowProgramCatalogError::Validator(error.to_string()))
-}
-
 fn workflow_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     fn visit(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if path.is_dir() {
                 visit(&path, output)?;
-            } else if path.file_name().is_some_and(|name| name == "workflow.py") {
+            } else if path.file_name().is_some_and(|name| name == "workflow.pm") {
                 output.push(path);
             }
         }
@@ -388,117 +274,12 @@ fn workflow_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     Ok(files)
 }
 
-pub fn python_runtime_sha256(runtime_root: &Path) -> Result<String, std::io::Error> {
-    let package = runtime_root.join("papermachine");
-    for required in ["__init__.py", "_runner.py", "_validate.py"] {
-        if !package.join(required).is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Python runtime file is missing: {required}"),
-            ));
-        }
-    }
-    fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let path = entry.path();
-            if file_type.is_symlink() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Python runtime may not contain symlinks: {}",
-                        path.display()
-                    ),
-                ));
-            }
-            if file_type.is_dir() {
-                if entry.file_name() != "__pycache__" {
-                    visit(&path, files)?;
-                }
-            } else if file_type.is_file() && path.extension().is_some_and(|value| value == "py") {
-                files.push(path);
-            }
-        }
-        Ok(())
-    }
-    let mut files = Vec::new();
-    visit(&package, &mut files)?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(b"papermachine-python-runtime-v1\0");
-    for path in files {
-        let relative = path
-            .strip_prefix(runtime_root)
-            .map_err(std::io::Error::other)?;
-        let name = relative.as_os_str().as_encoded_bytes();
-        let content = fs::read(&path)?;
-        hasher.update((name.len() as u64).to_be_bytes());
-        hasher.update(name);
-        hasher.update((content.len() as u64).to_be_bytes());
-        hasher.update(content);
-    }
-    Ok(encode(hasher.finalize()))
-}
-
-pub fn resolve_python_executable() -> Result<PathBuf, WorkflowProgramCatalogError> {
-    if let Some(configured) = env::var_os("PAPERMACHINE_PYTHON") {
-        let configured = PathBuf::from(configured);
-        let path = resolve_executable(&configured).ok_or_else(|| {
-            WorkflowProgramCatalogError::PythonUnavailable(configured.display().to_string())
-        })?;
-        if supported_python(&path) {
-            return Ok(path);
-        }
-        return Err(WorkflowProgramCatalogError::PythonUnavailable(format!(
-            "{} is not Python 3.11 or newer",
-            path.display()
-        )));
-    }
-    let names: &[&str] = if cfg!(windows) {
-        &["python3.exe", "python.exe"]
-    } else {
-        &["python3", "python"]
-    };
-    for name in names {
-        let candidate = PathBuf::from(name);
-        if let Some(path) = resolve_executable(&candidate)
-            && supported_python(&path)
-        {
-            return Ok(path);
-        }
-    }
-    Err(WorkflowProgramCatalogError::PythonUnavailable(
-        "Python 3.11 or newer was not found on PATH; set PAPERMACHINE_PYTHON".to_string(),
-    ))
-}
-
-fn resolve_executable(value: &Path) -> Option<PathBuf> {
-    if value.is_absolute() || value.components().count() > 1 {
-        return value.is_file().then(|| value.to_path_buf());
-    }
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|directory| directory.join(value))
-        .find(|candidate| candidate.is_file())
-}
-
-fn supported_python(path: &Path) -> bool {
-    Command::new(path)
-        .arg("-c")
-        .arg("import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)")
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
 #[derive(Debug, Error)]
 pub enum WorkflowProgramCatalogError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("workflow validator failed: {0}")]
-    Validator(String),
     #[error("invalid workflow source")]
     Invalid(Box<WorkflowValidation>),
     #[error("invalid workflow file {path}: {validation:?}")]
@@ -513,6 +294,25 @@ pub enum WorkflowProgramCatalogError {
     },
     #[error("workflow path is invalid: {0}")]
     Path(String),
-    #[error("Python runtime unavailable: {0}")]
-    PythonUnavailable(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_builtin_workflows_compile_through_the_public_language() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("workflows");
+        let catalog = WorkflowProgramCatalog::scan(root, Vec::<String>::new())
+            .expect("built-in workflows should compile");
+        assert_eq!(catalog.entries.len(), 6);
+        assert!(
+            catalog
+                .entries
+                .values()
+                .all(|entry| entry.path.extension().is_some_and(|value| value == "pm"))
+        );
+    }
 }

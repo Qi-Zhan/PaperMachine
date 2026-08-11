@@ -13,14 +13,6 @@
 /apps/web/node_modules/
 /apps/web/dist/
 
-# Python
-**/__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-
 # PaperMachine runtime state
 /data/
 /workspaces/

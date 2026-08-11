@@ -171,14 +171,14 @@ pub fn workflow_snapshot() -> WorkflowProgramSnapshot {
             slug: "store-test".to_string(),
             name: "Store test".to_string(),
             description: String::new(),
-            entrypoint: "main".to_string(),
+            language_version: 1,
             request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
-        definition_path: "builtin/store-test/workflow.py".to_string(),
+        definition_path: "builtin/store-test/workflow.pm".to_string(),
         sha256: "source-sha".to_string(),
-        runtime_sha256: "runtime-sha".to_string(),
+        ir_sha256: "test-ir-sha".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }

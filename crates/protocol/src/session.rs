@@ -83,7 +83,7 @@ pub struct Session {
     pub default_model: String,
     pub access: AccessPreset,
     pub enabled_skills: Vec<String>,
-    /// Per-Session overrides keyed by Python Agent class name. Session access
+    /// Per-Session overrides keyed by Workflow Agent template name. Session access
     /// remains the hard upper bound.
     pub agent_access_overrides: BTreeMap<String, AccessPreset>,
     pub status: SessionStatus,
@@ -111,7 +111,7 @@ pub enum SessionEffectStatus {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct SessionEffect {
     pub session_id: SessionId,
-    /// Deterministic logical path assigned by the Python DSL runtime.
+    /// Deterministic logical path assigned by the Workflow interpreter.
     pub key: String,
     pub kind: String,
     pub request_sha256: String,
@@ -186,7 +186,7 @@ pub struct ActionInvocation {
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub action_name: String,
-    /// Stable Action method contract (normally its Python docstring/prompt).
+    /// Stable Action contract declared by Workflow source.
     pub contract: String,
     pub arguments: Value,
     /// Exact user-role input fixed when the Action is admitted.

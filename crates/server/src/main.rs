@@ -26,16 +26,20 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[command(name = "papermachine-server")]
 #[command(about = "Local-first auto-research server")]
 struct Args {
-    /// Read-only PaperMachine resources: web assets, Python runtime, and built-in Workflows.
+    /// Read-only PaperMachine resources: web assets and built-in Workflows.
     #[arg(long, env = "PAPERMACHINE_RESOURCE_ROOT")]
     resource_root: PathBuf,
     /// Durable PaperMachine application data. Uses the platform user-data directory by default.
     #[arg(long, env = "PAPERMACHINE_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Use isolated development defaults under the platform PaperMachine data directory.
+    #[arg(long)]
+    dev: bool,
     #[arg(long, env = "PAPERMACHINE_PORT", default_value_t = 4310)]
     port: u16,
     /// PaperMachine-owned provider and model-profile configuration. Defaults
-    /// to <data-dir>/config.toml outside explicit demo mode.
+    /// to <resource-root>/papermachine.toml in development, otherwise
+    /// <data-dir>/config.toml, outside explicit demo mode.
     #[arg(long, env = "PAPERMACHINE_CONFIG")]
     config: Option<PathBuf>,
     #[arg(long, env = "PAPERMACHINE_DEMO")]
@@ -89,6 +93,7 @@ async fn run_server() -> anyhow::Result<()> {
     })?;
     let requested_data_dir = match args.data_dir {
         Some(path) => path,
+        None if args.dev => default_data_dir()?.join("dev"),
         None => default_data_dir()?,
     };
     std::fs::create_dir_all(&requested_data_dir).with_context(|| {
@@ -106,7 +111,13 @@ async fn run_server() -> anyhow::Result<()> {
     let models = if args.demo {
         ServerModelConfig::Demo
     } else {
-        let config_path = args.config.unwrap_or_else(|| data_dir.join("config.toml"));
+        let config_path = args.config.unwrap_or_else(|| {
+            if args.dev {
+                resource_root.join("papermachine.toml")
+            } else {
+                data_dir.join("config.toml")
+            }
+        });
         let configured = ConfiguredModels::from_file(&config_path)
             .context("failed to load PaperMachine provider configuration")?;
         ServerModelConfig::Providers(configured)

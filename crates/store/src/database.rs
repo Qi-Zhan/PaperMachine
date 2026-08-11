@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-const SCHEMA_VERSION: u32 = 24;
+const SCHEMA_VERSION: u32 = 25;
 const PROJECT_SYSTEM_PROMPT_PATH: &str = "prompts/system.md";
 const MAX_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 const MAX_PROJECT_CHANGES_PER_READ: usize = 10_001;
@@ -3449,7 +3449,6 @@ fn create_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "sources",
         "state",
         "artifacts",
-        "workflow-runtime",
         "runtime/sandboxes",
     ] {
         std::fs::create_dir_all(root.join(directory))
@@ -3475,7 +3474,6 @@ fn open_managed_root(root: &Path) -> Result<PathBuf, StoreError> {
         "sources",
         "state",
         "artifacts",
-        "workflow-runtime",
         "runtime/sandboxes",
     ] {
         let directory = root.join(relative);

@@ -150,7 +150,7 @@ export interface WorkflowProgramManifest {
   slug: string
   name: string
   description: string
-  entrypoint: string
+  language_version: number
   request_mode: 'required' | 'none'
   params_schema: Record<string, unknown>
 }
@@ -165,7 +165,7 @@ export interface WorkflowProgram {
 }
 
 export interface WorkflowProgramSnapshot extends WorkflowProgram {
-  runtime_sha256: string
+  ir_sha256: string
   source_code: string
 }
 

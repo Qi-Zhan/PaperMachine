@@ -4,8 +4,8 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "pnpm --dir apps/web dev",
-    "server:dev": "python3 scripts/dev_server.py",
-    "server:demo": "python3 scripts/dev_server.py --demo",
+    "server:dev": "cargo run --release -p papermachine-server -- --resource-root . --dev",
+    "server:demo": "cargo run --release -p papermachine-server -- --resource-root . --dev --demo",
     "build": "pnpm --dir apps/web build",
     "test": "pnpm --dir apps/web test"
   }

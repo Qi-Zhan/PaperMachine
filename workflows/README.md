@@ -1,16 +1,15 @@
 # Workflows
 
-PaperMachine workflows are validated Python programs. The directory split is
-ownership only; built-in and user workflows execute through the same Rust
-effect runtime.
+PaperMachine Workflows are `workflow.pm` programs compiled and interpreted by
+the Rust workflow crate.
 
-- `builtin/<slug>/workflow.py`: reviewed workflows shipped with PaperMachine.
-- `<data-dir>/projects/<project-id>/workflows/<slug>/workflow.py`: workflows
-  authored or generated for one Project in the Workflow page.
+- `builtin/<slug>/workflow.pm`: reviewed programs shipped with PaperMachine.
+- `<data-dir>/projects/<project-id>/workflows/<slug>/workflow.pm`: user programs
+  owned by one Project.
 
-Each source defines Agent classes with an explicit `access` profile and
-`@action` methods, plus exactly one async
-function decorated with `@workflow(...)`. Python owns ordinary control flow;
-Rust owns Sessions, Turns, tools, sandboxing, permissions, durable waits,
-human requests, Agent inputs, events, and persistence. A Workflow stores its exact source and SHA-256, so
-later edits cannot change the meaning of an existing run.
+Both locations use the same v1 compiler, canonical IR, interpreter, durable
+effect journal, and ActionRunner. The HTTP API generates, validates, edits, and
+saves source at runtime; a server restart is not required. There is no import or
+module search path.
+
+See [Workflow Language semantics](../docs/workflow-language-semantics.md).

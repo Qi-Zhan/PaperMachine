@@ -369,14 +369,14 @@ fn workflow_snapshot() -> WorkflowProgramSnapshot {
             slug: "recovery-test".to_string(),
             name: "Recovery test".to_string(),
             description: "Test recovery".to_string(),
-            entrypoint: "main".to_string(),
+            language_version: 1,
             request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
-        definition_path: "builtin/recovery-test/workflow.py".to_string(),
+        definition_path: "builtin/recovery-test/workflow.pm".to_string(),
         sha256: "recovery-test".to_string(),
-        runtime_sha256: "test-runtime".to_string(),
+        ir_sha256: "test-ir".to_string(),
         source_code: "async def main(ctx): return {}\n".to_string(),
     }
 }

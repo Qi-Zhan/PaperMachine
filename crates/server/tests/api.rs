@@ -54,20 +54,6 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("response should contain JSON")
 }
 
-fn copy_directory(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("destination should be created");
-    for entry in std::fs::read_dir(source).expect("source directory should be readable") {
-        let entry = entry.expect("source entry should be readable");
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_directory(&source_path, &destination_path);
-        } else {
-            std::fs::copy(&source_path, &destination_path).expect("source file should copy");
-        }
-    }
-}
-
 fn prepare_root(root: &Path) {
     for slug in [
         "goal",
@@ -80,13 +66,9 @@ fn prepare_root(root: &Path) {
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../workflows/builtin")
             .join(slug)
-            .join("workflow.py");
-        std::fs::copy(source, builtin.join("workflow.py")).expect("builtin Workflow should copy");
+            .join("workflow.pm");
+        std::fs::copy(source, builtin.join("workflow.pm")).expect("builtin Workflow should copy");
     }
-    copy_directory(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python"),
-        &root.join("python"),
-    );
 }
 
 async fn test_app(directory: &TempDir) -> Router {
@@ -224,7 +206,6 @@ async fn start_interactive_session(
             "instructions": "",
             "params": {
                 "session_title": title,
-                "agent_system_prompt": "",
                 "agent_access": access,
             },
             "model": "demo-model",
@@ -405,14 +386,14 @@ async fn inactive_project_runtime_failure_is_lazy_and_isolated() {
         .path()
         .join("app-data/projects")
         .join(project.id.to_string())
-        .join("workflows/broken/workflow.py");
+        .join("workflows/broken/workflow.pm");
     std::fs::create_dir_all(
         broken
             .parent()
             .expect("broken Workflow fixture should have a parent"),
     )
     .expect("fixture directory should create");
-    std::fs::write(&broken, "not valid Python (").expect("fixture should write");
+    std::fs::write(&broken, "not valid Workflow Language (").expect("fixture should write");
     drop(app);
 
     let restarted = test_app(&directory).await;
@@ -887,7 +868,9 @@ async fn generated_workflow_can_be_validated_saved_and_run_as_a_session() {
     assert_eq!(generated.status(), StatusCode::OK);
     let generated = response_json(generated).await;
     assert_eq!(generated["validation"]["valid"], true);
+    assert_eq!(generated["validation"]["manifest"]["language_version"], 1);
     let source = generated["source"].as_str().expect("source should exist");
+    assert!(source.trim_start().starts_with("version 1;"));
     let saved = app
         .clone()
         .oneshot(json_request(
@@ -898,6 +881,12 @@ async fn generated_workflow_can_be_validated_saved_and_run_as_a_session() {
         .await
         .expect("save should complete");
     assert_eq!(saved.status(), StatusCode::CREATED);
+    let saved = response_json(saved).await;
+    assert!(
+        saved["definition_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("workflow.pm"))
+    );
 
     let (status, value) = create_session(
         &app,

@@ -55,14 +55,14 @@ fn program() -> WorkflowProgramSnapshot {
             slug: "collaboration-test".to_string(),
             name: "Collaboration test".to_string(),
             description: "Exercise the Agent collaboration kernel.".to_string(),
-            entrypoint: "main".to_string(),
+            language_version: 1,
             request_mode: Default::default(),
             params_schema: json!({"type": "object"}),
         },
         source: WorkflowProgramSource::Builtin,
-        definition_path: "builtin/collaboration-test/workflow.py".to_string(),
+        definition_path: "builtin/collaboration-test/workflow.pm".to_string(),
         sha256: "0".repeat(64),
-        runtime_sha256: "0".repeat(64),
+        ir_sha256: "0".repeat(64),
         source_code: String::new(),
     }
 }

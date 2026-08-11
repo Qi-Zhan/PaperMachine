@@ -141,7 +141,7 @@ impl SessionScheduler {
         Ok(true)
     }
 
-    /// Restarts every non-terminal Session. The Python program executes from
+    /// Restarts every non-terminal Session. The Workflow interpreter executes from
     /// its snapshotted source while deterministic effects replay from the
     /// durable journal; an unfinished Action resumes its checkpointed Turn.
     pub async fn recover(&self) -> Result<Vec<SessionId>, SessionSchedulerError> {
@@ -744,14 +744,14 @@ mod tests {
                 slug: "scheduler-test".to_string(),
                 name: "Scheduler test".to_string(),
                 description: String::new(),
-                entrypoint: "main".to_string(),
+                language_version: 1,
                 request_mode: Default::default(),
                 params_schema: json!({"type": "object"}),
             },
             source: WorkflowProgramSource::Builtin,
-            definition_path: "builtin/scheduler-test/workflow.py".to_string(),
+            definition_path: "builtin/scheduler-test/workflow.pm".to_string(),
             sha256: "test".to_string(),
-            runtime_sha256: "test-runtime".to_string(),
+            ir_sha256: "test-ir".to_string(),
             source_code: String::new(),
         }
     }

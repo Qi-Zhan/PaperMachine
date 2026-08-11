@@ -96,7 +96,8 @@
               <section v-if="manifest" class="workflow-protocol-intro">
                 <p>{{ manifest.description }}</p>
                 <dl>
-                  <div><dt>{{ t('workflow.entrypoint') }}</dt><dd>{{ manifest.entrypoint }}</dd></div>
+                  <div><dt>{{ t('workflow.languageVersion') }}</dt><dd>v{{ manifest.language_version }}</dd></div>
+                  <div><dt>{{ t('workflow.requestMode') }}</dt><dd>{{ manifest.request_mode }}</dd></div>
                   <div><dt>{{ t('workflow.params') }}</dt><dd>{{ schemaKeys(manifest.params_schema) }}</dd></div>
                 </dl>
               </section>
@@ -119,8 +120,8 @@
 
               <section v-if="validation?.diagnostics.length" class="workflow-diagnostics">
                 <header><AlertCircle :size="15" /><h3>{{ t('workflow.diagnostics') }}</h3></header>
-                <p v-for="(diagnostic, index) in validation.diagnostics" :key="`${diagnostic.line}-${index}`" :data-severity="diagnostic.severity">
-                  <span>{{ diagnostic.line ? t('workflow.line', { line: diagnostic.line }) : 'Workflow' }}</span>
+                <p v-for="(diagnostic, index) in validation.diagnostics" :key="`${diagnostic.line}-${diagnostic.column}-${index}`" :data-severity="diagnostic.severity">
+                  <span>{{ diagnostic.line ? t('workflow.location', { line: diagnostic.line, column: diagnostic.column ?? 1 }) : 'Workflow' }}</span>
                   {{ diagnostic.message }}
                 </p>
               </section>

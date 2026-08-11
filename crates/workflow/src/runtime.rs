@@ -1,9 +1,4 @@
-use async_trait::async_trait;
 use chrono::Utc;
-use papermachine_execution::SandboxManager;
-use papermachine_execution::SandboxPolicy;
-use papermachine_execution::SandboxRequest;
-use papermachine_execution::terminate_process_tree;
 use papermachine_protocol::*;
 use papermachine_store::NewActionInvocation;
 use papermachine_store::PROJECT_HOME_ROLE;
@@ -12,375 +7,52 @@ use papermachine_store::Store;
 use papermachine_store::StoreError;
 use papermachine_store::StoreHandle;
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
-use sha2::Digest;
-use sha2::Sha256;
 use std::collections::HashMap;
-use std::path::Path;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::AsyncBufRead;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufReader;
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::SessionExecution;
-use crate::SessionExecutor;
 use crate::SessionSuspension;
-use crate::python_runtime_sha256;
 use crate::wait_for_action;
 
-const MAX_RUNTIME_STDERR_BYTES: usize = 1024 * 1024;
-const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_IN_FLIGHT_EFFECTS: usize = 64;
-const RESPONSE_CHANNEL_CAPACITY: usize = 64;
-
-#[derive(Clone)]
-pub struct PythonSessionExecutor {
-    store: StoreHandle,
-    python: PathBuf,
-    python_runtime_root: PathBuf,
-    work_root: PathBuf,
-}
-
-impl PythonSessionExecutor {
-    pub fn new(
-        store: StoreHandle,
-        python: impl Into<PathBuf>,
-        python_runtime_root: impl Into<PathBuf>,
-        work_root: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            store,
-            python: python.into(),
-            python_runtime_root: python_runtime_root.into(),
-            work_root: work_root.into(),
-        }
-    }
-
-    async fn execute_inner(
-        &self,
-        session_id: SessionId,
-        cancellation: CancellationToken,
-    ) -> Result<Value, SessionExecutionError> {
-        let session = self
-            .store
-            .call(move |store| store.get_session(session_id))
-            .await?;
-        let source_sha256 = hex::encode(Sha256::digest(session.program.source_code.as_bytes()));
-        if source_sha256 != session.program.sha256 {
-            return Err(SessionExecutionError::Snapshot(
-                "Workflow source hash does not match its durable snapshot".to_string(),
-            ));
-        }
-        let runtime_sha256 = python_runtime_sha256(&self.python_runtime_root)?;
-        if runtime_sha256 != session.program.runtime_sha256 {
-            return Err(SessionExecutionError::Snapshot(
-                "Python Workflow ABI differs from the durable Session snapshot".to_string(),
-            ));
-        }
-        let workspace = self.work_root.join(session.id.to_string());
-        materialize_runtime(
-            &workspace,
-            &self.python_runtime_root,
-            &session.program.source_code,
-        )
-        .await?;
-        let policy = SandboxPolicy::workflow_runtime(&workspace)
-            .map_err(|error| SessionExecutionError::Sandbox(error.to_string()))?;
-        let prepared = SandboxManager
-            .prepare(
-                SandboxRequest::new(
-                    self.python.as_os_str().to_owned(),
-                    [
-                        "-B".into(),
-                        "-m".into(),
-                        "papermachine._runner".into(),
-                        "workflow.py".into(),
-                        "main".into(),
-                    ],
-                    &workspace,
-                    workspace.join(".sandbox"),
-                    policy,
-                )
-                .with_environment_override("PYTHONDONTWRITEBYTECODE", "1"),
-            )
-            .await
-            .map_err(|error| SessionExecutionError::Sandbox(error.to_string()))?;
-        let mut command = prepared.into_command();
-        let mut child = command
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| SessionExecutionError::Spawn(error.to_string()))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or(SessionExecutionError::MissingPipe("stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(SessionExecutionError::MissingPipe("stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(SessionExecutionError::MissingPipe("stderr"))?;
-        let initialization = json!({
-            "session_id": session.id,
-            "request": session.request,
-            "instructions": session.instructions,
-            "params": session.params,
-            "trigger": session.trigger,
-        });
-        stdin
-            .write_all(&encode_protocol_frame(&initialization)?)
-            .await?;
-        stdin.flush().await?;
-
-        let effect_cancellation = cancellation.child_token();
-        let context = Arc::new(SessionEffectContext {
-            store: self.store.clone(),
-            session_id,
-            cancellation: effect_cancellation.clone(),
-            effect_gates: Mutex::new(HashMap::new()),
-            suspensions: Mutex::new(HashMap::new()),
-            completion: Mutex::new(None),
-        });
-        let (responses_tx, mut responses_rx) =
-            mpsc::channel::<EffectResponse>(RESPONSE_CHANNEL_CAPACITY);
-        let mut writer = tokio::spawn(async move {
-            while let Some(response) = responses_rx.recv().await {
-                let line = encode_protocol_frame(&response).map_err(|error| error.to_string())?;
-                stdin
-                    .write_all(&line)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                stdin.flush().await.map_err(|error| error.to_string())?;
-            }
-            Ok::<(), String>(())
-        });
-        let stderr_task = tokio::spawn(drain_limited(stderr, MAX_RUNTIME_STDERR_BYTES));
-        let mut reader = BufReader::new(stdout);
-        let mut handlers = JoinSet::new();
-        let effect_permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_EFFECTS));
-        let mut protocol_error = None;
-        let mut writer_result = None;
-        loop {
-            let next = tokio::select! {
-                frame = read_protocol_frame(&mut reader) => frame,
-                joined = handlers.join_next(), if !handlers.is_empty() => {
-                    match joined {
-                        Some(Ok(Ok(()))) => continue,
-                        Some(Ok(Err(error))) => {
-                            protocol_error = Some(SessionExecutionError::Protocol(error));
-                        }
-                        Some(Err(error)) => {
-                            protocol_error = Some(SessionExecutionError::Protocol(error.to_string()));
-                        }
-                        None => continue,
-                    }
-                    terminate_process_tree(&mut child).await;
-                    break;
-                }
-                result = &mut writer => {
-                    let result = result
-                        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
-                        .map_err(SessionExecutionError::Protocol);
-                    protocol_error = Some(match &result {
-                        Ok(()) => SessionExecutionError::Protocol(
-                            "workflow protocol writer ended before stdout closed".to_string(),
-                        ),
-                        Err(error) => SessionExecutionError::Protocol(error.to_string()),
-                    });
-                    writer_result = Some(result);
-                    terminate_process_tree(&mut child).await;
-                    break;
-                }
-                _ = cancellation.cancelled() => {
-                    terminate_process_tree(&mut child).await;
-                    protocol_error = Some(SessionExecutionError::Cancelled);
-                    break;
-                }
-            };
-            let Some(frame) = next? else { break };
-            let request: EffectRequest = match serde_json::from_slice(&frame) {
-                Ok(request) => request,
-                Err(error) => {
-                    protocol_error = Some(SessionExecutionError::Protocol(format!(
-                        "invalid effect request: {error}; frame={}",
-                        protocol_frame_preview(&frame)
-                    )));
-                    terminate_process_tree(&mut child).await;
-                    break;
-                }
-            };
-            if request.kind == "runtime_suspend" {
-                match context.aggregate_suspension().await {
-                    Ok(suspension) => {
-                        terminate_process_tree(&mut child).await;
-                        protocol_error = Some(SessionExecutionError::Suspended(suspension));
-                    }
-                    Err(error) => {
-                        terminate_process_tree(&mut child).await;
-                        protocol_error = Some(error);
-                    }
-                }
-                break;
-            }
-            let permit = tokio::select! {
-                permit = Arc::clone(&effect_permits).acquire_owned() => {
-                    permit.map_err(|_| SessionExecutionError::Protocol(
-                        "workflow effect semaphore closed".to_string(),
-                    ))?
-                }
-                result = &mut writer => {
-                    let result = result
-                        .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
-                        .map_err(SessionExecutionError::Protocol);
-                    protocol_error = Some(match &result {
-                        Ok(()) => SessionExecutionError::Protocol(
-                            "workflow protocol writer ended while applying backpressure".to_string(),
-                        ),
-                        Err(error) => SessionExecutionError::Protocol(error.to_string()),
-                    });
-                    writer_result = Some(result);
-                    terminate_process_tree(&mut child).await;
-                    break;
-                }
-                _ = cancellation.cancelled() => {
-                    terminate_process_tree(&mut child).await;
-                    protocol_error = Some(SessionExecutionError::Cancelled);
-                    break;
-                }
-            };
-            let effect_context = Arc::clone(&context);
-            let sender = responses_tx.clone();
-            handlers.spawn(async move {
-                let id = request.id.clone();
-                let response = match effect_context.handle(request).await {
-                    Ok(result) => EffectResponse {
-                        id,
-                        ok: true,
-                        result: Some(result),
-                        error: None,
-                        suspended: None,
-                    },
-                    Err(SessionExecutionError::Suspended(suspension)) => EffectResponse {
-                        id,
-                        ok: false,
-                        result: None,
-                        error: None,
-                        suspended: Some(suspension),
-                    },
-                    Err(error) => EffectResponse {
-                        id,
-                        ok: false,
-                        result: None,
-                        error: Some(error.to_string()),
-                        suspended: None,
-                    },
-                };
-                sender
-                    .send(response)
-                    .await
-                    .map_err(|_| "workflow protocol response channel closed".to_string())?;
-                drop(permit);
-                Ok::<(), String>(())
-            });
-        }
-        effect_cancellation.cancel();
-        while let Some(joined) = handlers.join_next().await {
-            let error = match joined {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error),
-                Err(error) => Some(error.to_string()),
-            };
-            if protocol_error.is_none()
-                && let Some(error) = error
-            {
-                protocol_error = Some(SessionExecutionError::Protocol(error));
-            }
-        }
-        drop(responses_tx);
-        let writer_result = match writer_result {
-            Some(result) => result,
-            None => writer
-                .await
-                .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
-                .map_err(SessionExecutionError::Protocol),
-        };
-        let status_result = child.wait().await.map_err(SessionExecutionError::Io);
-        let stderr_result = stderr_task
-            .await
-            .map_err(|error| SessionExecutionError::Protocol(error.to_string()))?
-            .map_err(SessionExecutionError::Io);
-        if let Some(error) = protocol_error {
-            return Err(error);
-        }
-        let status = status_result?;
-        let stderr = stderr_result?;
-        if !status.success() {
-            return Err(SessionExecutionError::Python {
-                code: status.code(),
-                stderr: stderr.text.trim().to_string(),
-                truncated: stderr.truncated,
-            });
-        }
-        writer_result?;
-        context.completion.lock().await.take().ok_or_else(|| {
-            SessionExecutionError::Protocol(
-                "workflow.py exited without submitting a completion output".to_string(),
-            )
-        })
-    }
-}
-
-#[async_trait]
-impl SessionExecutor for PythonSessionExecutor {
-    async fn execute(
-        &self,
-        session_id: SessionId,
-        cancellation: CancellationToken,
-    ) -> Result<SessionExecution, String> {
-        let result = self.execute_inner(session_id, cancellation).await;
-        let workspace = self.work_root.join(session_id.to_string());
-        if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
-            let _ = tokio::fs::remove_dir_all(workspace).await;
-        }
-        match result {
-            Ok(output) => Ok(SessionExecution::Completed(output)),
-            Err(SessionExecutionError::Suspended(suspension)) => {
-                Ok(SessionExecution::Suspended(suspension))
-            }
-            Err(error) => Err(error.to_string()),
-        }
-    }
-}
-
-struct SessionEffectContext {
+pub(crate) struct SessionEffectContext {
     store: StoreHandle,
     session_id: SessionId,
     cancellation: CancellationToken,
     effect_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     suspensions: Mutex<HashMap<String, SessionSuspension>>,
-    completion: Mutex<Option<Value>>,
 }
 
 impl SessionEffectContext {
-    async fn handle(&self, request: EffectRequest) -> Result<Value, SessionExecutionError> {
+    pub(crate) fn new(
+        store: StoreHandle,
+        session_id: SessionId,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            store,
+            session_id,
+            cancellation,
+            effect_gates: Mutex::new(HashMap::new()),
+            suspensions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) async fn handle(
+        &self,
+        id: String,
+        kind: &str,
+        payload: Value,
+    ) -> Result<Value, SessionExecutionError> {
+        let request = EffectRequest {
+            id,
+            kind: kind.to_string(),
+            payload,
+        };
         validate_effect_key(&request.id)?;
         let gate = {
             let mut gates = self.effect_gates.lock().await;
@@ -404,9 +76,6 @@ impl SessionEffectContext {
         match effect.status {
             SessionEffectStatus::Completed => {
                 self.suspensions.lock().await.remove(&request.id);
-                if request.kind == "complete" {
-                    self.remember_completion(&request.payload).await?;
-                }
                 return Ok(effect.result.unwrap_or(Value::Null));
             }
             SessionEffectStatus::Failed => {
@@ -453,11 +122,14 @@ impl SessionEffectContext {
         result
     }
 
-    async fn aggregate_suspension(&self) -> Result<SessionSuspension, SessionExecutionError> {
+    pub(crate) async fn aggregate_suspension(
+        &self,
+    ) -> Result<SessionSuspension, SessionExecutionError> {
         let suspensions = self.suspensions.lock().await;
         if suspensions.is_empty() {
             return Err(SessionExecutionError::Protocol(
-                "Python runtime requested suspension without a pending durable wait".to_string(),
+                "workflow interpreter requested suspension without a pending durable wait"
+                    .to_string(),
             ));
         }
         let session_id = self.session_id;
@@ -497,7 +169,6 @@ impl SessionEffectContext {
             "project_changes" => self.project_changes(payload).await,
             "publish_artifact" => self.publish_artifact(effect_key, payload).await,
             "publish_project_home" => self.publish_project_home(effect_key, payload).await,
-            "complete" => self.complete(payload).await,
             other => Err(SessionExecutionError::Protocol(format!(
                 "unknown effect kind: {other}"
             ))),
@@ -535,8 +206,10 @@ impl SessionEffectContext {
         payload: Value,
     ) -> Result<Value, SessionExecutionError> {
         let payload: CreateAgentEffect = serde_json::from_value(payload)?;
-        let agent_id =
-            AgentId::from_uuid(effect_resource_uuid(self.session_id, effect_key, "agent"));
+        let agent_id = AgentId::from_uuid(uuid::Uuid::new_v5(
+            self.session_id.as_uuid(),
+            format!("agent:{}:{}", payload.class_name, payload.identity_key).as_bytes(),
+        ));
         let session_id = self.session_id;
         let (agent, current_access, effective_access) = self
             .store
@@ -548,21 +221,45 @@ impl SessionEffectContext {
                     .copied()
                     .unwrap_or(payload.access);
                 let effective_access = std::cmp::min(requested_access, session.access);
+                let effective_model = if payload.model.trim().is_empty() {
+                    session.default_model.clone()
+                } else {
+                    payload.model.clone()
+                };
+                let effective_skills = if payload.skills.is_empty() {
+                    session.enabled_skills.clone()
+                } else {
+                    payload.skills.clone()
+                };
                 let agent = match store.get_agent(agent_id) {
                     Ok(agent) => agent,
                     Err(StoreError::NotFound { .. }) => store.create_agent_with_id(
                         session_id,
                         agent_id,
-                        payload.class_name,
-                        payload.name,
-                        payload.role,
-                        payload.system_prompt,
-                        payload.model,
-                        payload.skills,
+                        payload.class_name.clone(),
+                        payload.name.clone(),
+                        payload.role.clone(),
+                        payload.system_prompt.clone(),
+                        payload.model.clone(),
+                        payload.skills.clone(),
                         effective_access,
                     )?,
                     Err(error) => return Err(error.into()),
                 };
+                if agent.session_id != session_id
+                    || agent.class_name != payload.class_name
+                    || agent.name != payload.name
+                    || agent.role != payload.role
+                    || agent.system_prompt != payload.system_prompt
+                    || agent.model != effective_model
+                    || agent.skills != effective_skills
+                    || agent.access != effective_access
+                {
+                    return Err(SessionExecutionError::Protocol(
+                        "Agent identity was replayed with a different frozen configuration"
+                            .to_string(),
+                    ));
+                }
                 let current_access = agent.access;
                 Ok::<_, SessionExecutionError>((agent, current_access, effective_access))
             })
@@ -1078,26 +775,6 @@ impl SessionEffectContext {
             "changed": publication.changed,
         }))
     }
-
-    async fn complete(&self, payload: Value) -> Result<Value, SessionExecutionError> {
-        self.remember_completion(&payload).await?;
-        Ok(Value::Null)
-    }
-
-    async fn remember_completion(&self, payload: &Value) -> Result<(), SessionExecutionError> {
-        let output = payload.get("output").cloned().unwrap_or(Value::Null);
-        let mut completion = self.completion.lock().await;
-        if completion
-            .as_ref()
-            .is_some_and(|existing| existing != &output)
-        {
-            return Err(SessionExecutionError::Protocol(
-                "Session submitted conflicting completion outputs".to_string(),
-            ));
-        }
-        *completion = Some(output);
-        Ok(())
-    }
 }
 
 fn human_answer_or_suspend(
@@ -1113,134 +790,6 @@ fn human_answer_or_suspend(
             None,
         ))),
     }
-}
-
-async fn materialize_runtime(
-    workspace: &Path,
-    python_runtime_root: &Path,
-    source: &str,
-) -> Result<(), SessionExecutionError> {
-    tokio::fs::create_dir_all(workspace).await?;
-    tokio::fs::create_dir_all(workspace.join(".home")).await?;
-    tokio::fs::create_dir_all(workspace.join(".tmp")).await?;
-    tokio::fs::write(workspace.join("workflow.py"), source).await?;
-    let package = workspace.join("papermachine");
-    if tokio::fs::try_exists(&package).await? {
-        tokio::fs::remove_dir_all(&package).await?;
-    }
-    copy_directory(&python_runtime_root.join("papermachine"), &package).await
-}
-
-async fn copy_directory(source: &Path, destination: &Path) -> Result<(), SessionExecutionError> {
-    let mut stack = vec![(source.to_path_buf(), destination.to_path_buf())];
-    while let Some((source, destination)) = stack.pop() {
-        tokio::fs::create_dir_all(&destination).await?;
-        let mut entries = tokio::fs::read_dir(&source).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let from = entry.path();
-            let to = destination.join(entry.file_name());
-            let file_type = entry.file_type().await?;
-            if file_type.is_symlink() {
-                return Err(SessionExecutionError::Snapshot(format!(
-                    "Python Workflow ABI contains a symlink: {}",
-                    from.display()
-                )));
-            }
-            if file_type.is_dir() && entry.file_name() != "__pycache__" {
-                stack.push((from, to));
-            } else if file_type.is_file()
-                && from.extension().is_some_and(|extension| extension == "py")
-            {
-                tokio::fs::copy(from, to).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn drain_limited<R: AsyncRead + Unpin>(
-    mut reader: R,
-    limit: usize,
-) -> Result<LimitedText, std::io::Error> {
-    let mut kept = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    let mut truncated = false;
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        let take = read.min(limit.saturating_sub(kept.len()));
-        kept.extend_from_slice(&buffer[..take]);
-        truncated |= take < read;
-    }
-    Ok(LimitedText {
-        text: String::from_utf8_lossy(&kept).into_owned(),
-        truncated,
-    })
-}
-
-fn encode_protocol_frame(value: &impl Serialize) -> Result<Vec<u8>, SessionExecutionError> {
-    let mut frame = serde_json::to_vec(value)?;
-    if frame.len().saturating_add(1) > MAX_PROTOCOL_FRAME_BYTES {
-        return Err(SessionExecutionError::Protocol(format!(
-            "workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"
-        )));
-    }
-    frame.push(b'\n');
-    Ok(frame)
-}
-
-async fn read_protocol_frame<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<Option<Vec<u8>>, std::io::Error> {
-    let mut frame = Vec::new();
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if frame.is_empty() {
-                return Ok(None);
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "workflow protocol frame is missing its newline",
-            ));
-        }
-        if let Some(index) = available.iter().position(|byte| *byte == b'\n') {
-            let consumed = index + 1;
-            if frame.len().saturating_add(consumed) > MAX_PROTOCOL_FRAME_BYTES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"),
-                ));
-            }
-            frame.extend_from_slice(&available[..index]);
-            reader.consume(consumed);
-            if frame.last() == Some(&b'\r') {
-                frame.pop();
-            }
-            return Ok(Some(frame));
-        }
-        if frame.len().saturating_add(available.len()) >= MAX_PROTOCOL_FRAME_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("workflow protocol frame exceeds {MAX_PROTOCOL_FRAME_BYTES} bytes"),
-            ));
-        }
-        frame.extend_from_slice(available);
-        let consumed = available.len();
-        reader.consume(consumed);
-    }
-}
-
-fn protocol_frame_preview(frame: &[u8]) -> String {
-    const PREVIEW_BYTES: usize = 512;
-    let prefix = &frame[..frame.len().min(PREVIEW_BYTES)];
-    let mut preview = String::from_utf8_lossy(prefix).into_owned();
-    if frame.len() > PREVIEW_BYTES {
-        preview.push('…');
-    }
-    preview
 }
 
 fn format_action_turn_input(arguments: &Value) -> String {
@@ -1373,18 +922,10 @@ struct EffectRequest {
     payload: Value,
 }
 
-#[derive(Debug, Serialize)]
-struct EffectResponse {
-    id: String,
-    ok: bool,
-    result: Option<Value>,
-    error: Option<String>,
-    suspended: Option<SessionSuspension>,
-}
-
 #[derive(Debug, Deserialize)]
 struct CreateAgentEffect {
     class_name: String,
+    identity_key: String,
     name: String,
     role: String,
     system_prompt: String,
@@ -1479,37 +1020,18 @@ fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, SessionExecutionErro
     }
 }
 
-struct LimitedText {
-    text: String,
-    truncated: bool,
-}
-
 #[derive(Debug, Error)]
 pub enum SessionExecutionError {
     #[error(transparent)]
     Store(#[from] papermachine_store::StoreError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error("workflow runtime failed to spawn: {0}")]
-    Spawn(String),
     #[error("workflow snapshot validation failed: {0}")]
     Snapshot(String),
-    #[error("workflow runtime is missing its {0} pipe")]
-    MissingPipe(&'static str),
     #[error("workflow effect protocol failed: {0}")]
     Protocol(String),
     #[error("replayed Session effect {key} failed previously: {error}")]
     ReplayedEffect { key: String, error: String },
-    #[error("workflow Python process exited with {code:?}: {stderr}{suffix}", suffix = if *.truncated { " [truncated]" } else { "" })]
-    Python {
-        code: Option<i32>,
-        stderr: String,
-        truncated: bool,
-    },
-    #[error("workflow sandbox unavailable: {0}")]
-    Sandbox(String),
     #[error("Session was cancelled")]
     Cancelled,
     #[error("Session suspended as {0:?}")]
@@ -1518,36 +1040,4 @@ pub enum SessionExecutionError {
     SessionTerminal(SessionStatus),
     #[error("Agent action failed: {0}")]
     Action(String),
-}
-
-#[cfg(test)]
-mod protocol_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn protocol_frame_decoder_accepts_the_limit_and_rejects_the_next_byte() {
-        let mut exact = vec![b'x'; MAX_PROTOCOL_FRAME_BYTES - 1];
-        exact.push(b'\n');
-        let mut reader = BufReader::new(exact.as_slice());
-        assert_eq!(
-            read_protocol_frame(&mut reader)
-                .await
-                .expect("exact frame should decode")
-                .expect("frame should exist")
-                .len(),
-            MAX_PROTOCOL_FRAME_BYTES - 1
-        );
-
-        let mut oversized = vec![b'x'; MAX_PROTOCOL_FRAME_BYTES];
-        oversized.push(b'\n');
-        let mut reader = BufReader::new(oversized.as_slice());
-        assert!(read_protocol_frame(&mut reader).await.is_err());
-    }
-
-    #[test]
-    fn protocol_frame_encoder_appends_one_newline() {
-        let frame = encode_protocol_frame(&json!({"ok": true})).expect("frame should encode");
-        assert_eq!(frame.last(), Some(&b'\n'));
-        assert_eq!(frame.iter().filter(|byte| **byte == b'\n').count(), 1);
-    }
 }
