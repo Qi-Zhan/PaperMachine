@@ -78,6 +78,7 @@ pub struct Workflow {
 pub struct Parameter {
     pub name: String,
     pub schema: BoundarySchema,
+    pub optional: bool,
     pub span: Span,
 }
 

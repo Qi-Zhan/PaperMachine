@@ -15,6 +15,10 @@ Schema 支持 `any/string/bool/int/number/list/map/object/enum`、optional field
 default、长度和数值范围。`model_profile` 与 `access` 是启动表单边界的受控形式。
 声明顺序就是 UI 顺序。
 
+Workflow params 与 object schema 使用同一字段语法：`name: schema` 在没有 default
+时是必填字段，`name?: schema` 是可选字段。runtime 在验证前应用 default，因此
+`run` 应直接信任 `ctx.params`，不重复执行 default、clamp 或同一范围检查。
+
 ## 值与控制流
 
 值包括 `null/bool/int/number/string/list/object`，以及不可伪造的 Agent、Action、
@@ -47,12 +51,26 @@ repair。模型不是“只返回 active”，而是在正常工作报告之外�
 返回底层 text/JSON，同时保留 exact Action provenance，供 `publish_home(action=...)`
 校验。
 
-`ask_human` 返回 opaque HumanMessage。它作为 Action 的唯一参数时，host 校验 exact
-answered HumanRequest、Session、Agent、参数名和内容，再建立 direct human Turn。
+HumanRequest 的 response schema 必须是顶层已声明 schema，例如
+`ask_human(question = "...", response = HumanText, agent = worker)`。编译器将其展开并
+验证；Workflow 源码不再嵌入 raw JSON Schema。`ask_human` 返回 opaque HumanMessage。
+它作为 Action 的唯一参数时，host 校验 exact answered HumanRequest、Session、Agent、
+参数名和内容，再建立 direct human Turn。
 
 ## 并行
 
 ~~~rust
+let fixed = parallel {
+    primary => {
+        let worker = Researcher(key = "primary", name = "Primary");
+        await worker.research(question = ctx.request, objective = "primary evidence")
+    },
+    challenge => {
+        let worker = Researcher(key = "challenge", name = "Challenge");
+        await worker.research(question = ctx.request, objective = "counterevidence")
+    },
+};
+
 let reports = parallel for route in plan.routes key route.key {
     let worker = Researcher(key = route.key, name = route.name);
     await worker.research(question = ctx.request, objective = route.objective)
@@ -63,7 +81,8 @@ let reports = parallel for route in plan.routes key route.key {
 动态 key 必须是唯一 scalar。effect path 包含 IR NodeId、函数调用点、loop iteration、
 branch index 与 canonical key hash，不受完成顺序影响。同一个 Agent 不能并行执行两个
 Action，不同 Agent 可以。分支只通过返回值汇合，但仍共享 Workspace，不提供文件系统
-隔离。
+隔离。内置 `parallel-universe`（平行宇宙）是动态 key 的完整示例；上面的固定分支形式
+也由 durable runtime 测试覆盖。
 
 ## Durable runtime
 

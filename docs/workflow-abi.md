@@ -42,6 +42,9 @@ boundary.
 Schemas are limited to `any`, scalar types, list, map, object, and scalar enum,
 with optional/default fields and length/numeric constraints. The same validator
 serves params, structured Action output, and HumanRequest answers.
+Params use object-field required/optional syntax. HumanRequest response schemas
+are named top-level schemas expanded during compilation rather than runtime JSON
+Schema values embedded in Workflow code.
 
 ## Effects and replay
 

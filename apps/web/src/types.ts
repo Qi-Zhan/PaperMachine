@@ -379,6 +379,7 @@ export interface Health {
 export interface ModelProfile {
   id: string
   provider: string
+  api: 'open_ai_responses' | 'open_ai_chat_completions'
   model: string
   context_window: number
   capabilities: string[]
@@ -388,8 +389,9 @@ export interface ModelProfile {
 
 export interface ModelProvider {
   id: string
-  kind: string
-  endpoint: string
+  base_url: string
+  apis: Array<'open_ai_responses' | 'open_ai_chat_completions'>
+  chat_compatibility: 'generic' | 'deepseek' | 'glm'
   max_request_retries: number
   request_timeout_seconds: number
   stream_idle_timeout_seconds: number

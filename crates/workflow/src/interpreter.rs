@@ -1102,14 +1102,11 @@ impl Runtime {
     ) -> Result<RuntimeValue, SessionExecutionError> {
         match name {
             "ask_human" => {
-                let values = flexible_arguments(
-                    "ask_human",
-                    &["question", "response_schema", "agent"],
-                    values,
-                )?;
+                let values =
+                    flexible_arguments("ask_human", &["question", "response", "agent"], values)?;
                 let question = required_string(&values, "question")?;
                 let response_schema = values
-                    .get("response_schema")
+                    .get("response")
                     .map(RuntimeValue::to_json)
                     .transpose()?
                     .unwrap_or_else(|| json!({"type":"string"}));

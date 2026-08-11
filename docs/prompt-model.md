@@ -32,8 +32,15 @@ meaning.
 
 Session default model and Agent model refer to configured profile IDs. Before a
 Turn, the router resolves provider, upstream model, context window, capabilities,
-reasoning default, and non-secret config hash into ModelRouteSnapshot. A changed
-route configuration cannot masquerade as the old snapshot on recovery.
+wire API, reasoning default, and non-secret config hash into ModelRouteSnapshot.
+A provider may back profiles using both Responses and Chat Completions; the API
+belongs to the profile and is included in its config hash. A changed route
+configuration cannot masquerade as the old snapshot on recovery.
+
+Chat Completions responses are normalized into the same durable response-item
+history as Responses. Provider compatibility only translates wire details such
+as thinking fields and streamed tool calls; it does not create a second Agent
+runtime. Chat profiles cannot declare hosted search.
 
 Hosted search is requested only by Action search context and only when the route
 declares capability. It is separate from local ToolRegistry membership.

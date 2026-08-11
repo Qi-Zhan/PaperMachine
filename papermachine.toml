@@ -3,7 +3,6 @@
 default_model = "glm-5-2"
 
 [providers.aeroides]
-kind = "open_ai_responses"
 base_url = "https://private.aeroides.dev/v1"
 api_key_env = "AEROIDES_API_KEY"
 max_request_retries = 3
@@ -16,12 +15,12 @@ reasoning_effort = "medium"
 
 [models.glm-5-2]
 provider = "aeroides"
+api = "open_ai_responses"
 model = "glm-5.2"
 context_window = 1048576
 capabilities = []
 
 [providers.deepseek]
-kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 optional = true
@@ -32,9 +31,54 @@ store_responses = false
 responses_websockets = false
 prompt_cache_mode = "implicit"
 reasoning_effort = "high"
+chat_compatibility = "deepseek"
 
 [models.deepseek-flash]
 provider = "deepseek"
+api = "open_ai_responses"
 model = "deepseek-v4-flash"
 context_window = 1000000
+capabilities = ["hosted_web_search"]
+
+[models.deepseek-pro]
+provider = "deepseek"
+api = "open_ai_chat_completions"
+model = "deepseek-v4-pro"
+context_window = 1000000
+capabilities = []
+
+[providers.glm]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZHIPUAI_API_KEY"
+optional = true
+max_request_retries = 3
+request_timeout_seconds = 900
+stream_idle_timeout_seconds = 300
+reasoning_effort = "max"
+chat_compatibility = "glm"
+
+[models.glm-direct]
+provider = "glm"
+api = "open_ai_chat_completions"
+model = "glm-5.2"
+context_window = 1000000
+capabilities = []
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+optional = true
+max_request_retries = 3
+request_timeout_seconds = 900
+stream_idle_timeout_seconds = 300
+store_responses = false
+responses_websockets = true
+prompt_cache_mode = "auto"
+reasoning_effort = "medium"
+
+[models.openai-main]
+provider = "openai"
+api = "open_ai_responses"
+model = "gpt-5.6-sol"
+context_window = 1050000
 capabilities = ["hosted_web_search"]

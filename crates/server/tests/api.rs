@@ -4,6 +4,7 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
 use papermachine_model::ConfiguredModels;
+use papermachine_model::ModelApi;
 use papermachine_model::ModelClient;
 use papermachine_model::ModelProfile;
 use papermachine_model::ModelRouter;
@@ -58,7 +59,7 @@ fn prepare_root(root: &Path) {
     for slug in [
         "goal",
         "interactive-agent",
-        "parallel-discovery",
+        "parallel-universe",
         "project-summary",
     ] {
         let builtin = root.join("workflows/builtin").join(slug);
@@ -95,6 +96,7 @@ async fn test_app_with_model_profiles(
         ModelProfile {
             id: "research-model".to_string(),
             provider: "scripted".to_string(),
+            api: ModelApi::OpenAiResponses,
             model: "research-upstream".to_string(),
             context_window: 128_000,
             capabilities: Vec::new(),
@@ -104,6 +106,7 @@ async fn test_app_with_model_profiles(
         ModelProfile {
             id: "review-model".to_string(),
             provider: "scripted".to_string(),
+            api: ModelApi::OpenAiResponses,
             model: "review-upstream".to_string(),
             context_window: 128_000,
             capabilities: Vec::new(),
@@ -115,13 +118,13 @@ async fn test_app_with_model_profiles(
         default_model: "research-model".to_string(),
         profiles: profiles.clone(),
         providers: Vec::new(),
-        router: ModelRouter::new(
-            profiles,
-            HashMap::from([(
-                "scripted".to_string(),
-                Arc::new(scripted) as Arc<dyn ModelClient>,
-            )]),
-        )
+        router: ModelRouter::new(profiles, {
+            let client = Arc::new(scripted) as Arc<dyn ModelClient>;
+            HashMap::from([
+                ("research-model".to_string(), Arc::clone(&client)),
+                ("review-model".to_string(), client),
+            ])
+        })
         .expect("model router should be valid"),
     };
     let state = initialize(&ServerConfig {
@@ -443,7 +446,7 @@ async fn session_creation_validates_program_contract_and_project_scope() {
         &app,
         owner.id,
         json!({
-            "program_slug": "parallel-discovery",
+            "program_slug": "parallel-universe",
             "instructions": "",
             "params": {},
             "model": "demo-model",
@@ -462,6 +465,72 @@ async fn session_creation_validates_program_contract_and_project_scope() {
         .await
         .expect("scoped request should complete");
     assert_eq!(wrong_project.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn workflow_params_enforce_required_optional_and_default_semantics() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let app = test_app(&directory).await;
+    let project = create_project(&app, directory.path(), "Params").await;
+    let source = r#"
+version 1;
+workflow required_param {
+    slug = "required-param";
+    name = "Required param";
+    description = "Exercise required and defaulted launch params.";
+    request = none;
+    params {
+        topic: string(min_len = 1, title = "Topic");
+        note?: string(default = "default note", title = "Note");
+    }
+    run(ctx) {
+        return {topic: ctx.params.topic, note: ctx.params.note};
+    }
+}
+"#;
+    let saved = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/projects/{}/workflow-programs", project.id),
+            json!({"source": source}),
+        ))
+        .await
+        .expect("Workflow save should complete");
+    assert_eq!(saved.status(), StatusCode::CREATED);
+
+    let (status, value) = create_session(
+        &app,
+        project.id,
+        json!({
+            "program_slug": "required-param",
+            "params": {},
+            "model": "demo-model",
+            "access": "model_only"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+
+    let (status, value) = create_session(
+        &app,
+        project.id,
+        json!({
+            "program_slug": "required-param",
+            "params": {"topic": "language boundary"},
+            "model": "demo-model",
+            "access": "model_only"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    let session: Session = serde_json::from_value(value).expect("Session should deserialize");
+    assert_eq!(session.params["note"], "default note");
+    let view = wait_for_session_status(&app, project.id, session.id, &["completed"]).await;
+    assert_eq!(
+        view["session"]["output"],
+        json!({"topic":"language boundary","note":"default note"})
+    );
 }
 
 #[tokio::test]
@@ -595,7 +664,7 @@ async fn one_workflow_session_owns_all_of_its_agents_actions_and_turns() {
         &app,
         project.id,
         json!({
-            "program_slug": "parallel-discovery",
+            "program_slug": "parallel-universe",
             "title": "Research routes",
             "request": "Compare the evidence.",
             "instructions": "",
@@ -654,7 +723,7 @@ async fn per_agent_model_profiles_are_bound_inside_one_session() {
         &app,
         project.id,
         json!({
-            "program_slug": "parallel-discovery",
+            "program_slug": "parallel-universe",
             "request": "Compare models.",
             "instructions": "",
             "params": {
@@ -699,7 +768,7 @@ async fn child_session_keeps_provenance_and_cannot_exceed_source_access() {
         &app,
         project.id,
         json!({
-            "program_slug": "parallel-discovery",
+            "program_slug": "parallel-universe",
             "request": "Escalate.",
             "instructions": "",
             "params": {},
@@ -715,7 +784,7 @@ async fn child_session_keeps_provenance_and_cannot_exceed_source_access() {
         &app,
         project.id,
         json!({
-            "program_slug": "parallel-discovery",
+            "program_slug": "parallel-universe",
             "request": "Continue from the source Session.",
             "instructions": "",
             "params": {"perspectives": ["one", "two"]},
@@ -759,7 +828,6 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
             project.id,
             json!({
                 "program_slug": "project-summary",
-                "request": "Refresh the Project home now.",
                 "instructions": "Keep verified results and next actions visible.",
                 "params": {"interval_minutes": 0},
                 "model": "demo-model",
@@ -771,6 +839,8 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
     assert_eq!(status, StatusCode::CREATED);
     let first: Session = serde_json::from_value(value).expect("Session should deserialize");
     let first_view = wait_for_session_status(&app, project.id, first.id, &["completed"]).await;
+    assert_eq!(first_view["session"]["output"]["updated"], true);
+    assert!(first_view["session"]["output"]["artifact_id"].is_string());
     assert_eq!(first_view["agents"].as_array().map(Vec::len), Some(1));
     assert!(
         first_view["turns"]
@@ -832,14 +902,17 @@ async fn project_summary_publishes_and_refreshes_the_managed_home() {
     let (status, value) = run_summary().await;
     assert_eq!(status, StatusCode::CREATED);
     let second: Session = serde_json::from_value(value).expect("Session should deserialize");
-    wait_for_session_status(&app, project.id, second.id, &["completed"]).await;
+    let second_view = wait_for_session_status(&app, project.id, second.id, &["completed"]).await;
+    assert_eq!(second_view["session"]["output"]["updated"], false);
+    assert!(second_view["session"]["output"]["artifact_id"].is_string());
     let overview = response_json(
-        app.oneshot(empty_request(
-            "GET",
-            &format!("/api/projects/{}", project.id),
-        ))
-        .await
-        .expect("Project overview should load"),
+        app.clone()
+            .oneshot(empty_request(
+                "GET",
+                &format!("/api/projects/{}", project.id),
+            ))
+            .await
+            .expect("Project overview should load"),
     )
     .await;
     assert_eq!(overview["summary_session"]["id"], second.id.to_string());

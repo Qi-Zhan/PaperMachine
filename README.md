@@ -104,7 +104,7 @@ Actions; there is no second scheduler.
 ## Repository layout
 
 - `crates/protocol`: canonical IDs, entities, events, and API types.
-- `crates/model`: provider profiles, routing, and Responses transports.
+- `crates/model`: provider profiles, routing, and Responses/Chat Completions transports.
 - `crates/tools`: ToolCatalog, per-Turn ToolRegistry, and local tools.
 - `crates/execution`: process lifecycle and OS sandbox enforcement.
 - `crates/agent`: sampling, tool execution, Agent inputs, and context.
@@ -131,7 +131,10 @@ win. Open <http://127.0.0.1:4310>; non-loopback Host headers are rejected.
 
 Real providers resolve credentials only from the configured environment
 variable. Session `default_model` and Agent `model` values are model-profile IDs,
-not upstream model strings.
+not upstream model strings. A provider owns credentials and a base URL; each
+model profile explicitly selects `open_ai_responses` or
+`open_ai_chat_completions`. Optional providers are listed only when their
+credential is present and are never contacted merely by loading configuration.
 
 ## Verification
 

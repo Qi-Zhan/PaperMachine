@@ -1,5 +1,7 @@
 version 1;
 
+schema HumanText = string(min_len = 1);
+
 agent InteractiveAgent {
     access = workspace;
     role = "interactive project agent";
@@ -29,8 +31,8 @@ workflow interactive_agent {
     request = none;
 
     params {
-        session_title = string(default = "New project Session", title = "Session title");
-        agent_access = access(default = "workspace", title = "Agent access");
+        session_title?: string(default = "New project Session", title = "Session title");
+        agent_access?: access(default = workspace, title = "Agent access");
     }
 
     run(ctx) {
@@ -42,7 +44,7 @@ workflow interactive_agent {
         loop {
             let message = await ask_human(
                 question = "Send a message to this agent.",
-                response_schema = {type: "string"},
+                response = HumanText,
                 agent = worker,
             );
             await worker.respond(message = message);

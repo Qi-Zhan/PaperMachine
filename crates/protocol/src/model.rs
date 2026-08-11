@@ -235,6 +235,9 @@ pub struct ModelRequestMetadata {
     /// PaperMachine provider identifier selected by the model profile.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Concrete wire API selected by the model profile.
+    #[serde(default)]
+    pub api: Option<String>,
     /// User-facing PaperMachine model profile. This can differ from the
     /// provider's model identifier.
     #[serde(default)]

@@ -2,7 +2,7 @@ version 1;
 
 agent Researcher {
     access = model_only;
-    role = "independent research route";
+    role = "independent research universe";
     system = "Gather concrete evidence, preserve provenance, and state uncertainty.";
 
     action investigate(question, perspective) {
@@ -19,7 +19,7 @@ counterevidence, direct URLs, and open questions.
 
 agent Synthesizer {
     access = model_only;
-    role = "research synthesis";
+    role = "cross-universe synthesis";
     system = "Compare independent findings and keep conclusions bounded by the evidence.";
 
     action synthesize(question, findings) {
@@ -32,21 +32,20 @@ missing evidence, and the strongest defensible conclusion.
     }
 }
 
-workflow parallel_discovery {
-    slug = "parallel-discovery";
-    name = "Parallel discovery";
-    description = "Investigate a request from independent directions, then combine the evidence.";
+workflow parallel_universe {
+    slug = "parallel-universe";
+    name = "Parallel universe";
+    description = "Explore a request through keyed parallel research universes, then combine their evidence.";
     request = required;
 
     params {
-        perspectives = list(string, default = ["primary evidence", "counterevidence and limitations"]);
-        research_model = model_profile(title = "Research model");
-        synthesis_model = model_profile(title = "Synthesis model");
+        perspectives?: list(string(min_len = 1), default = ["primary evidence", "counterevidence and limitations"], min_len = 2, max_len = 8);
+        research_model?: model_profile(title = "Research model");
+        synthesis_model?: model_profile(title = "Synthesis model");
     }
 
     run(ctx) {
-        let perspectives = get(ctx.params, "perspectives", ["primary evidence", "counterevidence and limitations"]);
-        let findings = parallel for perspective in perspectives key perspective {
+        let findings = parallel for perspective in ctx.params.perspectives key perspective {
             let researcher = Researcher(
                 key = perspective,
                 name = perspective,
@@ -59,7 +58,7 @@ workflow parallel_discovery {
         };
         let synthesizer = Synthesizer(
             key = "main",
-            name = "Synthesis",
+            name = "Cross-universe synthesis",
             model = get(ctx.params, "synthesis_model", ""),
         );
         let summary = await synthesizer.synthesize(

@@ -3,6 +3,9 @@ use crate::DEFAULT_MODEL_STREAM_IDLE_TIMEOUT;
 use crate::ModelClient;
 use crate::ModelError;
 use crate::ModelStream;
+use crate::OpenAiChatClient;
+use crate::OpenAiChatCompatibility;
+use crate::OpenAiChatConfig;
 use crate::OpenAiPromptCacheMode;
 use crate::OpenAiReasoningEffort;
 use crate::OpenAiResponsesClient;
@@ -25,16 +28,34 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ModelProfile {
     pub id: String,
     pub provider: String,
+    pub api: ModelApi,
     pub model: String,
     pub context_window: usize,
     pub capabilities: Vec<ModelCapability>,
     pub default_reasoning_effort: Option<ReasoningEffort>,
     pub config_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelApi {
+    OpenAiResponses,
+    OpenAiChatCompletions,
+}
+
+impl ModelApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiResponses => "open_ai_responses",
+            Self::OpenAiChatCompletions => "open_ai_chat_completions",
+        }
+    }
 }
 
 impl ModelProfile {
@@ -52,8 +73,9 @@ pub enum ModelCapability {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ModelProviderInfo {
     pub id: String,
-    pub kind: String,
-    pub endpoint: String,
+    pub base_url: String,
+    pub apis: Vec<ModelApi>,
+    pub chat_compatibility: String,
     pub max_request_retries: u32,
     pub request_timeout_seconds: u64,
     pub stream_idle_timeout_seconds: u64,
@@ -126,19 +148,21 @@ impl ConfiguredModels {
             models: model_configs,
         } = file;
         let declared_providers = provider_configs.keys().cloned().collect::<HashSet<_>>();
+        let responses_hosted_search = model_configs
+            .values()
+            .filter(|profile| {
+                profile.api == ModelApi::OpenAiResponses
+                    && profile
+                        .capabilities
+                        .contains(&ModelCapability::HostedWebSearch)
+            })
+            .map(|profile| profile.provider.clone())
+            .collect::<HashSet<_>>();
 
-        let mut clients: HashMap<String, Arc<dyn ModelClient>> = HashMap::new();
-        let mut providers = Vec::with_capacity(provider_configs.len());
+        let mut resolved_providers = HashMap::with_capacity(provider_configs.len());
         let mut unavailable_providers = HashSet::new();
-        let mut provider_config_sha256 = HashMap::new();
-        let mut provider_reasoning_effort = HashMap::new();
         for (provider_id, provider) in provider_configs {
             validate_identifier("provider", &provider_id)?;
-            if provider.kind != ProviderKind::OpenAiResponses {
-                return Err(ModelError::Configuration(format!(
-                    "provider {provider_id:?} has an unsupported kind"
-                )));
-            }
             if provider.api_key_env.trim().is_empty() {
                 return Err(ModelError::Configuration(format!(
                     "provider {provider_id:?} must set api_key_env"
@@ -164,11 +188,11 @@ impl ConfiguredModels {
                     )));
                 }
             };
-            let endpoint = super::openai::responses_endpoint(&provider.base_url)?;
-            if endpoint.scheme() != "https" {
+            let base_url = normalize_base_url(&provider.base_url)?;
+            if base_url.scheme() != "https" {
                 tracing::warn!(
                     provider = provider_id,
-                    endpoint = %endpoint,
+                    endpoint = %base_url,
                     "model endpoint is not protected by HTTPS"
                 );
             }
@@ -187,58 +211,32 @@ impl ConfiguredModels {
             let max_request_retries = provider.max_request_retries.unwrap_or(2);
             let store_responses = provider.store_responses.unwrap_or(false);
             let default_reasoning_effort = provider.reasoning_effort.map(protocol_reasoning_effort);
-            let provider_sha256 = hash_route_config(&serde_json::json!({
-                "provider": provider_id,
-                "kind": "openai_responses",
-                "endpoint": endpoint.to_string(),
-                "api_key_env": provider.api_key_env,
-                "optional": provider.optional,
-                "organization": provider.organization,
-                "project": provider.project,
-                "max_request_retries": max_request_retries,
-                "request_timeout_seconds": request_timeout.as_secs(),
-                "stream_idle_timeout_seconds": stream_idle_timeout.as_secs(),
-                "reasoning_effort": default_reasoning_effort,
-                "store_responses": store_responses,
-                "responses_websockets": responses_websockets,
-                "prompt_cache_mode": prompt_cache_mode_name(prompt_cache_mode),
-            }))?;
-            let hosted_web_search = model_configs.values().any(|profile| {
-                profile.provider == provider_id
-                    && profile
-                        .capabilities
-                        .contains(&ModelCapability::HostedWebSearch)
-            });
-            let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
-                provider_id: provider_id.clone(),
-                endpoint: endpoint.clone(),
-                api_key,
-                organization: provider.organization.clone(),
-                project: provider.project.clone(),
-                max_request_retries,
-                request_timeout,
-                stream_idle_timeout,
-                reasoning_effort: provider.reasoning_effort,
-                store_responses,
-                responses_websockets,
-                hosted_web_search,
-                prompt_cache_mode,
-            })?;
-            providers.push(ModelProviderInfo {
-                id: provider_id.clone(),
-                kind: "openai_responses".to_string(),
-                endpoint: endpoint.to_string(),
-                max_request_retries,
-                request_timeout_seconds: request_timeout.as_secs(),
-                stream_idle_timeout_seconds: stream_idle_timeout.as_secs(),
-                responses_websockets,
-                prompt_cache_mode: prompt_cache_mode_name(prompt_cache_mode).to_string(),
-            });
-            provider_config_sha256.insert(provider_id.clone(), provider_sha256);
-            provider_reasoning_effort.insert(provider_id.clone(), default_reasoning_effort);
-            clients.insert(provider_id, Arc::new(client));
+            resolved_providers.insert(
+                provider_id,
+                ResolvedProvider {
+                    base_url: base_url.to_string(),
+                    api_key_env: provider.api_key_env.trim().to_string(),
+                    optional: provider.optional,
+                    api_key,
+                    organization: provider.organization,
+                    project: provider.project,
+                    max_request_retries,
+                    request_timeout,
+                    stream_idle_timeout,
+                    reasoning_effort: provider.reasoning_effort,
+                    default_reasoning_effort,
+                    store_responses,
+                    responses_websockets,
+                    prompt_cache_mode,
+                    chat_compatibility: provider.chat_compatibility,
+                },
+            );
         }
 
+        let mut api_clients: HashMap<(String, ModelApi), Arc<dyn ModelClient>> = HashMap::new();
+        let mut api_config_sha256 = HashMap::new();
+        let mut profile_clients = HashMap::new();
+        let mut used_apis: HashMap<String, HashSet<ModelApi>> = HashMap::new();
         let mut profiles = Vec::with_capacity(model_configs.len());
         for (profile_id, profile) in model_configs {
             validate_identifier("model profile", &profile_id)?;
@@ -265,6 +263,15 @@ impl ConfiguredModels {
                     "model profile {profile_id:?} contains duplicate capabilities"
                 )));
             }
+            if profile.api == ModelApi::OpenAiChatCompletions
+                && profile
+                    .capabilities
+                    .contains(&ModelCapability::HostedWebSearch)
+            {
+                return Err(ModelError::Configuration(format!(
+                    "model profile {profile_id:?} cannot declare hosted_web_search through open_ai_chat_completions"
+                )));
+            }
             if unavailable_providers.contains(&profile.provider) {
                 tracing::warn!(
                     model_profile = profile_id,
@@ -273,35 +280,73 @@ impl ConfiguredModels {
                 );
                 continue;
             }
-            if !clients.contains_key(&profile.provider) {
-                return Err(ModelError::Configuration(format!(
+            let provider = resolved_providers.get(&profile.provider).ok_or_else(|| {
+                ModelError::Configuration(format!(
                     "model profile {profile_id:?} has no available provider {:?}",
                     profile.provider
-                )));
+                ))
+            })?;
+            let api_key = (profile.provider.clone(), profile.api);
+            if !api_clients.contains_key(&api_key) {
+                let hosted_web_search = profile.api == ModelApi::OpenAiResponses
+                    && responses_hosted_search.contains(&profile.provider);
+                let (client, config_sha256) =
+                    build_api_client(&profile.provider, provider, profile.api, hosted_web_search)?;
+                api_clients.insert(api_key.clone(), client);
+                api_config_sha256.insert(api_key.clone(), config_sha256);
             }
-            let default_reasoning_effort = provider_reasoning_effort
-                .get(&profile.provider)
-                .copied()
-                .flatten();
+            let client = api_clients
+                .get(&api_key)
+                .cloned()
+                .expect("API client was inserted above");
             let config_sha256 = hash_route_config(&serde_json::json!({
                 "profile": profile_id,
                 "provider": profile.provider,
+                "api": profile.api,
                 "upstream_model": profile.model,
                 "context_window": profile.context_window,
                 "capabilities": profile.capabilities,
-                "default_reasoning_effort": default_reasoning_effort,
-                "provider_config_sha256": provider_config_sha256.get(&profile.provider),
+                "default_reasoning_effort": provider.default_reasoning_effort,
+                "api_config_sha256": api_config_sha256.get(&api_key),
             }))?;
+            profile_clients.insert(profile_id.clone(), client);
+            used_apis
+                .entry(profile.provider.clone())
+                .or_default()
+                .insert(profile.api);
             profiles.push(ModelProfile {
                 id: profile_id,
                 provider: profile.provider,
+                api: profile.api,
                 model: profile.model,
                 context_window: profile.context_window,
                 capabilities: profile.capabilities,
-                default_reasoning_effort,
+                default_reasoning_effort: provider.default_reasoning_effort,
                 config_sha256,
             });
         }
+        let mut providers = used_apis
+            .into_iter()
+            .map(|(provider_id, apis)| {
+                let provider = resolved_providers
+                    .get(&provider_id)
+                    .expect("used provider must be available");
+                let mut apis = apis.into_iter().collect::<Vec<_>>();
+                apis.sort();
+                ModelProviderInfo {
+                    id: provider_id,
+                    base_url: provider.base_url.clone(),
+                    apis,
+                    chat_compatibility: provider.chat_compatibility.as_str().to_string(),
+                    max_request_retries: provider.max_request_retries,
+                    request_timeout_seconds: provider.request_timeout.as_secs(),
+                    stream_idle_timeout_seconds: provider.stream_idle_timeout.as_secs(),
+                    responses_websockets: provider.responses_websockets,
+                    prompt_cache_mode: prompt_cache_mode_name(provider.prompt_cache_mode)
+                        .to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
         profiles.sort_by(|left, right| left.id.cmp(&right.id));
         providers.sort_by(|left, right| left.id.cmp(&right.id));
         if !profiles.iter().any(|profile| profile.id == default_model) {
@@ -309,7 +354,7 @@ impl ConfiguredModels {
                 "default_model {default_model:?} is unavailable; its provider credentials are required"
             )));
         }
-        let router = ModelRouter::new(profiles.clone(), clients)?;
+        let router = ModelRouter::new(profiles.clone(), profile_clients)?;
         Ok(Self {
             default_model,
             profiles,
@@ -322,7 +367,7 @@ impl ConfiguredModels {
 #[derive(Clone)]
 pub struct ModelRouter {
     routes: Arc<HashMap<String, ModelRoute>>,
-    providers: Arc<HashMap<String, Arc<dyn ModelClient>>>,
+    clients: Arc<Vec<Arc<dyn ModelClient>>>,
 }
 
 impl fmt::Debug for ModelRouter {
@@ -330,7 +375,7 @@ impl fmt::Debug for ModelRouter {
         formatter
             .debug_struct("ModelRouter")
             .field("profiles", &self.routes.keys().collect::<Vec<_>>())
-            .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .field("client_count", &self.clients.len())
             .finish()
     }
 }
@@ -344,7 +389,7 @@ struct ModelRoute {
 impl ModelRouter {
     pub fn new(
         profiles: Vec<ModelProfile>,
-        providers: HashMap<String, Arc<dyn ModelClient>>,
+        clients_by_profile: HashMap<String, Arc<dyn ModelClient>>,
     ) -> Result<Self, ModelError> {
         let mut routes = HashMap::with_capacity(profiles.len());
         for mut profile in profiles {
@@ -352,18 +397,22 @@ impl ModelRouter {
                 profile.config_sha256 = hash_route_config(&serde_json::json!({
                     "profile": profile.id,
                     "provider": profile.provider,
+                    "api": profile.api,
                     "upstream_model": profile.model,
                     "context_window": profile.context_window,
                     "capabilities": profile.capabilities,
                     "default_reasoning_effort": profile.default_reasoning_effort,
                 }))?;
             }
-            let client = providers.get(&profile.provider).cloned().ok_or_else(|| {
-                ModelError::Configuration(format!(
-                    "model profile {:?} references unknown provider {:?}",
-                    profile.id, profile.provider
-                ))
-            })?;
+            let client = clients_by_profile
+                .get(&profile.id)
+                .cloned()
+                .ok_or_else(|| {
+                    ModelError::Configuration(format!(
+                        "model profile {:?} has no model client",
+                        profile.id
+                    ))
+                })?;
             if routes
                 .insert(profile.id.clone(), ModelRoute { profile, client })
                 .is_some()
@@ -373,9 +422,23 @@ impl ModelRouter {
                 ));
             }
         }
+        if clients_by_profile.len() != routes.len() {
+            return Err(ModelError::Configuration(
+                "model clients contain an unknown profile identifier".to_string(),
+            ));
+        }
+        let mut clients = Vec::new();
+        for client in clients_by_profile.into_values() {
+            if !clients
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &client))
+            {
+                clients.push(client);
+            }
+        }
         Ok(Self {
             routes: Arc::new(routes),
-            providers: Arc::new(providers),
+            clients: Arc::new(clients),
         })
     }
 }
@@ -394,6 +457,7 @@ impl ModelClient for ModelRouter {
         })?;
         request.model = route.profile.model.clone();
         let provider_id = route.profile.provider.clone();
+        let api = route.profile.api.as_str().to_string();
         let upstream_model = route.profile.model.clone();
         let stream = route.client.stream(request).await?;
         Ok(stream
@@ -401,6 +465,7 @@ impl ModelClient for ModelRouter {
                 event.map(|event| match event {
                     ModelEvent::RequestMetadata { mut metadata } => {
                         metadata.provider = Some(provider_id.clone());
+                        metadata.api = Some(api.clone());
                         metadata.model_profile = Some(profile_id.clone());
                         metadata.upstream_model = Some(upstream_model.clone());
                         ModelEvent::RequestMetadata { metadata }
@@ -412,7 +477,7 @@ impl ModelClient for ModelRouter {
     }
 
     async fn close_transport_session(&self, session_key: &str) {
-        for client in self.providers.values() {
+        for client in self.clients.iter() {
             client.close_transport_session(session_key).await;
         }
     }
@@ -494,16 +559,9 @@ struct ModelConfigFile {
     models: HashMap<String, ModelProfileFile>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum ProviderKind {
-    OpenAiResponses,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderConfigFile {
-    kind: ProviderKind,
     base_url: String,
     api_key_env: String,
     #[serde(default)]
@@ -517,15 +575,134 @@ struct ProviderConfigFile {
     store_responses: Option<bool>,
     responses_websockets: Option<bool>,
     prompt_cache_mode: Option<OpenAiPromptCacheMode>,
+    #[serde(default)]
+    chat_compatibility: OpenAiChatCompatibility,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelProfileFile {
     provider: String,
+    api: ModelApi,
     model: String,
     context_window: usize,
     capabilities: Vec<ModelCapability>,
+}
+
+struct ResolvedProvider {
+    base_url: String,
+    api_key_env: String,
+    optional: bool,
+    api_key: String,
+    organization: Option<String>,
+    project: Option<String>,
+    max_request_retries: u32,
+    request_timeout: Duration,
+    stream_idle_timeout: Duration,
+    reasoning_effort: Option<OpenAiReasoningEffort>,
+    default_reasoning_effort: Option<ReasoningEffort>,
+    store_responses: bool,
+    responses_websockets: bool,
+    prompt_cache_mode: OpenAiPromptCacheMode,
+    chat_compatibility: OpenAiChatCompatibility,
+}
+
+fn build_api_client(
+    provider_id: &str,
+    provider: &ResolvedProvider,
+    api: ModelApi,
+    hosted_web_search: bool,
+) -> Result<(Arc<dyn ModelClient>, String), ModelError> {
+    match api {
+        ModelApi::OpenAiResponses => {
+            let endpoint = super::openai::responses_endpoint(&provider.base_url)?;
+            let config_sha256 = hash_route_config(&serde_json::json!({
+                "provider": provider_id,
+                "api": api,
+                "endpoint": endpoint.as_str(),
+                "api_key_env": provider.api_key_env,
+                "optional": provider.optional,
+                "organization": provider.organization,
+                "project": provider.project,
+                "max_request_retries": provider.max_request_retries,
+                "request_timeout_seconds": provider.request_timeout.as_secs(),
+                "stream_idle_timeout_seconds": provider.stream_idle_timeout.as_secs(),
+                "reasoning_effort": provider.default_reasoning_effort,
+                "store_responses": provider.store_responses,
+                "responses_websockets": provider.responses_websockets,
+                "hosted_web_search": hosted_web_search,
+                "prompt_cache_mode": prompt_cache_mode_name(provider.prompt_cache_mode),
+            }))?;
+            let client = OpenAiResponsesClient::new(OpenAiResponsesConfig {
+                provider_id: provider_id.to_string(),
+                endpoint,
+                api_key: provider.api_key.clone(),
+                organization: provider.organization.clone(),
+                project: provider.project.clone(),
+                max_request_retries: provider.max_request_retries,
+                request_timeout: provider.request_timeout,
+                stream_idle_timeout: provider.stream_idle_timeout,
+                reasoning_effort: provider.reasoning_effort,
+                store_responses: provider.store_responses,
+                responses_websockets: provider.responses_websockets,
+                hosted_web_search,
+                prompt_cache_mode: provider.prompt_cache_mode,
+            })?;
+            Ok((Arc::new(client), config_sha256))
+        }
+        ModelApi::OpenAiChatCompletions => {
+            let endpoint = super::openai_chat::chat_completions_endpoint(&provider.base_url)?;
+            let config_sha256 = hash_route_config(&serde_json::json!({
+                "provider": provider_id,
+                "api": api,
+                "endpoint": endpoint.as_str(),
+                "api_key_env": provider.api_key_env,
+                "optional": provider.optional,
+                "organization": provider.organization,
+                "project": provider.project,
+                "max_request_retries": provider.max_request_retries,
+                "request_timeout_seconds": provider.request_timeout.as_secs(),
+                "stream_idle_timeout_seconds": provider.stream_idle_timeout.as_secs(),
+                "reasoning_effort": provider.default_reasoning_effort,
+                "chat_compatibility": provider.chat_compatibility,
+            }))?;
+            let client = OpenAiChatClient::new(OpenAiChatConfig {
+                provider_id: provider_id.to_string(),
+                endpoint,
+                api_key: provider.api_key.clone(),
+                organization: provider.organization.clone(),
+                project: provider.project.clone(),
+                max_request_retries: provider.max_request_retries,
+                request_timeout: provider.request_timeout,
+                stream_idle_timeout: provider.stream_idle_timeout,
+                reasoning_effort: provider.reasoning_effort,
+                compatibility: provider.chat_compatibility,
+            })?;
+            Ok((Arc::new(client), config_sha256))
+        }
+    }
+}
+
+fn normalize_base_url(value: &str) -> Result<Url, ModelError> {
+    let parsed = value
+        .parse::<Url>()
+        .map_err(|error| ModelError::Configuration(format!("invalid model base URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ModelError::Configuration(
+            "model base URL must be an absolute HTTP(S) URL".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ModelError::Configuration(
+            "model base URL must not contain credentials".to_string(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ModelError::Configuration(
+            "model base URL must not contain a query or fragment".to_string(),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), ModelError> {
@@ -600,6 +777,7 @@ mod tests {
             Ok(futures::stream::iter([Ok(ModelEvent::RequestMetadata {
                 metadata: ModelRequestMetadata {
                     provider: None,
+                    api: None,
                     model_profile: None,
                     upstream_model: None,
                     transport: ModelTransport::HttpSse,
@@ -621,33 +799,35 @@ mod tests {
 default_model = "deepseek-flash"
 
 [providers.deepseek]
-kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 responses_websockets = false
 prompt_cache_mode = "implicit"
 reasoning_effort = "medium"
+chat_compatibility = "deepseek"
 
 [providers.openai]
-kind = "open_ai_responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
 [models.deepseek-flash]
 provider = "deepseek"
+api = "open_ai_responses"
 model = "deepseek-v4-flash"
 context_window = 1000000
 capabilities = ["hosted_web_search"]
 
 [models.openai-main]
 provider = "openai"
+api = "open_ai_responses"
 model = "gpt-5.6-sol"
 context_window = 1000000
 capabilities = []
 
 [models.deepseek-no-search]
 provider = "deepseek"
-model = "deepseek-chat"
+api = "open_ai_chat_completions"
+model = "deepseek-v4-pro"
 context_window = 1000000
 capabilities = []
 "#;
@@ -659,6 +839,22 @@ capabilities = []
         assert_eq!(configured.default_model, "deepseek-flash");
         assert_eq!(configured.profiles.len(), 3);
         assert_eq!(configured.providers.len(), 2);
+        assert_eq!(
+            configured
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "deepseek-no-search")
+                .map(|profile| profile.api),
+            Some(ModelApi::OpenAiChatCompletions)
+        );
+        assert_eq!(
+            configured
+                .providers
+                .iter()
+                .find(|provider| provider.id == "deepseek")
+                .map(|provider| provider.apis.as_slice()),
+            Some([ModelApi::OpenAiResponses, ModelApi::OpenAiChatCompletions,].as_slice())
+        );
         assert!(
             configured
                 .profiles
@@ -727,15 +923,54 @@ capabilities = []
     }
 
     #[test]
+    fn checked_in_config_declares_openai_deepseek_and_glm_without_network_calls() {
+        let source = include_str!("../../../papermachine.toml");
+        let configured = ConfiguredModels::from_toml_with_key_lookup(source, |name| {
+            Some(format!("test-only-{name}"))
+        })
+        .expect("checked-in model config should load with dummy credentials");
+
+        assert_eq!(configured.default_model, "glm-5-2");
+        for profile in [
+            "glm-5-2",
+            "glm-direct",
+            "deepseek-flash",
+            "deepseek-pro",
+            "openai-main",
+        ] {
+            assert!(
+                configured.profiles.iter().any(|item| item.id == profile),
+                "missing model profile {profile}"
+            );
+        }
+        assert_eq!(
+            configured
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "deepseek-pro")
+                .map(|profile| profile.api),
+            Some(ModelApi::OpenAiChatCompletions)
+        );
+        assert_eq!(
+            configured
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "openai-main")
+                .map(|profile| profile.api),
+            Some(ModelApi::OpenAiResponses)
+        );
+    }
+
+    #[test]
     fn missing_provider_key_fails_with_the_variable_name() {
         let source = r#"
 default_model = "main"
 [providers.deepseek]
-kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 [models.main]
 provider = "deepseek"
+api = "open_ai_responses"
 model = "deepseek-v4-flash"
 context_window = 1000000
 capabilities = []
@@ -751,24 +986,24 @@ capabilities = []
 default_model = "local-main"
 
 [providers.local]
-kind = "open_ai_responses"
 base_url = "https://models.example.test"
 api_key_env = "LOCAL_API_KEY"
 
 [providers.optional]
-kind = "open_ai_responses"
 base_url = "https://optional.example.test"
 api_key_env = "OPTIONAL_API_KEY"
 optional = true
 
 [models.local-main]
 provider = "local"
+api = "open_ai_responses"
 model = "main"
 context_window = 100000
 capabilities = []
 
 [models.optional-search]
 provider = "optional"
+api = "open_ai_responses"
 model = "search"
 context_window = 100000
 capabilities = ["hosted_web_search"]
@@ -786,7 +1021,7 @@ capabilities = ["hosted_web_search"]
     }
 
     #[test]
-    fn provider_kind_is_required() {
+    fn model_api_is_required() {
         let source = r#"
 default_model = "main"
 [providers.deepseek]
@@ -800,8 +1035,8 @@ capabilities = []
 "#;
         let error =
             ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
-                .expect_err("provider kind should be explicit");
-        assert!(error.to_string().contains("missing field `kind`"));
+                .expect_err("model API should be explicit");
+        assert!(error.to_string().contains("missing field `api`"));
     }
 
     #[test]
@@ -809,11 +1044,11 @@ capabilities = []
         let source = r#"
 default_model = "main"
 [providers.deepseek]
-kind = "open_ai_responses"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 [models.main]
 provider = "deepseek"
+api = "open_ai_responses"
 model = "deepseek-v4-flash"
 context_window = 1000000
 "#;
@@ -823,22 +1058,48 @@ context_window = 1000000
         assert!(error.to_string().contains("missing field `capabilities`"));
     }
 
+    #[test]
+    fn chat_completions_cannot_claim_hosted_web_search() {
+        let source = r#"
+default_model = "main"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+chat_compatibility = "deepseek"
+[models.main]
+provider = "deepseek"
+api = "open_ai_chat_completions"
+model = "deepseek-v4-pro"
+context_window = 1000000
+capabilities = ["hosted_web_search"]
+"#;
+        let error =
+            ConfiguredModels::from_toml_with_key_lookup(source, |_| Some("test-key".to_string()))
+                .expect_err("unsupported hosted search must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot declare hosted_web_search")
+        );
+    }
+
     #[tokio::test]
     async fn router_rewrites_profile_and_annotates_metadata() {
         let capture = Arc::new(CapturingClient::default());
-        let mut providers: HashMap<String, Arc<dyn ModelClient>> = HashMap::new();
-        providers.insert("deepseek".to_string(), capture.clone());
+        let mut clients: HashMap<String, Arc<dyn ModelClient>> = HashMap::new();
+        clients.insert("fast-research".to_string(), capture.clone());
         let router = ModelRouter::new(
             vec![ModelProfile {
                 id: "fast-research".to_string(),
                 provider: "deepseek".to_string(),
+                api: ModelApi::OpenAiResponses,
                 model: "deepseek-v4-flash".to_string(),
                 context_window: 1_000_000,
                 capabilities: vec![ModelCapability::HostedWebSearch],
                 default_reasoning_effort: None,
                 config_sha256: String::new(),
             }],
-            providers,
+            clients,
         )
         .expect("router should build");
         let request = ModelRequest {
@@ -877,11 +1138,15 @@ context_window = 1000000
             [ModelEvent::RequestMetadata {
                 metadata: ModelRequestMetadata {
                     provider: Some(provider),
+                    api: Some(api),
                     model_profile: Some(profile),
                     upstream_model: Some(model),
                     ..
                 }
-            }] if provider == "deepseek" && profile == "fast-research" && model == "deepseek-v4-flash"
+            }] if provider == "deepseek"
+                && api == "open_ai_responses"
+                && profile == "fast-research"
+                && model == "deepseek-v4-flash"
         ));
     }
 }

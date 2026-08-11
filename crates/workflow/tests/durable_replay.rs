@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 const SOURCE: &str = r#"
 version 1;
+schema HumanDecision = string(min_len = 1);
 agent Observer {
     access = model_only;
     role = "replay observer";
@@ -35,7 +36,7 @@ workflow durable_replay {
         let observer = Observer(key = "main", name = "Observer");
         let decision = await ask_human(
             question = "Continue after the simulated restart?",
-            response_schema = {type: "string"},
+            response = HumanDecision,
             agent = observer,
         );
         return {decision};
@@ -755,7 +756,7 @@ async fn builtin_evidence_loop_runs_effectful_helpers_and_keyed_parallel_routes(
             trigger: Default::default(),
             params: json!({
                 "route_count": 2,
-                "max_rounds": 1,
+                "max_rounds": 2,
                 "max_followups_per_round": 2,
                 "max_draft_revisions": 0,
                 "extra_requirements": []
@@ -778,7 +779,18 @@ async fn builtin_evidence_loop_runs_effectful_helpers_and_keyed_parallel_routes(
         completed_response("Primary evidence report", 20, 8),
         completed_response("Counterevidence report", 20, 8),
         completed_response(
-            r#"{"complete":true,"rationale":"Both routes are covered.","supported_conclusions":["bounded conclusion"],"unresolved_gaps":[],"contradictions":[],"follow_ups":[]}"#,
+            r#"{"complete":false,"rationale":"A new route is requested.","supported_conclusions":[],"unresolved_gaps":["new route"],"contradictions":[],"follow_ups":[{"route_key":"invented","objective":"Start another route"}]}"#,
+            20,
+            15,
+        ),
+        completed_response(
+            r#"{"complete":false,"rationale":"Primary evidence needs one check.","supported_conclusions":[],"unresolved_gaps":["primary check"],"contradictions":[],"follow_ups":[{"route_key":"primary","objective":"Verify the primary boundary"}]}"#,
+            20,
+            15,
+        ),
+        completed_response("Primary follow-up evidence report", 20, 8),
+        completed_response(
+            r#"{"complete":true,"rationale":"Both routes and the follow-up are covered.","supported_conclusions":["bounded conclusion"],"unresolved_gaps":[],"contradictions":[],"follow_ups":[]}"#,
             20,
             15,
         ),
@@ -805,7 +817,9 @@ async fn builtin_evidence_loop_runs_effectful_helpers_and_keyed_parallel_routes(
     };
     assert_eq!(output["report"], "Final evidence-grounded report");
     assert_eq!(output["completion"]["status"], "passed");
-    assert_eq!(output["evidence_ledger"].as_array().map(Vec::len), Some(2));
+    assert_eq!(output["evidence_ledger"].as_array().map(Vec::len), Some(3));
+    assert_eq!(output["rounds"], 2);
+    assert_eq!(output["route_sessions_reused"], true);
     assert_eq!(
         store
             .list_agents(session.id)
@@ -821,6 +835,15 @@ async fn builtin_evidence_loop_runs_effectful_helpers_and_keyed_parallel_routes(
         .collect::<Vec<_>>();
     assert_eq!(route_agents.len(), 2);
     assert_ne!(route_agents[0].id, route_agents[1].id);
+    assert_eq!(
+        store
+            .list_action_invocations(session.id)
+            .expect("Actions should load")
+            .iter()
+            .filter(|action| action.action_name == "research")
+            .count(),
+        3
+    );
 }
 
 #[tokio::test]

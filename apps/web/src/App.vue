@@ -845,10 +845,6 @@ async function runProjectSummary(input: {
   try {
     const session = await api.createSession(overview.project.id, {
       program_slug: 'project-summary',
-      request:
-        input.intervalMinutes > 0
-          ? `Refresh the Project home page every ${input.intervalMinutes} minutes.`
-          : 'Refresh the Project home page now.',
       instructions: input.instructions.trim(),
       params: { interval_minutes: input.intervalMinutes },
       model,

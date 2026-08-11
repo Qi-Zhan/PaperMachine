@@ -123,10 +123,7 @@ fn manifest(program: &Program) -> WorkflowProgramManifest {
                 .map(|parameter| super::schema::SchemaField {
                     name: parameter.name.clone(),
                     schema: parameter.schema.clone(),
-                    // Workflow params describe a launch form. Omitted fields
-                    // remain optional; defaults are a UI/runtime convenience,
-                    // not a second required-field model.
-                    optional: true,
+                    optional: parameter.optional,
                 })
                 .collect(),
         )
@@ -692,6 +689,21 @@ impl<'a> Validator<'a> {
                     self.error(message, Some(expression.span));
                 }
             }
+            ExpressionKind::Variable { name } if name == "ask_human" => {
+                validate_arity(self, name, arguments.len(), 1, 3, expression.span);
+                validate_named_options(
+                    self,
+                    arguments,
+                    &["question", "response", "agent"],
+                    expression.span,
+                );
+                if !in_await {
+                    self.error(
+                        "effect `ask_human` must be awaited".to_string(),
+                        Some(expression.span),
+                    );
+                }
+            }
             ExpressionKind::Variable { name } if builtin_arity(name).is_some() => {
                 let (minimum, maximum, effectful) = builtin_arity(name).expect("checked");
                 validate_arity(
@@ -1254,7 +1266,10 @@ workflow goal {
   name = "Goal";
   description = "Keep working";
   request = required;
-  params { title = string(default = "Goal", title = "Title"); }
+  params {
+    topic: string(title = "Topic");
+    title?: string(default = "Goal", title = "Title");
+  }
   run(ctx) {
     let worker = Worker(key = "main", name = ctx.params.title);
     loop {
@@ -1274,6 +1289,10 @@ workflow goal {
         let compiled = compile_source(SOURCE, &BTreeSet::new()).expect("source compiles");
         assert_eq!(compiled.manifest.slug, "goal");
         assert_eq!(compiled.manifest.language_version, 1);
+        assert_eq!(
+            compiled.manifest.params_schema["required"],
+            serde_json::json!(["topic"])
+        );
         assert_eq!(compiled.ir_sha256.len(), 64);
         let with_space = SOURCE.replace("version 1;", "version    1;");
         let second = compile_source(&with_space, &BTreeSet::new()).expect("source compiles");
@@ -1350,5 +1369,44 @@ workflow invalid {
                 validation.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn human_response_schema_is_a_compile_time_language_boundary() {
+        let valid = r#"
+version 1;
+schema HumanText = string(min_len = 1);
+agent Worker { role = "worker"; system = ""; access = model_only; }
+workflow interactive {
+  name = "Interactive"; description = "Ask once"; request = none;
+  params {}
+  run(ctx) {
+    let worker = Worker(key = "main");
+    return await ask_human(question = "Continue?", response = HumanText, agent = worker);
+  }
+}
+"#;
+        compile_source(valid, &BTreeSet::new()).expect("named response schema should compile");
+
+        let raw_json = valid.replace(
+            "response = HumanText",
+            "response_schema = {type: \"string\"}",
+        );
+        let validation = compile_source(&raw_json, &BTreeSet::new())
+            .expect_err("raw response schemas should be rejected");
+        assert!(
+            validation
+                .diagnostics
+                .iter()
+                .any(|item| item.message.contains("unknown option `response_schema`"))
+        );
+
+        let missing = valid.replace("response = HumanText", "response = MissingSchema");
+        let validation = compile_source(&missing, &BTreeSet::new())
+            .expect_err("unknown response schemas should be rejected");
+        assert!(validation.diagnostics.iter().any(|item| {
+            item.message
+                .contains("ask_human references unknown schema `MissingSchema`")
+        }));
     }
 }

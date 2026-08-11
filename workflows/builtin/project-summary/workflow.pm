@@ -20,16 +20,17 @@ workflow project_summary {
     slug = "project-summary";
     name = "Project summary";
     description = "Generate or periodically refresh the Project home page.";
-    request = required;
+    request = none;
 
     params {
-        interval_minutes = number(default = 60, min = 0, title = "Refresh interval (minutes)", description = "Use 0 for a one-time update.");
+        interval_minutes?: number(default = 60, min = 0, title = "Refresh interval (minutes)", description = "Use 0 for a one-time update.");
     }
 
     run(ctx) {
         let summarizer = ProjectSummaryAgent(key = "main", name = "Project summary");
         var refresh_count = 0;
-        var artifact_id = "";
+        var artifact_id = null;
+        var updated = false;
         var cursor = null;
 
         loop {
@@ -53,13 +54,14 @@ workflow project_summary {
                 );
                 refresh_count = next_refresh_count;
                 artifact_id = artifact.artifact_id;
+                updated = artifact.changed;
             }
             cursor = next_cursor;
             if changes.has_more {
                 continue;
             }
             if ctx.params.interval_minutes <= 0 {
-                return {artifact_id, refresh_count};
+                return {artifact_id, refresh_count, updated};
             }
             await wait(
                 minutes = ctx.params.interval_minutes,

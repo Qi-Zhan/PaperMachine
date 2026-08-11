@@ -1,9 +1,9 @@
 version 1;
 
 schema Route = object {
-    key: string,
-    name: string,
-    objective: string,
+    key: string(min_len = 1),
+    name: string(min_len = 1),
+    objective: string(min_len = 1),
 };
 
 schema ResearchPlan = object {
@@ -14,8 +14,8 @@ schema ResearchPlan = object {
 };
 
 schema FollowUp = object {
-    route_key: string,
-    objective: string,
+    route_key: string(min_len = 1),
+    objective: string(min_len = 1),
 };
 
 schema Assessment = object {
@@ -134,6 +134,44 @@ never invent missing values, and obey structured-output requirements exactly.
     }
 }
 
+fn routes_are_valid(routes, expected_count) {
+    if len(routes) != expected_count {
+        return false;
+    }
+    var keys = [];
+    for route in routes {
+        for key in keys {
+            if key == route.key {
+                return false;
+            }
+        }
+        keys = append(keys, route.key);
+    }
+    return true;
+}
+
+fn follow_ups_are_valid(routes, follow_ups) {
+    var seen = [];
+    for item in follow_ups {
+        var existing = false;
+        for route in routes {
+            if route.key == item.route_key {
+                existing = true;
+            }
+        }
+        if !existing {
+            return false;
+        }
+        for route_key in seen {
+            if route_key == item.route_key {
+                return false;
+            }
+        }
+        seen = append(seen, item.route_key);
+    }
+    return true;
+}
+
 fn create_plan(planner, question, route_count, extra_requirements) {
     var feedback = "";
     for attempt in range(2) {
@@ -143,10 +181,10 @@ fn create_plan(planner, question, route_count, extra_requirements) {
             extra_requirements = extra_requirements,
             feedback = feedback,
         );
-        if len(plan.routes) == route_count {
+        if routes_are_valid(plan.routes, route_count) {
             return plan;
         }
-        feedback = "routes must contain exactly " + string(route_count) + " entries";
+        feedback = "routes must contain exactly " + string(route_count) + " entries with unique keys";
     }
     fail("Planner did not return a usable plan: " + feedback)
 }
@@ -161,10 +199,15 @@ fn assess_evidence(evaluator, question, plan, ledger, round_number) {
             round_number = round_number,
             feedback = feedback,
         );
-        if !(assessment.complete && len(assessment.follow_ups) > 0) {
-            return assessment;
+        if assessment.complete && len(assessment.follow_ups) > 0 {
+            feedback = "a complete assessment cannot request follow-up research";
+            continue;
         }
-        feedback = "a complete assessment cannot request follow-up research";
+        if !follow_ups_are_valid(plan.routes, assessment.follow_ups) {
+            feedback = "follow-ups must use unique keys from the existing research routes";
+            continue;
+        }
+        return assessment;
     }
     fail("Evaluator did not return a usable assessment: " + feedback)
 }
@@ -176,22 +219,22 @@ workflow evidence_loop {
     request = required;
 
     params {
-        route_count = int(default = 2, min = 2, max = 4);
-        extra_requirements = list(string, default = []);
-        max_rounds = int(default = 2, min = 1, max = 4);
-        max_followups_per_round = int(default = 2, min = 1, max = 4);
-        max_draft_revisions = int(default = 2, min = 0, max = 3);
-        planner_model = model_profile(title = "Planner model");
-        research_model = model_profile(title = "Research model");
-        evaluator_model = model_profile(title = "Evaluator model");
-        writer_model = model_profile(title = "Writer model");
+        route_count?: int(default = 2, min = 2, max = 4);
+        extra_requirements?: list(string, default = []);
+        max_rounds?: int(default = 2, min = 1, max = 4);
+        max_followups_per_round?: int(default = 2, min = 1, max = 4);
+        max_draft_revisions?: int(default = 2, min = 0, max = 3);
+        planner_model?: model_profile(title = "Planner model");
+        research_model?: model_profile(title = "Research model");
+        evaluator_model?: model_profile(title = "Evaluator model");
+        writer_model?: model_profile(title = "Writer model");
     }
 
     run(ctx) {
-        let route_count = clamp(get(ctx.params, "route_count", 2), 2, 4);
-        let max_rounds = clamp(get(ctx.params, "max_rounds", 2), 1, 4);
-        let max_followups = clamp(get(ctx.params, "max_followups_per_round", route_count), 1, route_count);
-        let max_revisions = clamp(get(ctx.params, "max_draft_revisions", 2), 0, 3);
+        let route_count = ctx.params.route_count;
+        let max_rounds = ctx.params.max_rounds;
+        let max_followups = min(ctx.params.max_followups_per_round, route_count);
+        let max_revisions = ctx.params.max_draft_revisions;
         let planner_model = get(ctx.params, "planner_model", "");
         let research_model = get(ctx.params, "research_model", "");
         let evaluator_model = get(ctx.params, "evaluator_model", "");
@@ -204,7 +247,7 @@ workflow evidence_loop {
             planner = planner,
             question = ctx.request,
             route_count = route_count,
-            extra_requirements = get(ctx.params, "extra_requirements", []),
+            extra_requirements = ctx.params.extra_requirements,
         );
         var ledger = parallel for route in plan.routes key route.key {
             let researcher = Researcher(
@@ -238,7 +281,8 @@ workflow evidence_loop {
         );
 
         while !evaluation.complete && round_number < max_rounds {
-            let follow_ups = slice(evaluation.follow_ups, 0, max_followups);
+            let follow_up_count = min(len(evaluation.follow_ups), max_followups);
+            let follow_ups = slice(evaluation.follow_ups, 0, follow_up_count);
             if len(follow_ups) == 0 {
                 break;
             }

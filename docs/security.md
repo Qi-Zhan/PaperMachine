@@ -58,10 +58,12 @@ before another sample. After a crash, an incomplete canonical tool call receives
 one stable aborted output rather than being guessed or replayed.
 
 HumanRequest answers are validated by the same controlled schema validator used
-for params and Action results. Direct human Turns require an opaque provenance
-value tied to the exact answered request. Project Home publication similarly
-requires the exact completed Action handle and validates a full standalone HTML
-document before storing it.
+for params and Action results. Workflow source names a declared Human response
+schema; the compiler expands it, so runtime-computed raw JSON Schema is not an
+authority surface. Direct human Turns require an opaque provenance value tied to
+the exact answered request. Project Home publication similarly requires the
+exact completed Action handle and validates a full standalone HTML document
+before storing it.
 
 ## Network and UI
 

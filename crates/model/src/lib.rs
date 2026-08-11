@@ -1,6 +1,7 @@
 //! Model-provider streaming used by the PaperMachine agent runtime.
 
 mod openai;
+mod openai_chat;
 mod providers;
 mod scripted;
 
@@ -24,7 +25,11 @@ pub use openai::OpenAiPromptCacheMode;
 pub use openai::OpenAiReasoningEffort;
 pub use openai::OpenAiResponsesClient;
 pub use openai::OpenAiResponsesConfig;
+pub use openai_chat::OpenAiChatClient;
+pub use openai_chat::OpenAiChatCompatibility;
+pub use openai_chat::OpenAiChatConfig;
 pub use providers::ConfiguredModels;
+pub use providers::ModelApi;
 pub use providers::ModelCapability;
 pub use providers::ModelProfile;
 pub use providers::ModelProviderInfo;

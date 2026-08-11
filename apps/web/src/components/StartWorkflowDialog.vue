@@ -59,12 +59,14 @@
                   @change="setBooleanValue(field.key, $event)"
                 />
                 <span>
-                  <strong>{{ field.label }}</strong>
+                  <strong>{{ field.label }}<template v-if="field.required"> *</template></strong>
                   <small>{{ field.description }}</small>
                 </span>
               </label>
               <template v-else>
-                <label class="field-label" :for="`workflow-field-${field.key}`">{{ field.label }}</label>
+                <label class="field-label" :for="`workflow-field-${field.key}`">
+                  {{ field.label }}<template v-if="field.required"> *</template>
+                </label>
                 <div v-if="field.type === 'integer'" class="stepper schema-stepper">
                   <button type="button" :title="t('common.decrease')" :aria-label="t('common.decrease')" @click="decrement(field)">
                     <Minus :size="14" />
@@ -79,6 +81,7 @@
                   :id="`workflow-field-${field.key}`"
                   :value="String(formValues[field.key] ?? '')"
                   class="select-input schema-control"
+                  :required="field.required"
                   @change="setTextValue(field.key, $event)"
                 >
                   <option value="">{{ t('dialog.inheritRunModel') }}</option>
@@ -91,6 +94,7 @@
                   :id="`workflow-field-${field.key}`"
                   :value="String(formValues[field.key] ?? '')"
                   class="text-area schema-text-area"
+                  :required="field.required"
                   @input="setTextValue(field.key, $event)"
                 />
                 <select
@@ -98,6 +102,7 @@
                   :id="`workflow-field-${field.key}`"
                   :value="String(formValues[field.key] ?? '')"
                   class="select-input schema-control"
+                  :required="field.required"
                   @change="setTextValue(field.key, $event)"
                 >
                   <option value="">{{ t('common.default') }}</option>
@@ -111,6 +116,7 @@
                   type="number"
                   :min="field.minimum"
                   :max="field.maximum"
+                  :required="field.required"
                   step="any"
                   @input="setNumberValue(field.key, $event)"
                 />
@@ -120,6 +126,7 @@
                   :value="String(formValues[field.key] ?? '')"
                   class="text-input schema-control"
                   autocomplete="off"
+                  :required="field.required"
                   @input="setTextValue(field.key, $event)"
                 />
                 <p v-if="field.description" class="field-note schema-field-note">{{ field.description }}</p>
@@ -303,6 +310,7 @@ interface SchemaField {
   minimum?: number
   maximum?: number
   defaultValue?: unknown
+  required: boolean
   options?: string[]
   modelProfile: boolean
   multiline: boolean
@@ -346,11 +354,21 @@ const unknownSelectedModel = computed(
   () => Boolean(model.value && !props.modelProfiles.some((profile) => profile.id === model.value)),
 )
 const schemaFields = computed<SchemaField[]>(() => {
-  const properties = (selectedWorkflow.value?.manifest.params_schema as { properties?: unknown } | undefined)?.properties
+  const schema = selectedWorkflow.value?.manifest.params_schema as {
+    properties?: unknown
+    required?: unknown
+  } | undefined
+  const properties = schema?.properties
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return []
+  const required = new Set(
+    Array.isArray(schema?.required)
+      ? schema.required.filter((value): value is string => typeof value === 'string')
+      : [],
+  )
   return Object.entries(properties as Record<string, unknown>)
     .map(([key, raw]) => {
       const property = (raw ?? {}) as SchemaProperty
+      const isRequired = required.has(key)
       return {
         key,
         label: property.title ?? humanize(key),
@@ -359,10 +377,11 @@ const schemaFields = computed<SchemaField[]>(() => {
         minimum: property.minimum,
         maximum: property.maximum,
         defaultValue: property.default,
+        required: isRequired,
         options: property.enum,
         modelProfile: property.format === 'model-profile',
         multiline: key.includes('claim') || key.includes('result') || key.includes('description'),
-        advanced: property.format === 'model-profile' || key === 'model',
+        advanced: !isRequired && (property.format === 'model-profile' || key === 'model'),
         order: property['x-ui-order'] ?? Number.MAX_SAFE_INTEGER,
       }
     })
@@ -375,6 +394,7 @@ const canSubmit = computed(() => Boolean(
   selectedWorkflow.value &&
   model.value.trim() &&
   (requestMode.value === 'none' || requestText.value.trim()) &&
+  schemaFields.value.every((field) => !field.required || hasFormValue(formValues.value[field.key])) &&
   !programLoading.value &&
   !programError.value,
 ))
@@ -445,11 +465,17 @@ function initializeValues() {
       else if (['string', 'number', 'boolean'].includes(typeof field.defaultValue)) {
         values[field.key] = field.defaultValue as FormValue
       } else values[field.key] = ''
-    } else if (field.type === 'boolean') values[field.key] = false
-    else if (field.type === 'integer' || field.type === 'number') values[field.key] = field.minimum ?? 0
+    } else if (field.type === 'boolean') values[field.key] = field.required ? false : ''
+    else if (field.type === 'integer' || field.type === 'number') {
+      values[field.key] = field.required ? (field.minimum ?? 0) : ''
+    }
     else values[field.key] = ''
   }
   formValues.value = values
+}
+
+function hasFormValue(value: FormValue | undefined) {
+  return value !== '' && value !== undefined && value !== null
 }
 
 function resetAgentOverrides() {

@@ -356,7 +356,6 @@ impl Scenario {
                 r#"default_model = "{MODEL_PROFILE}"
 
 [providers.process-test]
-kind = "open_ai_responses"
 base_url = "{}"
 api_key_env = "{PROVIDER_KEY_ENV}"
 max_request_retries = 0
@@ -367,6 +366,7 @@ prompt_cache_mode = "implicit"
 
 [models.{MODEL_PROFILE}]
 provider = "process-test"
+api = "open_ai_responses"
 model = "process-test-upstream"
 context_window = 128000
 capabilities = []

@@ -439,13 +439,19 @@ impl Parser {
         while !self.take(&TokenKind::RBrace) {
             let span = self.current().span;
             let name = self.expect_ident()?;
-            self.expect_simple(TokenKind::Equal, "`=`")?;
+            let optional = self.take(&TokenKind::Question);
+            self.expect_simple(TokenKind::Colon, "`:`")?;
             let schema = self.schema_expression()?;
             self.expect_simple(TokenKind::Semicolon, "`;`")?;
             if params.iter().any(|value: &Parameter| value.name == name) {
                 return Err(self.error_here(&format!("duplicate parameter `{name}`")));
             }
-            params.push(Parameter { name, schema, span });
+            params.push(Parameter {
+                name,
+                schema,
+                optional,
+                span,
+            });
         }
         Ok(params)
     }
@@ -668,7 +674,13 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::LParen) {
-                let arguments = self.call_arguments()?;
+                let mut arguments = self.call_arguments()?;
+                if matches!(
+                    &left.kind,
+                    ExpressionKind::Variable { name } if name == "ask_human"
+                ) {
+                    self.lower_human_response_schema(&mut arguments)?;
+                }
                 left = Expression {
                     id: self.node_id(),
                     span: merge_span(start, self.previous_span()),
@@ -919,6 +931,32 @@ impl Parser {
             }
         }
         Ok(arguments)
+    }
+
+    fn lower_human_response_schema(
+        &self,
+        arguments: &mut [CallArgument],
+    ) -> Result<(), ParseError> {
+        let response = arguments.iter_mut().enumerate().find(|(index, argument)| {
+            argument.name.as_deref() == Some("response") || (argument.name.is_none() && *index == 1)
+        });
+        let Some((_, response)) = response else {
+            return Ok(());
+        };
+        let ExpressionKind::Variable { name } = &response.value.kind else {
+            return Err(ParseError {
+                message: "ask_human `response` must name a declared schema".to_string(),
+                span: response.value.span,
+            });
+        };
+        let schema = self.schemas.get(name).ok_or_else(|| ParseError {
+            message: format!("ask_human references unknown schema `{name}`"),
+            span: response.value.span,
+        })?;
+        response.value.kind = ExpressionKind::Literal {
+            value: schema.to_json_schema(),
+        };
+        Ok(())
     }
 
     fn binary_operator(&self) -> Option<(u8, u8, BinaryOperator)> {

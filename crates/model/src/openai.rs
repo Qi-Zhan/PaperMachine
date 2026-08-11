@@ -433,6 +433,7 @@ impl OpenAiResponsesClient {
         let metadata = ModelEvent::RequestMetadata {
             metadata: ModelRequestMetadata {
                 provider: Some(self.config.provider_id.clone()),
+                api: Some("open_ai_responses".to_string()),
                 model_profile: None,
                 upstream_model: Some(upstream_model.clone()),
                 transport: ModelTransport::HttpSse,
@@ -568,6 +569,7 @@ impl OpenAiResponsesClient {
         let metadata = ModelEvent::RequestMetadata {
             metadata: ModelRequestMetadata {
                 provider: Some(self.config.provider_id.clone()),
+                api: Some("open_ai_responses".to_string()),
                 model_profile: None,
                 upstream_model: Some(upstream_model.clone()),
                 transport: ModelTransport::ResponsesWebsocket,

@@ -8,7 +8,8 @@ with the same slug.
 - `interactive-agent`: durable direct-human Turns with provenance.
 - `evidence-loop`: effectful helpers, keyed route Agents, parallel follow-up,
   immutable evidence ledger, evaluation, and draft revision.
-- `parallel-discovery`: keyed parallel research followed by synthesis.
+- `parallel-universe`: keyed parallel research universes followed by
+  cross-universe synthesis.
 - `project-summary`: change cursor, exact-Action Project Home publication, and
   optional durable refresh wait.
 - `single-agent-research`: text Action with post-search finalization.
